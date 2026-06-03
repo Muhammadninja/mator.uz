@@ -1,0 +1,72 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// 1. Профили продавцов / магазинов
+model Seller {
+  id             Int      @id @default(autoincrement())
+  tgId           BigInt   @unique @map("tg_id")
+  phone          String   @db.VarChar(20)
+  storeName      String?  @db.VarChar(100) @map("store_name")
+  marketName     String?  @db.VarChar(100) @map("market_name")
+  addressComment String?  @db.Text @map("address_comment")
+  locationLat    Float?   @map("location_lat")
+  locationLng    Float?   @map("location_lng")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  stocks Stock[]
+
+  @@map("sellers")
+}
+
+// 2. Мастер-каталог уникальных автозапчастей
+model Product {
+  id        Int      @id @default(autoincrement())
+  gmNumber  String?  @unique @db.VarChar(50) @map("gm_number")
+  title     String   @db.VarChar(255)
+  carModel  String?  @db.VarChar(100) @map("car_model")
+  imageUrl  String?  @db.Text @map("image_url")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  stocks Stock[]
+
+  @@map("products")
+}
+
+// 3. Складские остатки и цены
+model Stock {
+  id        Int      @id @default(autoincrement())
+  sellerId  Int      @map("seller_id")
+  productId Int      @map("product_id")
+  priceUzs  Decimal  @db.Decimal(12, 2) @map("price_uzs")
+  quantity  Int      @default(1)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  seller  Seller  @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([sellerId, productId])
+  @@map("stocks")
+}
+
+// 4. Клиентские заказы и логистика
+model Order {
+  id             Int      @id @default(autoincrement())
+  userId         Int      @map("user_id")
+  status         String   @db.VarChar(50)     // 'paid' | 'courier_searching' | 'in_delivery' | 'delivered'
+  yandexClaimId  String?  @db.VarChar(100) @map("yandex_claim_id")
+  deliveryCost   Decimal? @db.Decimal(10, 2) @map("delivery_cost")
+  totalCost      Decimal? @db.Decimal(12, 2) @map("total_cost")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@map("orders")
+}
