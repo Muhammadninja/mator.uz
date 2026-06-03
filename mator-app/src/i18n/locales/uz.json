@@ -1,0 +1,19 @@
+// src/i18n/locales/uz.json
+{
+  "welcome": {
+    "tagline": "O'zbekistondagi avtoehtiyot\nqismlarining aqlli marketpleysi",
+    "cta": "Boshlash"
+  },
+  "tabs": {
+    "home": "Bosh sahifa",
+    "chat": "AI Chat",
+    "garage": "Mening garajim",
+    "orders": "Buyurtmalar",
+    "profile": "Profil"
+  },
+  "common": {
+    "loading": "Yuklanmoqda...",
+    "error": "Xatolik yuz berdi",
+    "retry": "Qayta urinish"
+  }
+}
