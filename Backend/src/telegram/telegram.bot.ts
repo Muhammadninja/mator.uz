@@ -79,6 +79,15 @@ export function createTelegramBot(): Telegraf {
       // 3. Parse metadata via Claude
       const metadata = await claudeService.parsePartText(caption);
 
+      if (metadata.title.length < 3) {
+        await ctx.reply(
+          '❌ Не удалось распознать название детали. Опишите товар подробнее:\n' +
+          '_Пример: Фильтр масляный Cobalt 96535062 25000 сум_',
+          { parse_mode: 'Markdown' },
+        );
+        return;
+      }
+
       // 4. Upsert pipeline: Seller → Product → Stock
       const seller = await prisma.seller.upsert({
         where: { tgId: BigInt(from.id) },

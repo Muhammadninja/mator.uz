@@ -70,3 +70,32 @@ model Order {
 
   @@map("orders")
 }
+
+// 5. Пользователи приложения
+model User {
+  id        Int       @id @default(autoincrement())
+  tgId      BigInt    @unique @map("tg_id")
+  firstName String?   @db.VarChar(100) @map("first_name")
+  lastName  String?   @db.VarChar(100) @map("last_name")
+  phone     String?   @db.VarChar(20)
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  userCars UserCar[]
+
+  @@map("users")
+}
+
+// 6. Гараж пользователя - привязка машин к аккаунту
+model UserCar {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @map("user_id")
+  make      String   @db.VarChar(100)  // Марка (Toyota, BMW и т.д.)
+  model     String   @db.VarChar(100)  // Модель (Camry, 3 Series и т.д.)
+  year      Int?                       // Год выпуска
+  vin       String?  @db.VarChar(50)   // VIN номер
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_cars")
+}
