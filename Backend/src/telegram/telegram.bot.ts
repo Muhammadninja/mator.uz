@@ -11,9 +11,24 @@ const photoroomService = new PhotoroomService();
 const claudeService = new ClaudeMcpService();
 
 function extractPrice(text: string): Decimal {
+  // Look for pattern like "30000 uzs", "30000 UZS", "30000 сўм", "30000сўм"
+  const currencyMatch = text.match(/(\d+)\s*(uzs|UZS|сўм|сум)/i);
+  if (currencyMatch) {
+    return new Decimal(currencyMatch[1]);
+  }
+
+  // Fallback: extract numbers, exclude small ones (likely part numbers), take largest
   const matches = text.match(/\d+/g);
   if (!matches) return new Decimal(0);
-  // Take the largest number as the price (avoids matching year/part numbers)
+
+  // Filter out numbers that look like part/OEM codes (typically 5-7 digits)
+  // and could be confused with price. Keep numbers that are clearly prices (4+ digits usually ≥1000)
+  const candidates = matches.map(Number).filter((n) => n > 1000);
+  if (candidates.length > 0) {
+    return new Decimal(Math.max(...candidates));
+  }
+
+  // If no clear price found, take the largest number as fallback
   const price = Math.max(...matches.map(Number));
   return new Decimal(price);
 }
