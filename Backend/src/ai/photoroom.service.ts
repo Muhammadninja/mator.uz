@@ -25,7 +25,10 @@ export class PhotoroomService {
     form.append('removeBackground', 'true');
 
     // ── Фон ──────────────────────────────────────────────────────────────────
-    form.append('background.color', 'FFFFFF');
+    form.append(
+      'background.prompt',
+      'Create a clean premium studio product background. Background: light gray gradient, minimalist, modern ecommerce style, soft ambient lighting, subtle realistic floor shadow, centered object, no decorations, no additional objects, no text, no reflections, professional catalog photography',
+    );
 
     // ── ИИ-тени ───────────────────────────────────────────────────────────────
     // ai.auto-with-overrides требует модель 2026-04-15 — указываем через заголовок

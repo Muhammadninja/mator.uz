@@ -10,27 +10,17 @@ import { prisma } from '../database/prisma.service';
 const photoroomService = new PhotoroomService();
 const claudeService = new ClaudeMcpService();
 
-function extractPrice(text: string): Decimal {
-  // Look for pattern like "30000 uzs", "30000 UZS", "30000 сўм", "30000сўм"
+function extractPriceFallback(text: string): Decimal {
   const currencyMatch = text.match(/(\d+)\s*(uzs|UZS|сўм|сум)/i);
-  if (currencyMatch) {
-    return new Decimal(currencyMatch[1]);
-  }
+  if (currencyMatch) return new Decimal(currencyMatch[1]);
 
-  // Fallback: extract numbers, exclude small ones (likely part numbers), take largest
   const matches = text.match(/\d+/g);
   if (!matches) return new Decimal(0);
 
-  // Filter out numbers that look like part/OEM codes (typically 5-7 digits)
-  // and could be confused with price. Keep numbers that are clearly prices (4+ digits usually ≥1000)
   const candidates = matches.map(Number).filter((n) => n > 1000);
-  if (candidates.length > 0) {
-    return new Decimal(Math.max(...candidates));
-  }
+  if (candidates.length > 0) return new Decimal(Math.max(...candidates));
 
-  // If no clear price found, take the largest number as fallback
-  const price = Math.max(...matches.map(Number));
-  return new Decimal(price);
+  return new Decimal(Math.max(...matches.map(Number)));
 }
 
 async function downloadTelegramFile(
@@ -52,7 +42,6 @@ export function createTelegramBot(): Telegraf {
   const bot = new Telegraf(token);
 
   bot.on(message('photo'), async (ctx: Context) => {
-    // Narrow the context — message is guaranteed to exist here
     const msg = ctx.message;
     if (!msg || !('photo' in msg)) return;
 
@@ -79,42 +68,75 @@ export function createTelegramBot(): Telegraf {
       // 3. Parse metadata via Claude
       const metadata = await claudeService.parsePartText(caption);
 
-      if (metadata.title.length < 3) {
+      if (!metadata.title || metadata.title.length < 3) {
         await ctx.reply(
           '❌ Не удалось распознать название детали. Опишите товар подробнее:\n' +
-          '_Пример: Фильтр масляный Cobalt 96535062 25000 сум_',
+          '_Пример: Фильтр масляный Cobalt Gentra 96535062 25000 сум_',
           { parse_mode: 'Markdown' },
         );
         return;
       }
 
-      // 4. Upsert pipeline: Seller → Product → Stock
+      // 4. Upsert pipeline: Seller → Brand → CarModels → Product → PartModels → Stock
       const seller = await prisma.seller.upsert({
         where: { tgId: BigInt(from.id) },
         update: {},
         create: {
           tgId: BigInt(from.id),
-          phone: '',               // будет заполнено при полноценной регистрации
+          phone: '',
           storeName: from.username ?? from.first_name,
         },
       });
 
+      // Find or create brand
+      let brandId: number | null = null;
+      if (metadata.brand) {
+        const brand = await prisma.brand.upsert({
+          where: { name: metadata.brand },
+          update: {},
+          create: { name: metadata.brand },
+        });
+        brandId = brand.id;
+      }
+
+      // Find or create each car model
+      const modelIds: number[] = [];
+      if (brandId !== null && metadata.models.length > 0) {
+        for (const modelName of metadata.models) {
+          const carModel = await prisma.carModel.upsert({
+            where: { brandId_name: { brandId, name: modelName } },
+            update: {},
+            create: { brandId, name: modelName },
+          });
+          modelIds.push(carModel.id);
+        }
+      }
+
+      // Upsert product
+      const gmKey = metadata.gm_number ?? `tg_${from.id}_${Date.now()}`;
       const product = await prisma.product.upsert({
-        where: {
-          gmNumber: metadata.gm_number ?? `tg_${from.id}_${Date.now()}`,
-        },
-        update: {
-          title: metadata.title,
-          carModel: metadata.car_model,
-        },
+        where: { gmNumber: gmKey },
+        update: { title: metadata.title },
         create: {
           gmNumber: metadata.gm_number,
           title: metadata.title,
-          carModel: metadata.car_model,
         },
       });
 
-      const price = extractPrice(caption);
+      // Link product to car models
+      for (const modelId of modelIds) {
+        await prisma.partModel.upsert({
+          where: { partId_modelId: { partId: product.id, modelId } },
+          update: {},
+          create: { partId: product.id, modelId },
+        });
+      }
+
+      // Upsert stock
+      const price =
+        metadata.price !== null
+          ? new Decimal(metadata.price)
+          : extractPriceFallback(caption);
 
       const stock = await prisma.stock.upsert({
         where: {
@@ -129,10 +151,17 @@ export function createTelegramBot(): Telegraf {
       });
 
       // 5. Reply with cleaned image + structured report
+      const modelsLine =
+        metadata.models.length > 0
+          ? metadata.models.join(', ')
+          : '—';
+      const brandLine = metadata.brand ?? '—';
+
       const report =
         `✅ *Товар добавлен в каталог MATOR.uz*\n\n` +
         `🔩 *Деталь:* ${metadata.title}\n` +
-        `🚗 *Модель:* ${metadata.car_model ?? '—'}\n` +
+        `🏭 *Марка:* ${brandLine}\n` +
+        `🚗 *Модели:* ${modelsLine}\n` +
         `🔢 *OEM/GM №:* ${metadata.gm_number ?? '—'}\n` +
         `💰 *Цена:* ${price.toFixed(0)} UZS\n` +
         `📦 *Stock ID:* #${stock.id}\n` +

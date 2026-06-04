@@ -2,126 +2,155 @@
 import Anthropic from '@anthropic-ai/sdk';
 
 export interface ParsedPartMetadata {
+  title: string | null;
+  brand: string | null;
+  models: string[];
   gm_number: string | null;
-  title: string;
-  car_model: string | null;
+  price: number | null;
 }
 
 const SYSTEM_PROMPT = `Ты — AI-модератор маркетплейса автозапчастей MATOR.uz (Узбекистан).
-Твоя задача: получить текст от продавца и извлечь из него ровно 3 поля в формате JSON.
+Получи текст от продавца и извлеки данные в формате JSON.
 
 Поля:
-- gm_number: OEM / GM-номер детали (строка цифр, 5–11 символов) или null
-- title: ТОЛЬКО название самой детали на русском. ЗАПРЕЩЕНО включать марку/модель авто
-- car_model: марка и/или модель автомобиля или null
+- title: ТОЛЬКО название самой детали на русском. ЗАПРЕЩЕНО включать марку или модель авто.
+- brand: марка автомобиля (Chevrolet, Daewoo, Hyundai, Kia, Toyota, Ravon, BYD, Chery, Geely и т.д.) или null.
+- models: массив моделей автомобилей (Cobalt, Gentra, Lacetti, Spark и т.д.). Пустой массив [], если модели не упомянуты.
+- gm_number: OEM/GM номер детали (строка из 5–11 цифр) или null.
+- price: только числовое значение цены без валюты или null.
 
-Правила:
-- Скобки в тексте — внутри всегда марка/модель. Перенеси ВСЁ содержимое скобок в car_model, скобки из title убери
-- Если марка/модель упомянута без скобок — тоже выноси в car_model, из title убирай
-- Если в тексте несколько моделей (например Chevrolet и Nexia) — объединяй: "Chevrolet Nexia 3"
-- Если марка/модель не упомянута — car_model: null, не выдумывай
-- Цены (число + uzs/сум/сўм) и OEM-номера в car_model не включать
-- title нормализуй на русском языке
-
-Популярные марки/модели в Узбекистане:
-Chevrolet/UzAuto: Cobalt, Gentra, Spark, Nexia 3, Damas, Labo, Lacetti, Matiz, Captiva, Tracker, Equinox, Malibu, Cruze, Orlando
-Китайские: BYD, Chery, Geely, Haval, Changan, JAC, Omoda
-Другие: Hyundai, Kia, Toyota, Honda, Nissan, Mercedes, BMW, Audi, Volkswagen, Lada, Daewoo, Ravon
-
-Отвечай ТОЛЬКО валидным JSON без Markdown и пояснений.
+Обязательные правила:
+1. НИКОГДА не включать марку или модель авто в title.
+2. Если деталь подходит для нескольких моделей — вернуть все в массиве models.
+3. Нормализовать регистр: "cobalt" → "Cobalt", "kia rio" → brand: "Kia", models: ["Rio"].
+4. Если модель не указана — models: [].
+5. Если марка не указана — brand: null.
+6. Не придумывать отсутствующие данные.
+7. Исправлять очевидные опечатки (gentra → Gentra, kobal → Cobalt).
+8. Игнорировать телефонные номера, эмодзи и лишний текст.
+9. Если сообщение — мусор или товар невозможно определить — вернуть все поля null/[].
+10. Возвращать ТОЛЬКО валидный JSON без Markdown и пояснений.
 
 Примеры:
-Вход: "фильтр масла кобальт 96535062 15000 сум"
-Выход: {"gm_number":"96535062","title":"Фильтр масляный","car_model":"Cobalt"}
 
-Вход: "Тормозной диск (Chevrolet nexia 3), 97168181, 100000000 uzs"
-Выход: {"gm_number":"97168181","title":"Тормозной диск","car_model":"Chevrolet Nexia 3"}
+Вход: "фильтр масла кобальт gentra lacetti 96535062 25000 сум"
+Выход: {"title":"Фильтр масляный","brand":"Chevrolet","models":["Cobalt","Gentra","Lacetti"],"gm_number":"96535062","price":25000}
 
-Вход: "Выхлопная труба (Volkswagen boro) 987654321 30000 сум"
-Выход: {"gm_number":"987654321","title":"Выхлопная труба","car_model":"Volkswagen Boro"}
+Вход: "ступица передняя spark matiz"
+Выход: {"title":"Ступица передняя","brand":null,"models":["Spark","Matiz"],"gm_number":null,"price":null}
 
-Вход: "Труба Ravon R4 Spark 98718393 10000000"
-Выход: {"gm_number":"98718393","title":"Труба","car_model":"Ravon R4 Spark"}
+Вход: "Тормозной диск Chevrolet Nexia 3, 97168181, 100000 uzs"
+Выход: {"title":"Тормозной диск","brand":"Chevrolet","models":["Nexia 3"],"gm_number":"97168181","price":100000}
 
-Вход: "тормозной диск nexia3 96281323"
-Выход: {"gm_number":"96281323","title":"Тормозной диск","car_model":"Nexia 3"}
+Вход: "генератор 150000"
+Выход: {"title":"Генератор","brand":null,"models":[],"gm_number":null,"price":150000}
 
-Вход: "генератор 50000"
-Выход: {"gm_number":null,"title":"Генератор","car_model":null}`;
+Вход: "привет как дела"
+Выход: {"title":null,"brand":null,"models":[],"gm_number":null,"price":null}`;
 
-const CAR_KEYWORDS = [
-  'chevrolet', 'cobalt', 'gentra', 'spark', 'nexia', 'damas', 'labo',
-  'lacetti', 'matiz', 'captiva', 'tracker', 'equinox', 'malibu', 'cruze',
-  'orlando', 'tahoe', 'traverse', 'daewoo', 'ravon', 'byd', 'chery',
-  'geely', 'haval', 'changan', 'jac', 'omoda', 'hyundai', 'kia', 'toyota',
-  'honda', 'nissan', 'mercedes', 'bmw', 'audi', 'volkswagen', 'vw', 'lada',
-  'ford', 'mitsubishi', 'subaru',
-];
+const CAR_BRANDS: Record<string, string> = {
+  chevrolet: 'Chevrolet',
+  daewoo: 'Daewoo',
+  hyundai: 'Hyundai',
+  kia: 'Kia',
+  toyota: 'Toyota',
+  ravon: 'Ravon',
+  byd: 'BYD',
+  chery: 'Chery',
+  geely: 'Geely',
+  haval: 'Haval',
+  changan: 'Changan',
+  jac: 'JAC',
+  omoda: 'Omoda',
+  ford: 'Ford',
+  mitsubishi: 'Mitsubishi',
+  subaru: 'Subaru',
+  honda: 'Honda',
+  nissan: 'Nissan',
+  volkswagen: 'Volkswagen',
+  bmw: 'BMW',
+  mercedes: 'Mercedes',
+  lada: 'Lada',
+};
 
-function capitalizeWords(str: string): string {
-  return str
-    .split(' ')
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
-    .join(' ');
-}
+const CAR_MODELS: Record<string, string> = {
+  cobalt: 'Cobalt',
+  kobal: 'Cobalt',
+  gentra: 'Gentra',
+  spark: 'Spark',
+  'nexia 3': 'Nexia 3',
+  nexia: 'Nexia',
+  damas: 'Damas',
+  labo: 'Labo',
+  lacetti: 'Lacetti',
+  matiz: 'Matiz',
+  captiva: 'Captiva',
+  tracker: 'Tracker',
+  equinox: 'Equinox',
+  malibu: 'Malibu',
+  cruze: 'Cruze',
+  orlando: 'Orlando',
+  rio: 'Rio',
+  cerato: 'Cerato',
+  sportage: 'Sportage',
+  accent: 'Accent',
+  elantra: 'Elantra',
+  sonata: 'Sonata',
+  tucson: 'Tucson',
+  creta: 'Creta',
+  camry: 'Camry',
+  corolla: 'Corolla',
+  polo: 'Polo',
+  golf: 'Golf',
+  passat: 'Passat',
+  tiguan: 'Tiguan',
+  jetta: 'Jetta',
+};
 
-function sanitizeMetadata(parsed: ParsedPartMetadata): ParsedPartMetadata {
-  if (!parsed.car_model) {
-    // Шаг 1: закрытые скобки — "Тормозной диск (Chevrolet nexia 3)"
-    const closedBracket = parsed.title.match(/^(.*?)\s*\(([^)]+)\)\s*(.*)$/);
-    if (closedBracket) {
-      const before = closedBracket[1].trim();
-      const inside = closedBracket[2].trim();
-      const after  = closedBracket[3].trim();
-      parsed.title = [before, after].filter(Boolean).join(' ').trim();
-      parsed.car_model = capitalizeWords(inside);
-      return parsed;
-    }
-
-    // Шаг 2: незакрытые скобки — "Труба (Ravon R"
-    const unclosedBracket = parsed.title.match(/^(.*?)\s*\((.+)$/);
-    if (unclosedBracket) {
-      parsed.title = unclosedBracket[1].trim();
-      parsed.car_model = capitalizeWords(unclosedBracket[2].trim());
-      return parsed;
-    }
-
-    // Шаг 3: keyword fallback — ищем все известные марки в title и собираем их
-    const titleLower = parsed.title.toLowerCase();
-    const foundKeywords = CAR_KEYWORDS.filter((m) => {
-      // Проверяем точное совпадение слова (word boundary)
-      return new RegExp(`\\b${m}\\b`).test(titleLower);
-    });
-
-    if (foundKeywords.length > 0) {
-      // Собираем все найденные марки в car_model
-      parsed.car_model = foundKeywords
-        .map((k) => k.charAt(0).toUpperCase() + k.slice(1))
-        .join(' ');
-      // Убираем их из title
-      for (const kw of foundKeywords) {
-        parsed.title = parsed.title
-          .replace(new RegExp(`\\b${kw}\\b`, 'gi'), '')
-          .replace(/\s{2,}/g, ' ')
-          .trim();
-      }
-    }
-  }
-
-  return parsed;
+function normalizeMetadata(parsed: ParsedPartMetadata): ParsedPartMetadata {
+  return {
+    title: parsed.title?.trim() || null,
+    brand: parsed.brand?.trim() || null,
+    models: Array.isArray(parsed.models)
+      ? [...new Set(parsed.models.map((m) => m.trim()).filter(Boolean))]
+      : [],
+    gm_number: parsed.gm_number?.trim() || null,
+    price: typeof parsed.price === 'number' && parsed.price > 0 ? parsed.price : null,
+  };
 }
 
 function mockParse(rawText: string): ParsedPartMetadata {
-  const textWithoutPrice = rawText.replace(/(\d+)\s*(uzs|UZS|сўм|сум)/i, '');
+  const textWithoutPrice = rawText.replace(/(\d[\d\s]*)\s*(uzs|UZS|сўм|сум)/gi, '');
   const gmMatch = textWithoutPrice.match(/\b\d{5,11}\b/);
-  const carMatch = CAR_KEYWORDS.find((m) => rawText.toLowerCase().includes(m));
+  const priceMatch = rawText.match(/(\d+)\s*(uzs|UZS|сўм|сум)/i);
+
+  const lower = rawText.toLowerCase();
+
+  let brand: string | null = null;
+  for (const [key, val] of Object.entries(CAR_BRANDS)) {
+    if (new RegExp(`\\b${key}\\b`, 'i').test(lower)) {
+      brand = val;
+      break;
+    }
+  }
+
+  const models: string[] = [];
+  for (const [key, val] of Object.entries(CAR_MODELS)) {
+    if (new RegExp(`\\b${key.replace(' ', '\\s+')}\\b`, 'i').test(lower)) {
+      models.push(val);
+    }
+  }
+
   const titleMatch = rawText.match(/^([^0-9\n,(]+)/);
-  const raw: ParsedPartMetadata = {
+  const rawTitle = titleMatch ? titleMatch[1].trim() : rawText.slice(0, 60).trim();
+
+  return normalizeMetadata({
+    title: rawTitle.length >= 3 ? rawTitle : null,
+    brand,
+    models,
     gm_number: gmMatch ? gmMatch[0] : null,
-    title: titleMatch ? titleMatch[1].trim() : rawText.slice(0, 60).trim(),
-    car_model: carMatch ? carMatch.charAt(0).toUpperCase() + carMatch.slice(1) : null,
-  };
-  return sanitizeMetadata(raw);
+    price: priceMatch ? parseInt(priceMatch[1], 10) : null,
+  });
 }
 
 export class ClaudeMcpService {
@@ -156,11 +185,7 @@ export class ClaudeMcpService {
       }
 
       const clean = content.text.replace(/```json|```/g, '').trim();
-      const parsed = sanitizeMetadata(JSON.parse(clean) as ParsedPartMetadata);
-
-      if (typeof parsed.title !== 'string' || parsed.title.trim() === '') {
-        throw new Error('Claude returned invalid metadata: missing title');
-      }
+      const parsed = normalizeMetadata(JSON.parse(clean) as ParsedPartMetadata);
 
       return parsed;
     } catch (error: unknown) {

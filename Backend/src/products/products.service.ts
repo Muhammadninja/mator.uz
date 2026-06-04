@@ -4,16 +4,28 @@ import { PrismaService } from '../prisma/prisma.service';
 export interface GetProductsQuery {
   page?: number;
   limit?: number;
-  carModel?: string;
+  brand?: string;
+  model?: string;
+  title?: string;
+  gmNumber?: string;
 }
 
 export interface ProductWithStock {
   id: number;
   gmNumber: string | null;
   title: string;
-  carModel: string | null;
   imageUrl: string | null;
   createdAt: Date;
+  partModels: Array<{
+    model: {
+      id: number;
+      name: string;
+      brand: {
+        id: number;
+        name: string;
+      };
+    };
+  }>;
   stocks: Array<{
     id: number;
     priceUzs: string;
@@ -35,12 +47,28 @@ export class ProductsService {
     const limit = query.limit || 20;
     const skip = (page - 1) * limit;
 
-    // Build where clause for filtering
     const where: any = {};
-    if (query.carModel) {
-      where.carModel = {
-        contains: query.carModel,
-        mode: 'insensitive',
+
+    if (query.title) {
+      where.title = { contains: query.title, mode: 'insensitive' };
+    }
+
+    if (query.gmNumber) {
+      where.gmNumber = { contains: query.gmNumber, mode: 'insensitive' };
+    }
+
+    if (query.brand || query.model) {
+      where.partModels = {
+        some: {
+          model: {
+            ...(query.model
+              ? { name: { contains: query.model, mode: 'insensitive' } }
+              : {}),
+            ...(query.brand
+              ? { brand: { name: { contains: query.brand, mode: 'insensitive' } } }
+              : {}),
+          },
+        },
       };
     }
 
@@ -50,6 +78,13 @@ export class ProductsService {
         skip,
         take: limit,
         include: {
+          partModels: {
+            include: {
+              model: {
+                include: { brand: true },
+              },
+            },
+          },
           stocks: {
             include: {
               seller: {
@@ -62,9 +97,7 @@ export class ProductsService {
             },
           },
         },
-        orderBy: {
-          createdAt: 'desc',
-        },
+        orderBy: { createdAt: 'desc' },
       }),
       this.prisma.product.count({ where }),
     ]);
@@ -84,6 +117,13 @@ export class ProductsService {
     return this.prisma.product.findUnique({
       where: { id },
       include: {
+        partModels: {
+          include: {
+            model: {
+              include: { brand: true },
+            },
+          },
+        },
         stocks: {
           include: {
             seller: {
@@ -99,6 +139,25 @@ export class ProductsService {
           },
         },
       },
+    });
+  }
+
+  async getBrands() {
+    return this.prisma.brand.findMany({
+      orderBy: { name: 'asc' },
+      include: {
+        models: {
+          orderBy: { name: 'asc' },
+          select: { id: true, name: true },
+        },
+      },
+    });
+  }
+
+  async getModelsByBrand(brandId: number) {
+    return this.prisma.carModel.findMany({
+      where: { brandId },
+      orderBy: { name: 'asc' },
     });
   }
 }
