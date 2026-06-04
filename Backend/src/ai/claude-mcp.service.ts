@@ -21,7 +21,10 @@ const CAR_MODELS = ['cobalt', 'gentra', 'spark', 'nexia', 'damas', 'labo', 'lace
 
 /** Regex-based fallback used when AI_MOCK=true or no API key is available. */
 function mockParse(rawText: string): ParsedPartMetadata {
-  const gmMatch = rawText.match(/\b\d{7,11}\b/);
+  // Extract OEM/GM number: standalone sequences of 5+ digits (not part of a larger number)
+  // Exclude price patterns (e.g., "30000 uzs")
+  const textWithoutPrice = rawText.replace(/(\d+)\s*(uzs|UZS|сўм|сум)/i, '');
+  const gmMatch = textWithoutPrice.match(/\b\d{5,11}\b/);
   const carMatch = CAR_MODELS.find((m) => rawText.toLowerCase().includes(m));
   // Everything before the first number/car model keyword is treated as the title
   const titleMatch = rawText.match(/^([^0-9\n,]+)/);
