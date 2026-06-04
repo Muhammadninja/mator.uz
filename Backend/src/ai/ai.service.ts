@@ -14,7 +14,7 @@ export interface DiagnoseResult {
   suggested_parts: Array<{
     id: number;
     title: string;
-    carModel: string | null;
+    models: Array<{ brand: string; model: string }>;
     gmNumber: string | null;
     stocks: Array<{
       sellerId: number;
@@ -139,9 +139,12 @@ export class AIService {
     // Filter by car model if provided
     if (carModel) {
       where.AND = {
-        carModel: {
-          contains: carModel,
-          mode: 'insensitive',
+        partModels: {
+          some: {
+            model: {
+              name: { contains: carModel, mode: 'insensitive' },
+            },
+          },
         },
       };
     }
@@ -149,8 +152,13 @@ export class AIService {
     // Search for products with stocks
     const products = await this.prisma.product.findMany({
       where,
-      take: 10, // Limit to top 10 results
+      take: 10,
       include: {
+        partModels: {
+          include: {
+            model: { include: { brand: true } },
+          },
+        },
         stocks: {
           include: {
             seller: {
@@ -163,9 +171,7 @@ export class AIService {
             },
           },
           where: {
-            quantity: {
-              gt: 0, // Only in-stock items
-            },
+            quantity: { gt: 0 },
           },
         },
       },
@@ -173,11 +179,14 @@ export class AIService {
 
     // Format results
     return products
-      .filter((p) => p.stocks.length > 0) // Only include products with stock
+      .filter((p) => p.stocks.length > 0)
       .map((product) => ({
         id: product.id,
         title: product.title,
-        carModel: product.carModel,
+        models: product.partModels.map((pm) => ({
+          brand: pm.model.brand.name,
+          model: pm.model.name,
+        })),
         gmNumber: product.gmNumber,
         stocks: product.stocks.map((stock) => ({
           sellerId: stock.sellerId,
