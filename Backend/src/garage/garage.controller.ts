@@ -6,8 +6,12 @@ import {
   Body,
   Param,
   ParseIntPipe,
-  Headers,
+  Request,
+  UseGuards,
+  HttpCode,
+  HttpStatus,
 } from '@nestjs/common';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { GarageService } from './garage.service';
 
 interface UserCarBody {
@@ -17,60 +21,51 @@ interface UserCarBody {
   vin?: string;
 }
 
-// In production, you'd use @UseGuards(AuthGuard) and get userId from request.user
-// For now, we'll get it from the X-User-Id header for demo purposes
-function extractUserId(headers: any): number {
-  const userId = headers['x-user-id'];
-  if (!userId) {
-    throw new Error('X-User-Id header is required');
-  }
-  return parseInt(userId, 10);
-}
-
 @Controller('api/garage')
+@UseGuards(JwtAuthGuard)
 export class GarageController {
   constructor(private readonly garageService: GarageService) {}
 
   @Get()
-  async getUserCars(@Headers() headers: any) {
-    const userId = extractUserId(headers);
-    return this.garageService.getUserCars(userId);
+  @HttpCode(HttpStatus.OK)
+  getUserCars(@Request() req: { user: { id: number } }) {
+    return this.garageService.getUserCars(req.user.id);
   }
 
   @Get(':id')
-  async getUserCarById(
+  @HttpCode(HttpStatus.OK)
+  getUserCarById(
     @Param('id', ParseIntPipe) id: number,
-    @Headers() headers: any,
+    @Request() req: { user: { id: number } },
   ) {
-    const userId = extractUserId(headers);
-    return this.garageService.getUserCarById(id, userId);
+    return this.garageService.getUserCarById(id, req.user.id);
   }
 
   @Post()
-  async createUserCar(@Body() body: UserCarBody, @Headers() headers: any) {
-    const userId = extractUserId(headers);
-    return this.garageService.createUserCar({
-      userId,
-      ...body,
-    });
+  @HttpCode(HttpStatus.CREATED)
+  createUserCar(
+    @Body() body: UserCarBody,
+    @Request() req: { user: { id: number } },
+  ) {
+    return this.garageService.createUserCar({ userId: req.user.id, ...body });
   }
 
   @Post(':id')
-  async updateUserCar(
+  @HttpCode(HttpStatus.OK)
+  updateUserCar(
     @Param('id', ParseIntPipe) id: number,
     @Body() body: Partial<UserCarBody>,
-    @Headers() headers: any,
+    @Request() req: { user: { id: number } },
   ) {
-    const userId = extractUserId(headers);
-    return this.garageService.updateUserCar(id, userId, body);
+    return this.garageService.updateUserCar(id, req.user.id, body);
   }
 
   @Delete(':id')
-  async deleteUserCar(
+  @HttpCode(HttpStatus.OK)
+  deleteUserCar(
     @Param('id', ParseIntPipe) id: number,
-    @Headers() headers: any,
+    @Request() req: { user: { id: number } },
   ) {
-    const userId = extractUserId(headers);
-    return this.garageService.deleteUserCar(id, userId);
+    return this.garageService.deleteUserCar(id, req.user.id);
   }
 }

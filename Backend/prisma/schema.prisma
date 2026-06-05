@@ -1,6 +1,3 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -11,39 +8,40 @@ datasource db {
   directUrl = env("DIRECT_URL")
 }
 
-// 1. Профили продавцов / магазинов
-model Seller {
-  id             Int      @id @default(autoincrement())
-  tgId           BigInt   @unique @map("tg_id")
-  phone          String   @db.VarChar(20)
-  storeName      String?  @db.VarChar(100) @map("store_name")
-  marketName     String?  @db.VarChar(100) @map("market_name")
-  addressComment String?  @db.Text @map("address_comment")
-  locationLat    Float?   @map("location_lat")
-  locationLng    Float?   @map("location_lng")
-  createdAt      DateTime @default(now()) @map("created_at")
+enum SellerStatus {
+  PENDING
+  ACTIVE
+  REJECTED
+}
 
-  stocks Stock[]
+model Seller {
+  id             Int          @id @default(autoincrement())
+  tgId           BigInt       @unique @map("tg_id")
+  phone          String       @db.VarChar(20)
+  storeName      String?      @map("store_name") @db.VarChar(100)
+  marketName     String?      @map("market_name") @db.VarChar(100)
+  addressComment String?      @map("address_comment")
+  locationLat    Float?       @map("location_lat")
+  locationLng    Float?       @map("location_lng")
+  status         SellerStatus @default(PENDING)
+  createdAt      DateTime     @default(now()) @map("created_at")
+  stocks         Stock[]
 
   @@map("sellers")
 }
 
-// 2. Марки автомобилей
 model Brand {
-  id   Int    @id @default(autoincrement())
-  name String @unique @db.VarChar(100)
-
+  id     Int        @id @default(autoincrement())
+  name   String     @unique @db.VarChar(100)
   models CarModel[]
 
   @@map("brands")
 }
 
-// 3. Модели автомобилей
 model CarModel {
-  id      Int    @id @default(autoincrement())
-  brandId Int    @map("brand_id")
-  name    String @db.VarChar(100)
-
+  id         Int         @id @default(autoincrement())
+  brandId    Int         @map("brand_id")
+  name       String      @db.VarChar(100)
   brand      Brand       @relation(fields: [brandId], references: [id], onDelete: Cascade)
   partModels PartModel[]
 
@@ -51,77 +49,66 @@ model CarModel {
   @@map("car_models")
 }
 
-// 4. Мастер-каталог уникальных автозапчастей
 model Product {
-  id        Int      @id @default(autoincrement())
-  gmNumber  String?  @unique @db.VarChar(50) @map("gm_number")
-  title     String   @db.VarChar(255)
-  imageUrl  String?  @db.Text @map("image_url")
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
-
-  stocks     Stock[]
+  id         Int         @id @default(autoincrement())
+  gmNumber   String?     @unique @map("gm_number") @db.VarChar(50)
+  title      String      @db.VarChar(255)
+  imageUrl   String?     @map("image_url")
+  createdAt  DateTime    @default(now()) @map("created_at")
+  updatedAt  DateTime    @updatedAt @map("updated_at")
   partModels PartModel[]
+  stocks     Stock[]
 
   @@map("products")
 }
 
-// 5. Связь many-to-many: деталь ↔ модель автомобиля
 model PartModel {
-  partId  Int @map("part_id")
-  modelId Int @map("model_id")
-
-  part  Product  @relation(fields: [partId], references: [id], onDelete: Cascade)
-  model CarModel @relation(fields: [modelId], references: [id], onDelete: Cascade)
+  partId  Int      @map("part_id")
+  modelId Int      @map("model_id")
+  model   CarModel @relation(fields: [modelId], references: [id], onDelete: Cascade)
+  part    Product  @relation(fields: [partId], references: [id], onDelete: Cascade)
 
   @@id([partId, modelId])
   @@map("part_models")
 }
 
-// 6. Складские остатки и цены
 model Stock {
   id        Int      @id @default(autoincrement())
   sellerId  Int      @map("seller_id")
   productId Int      @map("product_id")
-  priceUzs  Decimal  @db.Decimal(12, 2) @map("price_uzs")
+  priceUzs  Decimal  @map("price_uzs") @db.Decimal(12, 2)
   quantity  Int      @default(1)
   updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
-
-  seller  Seller  @relation(fields: [sellerId], references: [id], onDelete: Cascade)
-  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  seller    Seller   @relation(fields: [sellerId], references: [id], onDelete: Cascade)
 
   @@unique([sellerId, productId])
   @@map("stocks")
 }
 
-// 7. Клиентские заказы и логистика
 model Order {
   id            Int      @id @default(autoincrement())
   userId        Int      @map("user_id")
   status        String   @db.VarChar(50)
-  yandexClaimId String?  @db.VarChar(100) @map("yandex_claim_id")
-  deliveryCost  Decimal? @db.Decimal(10, 2) @map("delivery_cost")
-  totalCost     Decimal? @db.Decimal(12, 2) @map("total_cost")
+  yandexClaimId String?  @map("yandex_claim_id") @db.VarChar(100)
+  deliveryCost  Decimal? @map("delivery_cost") @db.Decimal(10, 2)
+  totalCost     Decimal? @map("total_cost") @db.Decimal(12, 2)
   createdAt     DateTime @default(now()) @map("created_at")
 
   @@map("orders")
 }
 
-// 8. Пользователи приложения
 model User {
   id        Int      @id @default(autoincrement())
   tgId      BigInt   @unique @map("tg_id")
-  firstName String?  @db.VarChar(100) @map("first_name")
-  lastName  String?  @db.VarChar(100) @map("last_name")
+  firstName String?  @map("first_name") @db.VarChar(100)
+  lastName  String?  @map("last_name") @db.VarChar(100)
   phone     String?  @db.VarChar(20)
   createdAt DateTime @default(now()) @map("created_at")
-
-  userCars UserCar[]
 
   @@map("users")
 }
 
-// 9. Гараж пользователя - привязка машин к аккаунту
 model UserCar {
   id        Int      @id @default(autoincrement())
   userId    Int      @map("user_id")
@@ -130,8 +117,39 @@ model UserCar {
   year      Int?
   vin       String?  @db.VarChar(50)
   createdAt DateTime @default(now()) @map("created_at")
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user      AppUser  @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("user_cars")
+}
+
+enum Role {
+  USER
+  SELLER
+  ADMIN
+}
+
+model AppUser {
+  id            Int            @id @default(autoincrement())
+  email         String         @unique @db.VarChar(255)
+  passwordHash  String         @map("password_hash") @db.VarChar(255)
+  firstName     String?        @map("first_name") @db.VarChar(100)
+  lastName      String?        @map("last_name") @db.VarChar(100)
+  role          Role           @default(USER)
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt @map("updated_at")
+  refreshTokens RefreshToken[]
+  userCars      UserCar[]
+
+  @@map("app_users")
+}
+
+model RefreshToken {
+  id        Int      @id @default(autoincrement())
+  token     String   @unique @db.VarChar(512)
+  userId    Int      @map("user_id")
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  user      AppUser  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("refresh_tokens")
 }

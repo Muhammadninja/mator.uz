@@ -41,17 +41,7 @@ export class GarageService {
     return car;
   }
 
-  // Create new car
   async createUserCar(dto: CreateUserCarDto) {
-    // First, ensure user exists
-    const user = await this.prisma.user.findUnique({
-      where: { id: dto.userId },
-    });
-
-    if (!user) {
-      throw new NotFoundException('User not found');
-    }
-
     return this.prisma.userCar.create({
       data: {
         userId: dto.userId,
