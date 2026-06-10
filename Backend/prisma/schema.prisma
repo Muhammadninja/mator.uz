@@ -14,6 +14,31 @@ enum SellerStatus {
   REJECTED
 }
 
+enum Role {
+  USER
+  SELLER
+  ADMIN
+}
+
+enum AuthProvider {
+  GOOGLE
+  APPLE
+}
+
+// Lifecycle of a buyer order. Adjust these values to match your actual
+// Yandex-delivery flow before going live; they replace the previous free-text
+// VARCHAR(50) which had no DB-level integrity guarantee.
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  PAID
+  DELIVERING
+  DELIVERED
+  CANCELLED
+  FAILED
+}
+
+// ── Sellers (Telegram bot only). Completely separate from AppUser. ──────────
 model Seller {
   id             Int          @id @default(autoincrement())
   tgId           BigInt       @unique @map("tg_id")
@@ -24,12 +49,14 @@ model Seller {
   locationLat    Float?       @map("location_lat")
   locationLng    Float?       @map("location_lng")
   status         SellerStatus @default(PENDING)
-  createdAt      DateTime     @default(now()) @map("created_at")
+  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
   stocks         Stock[]
 
+  @@index([status])
   @@map("sellers")
 }
 
+// ── Car catalog ─────────────────────────────────────────────────────────────
 model Brand {
   id     Int        @id @default(autoincrement())
   name   String     @unique @db.VarChar(100)
@@ -54,8 +81,8 @@ model Product {
   gmNumber   String?     @unique @map("gm_number") @db.VarChar(50)
   title      String      @db.VarChar(255)
   imageUrl   String?     @map("image_url")
-  createdAt  DateTime    @default(now()) @map("created_at")
-  updatedAt  DateTime    @updatedAt @map("updated_at")
+  createdAt  DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt  DateTime    @updatedAt @map("updated_at") @db.Timestamptz(3)
   partModels PartModel[]
   stocks     Stock[]
 
@@ -69,6 +96,7 @@ model PartModel {
   part    Product  @relation(fields: [partId], references: [id], onDelete: Cascade)
 
   @@id([partId, modelId])
+  @@index([modelId]) // reverse lookup: "which parts fit this model"
   @@map("part_models")
 }
 
@@ -78,35 +106,31 @@ model Stock {
   productId Int      @map("product_id")
   priceUzs  Decimal  @map("price_uzs") @db.Decimal(12, 2)
   quantity  Int      @default(1)
-  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
   product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
   seller    Seller   @relation(fields: [sellerId], references: [id], onDelete: Cascade)
 
   @@unique([sellerId, productId])
+  @@index([productId]) // price-comparison: "which sellers stock this product"
   @@map("stocks")
 }
 
+// ── Orders (buyers / AppUser) ───────────────────────────────────────────────
 model Order {
-  id            Int      @id @default(autoincrement())
-  userId        Int      @map("user_id")
-  status        String   @db.VarChar(50)
-  yandexClaimId String?  @map("yandex_claim_id") @db.VarChar(100)
-  deliveryCost  Decimal? @map("delivery_cost") @db.Decimal(10, 2)
-  totalCost     Decimal? @map("total_cost") @db.Decimal(12, 2)
-  createdAt     DateTime @default(now()) @map("created_at")
+  id            Int         @id @default(autoincrement())
+  userId        Int         @map("user_id")
+  status        OrderStatus @default(PENDING)
+  yandexClaimId String?     @map("yandex_claim_id") @db.VarChar(100)
+  deliveryCost  Decimal?    @map("delivery_cost") @db.Decimal(12, 2)
+  totalCost     Decimal?    @map("total_cost") @db.Decimal(12, 2)
+  createdAt     DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime    @updatedAt @map("updated_at") @db.Timestamptz(3)
+  user          AppUser     @relation(fields: [userId], references: [id], onDelete: Restrict)
 
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
   @@map("orders")
-}
-
-model User {
-  id        Int      @id @default(autoincrement())
-  tgId      BigInt   @unique @map("tg_id")
-  firstName String?  @map("first_name") @db.VarChar(100)
-  lastName  String?  @map("last_name") @db.VarChar(100)
-  phone     String?  @db.VarChar(20)
-  createdAt DateTime @default(now()) @map("created_at")
-
-  @@map("users")
 }
 
 model UserCar {
@@ -116,40 +140,71 @@ model UserCar {
   model     String   @db.VarChar(100)
   year      Int?
   vin       String?  @db.VarChar(50)
-  createdAt DateTime @default(now()) @map("created_at")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   user      AppUser  @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  @@index([userId])
   @@map("user_cars")
 }
 
-enum Role {
-  USER
-  SELLER
-  ADMIN
-}
-
+// ── Buyers (mobile app only). Single buyer entity; separate from Seller. ─────
 model AppUser {
-  id            Int            @id @default(autoincrement())
-  email         String         @unique @db.VarChar(255)
-  passwordHash  String         @map("password_hash") @db.VarChar(255)
-  firstName     String?        @map("first_name") @db.VarChar(100)
-  lastName      String?        @map("last_name") @db.VarChar(100)
-  role          Role           @default(USER)
-  createdAt     DateTime       @default(now()) @map("created_at")
-  updatedAt     DateTime       @updatedAt @map("updated_at")
+  id            Int                      @id @default(autoincrement())
+  email         String                   @unique @db.VarChar(255)
+  passwordHash  String?                  @map("password_hash") @db.VarChar(255)
+  emailVerified Boolean                  @default(false) @map("email_verified")
+  firstName     String?                  @map("first_name") @db.VarChar(100)
+  lastName      String?                  @map("last_name") @db.VarChar(100)
+  role          Role                     @default(USER)
+  createdAt     DateTime                 @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime                 @updatedAt @map("updated_at") @db.Timestamptz(3)
   refreshTokens RefreshToken[]
   userCars      UserCar[]
+  identities    AuthIdentity[]
+  emailTokens   EmailVerificationToken[]
+  orders        Order[]
 
   @@map("app_users")
 }
 
+model EmailVerificationToken {
+  id         Int       @id @default(autoincrement())
+  tokenHash  String    @unique @map("token_hash") @db.VarChar(64) // sha256 hex of the raw token
+  userId     Int       @map("user_id")
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(3)
+  consumedAt DateTime? @map("consumed_at") @db.Timestamptz(3)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  user       AppUser   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt]) // supports expired-token cleanup job
+  @@map("email_verification_tokens")
+}
+
+model AuthIdentity {
+  id             Int          @id @default(autoincrement())
+  provider       AuthProvider
+  providerUserId String       @map("provider_user_id") @db.VarChar(255)
+  email          String?      @db.VarChar(255)
+  userId         Int          @map("user_id")
+  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime     @updatedAt @map("updated_at") @db.Timestamptz(3)
+  user           AppUser      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerUserId]) // one social identity -> one user
+  @@index([userId])
+  @@map("auth_identities")
+}
+
 model RefreshToken {
   id        Int      @id @default(autoincrement())
-  token     String   @unique @db.VarChar(512)
+  tokenHash String   @unique @map("token_hash") @db.VarChar(64) // sha256 hex of the signed JWT
   userId    Int      @map("user_id")
-  expiresAt DateTime @map("expires_at")
-  createdAt DateTime @default(now()) @map("created_at")
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(3)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   user      AppUser  @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  @@index([userId])
+  @@index([expiresAt]) // supports expired-token cleanup job
   @@map("refresh_tokens")
 }

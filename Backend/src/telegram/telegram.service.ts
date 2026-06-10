@@ -9,6 +9,7 @@ import { ClaudeMcpService } from '../ai/claude-mcp.service';
 import { PhotoroomService } from '../ai/photoroom.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SellersService } from '../sellers/sellers.service';
+import { CloudinaryService } from '../cloudinary/cloudinary.service';
 
 
 function extractPriceFallback(text: string): Decimal {
@@ -33,6 +34,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
     private readonly sellers: SellersService,
+    private readonly cloudinary: CloudinaryService,
   ) {}
 
   onModuleInit() {
@@ -113,8 +115,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
           timeout: 20_000,
         });
         const originalBuffer = Buffer.from(response.data);
-        const cleanedBuffer = await this.photoroom.removeBackground(originalBuffer);
-        const metadata = await this.claude.parsePartText(caption);
+        const [cleanedBuffer, metadata] = await Promise.all([
+          this.photoroom.removeBackground(originalBuffer),
+          this.claude.parsePartText(caption),
+        ]);
 
         if (!metadata.title || metadata.title.length < 3) {
           await ctx.reply(
@@ -147,11 +151,13 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
           }
         }
 
+        const imageUrl = await this.cloudinary.uploadBuffer(cleanedBuffer);
+
         const gmKey = metadata.gm_number ?? `tg_${from.id}_${Date.now()}`;
         const product = await this.prisma.product.upsert({
           where: { gmNumber: gmKey },
-          update: { title: metadata.title },
-          create: { gmNumber: metadata.gm_number, title: metadata.title },
+          update: { title: metadata.title, imageUrl },
+          create: { gmNumber: metadata.gm_number, title: metadata.title, imageUrl },
         });
 
         for (const modelId of modelIds) {
@@ -188,8 +194,13 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
           { caption: report, parse_mode: 'Markdown' },
         );
       } catch (error: unknown) {
-        const errMsg = error instanceof Error ? error.message : 'Неизвестная ошибка';
-        this.logger.error(`Pipeline error: ${errMsg}`);
+        const errMsg =
+          error instanceof Error
+            ? error.message
+            : typeof error === 'object'
+              ? JSON.stringify(error)
+              : String(error);
+        this.logger.error(`Pipeline error: ${errMsg}`, error instanceof Error ? error.stack : undefined);
         await ctx.reply(`⚠️ Произошла ошибка при обработке товара.\n\`${errMsg}\``, { parse_mode: 'Markdown' });
       }
     });
