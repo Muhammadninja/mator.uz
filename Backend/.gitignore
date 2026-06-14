@@ -3,3 +3,9 @@
 node_modules/
 dist/
 *.tsbuildinfo
+keys/
+*.pem
+.claude-flow/
+.swarm/
+.DS_Store
+.mcp.json

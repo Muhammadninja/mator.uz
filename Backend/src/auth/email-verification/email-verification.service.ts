@@ -49,7 +49,10 @@ export class EmailVerificationService {
       }),
     ]);
 
-    await this.mail.sendVerificationEmail(user.email, rawToken);
+    // Phone-only accounts have no email; nothing to send.
+    if (user.email) {
+      await this.mail.sendVerificationEmail(user.email, rawToken);
+    }
     this.logger.log(`Verification email issued for user ${user.id}`);
   }
 

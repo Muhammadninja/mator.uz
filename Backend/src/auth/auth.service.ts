@@ -5,66 +5,39 @@ import {
   ForbiddenException,
   GoneException,
 } from '@nestjs/common';
-import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
-import { createHash } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { GoogleLoginDto } from './dto/google-login.dto';
 import { AppleLoginDto } from './dto/apple-login.dto';
 import { Role } from '@prisma/client';
-import { JwtPayload } from './interfaces/jwt-payload.interface';
 import { GoogleVerifierService } from './social/google-verifier.service';
 import { AppleVerifierService } from './social/apple-verifier.service';
 import { SocialIdentityService } from './social/social-identity.service';
 import { EmailVerificationService } from './email-verification/email-verification.service';
+import { TokenService } from './tokens/token.service';
 import { hashPassword, verifyPassword, needsRehash } from './password.util';
 import { normalizeEmail } from './email.util';
-
-const ACCESS_EXPIRES = '15m';
-const REFRESH_EXPIRES_MS = 7 * 24 * 60 * 60 * 1000;
 
 @Injectable()
 export class AuthService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly jwtService: JwtService,
     private readonly config: ConfigService,
     private readonly googleVerifier: GoogleVerifierService,
     private readonly appleVerifier: AppleVerifierService,
     private readonly socialIdentity: SocialIdentityService,
     private readonly emailVerification: EmailVerificationService,
+    private readonly tokens: TokenService,
   ) {}
 
-  private async generateTokens(userId: number, email: string, role: string) {
-    const payload: JwtPayload = { sub: userId, email, role };
-
-    const accessToken = await this.jwtService.signAsync(payload, {
-      secret: this.config.get<string>('JWT_SECRET'),
-      expiresIn: ACCESS_EXPIRES,
-    });
-
-    const refreshToken = await this.jwtService.signAsync(payload, {
-      secret: this.config.get<string>('JWT_REFRESH_SECRET'),
-      expiresIn: '7d',
-    });
-
-    // Store only a SHA-256 hash. The raw token is high-entropy (a signed JWT),
-    // so a fast hash is sufficient and a DB leak cannot reveal usable tokens.
-    await this.prisma.refreshToken.create({
-      data: {
-        tokenHash: this.hashToken(refreshToken),
-        userId,
-        expiresAt: new Date(Date.now() + REFRESH_EXPIRES_MS),
-      },
-    });
-
-    return { accessToken, refreshToken };
-  }
-
-  private hashToken(token: string): string {
-    return createHash('sha256').update(token).digest('hex');
+  // Existing email/Google/Apple endpoints keep their {accessToken, refreshToken}
+  // shape, but tokens are now issued by the unified TokenService (RS256 access +
+  // opaque rotating refresh).
+  private async generateTokens(userId: string, email: string | null, role: string) {
+    const session = await this.tokens.issueSession({ id: userId, email, role });
+    return { accessToken: session.accessToken, refreshToken: session.refreshToken };
   }
 
   private strip(user: { passwordHash: string | null; [key: string]: unknown }) {
@@ -196,38 +169,12 @@ export class AuthService {
   }
 
   async refresh(refreshToken: string) {
-    let payload: JwtPayload;
-    try {
-      payload = await this.jwtService.verifyAsync<JwtPayload>(refreshToken, {
-        secret: this.config.get<string>('JWT_REFRESH_SECRET'),
-      });
-    } catch {
-      throw new UnauthorizedException('Invalid or expired refresh token');
-    }
-
-    const tokenHash = this.hashToken(refreshToken);
-    const stored = await this.prisma.refreshToken.findUnique({ where: { tokenHash } });
-
-    // Valid signature but no stored row => the token was already rotated out
-    // (or is being replayed). Treat as theft: revoke the whole family.
-    if (!stored) {
-      await this.prisma.refreshToken.deleteMany({ where: { userId: payload.sub } });
-      throw new UnauthorizedException('Refresh token reuse detected');
-    }
-    if (stored.expiresAt < new Date()) {
-      await this.prisma.refreshToken.delete({ where: { id: stored.id } });
-      throw new UnauthorizedException('Refresh token revoked or expired');
-    }
-
-    // Rotation: invalidate the presented token and issue a brand-new pair.
-    await this.prisma.refreshToken.delete({ where: { id: stored.id } });
-    return this.generateTokens(payload.sub, payload.email, payload.role);
+    const session = await this.tokens.rotate(refreshToken);
+    return { accessToken: session.accessToken, refreshToken: session.refreshToken };
   }
 
   async logout(refreshToken: string) {
-    await this.prisma.refreshToken.deleteMany({
-      where: { tokenHash: this.hashToken(refreshToken) },
-    });
+    await this.tokens.revoke(refreshToken);
     return { message: 'Logged out successfully' };
   }
 }
