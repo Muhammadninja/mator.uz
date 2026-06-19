@@ -5,7 +5,7 @@ import { Decimal } from '@prisma/client/runtime/library';
 import axios from 'axios';
 import { Context, Telegraf } from 'telegraf';
 import { message } from 'telegraf/filters';
-import { ClaudeMcpService } from '../ai/claude-mcp.service';
+import { PartParserService } from '../ai/part-parser.service';
 import { PhotoroomService } from '../ai/photoroom.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SellersService } from '../sellers/sellers.service';
@@ -28,7 +28,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   private bot: Telegraf;
 
   private readonly photoroom = new PhotoroomService();
-  private readonly claude = new ClaudeMcpService();
+  private readonly partParser = new PartParserService();
 
   constructor(
     private readonly config: ConfigService,
@@ -117,8 +117,13 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         const originalBuffer = Buffer.from(response.data);
         const [cleanedBuffer, metadata] = await Promise.all([
           this.photoroom.removeBackground(originalBuffer),
-          this.claude.parsePartText(caption),
+          this.partParser.parse(caption),
         ]);
+
+        this.logger.log(
+          `Parsed via ${metadata.source} (confidence=${metadata.confidence}) — ` +
+          `title="${metadata.title ?? '∅'}"`,
+        );
 
         if (!metadata.title || metadata.title.length < 3) {
           await ctx.reply(
@@ -156,8 +161,17 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         const gmKey = metadata.gm_number ?? `tg_${from.id}_${Date.now()}`;
         const product = await this.prisma.product.upsert({
           where: { gmNumber: gmKey },
-          update: { title: metadata.title, imageUrl },
-          create: { gmNumber: metadata.gm_number, title: metadata.title, imageUrl },
+          update: {
+            title: metadata.title,
+            description: metadata.description,
+            imageUrl,
+          },
+          create: {
+            gmNumber: metadata.gm_number,
+            title: metadata.title,
+            description: metadata.description,
+            imageUrl,
+          },
         });
 
         for (const modelId of modelIds) {
@@ -181,9 +195,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
         const report =
           `✅ *Товар добавлен в каталог MATOR.uz*\n\n` +
-          `🔩 *Деталь:* ${metadata.title}\n` +
+          `🔩 *Название:* ${metadata.title}\n` +
+          `📝 *Описание:* ${metadata.description ?? '—'}\n` +
           `🏭 *Марка:* ${metadata.brand ?? '—'}\n` +
-          `🚗 *Модели:* ${metadata.models.length > 0 ? metadata.models.join(', ') : '—'}\n` +
+          `🚗 *Модель:* ${metadata.models.length > 0 ? metadata.models.join(', ') : '—'}\n` +
           `🔢 *OEM/GM №:* ${metadata.gm_number ?? '—'}\n` +
           `💰 *Цена:* ${price.toFixed(0)} UZS\n` +
           `📦 *Stock ID:* #${stock.id}\n` +

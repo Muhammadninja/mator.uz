@@ -8,12 +8,16 @@ export interface GetProductsQuery {
   model?: string;
   title?: string;
   gmNumber?: string;
+  search?: string;
+  minPrice?: number;
+  maxPrice?: number;
 }
 
 export interface ProductWithStock {
   id: number;
   gmNumber: string | null;
   title: string;
+  description: string | null;
   imageUrl: string | null;
   createdAt: Date;
   partModels: Array<{
@@ -70,6 +74,26 @@ export class ProductsService {
           },
         },
       };
+    }
+
+    // Price filter (price lives on Stock) — match products with a stock in range.
+    if (query.minPrice != null || query.maxPrice != null) {
+      const priceUzs: { gte?: number; lte?: number } = {};
+      if (query.minPrice != null) priceUzs.gte = query.minPrice;
+      if (query.maxPrice != null) priceUzs.lte = query.maxPrice;
+      where.stocks = { some: { priceUzs } };
+    }
+
+    // Unified free-text search across title, description, OEM number, brand, and models.
+    if (query.search) {
+      const term = { contains: query.search, mode: 'insensitive' as const };
+      where.OR = [
+        { title: term },
+        { description: term },
+        { gmNumber: term },
+        { partModels: { some: { model: { name: term } } } },
+        { partModels: { some: { model: { brand: { name: term } } } } },
+      ];
     }
 
     const [products, total] = await Promise.all([

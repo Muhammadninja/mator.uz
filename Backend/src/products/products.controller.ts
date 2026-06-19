@@ -13,6 +13,9 @@ export class ProductsController {
     @Query('model') model?: string,
     @Query('title') title?: string,
     @Query('gmNumber') gmNumber?: string,
+    @Query('search') search?: string,
+    @Query('minPrice') minPrice?: string,
+    @Query('maxPrice') maxPrice?: string,
   ) {
     return this.productsService.getProducts({
       page: page ? parseInt(page, 10) : 1,
@@ -21,6 +24,9 @@ export class ProductsController {
       model,
       title,
       gmNumber,
+      search,
+      minPrice: minPrice ? parseInt(minPrice, 10) : undefined,
+      maxPrice: maxPrice ? parseInt(maxPrice, 10) : undefined,
     });
   }
 

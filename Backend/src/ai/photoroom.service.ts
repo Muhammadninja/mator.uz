@@ -12,7 +12,9 @@ export class PhotoroomService {
     this.apiKey = key;
   }
 
-  async removeBackground(imageBuffer: Buffer): Promise<Buffer> {
+  // Собираем форму запроса. Поток form-data одноразовый, поэтому строим
+  // её заново на каждую попытку.
+  private buildForm(imageBuffer: Buffer): FormData {
     const form = new FormData();
 
     // Исходное изображение
@@ -48,31 +50,62 @@ export class PhotoroomService {
     // scaling: 'fit' | 'fill' — по умолчанию уже 'fit', но пишем явно
     form.append('scaling', 'fit');
 
-    try {
-      const response = await axios.post(PHOTOROOM_ENDPOINT, form, {
-        headers: {
-          ...form.getHeaders(),
-          'x-api-key': this.apiKey,
-          'Accept': 'image/png, application/json',
-          // Активируем модель теней 2026-04-15, которая поддерживает
-          // ai.auto-with-overrides + intensityOverride + softnessOverride
-          'pr-ai-shadows-model-version': '2026-04-15',
-        },
-        responseType: 'arraybuffer',
-        timeout: 30_000,
-      });
+    return form;
+  }
 
-      return Buffer.from(response.data);
-    } catch (error) {
-      // Достаём тело ответа из arraybuffer для диагностики 4xx
-      if (axios.isAxiosError(error) && error.response) {
-        const body = Buffer.from(error.response.data).toString('utf8');
-        throw new Error(
-          `PhotoroomService: background removal failed — HTTP ${error.response.status}: ${body}`,
-        );
+  async removeBackground(imageBuffer: Buffer): Promise<Buffer> {
+    // Пайплайн (удаление фона + ИИ-тени + бьютификация + композиция 1000x1000)
+    // тяжёлый, поэтому держим запас по времени и одну повторную попытку
+    // на случай таймаута или временной ошибки сервера (5xx).
+    const MAX_ATTEMPTS = 2;
+    const TIMEOUT_MS = 60_000;
+
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      const form = this.buildForm(imageBuffer);
+      try {
+        const response = await axios.post(PHOTOROOM_ENDPOINT, form, {
+          headers: {
+            ...form.getHeaders(),
+            'x-api-key': this.apiKey,
+            'Accept': 'image/png, application/json',
+            // Активируем модель теней 2026-04-15, которая поддерживает
+            // ai.auto-with-overrides + intensityOverride + softnessOverride
+            'pr-ai-shadows-model-version': '2026-04-15',
+          },
+          responseType: 'arraybuffer',
+          timeout: TIMEOUT_MS,
+        });
+
+        return Buffer.from(response.data);
+      } catch (error) {
+        lastError = error;
+
+        // 4xx — это ошибка запроса, повтор не поможет: выходим сразу с телом ответа.
+        if (axios.isAxiosError(error) && error.response) {
+          const status = error.response.status;
+          const isServerError = status >= 500;
+          if (!isServerError) {
+            const body = Buffer.from(error.response.data).toString('utf8');
+            throw new Error(
+              `PhotoroomService: background removal failed — HTTP ${status}: ${body}`,
+            );
+          }
+        }
+
+        // Таймаут или 5xx — повторяем, если попытки остались.
+        if (attempt < MAX_ATTEMPTS) continue;
       }
-      const msg = error instanceof Error ? error.message : String(error);
-      throw new Error(`PhotoroomService: background removal failed — ${msg}`);
     }
+
+    // Все попытки исчерпаны.
+    if (axios.isAxiosError(lastError) && lastError.response) {
+      const body = Buffer.from(lastError.response.data).toString('utf8');
+      throw new Error(
+        `PhotoroomService: background removal failed — HTTP ${lastError.response.status}: ${body}`,
+      );
+    }
+    const msg = lastError instanceof Error ? lastError.message : String(lastError);
+    throw new Error(`PhotoroomService: background removal failed — ${msg}`);
   }
 }

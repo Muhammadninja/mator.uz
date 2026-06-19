@@ -221,14 +221,15 @@ model CarModel {
 }
 
 model Product {
-  id         Int         @id @default(autoincrement())
-  gmNumber   String?     @unique @map("gm_number") @db.VarChar(50)
-  title      String      @db.VarChar(255)
-  imageUrl   String?     @map("image_url")
-  createdAt  DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt  DateTime    @updatedAt @map("updated_at") @db.Timestamptz(3)
-  partModels PartModel[]
-  stocks     Stock[]
+  id          Int         @id @default(autoincrement())
+  gmNumber    String?     @unique @map("gm_number") @db.VarChar(50)
+  title       String      @db.VarChar(255)
+  description String?     @db.Text
+  imageUrl    String?     @map("image_url")
+  createdAt   DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime    @updatedAt @map("updated_at") @db.Timestamptz(3)
+  partModels  PartModel[]
+  stocks      Stock[]
 
   @@map("products")
 }
