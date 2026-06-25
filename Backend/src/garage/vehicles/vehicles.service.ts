@@ -73,6 +73,43 @@ export class VehiclesService {
     return vehicle;
   }
 
+  /** Fetch a single owned vehicle (compatibility route GET /:id). */
+  async get(userId: string, vehicleId: string) {
+    await this.assertOwned(userId, vehicleId);
+    const vehicle = await this.prisma.vehicle.findUnique({
+      where: { id: vehicleId },
+      include: VEHICLE_INCLUDE,
+    });
+    return presentVehicle(vehicle!, true);
+  }
+
+  /**
+   * Dedicated set-primary route (POST /:id/set-primary). Equivalent to
+   * `update(... { is_primary: true })` but a first-class endpoint per the
+   * frontend contract. Emits both the existing `vehicle.updated` event and the
+   * `primary_vehicle_changed` alias.
+   */
+  async setPrimary(userId: string, vehicleId: string) {
+    await this.assertOwned(userId, vehicleId);
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      await tx.vehicle.updateMany({
+        where: { userId, isPrimary: true, id: { not: vehicleId } },
+        data: { isPrimary: false },
+      });
+      return tx.vehicle.update({
+        where: { id: vehicleId },
+        data: { isPrimary: true },
+        include: VEHICLE_INCLUDE,
+      });
+    });
+
+    const vehicle = presentVehicle(updated, true);
+    this.realtime.emitGarageEvent(userId, 'vehicle.updated', vehicle);
+    this.realtime.emitGarageEvent(userId, 'primary_vehicle_changed', vehicle);
+    return vehicle;
+  }
+
   async update(userId: string, vehicleId: string, dto: UpdateVehicleDto) {
     await this.assertOwned(userId, vehicleId);
 
@@ -100,6 +137,9 @@ export class VehiclesService {
 
     const vehicle = presentVehicle(updated, true);
     this.realtime.emitGarageEvent(userId, 'vehicle.updated', vehicle);
+    if (dto.is_primary === true) {
+      this.realtime.emitGarageEvent(userId, 'primary_vehicle_changed', vehicle);
+    }
     await this.notifications.emit(userId, {
       type: NotificationType.VEHICLE_STATUS_UPDATED,
       title: 'Avtomobil maʼlumotlari yangilandi',

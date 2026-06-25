@@ -3,7 +3,6 @@ import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
-import { V1AuthController } from './v1-auth.controller';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { RolesGuard } from './guards/roles.guard';
 import { GoogleVerifierService } from './social/google-verifier.service';
@@ -39,7 +38,7 @@ import { SmsModule } from '../sms/sms.module';
     PhoneAuthService,
     MyIdService,
   ],
-  controllers: [AuthController, V1AuthController],
+  controllers: [AuthController],
   exports: [RolesGuard, JwtKeyService, JwtModule],
 })
 export class AuthModule {}

@@ -62,6 +62,12 @@ enum Gender {
   FEMALE
 }
 
+enum Language {
+  RU
+  UZ
+  EN
+}
+
 enum ProviderType {
   MASTER
   STO
@@ -221,17 +227,33 @@ model CarModel {
 }
 
 model Product {
-  id          Int         @id @default(autoincrement())
-  gmNumber    String?     @unique @map("gm_number") @db.VarChar(50)
-  title       String      @db.VarChar(255)
-  description String?     @db.Text
-  imageUrl    String?     @map("image_url")
-  createdAt   DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt   DateTime    @updatedAt @map("updated_at") @db.Timestamptz(3)
+  id          Int            @id @default(autoincrement())
+  gmNumber    String?        @unique @map("gm_number") @db.VarChar(50)
+  title       String         @db.VarChar(255)
+  description String?        @db.Text
+  imageUrl    String?        @map("image_url") // primary image mirror (back-compat)
+  createdAt   DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
   partModels  PartModel[]
   stocks      Stock[]
+  images      ProductImage[]
 
   @@map("products")
+}
+
+// Ordered gallery for a product (Telegram media-group uploads). The first image
+// (sortOrder 0 / isPrimary) mirrors into Product.imageUrl for legacy readers.
+model ProductImage {
+  id        Int      @id @default(autoincrement())
+  productId Int      @map("product_id")
+  url       String
+  sortOrder Int      @default(0) @map("sort_order")
+  isPrimary Boolean  @default(false) @map("is_primary")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId, sortOrder])
+  @@map("product_images")
 }
 
 model PartModel {
@@ -274,6 +296,7 @@ model AppUser {
   avatarUrl           String?    @map("avatar_url")
   thumbnailUrl        String?    @map("thumbnail_url")
   role                Role       @default(USER)
+  language            Language   @default(UZ)
   myIdStatus          MyIdStatus @default(NOT_VERIFIED) @map("myid_status")
   transactionLimitUzs Decimal    @default(0) @map("transaction_limit_uzs") @db.Decimal(14, 2)
   createdAt           DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)

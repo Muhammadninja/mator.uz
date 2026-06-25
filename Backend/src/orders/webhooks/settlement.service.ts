@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { NotificationType, OrderStatus, PaymentStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { NotificationsService } from '../../notifications/notifications.service';
+import { RealtimeGateway } from '../../realtime/realtime.gateway';
 
 /**
  * Final state transitions shared by the Payme and Click webhooks. Idempotent:
@@ -14,6 +15,7 @@ export class SettlementService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
+    private readonly realtime: RealtimeGateway,
   ) {}
 
   async markPaid(paymentId: string, performTimeMs?: number): Promise<void> {
@@ -40,6 +42,12 @@ export class SettlementService {
         data: { status: OrderStatus.PAID },
       }),
     ]);
+
+    // Realtime push to the user's live sockets (frontend `order_paid` event).
+    this.realtime.emit(payment.order.userId, {
+      type: 'order_paid',
+      data: { order_id: payment.orderId, payment_id: payment.id, status: 'paid' },
+    });
 
     await this.notifications.emit(payment.order.userId, {
       type: NotificationType.ORDER_PAID,

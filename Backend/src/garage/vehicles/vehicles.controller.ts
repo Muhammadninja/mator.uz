@@ -35,10 +35,22 @@ export class VehiclesController {
     });
   }
 
+  @Get(':id')
+  @HttpCode(HttpStatus.OK)
+  getOne(@Request() req: { user: { id: string } }, @Param('id') id: string) {
+    return this.vehicles.get(req.user.id, id);
+  }
+
   @Post()
   @HttpCode(HttpStatus.CREATED)
   create(@Request() req: { user: { id: string } }, @Body() dto: CreateVehicleDto) {
     return this.vehicles.create(req.user.id, dto);
+  }
+
+  @Post(':id/set-primary')
+  @HttpCode(HttpStatus.OK)
+  setPrimary(@Request() req: { user: { id: string } }, @Param('id') id: string) {
+    return this.vehicles.setPrimary(req.user.id, id);
   }
 
   @Patch(':id')

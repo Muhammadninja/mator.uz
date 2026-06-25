@@ -4,6 +4,7 @@ import { Logger, ValidationPipe } from '@nestjs/common';
 import { WsAdapter } from '@nestjs/platform-ws';
 import helmet from 'helmet';
 import { AppModule } from './app.module';
+import { HttpExceptionFilter } from './common/http-exception.filter';
 
 /**
  * Parse a comma-separated CORS allowlist from CORS_ORIGINS. In production an
@@ -43,6 +44,8 @@ async function bootstrap() {
   }
 
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+  // Normalize all errors to the frontend `{ code, message }` contract.
+  app.useGlobalFilters(new HttpExceptionFilter());
   // Native `ws` adapter powers the /realtime gateway (raw WebSocket protocol).
   app.useWebSocketAdapter(new WsAdapter(app));
   await app.listen(process.env.PORT ?? 3000);

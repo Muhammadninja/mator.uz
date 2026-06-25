@@ -89,7 +89,11 @@ export class AiAdvisorController {
       const structured = await this.ai.buildStructured(vehicle);
       const saved = await this.ai.persistAssistantMessage(id, full, structured);
       await this.notifyReply(req.user.id, id, saved);
-      res.write(`data: ${JSON.stringify({ type: 'message', message: this.ai.presentMessage(saved, structured) })}\n\n`);
+      const finalMessage = this.ai.presentMessage(saved, structured);
+      res.write(`data: ${JSON.stringify({ type: 'message', message: finalMessage })}\n\n`);
+      // Named terminal frame per the frontend contract (`event: done`), kept
+      // alongside the legacy `data: [DONE]` sentinel for backward compatibility.
+      res.write(`event: done\ndata: ${JSON.stringify({ message: finalMessage })}\n\n`);
       res.write('data: [DONE]\n\n');
     } catch {
       res.write(`data: ${JSON.stringify({ type: 'error', error: 'generation_failed' })}\n\n`);

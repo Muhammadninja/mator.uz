@@ -6,28 +6,40 @@ import sharp from 'sharp';
 
 const PHOTOROOM_ENDPOINT = 'https://image-api.photoroom.com/v2/edit';
 
-// Локальный фон. Только этот файл — никаких AI-фонов, студий, промптов.
+// Локальный маркетплейс-фон. Только этот файл — никаких AI-фонов/студий/промптов.
 const BACKGROUND_PATH = path.join(__dirname, 'assets', '6.jpeg');
 
-// Финальный размер выходного изображения.
+// Финальный размер выходного изображения (квадрат маркетплейса).
 const OUTPUT_SIZE = 1000;
 
-// Доля площади кадра, которую должен занимать объект (70–80%).
-// Используем ширину/высоту: объект вписывается в квадрат OBJECT_RATIO × OUTPUT_SIZE.
-const OBJECT_RATIO = 0.78;
+// Объект должен занимать 75–85% площади кадра. Берём середину диапазона как
+// целевую долю; фактический bounding box объекта вписывается в этот квадрат,
+// что гарантирует визуально одинаковый размер деталей во всём каталоге.
+const OBJECT_RATIO_MIN = 0.75;
+const OBJECT_RATIO_MAX = 0.85;
+const OBJECT_RATIO_TARGET = (OBJECT_RATIO_MIN + OBJECT_RATIO_MAX) / 2; // 0.80
+
+const REQUEST_TIMEOUT_MS = 60_000;
+const MAX_ATTEMPTS = 2;
 
 /**
- * Pipeline:
- *   input photo
- *     → Photoroom removeBackground  (только вырезание объекта)
- *     → PNG с alpha
- *     → beautify объекта (только резкость/края, без теней и фона)
- *     → композитинг поверх локального фона 6.jpeg через Sharp
- *     → resize 1000×1000
- *     → финальное изображение
+ * Pipeline (детерминированный, единый для всех изображений каталога):
+ *   original seller photo
+ *     1. Photoroom AI upscale        → повышение разрешения исходного фото
+ *     2. Photoroom AI beautify       → улучшение качества (beautify.mode=ai.auto)
+ *     3. Photoroom removeBackground  → прозрачный PNG (вырезание объекта)
+ *     4. object detection (bbox)     → trim прозрачной рамки (Sharp)
+ *     5. scale to ~80% canvas        → объект вписывается в OBJECT_RATIO_TARGET
+ *     6. center on canvas            → одинаковые отступы
+ *     7. apply Mator background      → композитинг + resize 1000×1000
+ *     → save (вызывающий код заливает в Cloudinary)
  *
- * Photoroom используется СТРОГО для удаления фона. Он не генерирует фон,
- * не рисует тени/отражения/студию, не меняет композицию и геометрию.
+ * Photoroom используется СТРОГО для AI-операций (upscale, beautify, вырезание).
+ * Он НЕ генерирует фон, не рисует тени/отражения/студию, не меняет композицию и
+ * геометрию. Фон и размещение — локально через Sharp.
+ *
+ * Шаги 1–2 деградируют мягко: если Photoroom-улучшение не удалось, используем
+ * предыдущий буфер, чтобы единичный сбой не ронял весь пайплайн загрузки.
  */
 export class PhotoroomService {
   private readonly apiKey: string;
@@ -43,54 +55,119 @@ export class PhotoroomService {
 
   /**
    * Полный пайплайн обработки фото детали.
-   * Возвращает финальное изображение 1000×1000 (PNG) с локальным фоном.
+   * Возвращает финальное изображение 1000×1000 (PNG) с маркетплейс-фоном.
+   * Имя метода сохранено для обратной совместимости с вызывающим кодом.
    */
   async removeBackground(imageBuffer: Buffer): Promise<Buffer> {
-    // 1. Вырезаем объект — получаем прозрачный PNG.
-    const cutout = await this.cutout(imageBuffer);
+    // Pipeline order: AI Upscale → AI Beautify → Remove Background →
+    //   Object detection → Scale 80% → Center → Apply Mator background → Save.
+    // Upscale/Beautify run on the ORIGINAL photo (with background) so the AI
+    // works on the full-resolution source before the object is cut out.
 
-    // 2. Лёгкая бьютификация ТОЛЬКО объекта (резкость + чистка краёв альфы).
-    const beautified = await this.beautifyObject(cutout);
+    // 1. AI upscale on the original photo (мягкая деградация при сбое).
+    const upscaled = await this.aiUpscale(imageBuffer);
 
-    // 3. Композитинг поверх локального фона + ресайз до 1000×1000.
-    const composed = await this.composeOnBackground(beautified);
+    // 2. AI beautify on the upscaled photo (мягкая деградация при сбое).
+    const beautifiedAi = await this.aiBeautify(upscaled);
 
-    return composed;
+    // 3. Remove background — вырезаем объект, прозрачный PNG (обязательный шаг).
+    const cutout = await this.cutout(beautifiedAi);
+
+    // 3b. Локальная чистка краёв альфы вырезанного объекта (детерминированно,
+    //     без зависимости от внешнего сервиса) — перед измерением bbox.
+    const finished = await this.localBeautify(cutout);
+
+    // 4–7. object detection (bbox) → scale 80% → center → Mator background →
+    //      1000×1000 → save (вызывающий код заливает результат в Cloudinary).
+    return this.composeOnBackground(finished);
   }
 
   // ──────────────────────────────────────────────────────────────────────────
-  // 1. REMOVE BACKGROUND
+  // 3. REMOVE BACKGROUND
   // ──────────────────────────────────────────────────────────────────────────
 
-  /**
-   * Запрос к Photoroom строго на удаление фона.
-   * Никаких background.prompt / shadow / beautify / outputSize —
-   * только вырезанный объект в PNG с alpha-каналом.
-   */
   private buildCutoutForm(imageBuffer: Buffer): FormData {
     const form = new FormData();
-
-    form.append('imageFile', imageBuffer, {
-      filename: 'image.jpg',
-      contentType: 'image/jpeg',
-    });
-
-    // Удаляем фон.
+    form.append('imageFile', imageBuffer, { filename: 'image.jpg', contentType: 'image/jpeg' });
     form.append('removeBackground', 'true');
-
     // PNG обязателен — только он несёт alpha-канал.
     form.append('format', 'png');
-
     return form;
   }
 
   private async cutout(imageBuffer: Buffer): Promise<Buffer> {
-    const MAX_ATTEMPTS = 2;
-    const TIMEOUT_MS = 60_000;
+    const result = await this.callPhotoroom(
+      () => this.buildCutoutForm(imageBuffer),
+      'background removal',
+      { required: true },
+    );
+    // На обязательном шаге результат должен быть прозрачным, иначе это ошибка.
+    await this.assertTransparent(result!);
+    return result!;
+  }
 
+  // ──────────────────────────────────────────────────────────────────────────
+  // 1. AI UPSCALE
+  // ──────────────────────────────────────────────────────────────────────────
+
+  /** Photoroom AI upscale. При сбое возвращает входной буфер без изменений. */
+  private async aiUpscale(input: Buffer): Promise<Buffer> {
+    const result = await this.callPhotoroom(
+      () => {
+        const form = new FormData();
+        // Работаем над исходным фото (с фоном); Photoroom определяет формат
+        // по байтам, имя файла — лишь подсказка.
+        form.append('imageFile', input, { filename: 'source.jpg', contentType: 'image/jpeg' });
+        // Фон НЕ трогаем здесь — удаление фона выполняется отдельным шагом ниже.
+        form.append('removeBackground', 'false');
+        // v2/edit upscale.mode ∈ {ai.fast, ai.slow}; 'ai' отвергается API.
+        form.append('upscale.mode', 'ai.fast');
+        form.append('format', 'png');
+        return form;
+      },
+      'AI upscale',
+      { required: false },
+    );
+    return result ?? input;
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // 2. AI BEAUTIFY
+  // ──────────────────────────────────────────────────────────────────────────
+
+  /** Photoroom AI beautify/enhance объекта. При сбое возвращает вход. */
+  private async aiBeautify(input: Buffer): Promise<Buffer> {
+    const result = await this.callPhotoroom(
+      () => {
+        const form = new FormData();
+        // Вход — апскейленное фото (всё ещё с фоном); фон удалим следующим шагом.
+        form.append('imageFile', input, { filename: 'source.png', contentType: 'image/png' });
+        form.append('removeBackground', 'false');
+        // AI Beautifier: параметр называется beautify.mode (не enhance.mode);
+        // v2/edit допускает {ai.auto, ai.food, ai.car} — для автозапчастей ai.auto.
+        form.append('beautify.mode', 'ai.auto');
+        form.append('format', 'png');
+        return form;
+      },
+      'AI beautify',
+      { required: false },
+    );
+    return result ?? input;
+  }
+
+  /**
+   * Единый вызов Photoroom с retry/timeout. На 4xx повтор не делаем.
+   * required=true → бросаем при неудаче; required=false → возвращаем null,
+   * чтобы вызывающий шаг мог мягко деградировать.
+   */
+  private async callPhotoroom(
+    buildForm: () => FormData,
+    label: string,
+    opts: { required: boolean },
+  ): Promise<Buffer | null> {
     let lastError: unknown;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      const form = this.buildCutoutForm(imageBuffer);
+      const form = buildForm();
       try {
         const response = await axios.post(PHOTOROOM_ENDPOINT, form, {
           headers: {
@@ -99,58 +176,46 @@ export class PhotoroomService {
             Accept: 'image/png, application/json',
           },
           responseType: 'arraybuffer',
-          timeout: TIMEOUT_MS,
+          timeout: REQUEST_TIMEOUT_MS,
         });
-
-        const result = Buffer.from(response.data);
-        // Гарантируем прозрачный фон, иначе считаем результат ошибкой.
-        await this.assertTransparent(result);
-        return result;
+        return Buffer.from(response.data);
       } catch (error) {
         lastError = error;
-
         // 4xx — ошибка запроса, повтор не поможет.
-        if (axios.isAxiosError(error) && error.response) {
-          const status = error.response.status;
-          if (status < 500) {
-            const body = Buffer.from(error.response.data).toString('utf8');
-            throw new Error(
-              `PhotoroomService: background removal failed — HTTP ${status}: ${body}`,
-            );
-          }
+        if (axios.isAxiosError(error) && error.response && error.response.status < 500) {
+          break;
         }
-
         if (attempt < MAX_ATTEMPTS) continue;
       }
     }
 
-    if (axios.isAxiosError(lastError) && lastError.response) {
-      const body = Buffer.from(lastError.response.data).toString('utf8');
-      throw new Error(
-        `PhotoroomService: background removal failed — HTTP ${lastError.response.status}: ${body}`,
-      );
+    const detail = this.errorDetail(lastError);
+    if (opts.required) {
+      throw new Error(`PhotoroomService: ${label} failed — ${detail}`);
     }
-    const msg = lastError instanceof Error ? lastError.message : String(lastError);
-    throw new Error(`PhotoroomService: background removal failed — ${msg}`);
+    // Мягкая деградация для необязательных AI-шагов.
+    // eslint-disable-next-line no-console
+    console.warn(`PhotoroomService: ${label} failed, using previous image — ${detail}`);
+    return null;
   }
 
-  /**
-   * Проверяет, что Photoroom действительно вернул прозрачный фон.
-   * Если alpha-канала нет или фон непрозрачный — это ошибка, такой результат
-   * использовать нельзя.
-   */
+  private errorDetail(error: unknown): string {
+    if (axios.isAxiosError(error) && error.response) {
+      const body =
+        error.response.data instanceof Buffer
+          ? error.response.data.toString('utf8')
+          : JSON.stringify(error.response.data);
+      return `HTTP ${error.response.status}: ${body}`;
+    }
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  /** Проверяет, что Photoroom вернул реально прозрачный фон. */
   private async assertTransparent(png: Buffer): Promise<void> {
     const meta = await sharp(png).metadata();
-
     if (!meta.hasAlpha) {
-      throw new Error(
-        'PhotoroomService: removeBackground returned an image without an alpha channel',
-      );
+      throw new Error('PhotoroomService: removeBackground returned an image without an alpha channel');
     }
-
-    // Проверяем, что фон реально прозрачный: берём статистику alpha-канала.
-    // У вырезанного объекта минимум альфы по краям должен быть близок к 0
-    // (полностью прозрачные пиксели). Если минимум высокий — фон не убран.
     const stats = await sharp(png).stats();
     const alpha = stats.channels[stats.channels.length - 1];
     if (alpha.min > 8) {
@@ -162,38 +227,25 @@ export class PhotoroomService {
   }
 
   // ──────────────────────────────────────────────────────────────────────────
-  // 2. BEAUTIFY OBJECT ONLY
+  // 3b. LOCAL FINISH (deterministic, no external dependency)
   // ──────────────────────────────────────────────────────────────────────────
 
-  /**
-   * Лёгкое улучшение качества ТОЛЬКО объекта на прозрачном PNG.
-   * Делается локально через Sharp — это гарантирует, что не будет добавлено
-   * ни теней, ни отражений, ни фона, ни студийного освещения, ни изменения
-   * геометрии/материала/формы детали.
-   *
-   * Только:
-   *  - небольшое повышение резкости;
-   *  - аккуратная чистка краёв альфы (убрать «ореол» от вырезания).
-   */
-  private async beautifyObject(cutout: Buffer): Promise<Buffer> {
+  /** Лёгкая локальная финишная обработка: резкость + чистка краёв альфы. */
+  private async localBeautify(cutout: Buffer): Promise<Buffer> {
     return sharp(cutout)
       .ensureAlpha()
-      // Лёгкая резкость — деликатные параметры, без агрессии.
       .sharpen({ sigma: 0.7 })
-      // Чистка краёв: убираем полупрозрачную «бахрому» по контуру объекта,
-      // не трогая саму геометрию. median сглаживает alpha-шум на границе.
-      .median(1)
+      .median(1) // убираем полупрозрачную «бахрому» по контуру, не трогая геометрию
       .png({ compressionLevel: 9 })
       .toBuffer();
   }
 
   // ──────────────────────────────────────────────────────────────────────────
-  // 3. COMPOSITE ON LOCAL BACKGROUND + RESIZE 1000×1000
+  // 4–7. BBOX → SCALE 75–85% → CENTER → MARKETPLACE BACKGROUND
   // ──────────────────────────────────────────────────────────────────────────
 
   private async getBackground(): Promise<Buffer> {
     if (!this.backgroundCache) {
-      // Готовим фон один раз: ресайз до 1000×1000 (cover), без альфы.
       const raw = await readFile(BACKGROUND_PATH);
       this.backgroundCache = await sharp(raw)
         .resize(OUTPUT_SIZE, OUTPUT_SIZE, { fit: 'cover', position: 'centre' })
@@ -204,24 +256,22 @@ export class PhotoroomService {
   }
 
   /**
-   * Размещает вырезанный объект по центру локального фона.
-   *  - объект полностью помещается в кадр (не обрезается);
-   *  - пропорции сохраняются;
-   *  - занимает ~70–80% площади (вписан в OBJECT_RATIO × OUTPUT_SIZE);
-   *  - не масштабируется сверх оригинала (withoutEnlargement);
-   *  - одинаковые отступы (центрирование).
+   * Размещает вырезанный объект на маркетплейс-фоне с единообразным размером:
+   *  4. bounding box — trim полностью прозрачной рамки (Sharp.trim);
+   *  5. scale — объект вписывается в квадрат OBJECT_RATIO_TARGET × OUTPUT_SIZE
+   *     (≈80% кадра, в пределах требуемых 75–85%), пропорции сохраняются;
+   *  6. center — одинаковые отступы со всех сторон;
+   *  7. background — композитинг поверх локального фона, итог 1000×1000.
+   *
+   * Из-за фиксированной целевой доли (OBJECT_RATIO_TARGET) ВСЕ изображения
+   * каталога получают визуально одинаковый размер объекта.
    */
   private async composeOnBackground(objectPng: Buffer): Promise<Buffer> {
     const background = await this.getBackground();
+    const box = Math.round(OUTPUT_SIZE * OBJECT_RATIO_TARGET);
 
-    const box = Math.round(OUTPUT_SIZE * OBJECT_RATIO);
-
-    // Photoroom возвращает объект на исходном полнокадровом холсте с большими
-    // прозрачными полями. Обрезаем полностью прозрачную рамку, чтобы под ресайз
-    // попал именно объект (его bounding box), а не пустое пространство —
-    // иначе деталь окажется мелкой и не займёт нужные 70–80%.
-    // trim() бросает исключение, если обрезать нечего (однотонный кадр) —
-    // в этом случае используем объект как есть.
+    // 4. bounding box: обрезаем прозрачную рамку, чтобы под масштаб попал сам
+    //    объект, а не пустое пространство. trim() бросает, если обрезать нечего.
     let trimmed: Buffer;
     try {
       trimmed = await sharp(objectPng).trim().toBuffer();
@@ -229,23 +279,23 @@ export class PhotoroomService {
       trimmed = objectPng;
     }
 
-    // Вписываем объект в квадрат box×box с сохранением пропорций.
-    // Деталь полностью помещается в кадр и не обрезается (fit: 'inside').
-    // withoutEnlargement: не увеличиваем объект сверх его оригинального размера.
+    // 5. scale: вписываем bbox в box×box с сохранением пропорций. В отличие от
+    //    прежней версии разрешаем УВЕЛИЧЕНИЕ (без withoutEnlargement), иначе
+    //    мелкие объекты не дотягивали бы до 75–85% и размер был бы непостоянным.
     const resizedObject = await sharp(trimmed)
       .resize(box, box, {
         fit: 'inside',
-        withoutEnlargement: true,
         background: { r: 0, g: 0, b: 0, alpha: 0 },
       })
       .toBuffer();
 
     const { width = box, height = box } = await sharp(resizedObject).metadata();
 
-    // Центрируем объект на фоне (одинаковые отступы со всех сторон).
+    // 6. center.
     const left = Math.round((OUTPUT_SIZE - width) / 2);
     const top = Math.round((OUTPUT_SIZE - height) / 2);
 
+    // 7. background.
     return sharp(background)
       .composite([{ input: resizedObject, left, top }])
       .png({ compressionLevel: 9 })

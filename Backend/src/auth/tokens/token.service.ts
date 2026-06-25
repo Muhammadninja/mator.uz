@@ -6,7 +6,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { JwtKeyService } from './jwt-key.service';
 import { JwtPayload } from '../interfaces/jwt-payload.interface';
 
-const ACCESS_TTL_SECONDS = 60 * 60; // 1h (matches the mobile contract)
+export const ACCESS_TTL_SECONDS = 60 * 60; // 1h (matches the mobile contract)
 const REFRESH_TTL_MS = 90 * 24 * 60 * 60 * 1000; // 90d
 const ISSUER = 'mator';
 

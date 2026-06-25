@@ -8,7 +8,6 @@ import { AuthModule } from './auth/auth.module';
 import { SellersModule } from './sellers/sellers.module';
 import { AdminModule } from './admin/admin.module';
 import { TelegramModule } from './telegram/telegram.module';
-import { ProductsModule } from './products/products.module';
 import { GarageModule } from './garage/garage.module';
 import { CloudinaryModule } from './cloudinary/cloudinary.module';
 import { RetentionModule } from './retention/retention.module';
@@ -20,6 +19,9 @@ import { AiAdvisorModule } from './ai-advisor/ai-advisor.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { RealtimeModule } from './realtime/realtime.module';
 import { HealthModule } from './health/health.module';
+import { UserModule } from './user/user.module';
+import { AccountModule } from './account/account.module';
+import { ShippingModule } from './shipping/shipping.module';
 
 @Module({
   imports: [
@@ -32,7 +34,6 @@ import { HealthModule } from './health/health.module';
     SellersModule,
     AdminModule,
     TelegramModule,
-    ProductsModule,
     GarageModule,
     CloudinaryModule,
     RetentionModule,
@@ -44,6 +45,9 @@ import { HealthModule } from './health/health.module';
     NotificationsModule,
     RealtimeModule,
     HealthModule,
+    UserModule,
+    AccountModule,
+    ShippingModule,
   ],
 })
 export class AppModule {}

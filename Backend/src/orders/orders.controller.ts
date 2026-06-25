@@ -4,6 +4,7 @@ import {
   Get,
   Body,
   Param,
+  Query,
   Request,
   UseGuards,
   HttpCode,
@@ -12,6 +13,7 @@ import {
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { OrdersService } from './orders.service';
 import { CreateOrderDto } from './dto/create-order.dto';
+import { ListOrdersQueryDto } from './dto/list-orders.query.dto';
 
 @Controller('v1/orders')
 @UseGuards(JwtAuthGuard)
@@ -22,6 +24,14 @@ export class OrdersController {
   @HttpCode(HttpStatus.CREATED)
   create(@Request() req: { user: { id: string } }, @Body() dto: CreateOrderDto) {
     return this.orders.createFromCart(req.user.id, dto);
+  }
+
+  // Order history (paginated, optional status filter). Declared before the
+  // parameterized :id route for clarity; the paths are distinct regardless.
+  @Get()
+  @HttpCode(HttpStatus.OK)
+  list(@Request() req: { user: { id: string } }, @Query() query: ListOrdersQueryDto) {
+    return this.orders.list(req.user.id, query);
   }
 
   @Get(':id')

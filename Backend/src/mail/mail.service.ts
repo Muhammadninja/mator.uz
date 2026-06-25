@@ -18,7 +18,7 @@ export class MailService {
     // mobile deep-link (e.g. mator://verify-email) for app clients.
     this.verifyBaseUrl =
       this.config.get<string>('EMAIL_VERIFY_URL') ??
-      'http://localhost:3000/api/auth/verify-email';
+      'http://localhost:3000/v1/auth/verify-email';
   }
 
   buildVerificationLink(rawToken: string): string {

@@ -1,11 +1,14 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { DeliveryMethod, OrderStatus } from '@prisma/client';
+import { DeliveryMethod, OrderStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { prefixedId, IdPrefix } from '../common/ulid.util';
 import { resolvePromo } from '../cart/promo.util';
 import { ORDER_INCLUDE, presentOrder } from './order.presenter';
 import { CreateOrderDto } from './dto/create-order.dto';
+import { ListOrdersQueryDto } from './dto/list-orders.query.dto';
+
+const DEFAULT_ORDER_LIMIT = 20;
 
 @Injectable()
 export class OrdersService {
@@ -88,6 +91,34 @@ export class OrdersService {
     });
 
     return presentOrder(order);
+  }
+
+  /**
+   * Order history for the authenticated user. Keyset pagination by
+   * (createdAt desc, id desc); always scoped to userId so ownership is enforced
+   * by construction. Optional status filter (contract lowercase → enum).
+   */
+  async list(userId: string, query: ListOrdersQueryDto) {
+    const limit = query.limit ?? DEFAULT_ORDER_LIMIT;
+    const where: Prisma.OrderWhereInput = { userId };
+    if (query.status) {
+      where.status = query.status.toUpperCase() as OrderStatus;
+    }
+
+    const rows = await this.prisma.order.findMany({
+      where,
+      include: ORDER_INCLUDE,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: limit + 1,
+      ...(query.cursor ? { cursor: { id: query.cursor }, skip: 1 } : {}),
+    });
+
+    const hasMore = rows.length > limit;
+    const items = hasMore ? rows.slice(0, limit) : rows;
+    return {
+      items: items.map(presentOrder),
+      nextCursor: hasMore ? items[items.length - 1].id : null,
+    };
   }
 
   async getOrder(userId: string, orderId: string) {
