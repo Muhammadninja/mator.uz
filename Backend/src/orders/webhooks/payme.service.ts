@@ -1,9 +1,18 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { createHash, timingSafeEqual } from 'crypto';
 import { OrderStatus, PaymentProvider, PaymentStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { prefixedId, IdPrefix } from '../../common/ulid.util';
 import { SettlementService } from './settlement.service';
+
+/** Constant-time string equality (hash to a fixed length first so unequal
+ * lengths don't short-circuit and leak timing). */
+function safeEqual(a: string, b: string): boolean {
+  const ha = createHash('sha256').update(a).digest();
+  const hb = createHash('sha256').update(b).digest();
+  return timingSafeEqual(ha, hb);
+}
 
 // Payme JSON-RPC error codes.
 class PaymeError extends Error {
@@ -54,7 +63,7 @@ export class PaymeService {
   private authorize(authHeader?: string): void {
     const key = this.config.get<string>('PAYME_MERCHANT_KEY') ?? '';
     const expected = 'Basic ' + Buffer.from(`Paycom:${key}`).toString('base64');
-    if (!authHeader || authHeader !== expected) {
+    if (!authHeader || !safeEqual(authHeader, expected)) {
       throw new PaymeError(-32504, 'Insufficient privilege to perform this method');
     }
   }

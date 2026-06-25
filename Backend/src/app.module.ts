@@ -19,6 +19,7 @@ import { ProvidersModule } from './providers/providers.module';
 import { AiAdvisorModule } from './ai-advisor/ai-advisor.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { RealtimeModule } from './realtime/realtime.module';
+import { HealthModule } from './health/health.module';
 
 @Module({
   imports: [
@@ -42,6 +43,7 @@ import { RealtimeModule } from './realtime/realtime.module';
     AiAdvisorModule,
     NotificationsModule,
     RealtimeModule,
+    HealthModule,
   ],
 })
 export class AppModule {}

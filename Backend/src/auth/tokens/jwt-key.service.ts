@@ -33,6 +33,15 @@ export class JwtKeyService {
       return;
     }
 
+    // Production must never run on an ephemeral keypair: tokens would become
+    // unverifiable after a restart and across instances. Fail fast at boot.
+    if (this.config.get<string>('NODE_ENV') === 'production') {
+      throw new Error(
+        'JWT RS256 keys are not configured. Set JWT_PRIVATE_KEY, JWT_PUBLIC_KEY and JWT_KID ' +
+          'in production (ephemeral dev keys are disabled outside development).',
+      );
+    }
+
     this.logger.warn(
       'JWT RS256 keys not fully configured — generating an EPHEMERAL dev keypair. ' +
         'Set JWT_PRIVATE_KEY, JWT_PUBLIC_KEY and JWT_KID for production.',

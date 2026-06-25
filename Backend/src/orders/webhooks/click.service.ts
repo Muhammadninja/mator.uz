@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { createHash } from 'crypto';
+import { createHash, timingSafeEqual } from 'crypto';
 import { OrderStatus, PaymentProvider, PaymentStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { prefixedId, IdPrefix } from '../../common/ulid.util';
@@ -102,7 +102,11 @@ export class ClickService {
     if (isComplete) parts.push(p.merchant_prepare_id);
     parts.push(p.amount, p.action, p.sign_time);
     const expected = createHash('md5').update(parts.join('')).digest('hex');
-    return expected === p.sign_string;
+    const provided = String(p.sign_string ?? '');
+    // Both are fixed-length hex MD5 digests; guard against length mismatch
+    // before the constant-time compare.
+    if (expected.length !== provided.length) return false;
+    return timingSafeEqual(Buffer.from(expected), Buffer.from(provided));
   }
 
   private reply(p: Record<string, any>, error: number, note: string, prepareId?: string | null) {
