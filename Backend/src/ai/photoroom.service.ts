@@ -19,27 +19,29 @@ const OBJECT_RATIO_MIN = 0.75;
 const OBJECT_RATIO_MAX = 0.85;
 const OBJECT_RATIO_TARGET = (OBJECT_RATIO_MIN + OBJECT_RATIO_MAX) / 2; // 0.80
 
-const REQUEST_TIMEOUT_MS = 60_000;
-const MAX_ATTEMPTS = 2;
+// One combined /v2/edit call (removeBackground + beautify) is fast; cap the
+// wait and fail fast rather than stalling for minutes. No silent retries — a
+// single retry on a slow endpoint was the main multi-minute stall.
+const REQUEST_TIMEOUT_MS = 30_000;
+const MAX_ATTEMPTS = 1;
 
 /**
  * Pipeline (детерминированный, единый для всех изображений каталога):
  *   original seller photo
- *     1. Photoroom AI upscale        → повышение разрешения исходного фото
- *     2. Photoroom AI beautify       → улучшение качества (beautify.mode=ai.auto)
- *     3. Photoroom removeBackground  → прозрачный PNG (вырезание объекта)
- *     4. object detection (bbox)     → trim прозрачной рамки (Sharp)
- *     5. scale to ~80% canvas        → объект вписывается в OBJECT_RATIO_TARGET
- *     6. center on canvas            → одинаковые отступы
- *     7. apply Mator background      → композитинг + resize 1000×1000
+ *     1. Photoroom /v2/edit          → один вызов: removeBackground + beautify
+ *                                      (beautify.mode=ai.auto) → прозрачный PNG
+ *     2. object detection (bbox)     → trim прозрачной рамки (Sharp)
+ *     3. scale to ~80% canvas        → объект вписывается в OBJECT_RATIO_TARGET
+ *     4. center on canvas            → одинаковые отступы
+ *     5. apply Mator background      → композитинг + resize 1000×1000
  *     → save (вызывающий код заливает в Cloudinary)
  *
- * Photoroom используется СТРОГО для AI-операций (upscale, beautify, вырезание).
- * Он НЕ генерирует фон, не рисует тени/отражения/студию, не меняет композицию и
- * геометрию. Фон и размещение — локально через Sharp.
+ * AI Upscale убран намеренно: выход — 1000px, а телефонные фото уже крупнее, так
+ * что апскейл с последующим даунскейлом только тратил время без выигрыша.
  *
- * Шаги 1–2 деградируют мягко: если Photoroom-улучшение не удалось, используем
- * предыдущий буфер, чтобы единичный сбой не ронял весь пайплайн загрузки.
+ * Photoroom используется СТРОГО для AI-операций (beautify, вырезание). Он НЕ
+ * генерирует фон, не рисует тени/отражения/студию, не меняет композицию и
+ * геометрию. Фон и размещение — локально через Sharp.
  */
 export class PhotoroomService {
   private readonly apiKey: string;
@@ -59,100 +61,46 @@ export class PhotoroomService {
    * Имя метода сохранено для обратной совместимости с вызывающим кодом.
    */
   async removeBackground(imageBuffer: Buffer): Promise<Buffer> {
-    // Pipeline order: AI Upscale → AI Beautify → Remove Background →
-    //   Object detection → Scale 80% → Center → Apply Mator background → Save.
-    // Upscale/Beautify run on the ORIGINAL photo (with background) so the AI
-    // works on the full-resolution source before the object is cut out.
+    // 1. Один объединённый вызов Photoroom /v2/edit: removeBackground + beautify.
+    //    (AI upscale убран — финальный размер 1000px, телефонные фото и так
+    //    крупнее; апскейл с последующим даунскейлом — пустая трата времени.)
+    const cutout = await this.editImage(imageBuffer);
 
-    // 1. AI upscale on the original photo (мягкая деградация при сбое).
-    const upscaled = await this.aiUpscale(imageBuffer);
-
-    // 2. AI beautify on the upscaled photo (мягкая деградация при сбое).
-    const beautifiedAi = await this.aiBeautify(upscaled);
-
-    // 3. Remove background — вырезаем объект, прозрачный PNG (обязательный шаг).
-    const cutout = await this.cutout(beautifiedAi);
-
-    // 3b. Локальная чистка краёв альфы вырезанного объекта (детерминированно,
-    //     без зависимости от внешнего сервиса) — перед измерением bbox.
+    // 2. Локальная чистка краёв альфы вырезанного объекта (детерминированно)
+    //    перед измерением bbox.
     const finished = await this.localBeautify(cutout);
 
-    // 4–7. object detection (bbox) → scale 80% → center → Mator background →
-    //      1000×1000 → save (вызывающий код заливает результат в Cloudinary).
+    // 3. object detection (bbox) → scale ~80% → center → Mator background →
+    //    1000×1000 → save (вызывающий код заливает результат в Cloudinary).
     return this.composeOnBackground(finished);
   }
 
   // ──────────────────────────────────────────────────────────────────────────
-  // 3. REMOVE BACKGROUND
+  // 1. PHOTOROOM EDIT (single call: remove background + beautify)
   // ──────────────────────────────────────────────────────────────────────────
 
-  private buildCutoutForm(imageBuffer: Buffer): FormData {
-    const form = new FormData();
-    form.append('imageFile', imageBuffer, { filename: 'image.jpg', contentType: 'image/jpeg' });
-    form.append('removeBackground', 'true');
-    // PNG обязателен — только он несёт alpha-канал.
-    form.append('format', 'png');
-    return form;
-  }
-
-  private async cutout(imageBuffer: Buffer): Promise<Buffer> {
+  /**
+   * Один запрос к /v2/edit, выполняющий и удаление фона, и AI-бьютификацию.
+   * Обязательный шаг: при неудаче бросает (нет смысла продолжать без выреза).
+   * Результат должен быть прозрачным PNG.
+   */
+  private async editImage(imageBuffer: Buffer): Promise<Buffer> {
     const result = await this.callPhotoroom(
-      () => this.buildCutoutForm(imageBuffer),
-      'background removal',
+      () => {
+        const form = new FormData();
+        form.append('imageFile', imageBuffer, { filename: 'image.jpg', contentType: 'image/jpeg' });
+        form.append('removeBackground', 'true');
+        // AI Beautifier в том же вызове (beautify.mode ∈ {ai.auto, ai.food, ai.car}).
+        form.append('beautify.mode', 'ai.auto');
+        // PNG обязателен — только он несёт alpha-канал.
+        form.append('format', 'png');
+        return form;
+      },
+      'edit (removeBackground + beautify)',
       { required: true },
     );
-    // На обязательном шаге результат должен быть прозрачным, иначе это ошибка.
     await this.assertTransparent(result!);
     return result!;
-  }
-
-  // ──────────────────────────────────────────────────────────────────────────
-  // 1. AI UPSCALE
-  // ──────────────────────────────────────────────────────────────────────────
-
-  /** Photoroom AI upscale. При сбое возвращает входной буфер без изменений. */
-  private async aiUpscale(input: Buffer): Promise<Buffer> {
-    const result = await this.callPhotoroom(
-      () => {
-        const form = new FormData();
-        // Работаем над исходным фото (с фоном); Photoroom определяет формат
-        // по байтам, имя файла — лишь подсказка.
-        form.append('imageFile', input, { filename: 'source.jpg', contentType: 'image/jpeg' });
-        // Фон НЕ трогаем здесь — удаление фона выполняется отдельным шагом ниже.
-        form.append('removeBackground', 'false');
-        // v2/edit upscale.mode ∈ {ai.fast, ai.slow}; 'ai' отвергается API.
-        form.append('upscale.mode', 'ai.fast');
-        form.append('format', 'png');
-        return form;
-      },
-      'AI upscale',
-      { required: false },
-    );
-    return result ?? input;
-  }
-
-  // ──────────────────────────────────────────────────────────────────────────
-  // 2. AI BEAUTIFY
-  // ──────────────────────────────────────────────────────────────────────────
-
-  /** Photoroom AI beautify/enhance объекта. При сбое возвращает вход. */
-  private async aiBeautify(input: Buffer): Promise<Buffer> {
-    const result = await this.callPhotoroom(
-      () => {
-        const form = new FormData();
-        // Вход — апскейленное фото (всё ещё с фоном); фон удалим следующим шагом.
-        form.append('imageFile', input, { filename: 'source.png', contentType: 'image/png' });
-        form.append('removeBackground', 'false');
-        // AI Beautifier: параметр называется beautify.mode (не enhance.mode);
-        // v2/edit допускает {ai.auto, ai.food, ai.car} — для автозапчастей ai.auto.
-        form.append('beautify.mode', 'ai.auto');
-        form.append('format', 'png');
-        return form;
-      },
-      'AI beautify',
-      { required: false },
-    );
-    return result ?? input;
   }
 
   /**

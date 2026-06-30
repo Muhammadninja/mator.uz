@@ -17,6 +17,9 @@ import { MediaGroupBuffer } from './media-group-buffer';
 // buffer by group id and flush after a short quiet window.
 const MEDIA_GROUP_DEBOUNCE_MS = 1500;
 const MAX_IMAGES_PER_LISTING = 10;
+// Process album images in parallel, but bound concurrency so we don't hammer
+// Photoroom/Cloudinary or spike memory with many large buffers at once.
+const IMAGE_CONCURRENCY = 3;
 
 function extractPriceFallback(text: string): Decimal {
   const currencyMatch = text.match(/(\d+)\s*(uzs|UZS|сўм|сум)/i);
@@ -245,7 +248,6 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         `🚗 *Модель:* ${metadata.models.length > 0 ? metadata.models.join(', ') : '—'}\n` +
         `🔢 *OEM/GM №:* ${metadata.gm_number ?? '—'}\n` +
         `💰 *Цена:* ${price.toFixed(0)} UZS\n` +
-        `🖼 *Фото:* ${processedUrls.length}\n` +
         `📦 *Stock ID:* #${stock.id}\n` +
         `🆔 *Product ID:* #${product.id}`;
 
@@ -294,27 +296,47 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Download → Photoroom pipeline → Cloudinary for each image, preserving order.
-   * A single image failing is logged and skipped so the rest of the album still
-   * publishes; the caller handles the all-failed case.
+   * Download → Photoroom pipeline → Cloudinary for each image. Runs with a small
+   * concurrency limit (images are independent) instead of fully sequentially, so
+   * an album of N photos no longer takes N× the single-image latency. Album
+   * order is preserved (results placed by index); a single image failing is
+   * logged and skipped — the caller handles the all-failed case.
    */
   private async processImages(fileIds: string[]): Promise<string[]> {
-    const urls: string[] = [];
-    for (const fileId of fileIds) {
-      try {
-        const fileLink = await this.bot.telegram.getFileLink(fileId);
-        const response = await axios.get<ArrayBuffer>(fileLink.href, {
-          responseType: 'arraybuffer',
-          timeout: 20_000,
-        });
-        const cleaned = await this.photoroom.removeBackground(Buffer.from(response.data));
-        urls.push(await this.cloudinary.uploadBuffer(cleaned));
-      } catch (err) {
-        this.logger.warn(
-          `Skipping one image (${fileId}): ${err instanceof Error ? err.message : String(err)}`,
-        );
+    const results = new Array<string | null>(fileIds.length).fill(null);
+    let next = 0;
+
+    const worker = async () => {
+      for (;;) {
+        const i = next++;
+        if (i >= fileIds.length) return;
+        results[i] = await this.processOneImage(fileIds[i]);
       }
+    };
+
+    const workers = Array.from({ length: Math.min(IMAGE_CONCURRENCY, fileIds.length) }, worker);
+    await Promise.all(workers);
+
+    // Drop failed slots, keep album order.
+    return results.filter((u): u is string => u !== null);
+  }
+
+  /** Process a single image; returns its Cloudinary URL or null on failure. */
+  private async processOneImage(fileId: string): Promise<string | null> {
+    try {
+      const fileLink = await this.bot.telegram.getFileLink(fileId);
+      const response = await axios.get<ArrayBuffer>(fileLink.href, {
+        responseType: 'arraybuffer',
+        timeout: 20_000,
+      });
+      // Photoroom (remove bg + beautify) + local Sharp; only upload on success.
+      const cleaned = await this.photoroom.removeBackground(Buffer.from(response.data));
+      return await this.cloudinary.uploadBuffer(cleaned);
+    } catch (err) {
+      this.logger.warn(
+        `Skipping one image (${fileId}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
     }
-    return urls;
   }
 }
