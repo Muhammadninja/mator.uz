@@ -1,5 +1,20 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
+// ─────────────────────────────────────────────────────────────────────────────
+// Mator schema — foundation aligned to the mobile frontend contract (backend.json)
+//
+// ID conventions:
+//   • AppUser            -> UUID (@db.Uuid)
+//   • Buyer/transactional -> app-generated prefixed ULID strings (veh_, ord_,
+//     pay_, bk_, ai_, msg_, ntf_, dev_, addr_, otp_, myid_*) — generated in the
+//     service layer, never exposed as Int.
+//   • Catalog reference   -> stable slug strings (make_chevrolet, cat_engine_belts,
+//     trim_…, engine_…, svc_…, brand_gates, seller_avtomir).
+//   • Internal marketplace (Seller/Telegram/Product/Stock/Brand/CarModel) keeps
+//     Int PKs — supply-side bounded context, NOT exposed in the buyer app.
+//
+// Line-items (order/cart/booking) use a snapshot pattern: plain id columns +
+// denormalized title/price, so historical records are immutable against catalog
+// changes (no FK cascade on snapshots).
+// ─────────────────────────────────────────────────────────────────────────────
 
 generator client {
   provider = "prisma-client-js"
@@ -11,39 +26,199 @@ datasource db {
   directUrl = env("DIRECT_URL")
 }
 
-// 1. Профили продавцов / магазинов
+// ── Enums ────────────────────────────────────────────────────────────────────
+enum SellerStatus {
+  PENDING
+  ACTIVE
+  REJECTED
+}
+
+enum Role {
+  USER
+  SELLER
+  ADMIN
+}
+
+enum AuthProvider {
+  GOOGLE
+  APPLE
+  PHONE_OTP
+  MYID
+}
+
+enum MyIdStatus {
+  NOT_VERIFIED
+  PENDING
+  VERIFIED
+}
+
+enum OtpChannel {
+  SMS
+  TELEGRAM
+}
+
+enum Gender {
+  MALE
+  FEMALE
+}
+
+enum Language {
+  RU
+  UZ
+  EN
+}
+
+enum ProviderType {
+  MASTER
+  STO
+}
+
+enum Specialization {
+  ENGINE
+  TRANSMISSION
+  ELECTRICAL
+  BODY
+  PAINT
+  SUSPENSION
+  DIAGNOSTICS
+  TIRES
+  AC
+}
+
+enum VehicleTransmission {
+  MANUAL
+  AUTOMATIC
+  CVT
+  AMT
+  ROBOT
+}
+
+enum Drivetrain {
+  FWD
+  RWD
+  AWD
+}
+
+enum FuelType {
+  PETROL
+  DIESEL
+  HYBRID
+  ELECTRIC
+  GAS
+}
+
+enum VehicleServiceStage {
+  QUEUED
+  IN_PROGRESS
+  AWAITING_PARTS
+  READY
+  FLAGGED
+}
+
+enum CompatibilityStatus {
+  FITS
+  MAYBE
+  DOES_NOT_FIT
+}
+
+enum PartCondition {
+  NEW
+  USED
+  REFURBISHED
+}
+
+enum BookingStatus {
+  HOLD
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+  EXPIRED
+}
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  PAID
+  PROCESSING
+  SHIPPED
+  DELIVERED
+  CANCELLED
+  REFUNDED
+  EXPIRED
+}
+
+enum DeliveryMethod {
+  COURIER
+  PICKUP
+}
+
+enum PaymentProvider {
+  PAYME
+  CLICK
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  CANCELLED
+  EXPIRED
+  REFUNDED
+}
+
+enum DevicePlatform {
+  IOS
+  ANDROID
+}
+
+enum NotificationType {
+  ORDER_PAID
+  ORDER_STATUS_CHANGED
+  PAYMENT_PAID
+  AI_REPLY
+  MASTER_MESSAGE
+  BOOKING_CONFIRMED
+  BOOKING_CANCELLED
+  VEHICLE_STATUS_UPDATED
+  MYID_VERIFIED
+  MARKETING
+}
+
+enum AiMessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+}
+
+// ── Internal marketplace (supply-side, Int PKs, NOT exposed to buyer app) ─────
 model Seller {
-  id             Int      @id @default(autoincrement())
-  tgId           BigInt   @unique @map("tg_id")
-  phone          String   @db.VarChar(20)
-  storeName      String?  @db.VarChar(100) @map("store_name")
-  marketName     String?  @db.VarChar(100) @map("market_name")
-  addressComment String?  @db.Text @map("address_comment")
-  locationLat    Float?   @map("location_lat")
-  locationLng    Float?   @map("location_lng")
-  createdAt      DateTime @default(now()) @map("created_at")
+  id             Int          @id @default(autoincrement())
+  tgId           BigInt       @unique @map("tg_id")
+  phone          String       @db.VarChar(20)
+  storeName      String?      @map("store_name") @db.VarChar(100)
+  marketName     String?      @map("market_name") @db.VarChar(100)
+  addressComment String?      @map("address_comment")
+  locationLat    Float?       @map("location_lat")
+  locationLng    Float?       @map("location_lng")
+  status         SellerStatus @default(PENDING)
+  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  stocks         Stock[]
 
-  stocks Stock[]
-
+  @@index([status])
   @@map("sellers")
 }
 
-// 2. Марки автомобилей
 model Brand {
-  id   Int    @id @default(autoincrement())
-  name String @unique @db.VarChar(100)
-
+  id     Int        @id @default(autoincrement())
+  name   String     @unique @db.VarChar(100)
   models CarModel[]
 
   @@map("brands")
 }
 
-// 3. Модели автомобилей
 model CarModel {
-  id      Int    @id @default(autoincrement())
-  brandId Int    @map("brand_id")
-  name    String @db.VarChar(100)
-
+  id         Int         @id @default(autoincrement())
+  brandId    Int         @map("brand_id")
+  name       String      @db.VarChar(100)
   brand      Brand       @relation(fields: [brandId], references: [id], onDelete: Cascade)
   partModels PartModel[]
 
@@ -51,87 +226,811 @@ model CarModel {
   @@map("car_models")
 }
 
-// 4. Мастер-каталог уникальных автозапчастей
 model Product {
-  id        Int      @id @default(autoincrement())
-  gmNumber  String?  @unique @db.VarChar(50) @map("gm_number")
-  title     String   @db.VarChar(255)
-  imageUrl  String?  @db.Text @map("image_url")
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
-
-  stocks     Stock[]
-  partModels PartModel[]
+  id          Int            @id @default(autoincrement())
+  gmNumber    String?        @unique @map("gm_number") @db.VarChar(50)
+  title       String         @db.VarChar(255)
+  description String?        @db.Text
+  imageUrl    String?        @map("image_url") // primary image mirror (back-compat)
+  createdAt   DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
+  partModels  PartModel[]
+  stocks      Stock[]
+  images      ProductImage[]
 
   @@map("products")
 }
 
-// 5. Связь many-to-many: деталь ↔ модель автомобиля
-model PartModel {
-  partId  Int @map("part_id")
-  modelId Int @map("model_id")
+// Ordered gallery for a product (Telegram media-group uploads). The first image
+// (sortOrder 0 / isPrimary) mirrors into Product.imageUrl for legacy readers.
+model ProductImage {
+  id        Int      @id @default(autoincrement())
+  productId Int      @map("product_id")
+  url       String
+  sortOrder Int      @default(0) @map("sort_order")
+  isPrimary Boolean  @default(false) @map("is_primary")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
 
-  part  Product  @relation(fields: [partId], references: [id], onDelete: Cascade)
-  model CarModel @relation(fields: [modelId], references: [id], onDelete: Cascade)
+  @@index([productId, sortOrder])
+  @@map("product_images")
+}
+
+model PartModel {
+  partId  Int      @map("part_id")
+  modelId Int      @map("model_id")
+  model   CarModel @relation(fields: [modelId], references: [id], onDelete: Cascade)
+  part    Product  @relation(fields: [partId], references: [id], onDelete: Cascade)
 
   @@id([partId, modelId])
+  @@index([modelId])
   @@map("part_models")
 }
 
-// 6. Складские остатки и цены
 model Stock {
   id        Int      @id @default(autoincrement())
   sellerId  Int      @map("seller_id")
   productId Int      @map("product_id")
-  priceUzs  Decimal  @db.Decimal(12, 2) @map("price_uzs")
+  priceUzs  Decimal  @map("price_uzs") @db.Decimal(14, 2)
   quantity  Int      @default(1)
-  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
-
-  seller  Seller  @relation(fields: [sellerId], references: [id], onDelete: Cascade)
-  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  seller    Seller   @relation(fields: [sellerId], references: [id], onDelete: Cascade)
 
   @@unique([sellerId, productId])
+  @@index([productId])
   @@map("stocks")
 }
 
-// 7. Клиентские заказы и логистика
-model Order {
-  id            Int      @id @default(autoincrement())
-  userId        Int      @map("user_id")
-  status        String   @db.VarChar(50)
-  yandexClaimId String?  @db.VarChar(100) @map("yandex_claim_id")
-  deliveryCost  Decimal? @db.Decimal(10, 2) @map("delivery_cost")
-  totalCost     Decimal? @db.Decimal(12, 2) @map("total_cost")
-  createdAt     DateTime @default(now()) @map("created_at")
+// ── Buyer identity (UUID) ─────────────────────────────────────────────────────
+model AppUser {
+  id                  String     @id @default(uuid()) @db.Uuid
+  email               String?    @unique @db.VarChar(255)
+  passwordHash        String?    @map("password_hash") @db.VarChar(255)
+  emailVerified       Boolean    @default(false) @map("email_verified")
+  phoneE164           String?    @unique @map("phone_e164") @db.VarChar(20)
+  phoneVerified       Boolean    @default(false) @map("phone_verified")
+  displayName         String?    @map("display_name") @db.VarChar(120)
+  firstName           String?    @map("first_name") @db.VarChar(100)
+  lastName            String?    @map("last_name") @db.VarChar(100)
+  avatarUrl           String?    @map("avatar_url")
+  thumbnailUrl        String?    @map("thumbnail_url")
+  role                Role       @default(USER)
+  language            Language   @default(UZ)
+  myIdStatus          MyIdStatus @default(NOT_VERIFIED) @map("myid_status")
+  transactionLimitUzs Decimal    @default(0) @map("transaction_limit_uzs") @db.Decimal(14, 2)
+  createdAt           DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt           DateTime   @updatedAt @map("updated_at") @db.Timestamptz(3)
 
+  refreshTokens          RefreshToken[]
+  identities             AuthIdentity[]
+  emailTokens            EmailVerificationToken[]
+  vehicles               Vehicle[]
+  orders                 Order[]
+  bookings               Booking[]
+  cart                   Cart?
+  devices                Device[]
+  notifications          Notification[]
+  notificationPreference NotificationPreference?
+  aiSessions             AiSession[]
+  addresses              Address[]
+  myIdSessions           MyIdSession[]
+  myIdVerifications      MyIdVerification[]
+
+  @@map("app_users")
+}
+
+model AuthIdentity {
+  id             Int          @id @default(autoincrement())
+  provider       AuthProvider
+  providerUserId String       @map("provider_user_id") @db.VarChar(255)
+  email          String?      @db.VarChar(255)
+  userId         String       @map("user_id") @db.Uuid
+  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime     @updatedAt @map("updated_at") @db.Timestamptz(3)
+  user           AppUser      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerUserId])
+  @@index([userId])
+  @@map("auth_identities")
+}
+
+model RefreshToken {
+  id        Int      @id @default(autoincrement())
+  tokenHash String   @unique @map("token_hash") @db.VarChar(64)
+  userId    String   @map("user_id") @db.Uuid
+  deviceId  String?  @map("device_id") @db.VarChar(64) // session<->device binding; null for web/email logins
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(3)
+  consumedAt DateTime? @map("consumed_at") @db.Timestamptz(3) // soft-rotation marker for reuse detection
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  user      AppUser  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  device    Device?  @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@index([deviceId])
+  @@map("refresh_tokens")
+}
+
+model EmailVerificationToken {
+  id         Int       @id @default(autoincrement())
+  tokenHash  String    @unique @map("token_hash") @db.VarChar(64)
+  userId     String    @map("user_id") @db.Uuid
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(3)
+  consumedAt DateTime? @map("consumed_at") @db.Timestamptz(3)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  user       AppUser   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("email_verification_tokens")
+}
+
+// Phone OTP (pre-auth; not yet linked to a user). request_id = otp_<ulid>.
+model PhoneOtpRequest {
+  id         String     @id @db.VarChar(64)
+  phoneE164  String     @map("phone_e164") @db.VarChar(20)
+  codeHash   String     @map("code_hash") @db.VarChar(64)
+  channel    OtpChannel @default(SMS)
+  purpose    String     @default("login") @db.VarChar(40)
+  attempts   Int        @default(0)
+  resendCount Int       @default(0) @map("resend_count")
+  expiresAt  DateTime   @map("expires_at") @db.Timestamptz(3)
+  consumedAt DateTime?  @map("consumed_at") @db.Timestamptz(3)
+  lastSentAt DateTime   @default(now()) @map("last_sent_at") @db.Timestamptz(3)
+  createdAt  DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@index([phoneE164, createdAt]) // supports "N per hour per MSISDN" rate-limit counting
+  @@index([expiresAt])
+  @@map("phone_otp_requests")
+}
+
+// MyID OAuth verification session (myid_sess_<ulid>).
+model MyIdSession {
+  id                  String   @id @db.VarChar(64)
+  userId              String   @map("user_id") @db.Uuid
+  state               String   @unique @db.VarChar(120)
+  codeChallenge       String   @map("code_challenge") @db.VarChar(255)
+  codeChallengeMethod String   @default("S256") @map("code_challenge_method") @db.VarChar(10)
+  codeVerifier        String?  @map("code_verifier") @db.VarChar(255) // only set for backend-generated PKCE fallback
+  scopes              String[]
+  redirectUri         String   @map("redirect_uri")
+  status              String   @default("pending") @db.VarChar(20)
+  expiresAt           DateTime @map("expires_at") @db.Timestamptz(3)
+  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  user                AppUser  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("myid_sessions")
+}
+
+// Resolved MyID identity payload (myid_ver_<ulid>).
+model MyIdVerification {
+  id                String    @id @db.VarChar(64)
+  userId            String    @map("user_id") @db.Uuid
+  sessionId         String?   @map("session_id") @db.VarChar(64)
+  status            String    @db.VarChar(20)
+  pinfl             String?   @db.VarChar(14)
+  passportSerial    String?   @map("passport_serial") @db.VarChar(2)
+  passportNumber    String?   @map("passport_number") @db.VarChar(20)
+  firstName         String?   @map("first_name") @db.VarChar(100)
+  lastName          String?   @map("last_name") @db.VarChar(100)
+  middleName        String?   @map("middle_name") @db.VarChar(100)
+  dateOfBirth       DateTime? @map("date_of_birth") @db.Date
+  gender            Gender?
+  citizenshipIso3   String?   @map("citizenship_iso3") @db.VarChar(3)
+  addressRegion     String?   @map("address_region") @db.VarChar(120)
+  addressDistrict   String?   @map("address_district") @db.VarChar(120)
+  addressStreet     String?   @map("address_street")
+  biometricMatchScore Decimal? @map("biometric_match_score") @db.Decimal(4, 3)
+  verifiedAt        DateTime? @map("verified_at") @db.Timestamptz(3)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  user              AppUser   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([pinfl])
+  @@map("myid_verifications")
+}
+
+model Address {
+  id           String   @id @db.VarChar(64)
+  userId       String   @map("user_id") @db.Uuid
+  label        String?  @db.VarChar(80)
+  regionCode   String?  @map("region_code") @db.VarChar(10)
+  district     String?  @db.VarChar(120)
+  street       String?
+  fullText     String   @map("full_text")
+  lat          Float?
+  lng          Float?
+  isDefault    Boolean  @default(false) @map("is_default")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  user         AppUser  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  orders       Order[]
+
+  @@index([userId])
+  @@map("addresses")
+}
+
+// ── Vehicle catalog (buyer garage reference, slug IDs) ────────────────────────
+model VehicleMake {
+  id        String              @id @db.VarChar(64)
+  name      String              @db.VarChar(120)
+  logoUrl   String?             @map("logo_url")
+  sortOrder Int                 @default(0) @map("sort_order")
+  models    VehicleModelRef[]
+  vehicles  Vehicle[]
+  providers ProviderSupportedMake[]
+
+  @@map("vehicle_makes")
+}
+
+model VehicleModelRef {
+  id       String        @id @db.VarChar(64)
+  makeId   String        @map("make_id") @db.VarChar(64)
+  name     String        @db.VarChar(120)
+  make     VehicleMake   @relation(fields: [makeId], references: [id], onDelete: Cascade)
+  trims    VehicleTrim[]
+  vehicles Vehicle[]
+
+  @@index([makeId])
+  @@map("vehicle_models")
+}
+
+model VehicleTrim {
+  id             String            @id @db.VarChar(64)
+  modelId        String            @map("model_id") @db.VarChar(64)
+  name           String            @db.VarChar(120)
+  model          VehicleModelRef   @relation(fields: [modelId], references: [id], onDelete: Cascade)
+  vehicles       Vehicle[]
+  assets         Vehicle3dAsset[]
+  compatibilities PartCompatibility[]
+
+  @@index([modelId])
+  @@map("vehicle_trims")
+}
+
+model VehicleEngine {
+  id             String            @id @db.VarChar(64)
+  name           String            @db.VarChar(120)
+  displacementCc Int?              @map("displacement_cc")
+  fuelType       FuelType?         @map("fuel_type")
+  vehicles       Vehicle[]
+  compatibilities PartCompatibility[]
+
+  @@map("vehicle_engines")
+}
+
+model Vehicle3dAsset {
+  id            String          @id @db.VarChar(64)
+  trimId        String?         @map("trim_id") @db.VarChar(64)
+  glbUrl        String          @map("glb_url")
+  ktx2TexturesUrl String?       @map("ktx2_textures_url")
+  version       Int             @default(1)
+  byteSize      Int?            @map("byte_size")
+  checksumSha256 String?        @map("checksum_sha256") @db.VarChar(64)
+  trim          VehicleTrim?    @relation(fields: [trimId], references: [id], onDelete: SetNull)
+  variants      TuningVariant[]
+  vehicles      Vehicle[]
+
+  @@index([trimId])
+  @@map("vehicle_3d_assets")
+}
+
+model TuningVariant {
+  id           String         @id @db.VarChar(64)
+  assetId      String         @map("asset_id") @db.VarChar(64)
+  name         String         @db.VarChar(120)
+  thumbnailUrl String?        @map("thumbnail_url")
+  asset        Vehicle3dAsset @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  @@index([assetId])
+  @@map("tuning_variants")
+}
+
+// ── User vehicles (veh_<ulid>) ────────────────────────────────────────────────
+model Vehicle {
+  id                     String               @id @db.VarChar(64)
+  userId                 String               @map("user_id") @db.Uuid
+  isPrimary              Boolean              @default(false) @map("is_primary")
+  nickname               String?              @db.VarChar(120)
+  makeId                 String               @map("make_id") @db.VarChar(64)
+  modelId                String               @map("model_id") @db.VarChar(64)
+  year                   Int
+  trimId                 String?              @map("trim_id") @db.VarChar(64)
+  engineId               String?              @map("engine_id") @db.VarChar(64)
+  transmission           VehicleTransmission?
+  drivetrain             Drivetrain?
+  colorHex               String?              @map("color_hex") @db.VarChar(9)
+  vin                    String?              @db.VarChar(50)
+  licensePlate           String?              @map("license_plate") @db.VarChar(20)
+  registrationRegionCode String?              @map("registration_region_code") @db.VarChar(10)
+  mileageKm              Int?                 @map("mileage_km")
+  fuelType               FuelType?            @map("fuel_type")
+  model3dAssetId         String?              @map("model_3d_asset_id") @db.VarChar(64)
+  deletedAt              DateTime?            @map("deleted_at") @db.Timestamptz(3)
+  createdAt              DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt              DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user         AppUser              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  make         VehicleMake          @relation(fields: [makeId], references: [id], onDelete: Restrict)
+  model        VehicleModelRef      @relation(fields: [modelId], references: [id], onDelete: Restrict)
+  trim         VehicleTrim?         @relation(fields: [trimId], references: [id], onDelete: SetNull)
+  engine       VehicleEngine?       @relation(fields: [engineId], references: [id], onDelete: SetNull)
+  model3dAsset Vehicle3dAsset?      @relation(fields: [model3dAssetId], references: [id], onDelete: SetNull)
+  bookings     Booking[]
+  aiSessions   AiSession[]
+  orders       Order[]
+  statusEvents VehicleStatusEvent[]
+
+  @@index([userId])
+  @@index([userId, isPrimary])
+  @@map("vehicles")
+}
+
+model VehicleStatusEvent {
+  id           String              @id @db.VarChar(64)
+  vehicleId    String              @map("vehicle_id") @db.VarChar(64)
+  stage        VehicleServiceStage
+  label        String              @db.VarChar(160)
+  note         String?
+  mechanicName String?             @map("mechanic_name") @db.VarChar(120)
+  emittedAt    DateTime            @map("emitted_at") @db.Timestamptz(3)
+  createdAt    DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+  vehicle      Vehicle             @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+
+  @@index([vehicleId])
+  @@map("vehicle_status_events")
+}
+
+// ── Service providers (masters + STO; master_/sto_ <ulid>) ────────────────────
+model ServiceProvider {
+  id                String                  @id @db.VarChar(64)
+  providerType      ProviderType            @map("provider_type")
+  displayName       String                  @map("display_name") @db.VarChar(160)
+  shopName          String?                 @map("shop_name") @db.VarChar(160)
+  bio               String?
+  avatarUrl         String?                 @map("avatar_url")
+  ratingAvg         Decimal                 @default(0) @map("rating_avg") @db.Decimal(3, 2)
+  ratingCount       Int                     @default(0) @map("rating_count")
+  geoLat            Float                   @map("geo_lat")
+  geoLng            Float                   @map("geo_lng")
+  geohash           String                  @db.VarChar(12)
+  addressText       String?                 @map("address_text")
+  priceFloorUzs     Decimal?                @map("price_floor_uzs") @db.Decimal(14, 2)
+  priceCeilingUzs   Decimal?                @map("price_ceiling_uzs") @db.Decimal(14, 2)
+  badge             String?                 @db.VarChar(40)
+  contactPhoneE164  String?                 @map("contact_phone_e164") @db.VarChar(20)
+  contactTelegram   String?                 @map("contact_telegram") @db.VarChar(80)
+  contactWebsite    String?                 @map("contact_website")
+  isActive          Boolean                 @default(true) @map("is_active")
+  createdAt         DateTime                @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime                @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  specializations ProviderSpecialization[]
+  supportedMakes  ProviderSupportedMake[]
+  services        ProviderServiceOffering[]
+  workingHours    ProviderWorkingHours[]
+  certifications  ProviderCertification[]
+  portfolio       ProviderPortfolioItem[]
+  bookings        Booking[]
+
+  @@index([providerType])
+  @@index([geohash])
+  @@index([ratingAvg])
+  @@map("service_providers")
+}
+
+model ProviderSpecialization {
+  providerId     String          @map("provider_id") @db.VarChar(64)
+  specialization Specialization
+  provider       ServiceProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+
+  @@id([providerId, specialization])
+  @@map("provider_specializations")
+}
+
+model ProviderSupportedMake {
+  providerId String          @map("provider_id") @db.VarChar(64)
+  makeId     String          @map("make_id") @db.VarChar(64)
+  provider   ServiceProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  make       VehicleMake     @relation(fields: [makeId], references: [id], onDelete: Cascade)
+
+  @@id([providerId, makeId])
+  @@index([makeId])
+  @@map("provider_supported_makes")
+}
+
+model ProviderServiceOffering {
+  id          String          @id @db.VarChar(64)
+  providerId  String          @map("provider_id") @db.VarChar(64)
+  name        String          @db.VarChar(160)
+  durationMin Int?            @map("duration_min")
+  priceUzs    Decimal         @map("price_uzs") @db.Decimal(14, 2)
+  serviceType String?         @map("service_type") @db.VarChar(60)
+  provider    ServiceProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+
+  @@index([providerId])
+  @@map("provider_service_offerings")
+}
+
+model ProviderWorkingHours {
+  id         String          @id @db.VarChar(64)
+  providerId String          @map("provider_id") @db.VarChar(64)
+  weekday    Int // 0=Sunday … 6=Saturday
+  openTime   String?         @map("open_time") @db.VarChar(5)
+  closeTime  String?         @map("close_time") @db.VarChar(5)
+  provider   ServiceProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, weekday])
+  @@map("provider_working_hours")
+}
+
+model ProviderCertification {
+  id         String          @id @db.VarChar(64)
+  providerId String          @map("provider_id") @db.VarChar(64)
+  name       String          @db.VarChar(200)
+  issuedAt   DateTime?       @map("issued_at") @db.Date
+  provider   ServiceProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+
+  @@index([providerId])
+  @@map("provider_certifications")
+}
+
+model ProviderPortfolioItem {
+  id         String          @id @db.VarChar(64)
+  providerId String          @map("provider_id") @db.VarChar(64)
+  imageUrl   String          @map("image_url")
+  sortOrder  Int             @default(0) @map("sort_order")
+  provider   ServiceProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+
+  @@index([providerId])
+  @@map("provider_portfolio_items")
+}
+
+model Booking {
+  id               String          @id @db.VarChar(64)
+  userId           String          @map("user_id") @db.Uuid
+  providerId       String          @map("provider_id") @db.VarChar(64)
+  vehicleId        String?         @map("vehicle_id") @db.VarChar(64)
+  status           BookingStatus   @default(HOLD)
+  scheduledAt      DateTime        @map("scheduled_at") @db.Timestamptz(3)
+  holdExpiresAt    DateTime?       @map("hold_expires_at") @db.Timestamptz(3)
+  totalUzs         Decimal         @map("total_uzs") @db.Decimal(14, 2)
+  notes            String?
+  contactPhoneE164 String          @map("contact_phone_e164") @db.VarChar(20)
+  createdAt        DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt        DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
+  user             AppUser         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider         ServiceProvider @relation(fields: [providerId], references: [id], onDelete: Restrict)
+  vehicle          Vehicle?        @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
+  services         BookingService[]
+
+  @@index([userId])
+  @@index([providerId])
+  @@index([status])
+  @@map("bookings")
+}
+
+// Snapshot of the booked service (no FK to keep history immutable).
+model BookingService {
+  id          String  @id @db.VarChar(64)
+  bookingId   String  @map("booking_id") @db.VarChar(64)
+  serviceId   String  @map("service_id") @db.VarChar(64)
+  name        String  @db.VarChar(160)
+  priceUzs    Decimal @map("price_uzs") @db.Decimal(14, 2)
+  booking     Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([bookingId])
+  @@map("booking_services")
+}
+
+// ── Parts catalog (buyer-facing) ──────────────────────────────────────────────
+model PartCategory {
+  id       String         @id @db.VarChar(64)
+  name     String         @db.VarChar(160)
+  parentId String?        @map("parent_id") @db.VarChar(64)
+  iconUrl  String?        @map("icon_url")
+  parent   PartCategory?  @relation("PartCategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children PartCategory[] @relation("PartCategoryTree")
+  parts    CatalogPart[]
+
+  @@index([parentId])
+  @@map("part_categories")
+}
+
+model PartBrand {
+  id      String        @id @db.VarChar(64)
+  name    String        @db.VarChar(120)
+  logoUrl String?       @map("logo_url")
+  parts   CatalogPart[]
+
+  @@map("part_brands")
+}
+
+// Buyer-facing seller projection of the internal Seller (seller_<slug>).
+model CatalogSeller {
+  id               String        @id @db.VarChar(64)
+  name             String        @db.VarChar(160)
+  ratingAvg        Decimal       @default(0) @map("rating_avg") @db.Decimal(3, 2)
+  logoUrl          String?       @map("logo_url")
+  internalSellerId Int?          @map("internal_seller_id") // link to supply-side Seller, not exposed
+  parts            CatalogPart[]
+
+  @@index([internalSellerId])
+  @@map("catalog_sellers")
+}
+
+model CatalogPart {
+  id                String              @id @db.VarChar(64)
+  title             String              @db.VarChar(255)
+  brandId           String?             @map("brand_id") @db.VarChar(64)
+  categoryId        String              @map("category_id") @db.VarChar(64)
+  sellerId          String              @map("seller_id") @db.VarChar(64)
+  oemNumbers        String[]            @map("oem_numbers")
+  priceUzs          Decimal             @map("price_uzs") @db.Decimal(14, 2)
+  currency          String              @default("UZS") @db.VarChar(3)
+  condition         PartCondition       @default(NEW)
+  inStock           Boolean             @default(true) @map("in_stock")
+  stockQty          Int                 @default(0) @map("stock_qty")
+  deliveryEtaDaysMin Int?               @map("delivery_eta_days_min")
+  deliveryEtaDaysMax Int?               @map("delivery_eta_days_max")
+  images            String[]
+  createdAt         DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime            @updatedAt @map("updated_at") @db.Timestamptz(3)
+  brand             PartBrand?          @relation(fields: [brandId], references: [id], onDelete: SetNull)
+  category          PartCategory        @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  seller            CatalogSeller       @relation(fields: [sellerId], references: [id], onDelete: Restrict)
+  compatibilities   PartCompatibility[]
+
+  @@index([categoryId])
+  @@index([brandId])
+  @@index([sellerId])
+  @@index([inStock])
+  @@map("catalog_parts")
+}
+
+model PartCompatibility {
+  id         String              @id @db.VarChar(64)
+  partId     String              @map("part_id") @db.VarChar(64)
+  trimId     String?             @map("trim_id") @db.VarChar(64)
+  engineId   String?             @map("engine_id") @db.VarChar(64)
+  years      Int[]
+  status     CompatibilityStatus @default(FITS)
+  confidence Decimal             @default(1) @db.Decimal(4, 3)
+  source     String?             @db.VarChar(80)
+  part       CatalogPart         @relation(fields: [partId], references: [id], onDelete: Cascade)
+  trim       VehicleTrim?        @relation(fields: [trimId], references: [id], onDelete: SetNull)
+  engine     VehicleEngine?      @relation(fields: [engineId], references: [id], onDelete: SetNull)
+
+  @@index([partId])
+  @@index([trimId])
+  @@index([engineId])
+  @@map("part_compatibilities")
+}
+
+// Curated Top-Featured grid (f<n> in the contract).
+model FeaturedItem {
+  id          String        @id @db.VarChar(64)
+  partId      String?       @map("part_id") @db.VarChar(64)
+  badge       String?       @db.VarChar(40)
+  status      String?       @db.VarChar(40)
+  title       String        @db.VarChar(200)
+  description String?
+  priceUzs    Decimal?      @map("price_uzs") @db.Decimal(14, 2)
+  model       String?       @db.VarChar(120)
+  brand       String?       @db.VarChar(120)
+  color       String?       @db.VarChar(60)
+  condition   String?       @db.VarChar(60)
+  oem         String?       @db.VarChar(80)
+  sortOrder   Int           @default(0) @map("sort_order")
+  isActive    Boolean       @default(true) @map("is_active")
+  createdAt   DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@index([isActive, sortOrder])
+  @@map("featured_items")
+}
+
+// ── Cart (server-persisted, one per user) ─────────────────────────────────────
+model Cart {
+  id               String     @id @db.VarChar(64)
+  userId           String     @unique @map("user_id") @db.Uuid
+  promoCode        String?    @map("promo_code") @db.VarChar(60)
+  promoDiscountUzs Decimal?   @map("promo_discount_uzs") @db.Decimal(14, 2)
+  createdAt        DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt        DateTime   @updatedAt @map("updated_at") @db.Timestamptz(3)
+  user             AppUser    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items            CartItem[]
+
+  @@map("carts")
+}
+
+model CartItem {
+  id               String    @id @db.VarChar(64)
+  cartId           String    @map("cart_id") @db.VarChar(64)
+  partId           String?   @map("part_id") @db.VarChar(64)
+  serviceId        String?   @map("service_id") @db.VarChar(64)
+  providerId       String?   @map("provider_id") @db.VarChar(64)
+  vehicleId        String?   @map("vehicle_id") @db.VarChar(64)
+  title            String    @db.VarChar(255)
+  imageUrl         String?   @map("image_url")
+  quantity         Int       @default(1)
+  scheduledAt      DateTime? @map("scheduled_at") @db.Timestamptz(3)
+  priceUzsSnapshot Decimal   @map("price_uzs_snapshot") @db.Decimal(14, 2)
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  cart             Cart      @relation(fields: [cartId], references: [id], onDelete: Cascade)
+
+  @@index([cartId])
+  @@map("cart_items")
+}
+
+// ── Orders & payments ─────────────────────────────────────────────────────────
+model Order {
+  id               String         @id @db.VarChar(64)
+  userId           String         @map("user_id") @db.Uuid
+  status           OrderStatus    @default(PENDING_PAYMENT)
+  subtotalUzs      Decimal        @map("subtotal_uzs") @db.Decimal(14, 2)
+  deliveryUzs      Decimal        @default(0) @map("delivery_uzs") @db.Decimal(14, 2)
+  serviceFeeUzs    Decimal        @default(0) @map("service_fee_uzs") @db.Decimal(14, 2)
+  discountUzs      Decimal        @default(0) @map("discount_uzs") @db.Decimal(14, 2)
+  totalUzs         Decimal        @map("total_uzs") @db.Decimal(14, 2)
+  currency         String         @default("UZS") @db.VarChar(3)
+  vehicleId        String?        @map("vehicle_id") @db.VarChar(64)
+  deliveryAddressId String?       @map("delivery_address_id") @db.VarChar(64)
+  deliveryMethod   DeliveryMethod? @map("delivery_method")
+  contactPhoneE164 String?        @map("contact_phone_e164") @db.VarChar(20)
+  promoCode        String?        @map("promo_code") @db.VarChar(60)
+  yandexClaimId    String?        @map("yandex_claim_id") @db.VarChar(100)
+  expiresAt        DateTime?      @map("expires_at") @db.Timestamptz(3)
+  createdAt        DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt        DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
+  user             AppUser        @relation(fields: [userId], references: [id], onDelete: Restrict)
+  vehicle          Vehicle?       @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
+  deliveryAddress  Address?       @relation(fields: [deliveryAddressId], references: [id], onDelete: SetNull)
+  items            OrderItem[]
+  payments         Payment[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
   @@map("orders")
 }
 
-// 8. Пользователи приложения
-model User {
-  id        Int      @id @default(autoincrement())
-  tgId      BigInt   @unique @map("tg_id")
-  firstName String?  @db.VarChar(100) @map("first_name")
-  lastName  String?  @db.VarChar(100) @map("last_name")
-  phone     String?  @db.VarChar(20)
-  createdAt DateTime @default(now()) @map("created_at")
+// Snapshot line item (no FK to catalog — immutable order history).
+model OrderItem {
+  id          String   @id @db.VarChar(64)
+  orderId     String   @map("order_id") @db.VarChar(64)
+  partId      String?  @map("part_id") @db.VarChar(64)
+  serviceId   String?  @map("service_id") @db.VarChar(64)
+  providerId  String?  @map("provider_id") @db.VarChar(64)
+  title       String   @db.VarChar(255)
+  quantity    Int      @default(1)
+  priceUzs    Decimal  @map("price_uzs") @db.Decimal(14, 2)
+  lineTotalUzs Decimal @map("line_total_uzs") @db.Decimal(14, 2)
+  scheduledAt DateTime? @map("scheduled_at") @db.Timestamptz(3)
+  order       Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
-  userCars UserCar[]
-
-  @@map("users")
+  @@index([orderId])
+  @@map("order_items")
 }
 
-// 9. Гараж пользователя - привязка машин к аккаунту
-model UserCar {
-  id        Int      @id @default(autoincrement())
-  userId    Int      @map("user_id")
-  make      String   @db.VarChar(100)
-  model     String   @db.VarChar(100)
-  year      Int?
-  vin       String?  @db.VarChar(50)
-  createdAt DateTime @default(now()) @map("created_at")
+model Payment {
+  id                    String          @id @db.VarChar(64)
+  orderId               String          @map("order_id") @db.VarChar(64)
+  provider              PaymentProvider
+  status                PaymentStatus   @default(PENDING)
+  amountUzs             Decimal         @map("amount_uzs") @db.Decimal(14, 2)
+  amountTiyin           BigInt?         @map("amount_tiyin")
+  deepLink              String?         @map("deep_link")
+  httpsFallback         String?         @map("https_fallback")
+  providerTransactionId String?         @map("provider_transaction_id") @db.VarChar(120)
+  // Provider transaction state machine (Payme states 1/2/-1/-2; Click prepare id).
+  providerState         Int?            @map("provider_state")
+  providerCreateTime    BigInt?         @map("provider_create_time")
+  providerPerformTime   BigInt?         @map("provider_perform_time")
+  providerCancelTime    BigInt?         @map("provider_cancel_time")
+  cancelReason          Int?            @map("cancel_reason")
+  providerPrepareId     String?         @map("provider_prepare_id") @db.VarChar(64)
+  paidAt                DateTime?       @map("paid_at") @db.Timestamptz(3)
+  expiresAt             DateTime?       @map("expires_at") @db.Timestamptz(3)
+  createdAt             DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt             DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
+  order                 Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@index([orderId])
+  @@index([status])
+  @@index([providerTransactionId])
+  @@map("payments")
+}
 
-  @@map("user_cars")
+// ── Devices, push & notifications ─────────────────────────────────────────────
+model Device {
+  id                String         @id @db.VarChar(64)
+  userId            String         @map("user_id") @db.Uuid
+  installId         String         @map("install_id") @db.VarChar(80)
+  platform          DevicePlatform
+  expoPushToken     String?        @map("expo_push_token")
+  fcmToken          String?        @map("fcm_token")
+  apnsToken         String?        @map("apns_token")
+  osVersion         String?        @map("os_version") @db.VarChar(40)
+  appVersion        String?        @map("app_version") @db.VarChar(40)
+  deviceModel       String?        @map("device_model") @db.VarChar(80)
+  locale            String?        @db.VarChar(20)
+  timezone          String?        @db.VarChar(60)
+  permissionsGranted Boolean       @default(false) @map("permissions_granted")
+  lastSeenAt        DateTime       @default(now()) @map("last_seen_at") @db.Timestamptz(3)
+  createdAt         DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
+  user              AppUser        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  refreshTokens     RefreshToken[]
+
+  @@unique([userId, installId])
+  @@index([userId])
+  @@map("devices")
+}
+
+model NotificationPreference {
+  id             String   @id @db.VarChar(64)
+  userId         String   @unique @map("user_id") @db.Uuid
+  orders         Boolean  @default(true)
+  payments       Boolean  @default(true)
+  aiReplies      Boolean  @default(true) @map("ai_replies")
+  masterMessages Boolean  @default(true) @map("master_messages")
+  marketing      Boolean  @default(false)
+  quietHoursStart String? @map("quiet_hours_start") @db.VarChar(5)
+  quietHoursEnd   String? @map("quiet_hours_end") @db.VarChar(5)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  user           AppUser  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("notification_preferences")
+}
+
+model Notification {
+  id            String           @id @db.VarChar(64)
+  userId        String           @map("user_id") @db.Uuid
+  type          NotificationType
+  title         String           @db.VarChar(200)
+  body          String
+  data          Json?           
+  deeplinkPath  String?          @map("deeplink_path")
+  readAt        DateTime?        @map("read_at") @db.Timestamptz(3)
+  createdAt     DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  user          AppUser          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+  @@index([createdAt])
+  @@map("notifications")
+}
+
+// ── AI advisor ────────────────────────────────────────────────────────────────
+model AiSession {
+  id         String      @id @db.VarChar(64)
+  userId     String      @map("user_id") @db.Uuid
+  vehicleId  String?     @map("vehicle_id") @db.VarChar(64)
+  locale     String?     @db.VarChar(20)
+  entryPoint String?     @map("entry_point") @db.VarChar(60)
+  createdAt  DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt  DateTime    @updatedAt @map("updated_at") @db.Timestamptz(3)
+  user       AppUser     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  vehicle    Vehicle?    @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
+  messages   AiMessage[]
+
+  @@index([userId])
+  @@map("ai_sessions")
+}
+
+model AiMessage {
+  id              String        @id @db.VarChar(64)
+  sessionId       String        @map("session_id") @db.VarChar(64)
+  role            AiMessageRole
+  content         String
+  clientMessageId String?       @map("client_message_id") @db.VarChar(64)
+  attachments     Json?        
+  structured      Json?        
+  tokenCount      Int?          @map("token_count")
+  createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  session         AiSession     @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@map("ai_messages")
 }
