@@ -77,16 +77,6 @@ interface PendingProduct {
   expiry: NodeJS.Timeout;
 }
 
-/** Elapsed milliseconds since a process.hrtime.bigint() start marker. */
-function hrToMs(start: bigint): number {
-  return Number(process.hrtime.bigint() - start) / 1e6;
-}
-
-/** Format a millisecond duration compactly: "82 ms" under 1s, "19.57 s" above. */
-function fmtDuration(ms: number): string {
-  return ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(2)} s`;
-}
-
 function extractPriceFallback(text: string): Decimal {
   const currencyMatch = text.match(/(\d+)\s*(uzs|UZS|сўм|сум)/i);
   if (currencyMatch) return new Decimal(currencyMatch[1]);
@@ -549,86 +539,37 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
    */
   private async processImages(fileIds: string[]): Promise<UploadedImage[]> {
     const results = new Array<UploadedImage | null>(fileIds.length).fill(null);
-    const total = fileIds.length;
     let next = 0;
-
-    const albumStart = process.hrtime.bigint();
 
     const worker = async () => {
       for (;;) {
         const i = next++;
         if (i >= fileIds.length) return;
-        results[i] = await this.processOneImage(fileIds[i], i, total);
+        results[i] = await this.processOneImage(fileIds[i]);
       }
     };
 
     const workers = Array.from({ length: Math.min(this.imageConcurrency, fileIds.length) }, worker);
     await Promise.all(workers);
 
-    const albumMs = hrToMs(albumStart);
-    this.logger.log(
-      `\n━━━━━━━━━━━━━━━━━━━━\n` +
-        `Album summary\n` +
-        `Images: ${total}\n` +
-        `Concurrency: ${this.imageConcurrency}\n` +
-        `Album total: ${fmtDuration(albumMs)}\n` +
-        `━━━━━━━━━━━━━━━━━━━━`,
-    );
-
     // Drop failed slots, keep album order.
     return results.filter((u): u is UploadedImage => u !== null);
   }
 
-  /**
-   * Process a single image; returns its uploaded asset or null on failure.
-   * Instrumented: measures each stage (getFileLink, download, Photoroom, Sharp,
-   * Cloudinary) with a high-resolution timer and logs a per-image breakdown.
-   * Timing only — the processing order and logic are unchanged.
-   */
-  private async processOneImage(
-    fileId: string,
-    index: number,
-    total: number,
-  ): Promise<UploadedImage | null> {
-    const imageStart = process.hrtime.bigint();
+  /** Process a single image; returns its uploaded asset or null on failure. */
+  private async processOneImage(fileId: string): Promise<UploadedImage | null> {
     try {
-      const tLink = process.hrtime.bigint();
       const fileLink = await this.bot.telegram.getFileLink(fileId);
-      const linkMs = hrToMs(tLink);
-
-      const tDownload = process.hrtime.bigint();
       const response = await axios.get<ArrayBuffer>(fileLink.href, {
         responseType: 'arraybuffer',
         timeout: 20_000,
       });
-      const downloadMs = hrToMs(tDownload);
-
-      // Photoroom (remove bg + beautify) + local Sharp; the timed variant splits
-      // the remote Photoroom call from the local Sharp work. Only upload on success.
-      const { buffer: cleaned, photoroomMs, sharpMs } =
-        await this.photoroom.removeBackgroundTimed(Buffer.from(response.data));
-
-      const tUpload = process.hrtime.bigint();
-      const uploaded = await this.cloudinary.uploadBuffer(cleaned);
-      const uploadMs = hrToMs(tUpload);
-
-      const totalMs = hrToMs(imageStart);
-      this.logger.log(
-        `\n━━━━━━━━━━━━━━━━━━━━\n` +
-          `Image ${index + 1}/${total}\n` +
-          `getFileLink:  ${fmtDuration(linkMs).padStart(10)}\n` +
-          `download:     ${fmtDuration(downloadMs).padStart(10)}\n` +
-          `Photoroom:    ${fmtDuration(photoroomMs).padStart(10)}\n` +
-          `Sharp:        ${fmtDuration(sharpMs).padStart(10)}\n` +
-          `Cloudinary:   ${fmtDuration(uploadMs).padStart(10)}\n` +
-          `TOTAL:        ${fmtDuration(totalMs).padStart(10)}\n` +
-          `━━━━━━━━━━━━━━━━━━━━`,
-      );
-      return uploaded;
+      // (optional) AI upscale + remove bg + local Sharp; only upload on success.
+      const cleaned = await this.photoroom.removeBackground(Buffer.from(response.data));
+      return await this.cloudinary.uploadBuffer(cleaned);
     } catch (err) {
       this.logger.warn(
-        `Skipping one image (${fileId}) after ${fmtDuration(hrToMs(imageStart))}: ` +
-          `${err instanceof Error ? err.message : String(err)}`,
+        `Skipping one image (${fileId}): ${err instanceof Error ? err.message : String(err)}`,
       );
       return null;
     }

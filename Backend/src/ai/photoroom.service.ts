@@ -159,29 +159,13 @@ export class PhotoroomService {
   /**
    * Полный пайплайн обработки фото детали.
    * Возвращает финальное изображение 1000×1000 (PNG) с маркетплейс-фоном.
-   * Имя метода сохранено для обратной совместимости с вызывающим кодом.
    */
   async removeBackground(imageBuffer: Buffer): Promise<Buffer> {
-    return (await this.removeBackgroundTimed(imageBuffer)).buffer;
-  }
-
-  /**
-   * Идентичен removeBackground по логике и порядку шагов, но дополнительно
-   * возвращает разбивку времени: `photoroomMs` — сетевой вызов Photoroom /v2/edit,
-   * `sharpMs` — вся локальная обработка Sharp (проверка альфы + localBeautify +
-   * composeOnBackground). Предназначен только для профилирования.
-   */
-  async removeBackgroundTimed(
-    imageBuffer: Buffer,
-  ): Promise<{ buffer: Buffer; photoroomMs: number; sharpMs: number }> {
     // 0. (optional) AI Upscale — только для низко-/среднеразрешённых фото; на
     //    неудаче/таймауте возвращает исходник (никогда не роняет загрузку).
     // 1. Вызов Photoroom /v2/edit: ТОЛЬКО removeBackground (beautify убран).
-    //    Обе сетевые операции Photoroom считаем в photoroomMs.
-    const t0 = process.hrtime.bigint();
     const source = await this.maybeUpscale(imageBuffer);
     const cutout = await this.callPhotoroomEdit(source);
-    const t1 = process.hrtime.bigint();
 
     // Локальная обработка Sharp (детерминированная, без внешних зависимостей):
     //   assertTransparent   — проверка альфы вырезанного объекта;
@@ -190,14 +174,7 @@ export class PhotoroomService {
     //                         финальная резкость.
     await this.assertTransparent(cutout);
     const finished = await this.localBeautify(cutout);
-    const buffer = await this.composeOnBackground(finished);
-    const t2 = process.hrtime.bigint();
-
-    return {
-      buffer,
-      photoroomMs: Number(t1 - t0) / 1e6,
-      sharpMs: Number(t2 - t1) / 1e6,
-    };
+    return this.composeOnBackground(finished);
   }
 
   // ──────────────────────────────────────────────────────────────────────────
