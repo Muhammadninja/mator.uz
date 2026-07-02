@@ -11,21 +11,21 @@ const base: ParsedPartMetadata = {
 };
 
 describe('sanitizeMetadata', () => {
-  it('moves a brand/model that leaked into the title out of it', () => {
+  // INVARIANT: the title is the seller's source of truth. The sanitizer detects
+  // brand/model FROM it but never rewrites/shortens/strips the title itself.
+  it('detects a brand/model in the title but keeps the title verbatim', () => {
     const r = sanitizeMetadata({
       ...base,
       title: 'Фильтр масляный Cobalt оригинал',
     });
-    expect(r.title).toBe('Фильтр масляный');
+    expect(r.title).toBe('Фильтр масляный Cobalt оригинал'); // NOT stripped
     expect(r.brand).toBe('Chevrolet');
     expect(r.models).toEqual(['Cobalt']);
-    expect(r.description?.toLowerCase()).toContain('оригинал');
   });
 
-  it('moves condition words from title to description', () => {
+  it('does not move condition words out of the title', () => {
     const r = sanitizeMetadata({ ...base, title: 'Фильтр масляный новый' });
-    expect(r.title).toBe('Фильтр масляный');
-    expect(r.description?.toLowerCase()).toContain('новый');
+    expect(r.title).toBe('Фильтр масляный новый'); // "новый" stays in the title
   });
 
   it('canonicalizes brand and model aliases', () => {
@@ -52,12 +52,22 @@ describe('sanitizeMetadata', () => {
 
   it('rejects an empty/meaningless title', () => {
     expect(sanitizeMetadata({ ...base, title: '...' }).title).toBeNull();
-    expect(sanitizeMetadata({ ...base, title: 'Cobalt' }).title).toBeNull(); // only a model
+    expect(sanitizeMetadata({ ...base, title: 'ab' }).title).toBeNull(); // too short/no word
   });
 
-  it('strips OEM/price tokens that leaked into the title', () => {
+  it('keeps OEM/price tokens in the title (title is not rewritten)', () => {
     const r = sanitizeMetadata({ ...base, title: 'Фильтр 96535062 25000 сум' });
-    expect(r.title).toBe('Фильтр');
+    expect(r.title).toBe('Фильтр 96535062 25000 сум'); // verbatim, nothing stripped
+  });
+
+  it('normalizes only whitespace in the title (collapse duplicates, trim)', () => {
+    const r = sanitizeMetadata({ ...base, title: '  Фильтр   масляный  Cobalt  ' });
+    expect(r.title).toBe('Фильтр масляный Cobalt');
+  });
+
+  it('preserves the seller casing (no capitalization of the title)', () => {
+    const r = sanitizeMetadata({ ...base, title: 'фильтр масляный' });
+    expect(r.title).toBe('фильтр масляный');
   });
 
   it('is idempotent', () => {
@@ -69,13 +79,20 @@ describe('sanitizeMetadata', () => {
     expect(twice).toEqual(once);
   });
 
-  it('dedups repeated description fragments', () => {
+  it('passes the seller description through and leaves the title untouched', () => {
     const r = sanitizeMetadata({
       ...base,
       title: 'Фильтр новый',
-      description: 'Новый',
+      description: 'Оригинал',
     });
-    // "Новый" from description + "новый" from title should not duplicate.
-    expect(r.description?.toLowerCase().match(/новый/g)?.length).toBe(1);
+    expect(r.title).toBe('Фильтр новый'); // title untouched (condition word stays)
+    expect(r.description).toBe('Оригинал');
+  });
+
+  it('detects the make/model into fields while keeping them in the title', () => {
+    const r = sanitizeMetadata({ ...base, title: 'Магнитола для Nexia 3' });
+    expect(r.title).toBe('Магнитола для Nexia 3'); // verbatim — NOT "Магнитола для"
+    expect(r.brand).toBe('Chevrolet');
+    expect(r.models).toEqual(['Nexia 3']);
   });
 });

@@ -81,6 +81,13 @@ function capitalize(text: string): string {
 /**
  * Sanitize a parsed metadata object into the canonical, separated form.
  * Idempotent: running it twice yields the same result.
+ *
+ * TITLE INVARIANT: the seller's title is the source of truth. This function
+ * never rewrites, shortens, or reconstructs the title — it only normalizes
+ * whitespace. Brand/model are DETECTED from the title to populate the
+ * structured fields, but the title text itself is left exactly as the seller
+ * wrote it (whitespace aside). This holds for every source (structured,
+ * rule-based, AI).
  */
 export function sanitizeMetadata(input: ParsedPartMetadata): ParsedPartMetadata {
   // ── price → number|null ───────────────────────────────────────────────────
@@ -107,42 +114,25 @@ export function sanitizeMetadata(input: ParsedPartMetadata): ParsedPartMetadata 
     descriptionParts.push(input.description.trim());
   }
 
-  // ── title cleanup ─────────────────────────────────────────────────────────
+  // ── title (INVARIANT: preserve verbatim, whitespace-normalize only) ────────
   let title = input.title ? input.title.trim() : '';
 
   if (title) {
-    // 1. Strip brand/model tokens the AI/rule-parser may have left in the title.
+    // DETECT brand/model in the title to populate the structured fields. This
+    // only reads the title — the tokens stay in the title text unchanged.
     const catalogHit = matchCatalog(title);
     if (!brand && catalogHit.brand) brand = catalogHit.brand;
     for (const m of catalogHit.models) {
       if (!models.includes(m)) models.push(m);
     }
-    for (const token of catalogHit.matchedTokens) {
-      title = title.replace(wordRegex(token), ' ');
-    }
 
-    // 2. Strip any OEM number / price digits that leaked into the title.
-    title = title.replace(/\b\d{4,}\b/g, ' ');
-    title = title.replace(/(uzs|сум|сўм|so'm|som)/gi, ' ');
-
-    // 3. Move condition words from title → description.
-    for (const word of CONDITION_WORDS) {
-      const re = wordRegex(word);
-      const matches = title.match(re);
-      if (matches) {
-        for (const raw of matches) {
-          const clean = collapse(raw);
-          if (clean) descriptionParts.push(clean);
-        }
-        title = title.replace(re, ' ');
-      }
-    }
-
+    // The ONLY transform applied to the title: collapse whitespace. No word
+    // removal, no rewriting, no capitalization (the seller's casing stands).
     title = collapse(title);
   }
 
-  // 4. Reject empty/meaningless titles.
-  const finalTitle = title && isMeaningfulTitle(title) ? capitalize(title) : null;
+  // Reject empty/meaningless titles (does not modify a valid title).
+  const finalTitle = title && isMeaningfulTitle(title) ? title : null;
 
   // ── assemble description ──────────────────────────────────────────────────
   const seen = new Set<string>();

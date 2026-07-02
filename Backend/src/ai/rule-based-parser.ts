@@ -7,6 +7,7 @@
 
 import type { RuleBasedResult } from './part-parser.types';
 import { CONDITION_WORDS } from './part-sanitizer';
+import { splitParagraphs } from './structured-parser';
 import { matchCatalog } from './vehicle-catalog';
 
 // ── Confidence weights (tweak the parser's behavior from one place) ──────────
@@ -99,37 +100,34 @@ function extractGmNumber(textWithoutPrice: string): GmHit {
   return { value: digits, raw: [m[0]] };
 }
 
-// ── Title / description split ─────────────────────────────────────────────────
-// After brand/model/price/gm are removed, what remains is "title + description".
-// Condition words go to description; the rest is the title.
-function splitTitleAndDescription(remainder: string): {
-  title: string | null;
-  description: string | null;
-} {
-  let title = remainder;
-  const descParts: string[] = [];
+// ── Title preservation (the invariant) ────────────────────────────────────────
+/**
+ * The ONLY transform allowed on a title, on every parser path: trim and collapse
+ * duplicate internal whitespace. No word removal, no rewriting. Returns null for
+ * an empty/whitespace-only input.
+ */
+export function normalizeTitle(raw: string): string | null {
+  const t = raw.replace(/[ \t\r\n]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
+  return t.length ? t : null;
+}
 
+/**
+ * DETECT condition words in the text for the description. This reads the text
+ * and returns the matched condition phrases — it does NOT modify its input (and
+ * therefore never touches the title). Returns null when none are found.
+ */
+function extractConditionWords(text: string): string | null {
+  const found: string[] = [];
   for (const word of CONDITION_WORDS) {
-    const re = wordRegex(word);
-    const matches = title.match(re);
+    const matches = text.match(wordRegex(word));
     if (matches) {
       for (const raw of matches) {
         const clean = raw.replace(/[^a-zA-Zа-яёА-ЯЁ0-9/ ]/g, '').trim();
-        if (clean) descParts.push(clean);
+        if (clean) found.push(clean);
       }
-      title = title.replace(re, ' ');
     }
   }
-
-  title = title
-    .replace(/[^\p{L}\p{N}\s/-]+/gu, ' ')
-    .replace(/\s{2,}/g, ' ')
-    .trim();
-
-  return {
-    title: title.length >= 3 ? title : null,
-    description: descParts.length ? descParts.join(', ') : null,
-  };
+  return found.length ? found.join(', ') : null;
 }
 
 // Looks like a real part name: has a cyrillic/latin word ≥3 chars and isn't
@@ -163,33 +161,51 @@ export function computeConfidence(params: {
 /**
  * Parse seller text with rules only. Returns canonical-ish fields plus a
  * confidence score. The orchestrator runs the shared sanitizer afterwards.
+ *
+ * Multi-paragraph captions (blank-line separated) are handled specially so the
+ * title can never absorb later paragraphs: only the FIRST paragraph feeds title
+ * extraction; the rest are description + field-detection material. A single
+ * paragraph keeps the original flat behavior (backward compatible).
  */
 export function ruleBasedParse(rawText: string): RuleBasedResult {
-  const text = normalizeText(rawText);
+  const paragraphs = splitParagraphs(rawText);
+  if (paragraphs.length >= 2) {
+    return parseMultiParagraph(paragraphs);
+  }
+  return parseFlat(normalizeText(rawText));
+}
 
-  // 1. price (remove its substrings from the working text)
+/**
+ * Single-paragraph (or unparagraphed) caption.
+ *
+ * INVARIANT: the seller's title is the source of truth. There is no separate
+ * title field to isolate here, so the title is the WHOLE line, verbatim except
+ * whitespace normalization. Brand / model / GM / price / condition are still
+ * DETECTED (to populate the structured fields), but detection reads a working
+ * COPY of the text and never mutates the title. The description is assembled
+ * only from detected condition words — extraction, not title surgery.
+ */
+function parseFlat(text: string): RuleBasedResult {
+  // Detection runs on a working copy; the title is preserved separately.
   const priceHit = extractPrice(text);
   let working = text;
   for (const r of priceHit.raw) {
     working = working.replace(r, ' ');
   }
 
-  // 2. gm number (on the price-stripped text, so a price isn't read as OEM)
   const gmHit = extractGmNumber(working);
   for (const r of gmHit.raw) {
     working = working.replace(r, ' ');
   }
 
-  // 3. brand + models from the local catalog
   const catalog = matchCatalog(working);
-  for (const token of catalog.matchedTokens) {
-    working = working.replace(wordRegex(token), ' ');
-  }
 
-  // 4. split what's left into title + description
-  const { title, description } = splitTitleAndDescription(working);
+  // Condition words → description (extracted, not removed from the title).
+  const description = extractConditionWords(text);
 
-  // 5. confidence
+  // Title = the seller's line, verbatim except whitespace normalization.
+  const title = normalizeTitle(text);
+
   const hasBrandOrModel = Boolean(catalog.brand) || catalog.models.length > 0;
   const goodTitle = looksLikeGoodTitle(title);
   const confidence = computeConfidence({
@@ -207,5 +223,80 @@ export function ruleBasedParse(rawText: string): RuleBasedResult {
     gm_number: gmHit.value,
     price: priceHit.value,
     confidence,
+    // Title is the seller's verbatim text — the sanitizer must not rewrite it.
+    preserveTitle: true,
   };
+}
+
+/**
+ * Multi-paragraph caption: the title comes ONLY from the first paragraph and is
+ * preserved verbatim (whitespace-normalized) — the detected make/model is NOT
+ * stripped from it and no text from later paragraphs can leak in. The remaining
+ * paragraphs supply the description and are the source for GM/OEM and price
+ * detection; the price/GM tokens are removed from the description text only.
+ *
+ * This is the hardening for captions like:
+ *   "Магнитола для Nexia 3\n\nПроизводство Корея, новая"
+ * which previously flattened to one string and produced the corrupt title
+ * "Магнитола для Производство Корея".
+ */
+function parseMultiParagraph(paragraphs: string[]): RuleBasedResult {
+  const titleParagraph = paragraphs[0];
+  const restText = normalizeText(paragraphs.slice(1).join(' '));
+
+  // Detect price / GM from the description paragraphs (not from the title, so a
+  // number in the title can never be treated as price/OEM and stripped away).
+  const priceHit = extractPrice(restText);
+  let restWorking = restText;
+  for (const r of priceHit.raw) {
+    restWorking = restWorking.replace(r, ' ');
+  }
+  const gmHit = extractGmNumber(restWorking);
+  for (const r of gmHit.raw) {
+    restWorking = restWorking.replace(r, ' ');
+  }
+
+  // Detect brand/model from the FULL caption (title + rest) so a model named in
+  // the title still populates the structured fields — but the title text itself
+  // is left untouched (make/model stays in it, per the contract).
+  const catalog = matchCatalog(`${titleParagraph} ${restText}`);
+
+  // Title = first paragraph, verbatim except whitespace normalization.
+  const title = normalizeTitle(titleParagraph);
+
+  // Description = remaining paragraphs with price/GM tokens removed; condition
+  // words are kept in place (this is the seller's own description text).
+  const description = cleanDescription(restWorking);
+
+  const hasBrandOrModel = Boolean(catalog.brand) || catalog.models.length > 0;
+  const goodTitle = looksLikeGoodTitle(title);
+  const confidence = computeConfidence({
+    hasGm: Boolean(gmHit.value),
+    hasPrice: priceHit.value !== null,
+    hasBrandOrModel,
+    hasGoodTitle: goodTitle,
+  });
+
+  return {
+    title,
+    description,
+    brand: catalog.brand,
+    models: catalog.models,
+    gm_number: gmHit.value,
+    price: priceHit.value,
+    confidence,
+    // Title is the seller's verbatim first paragraph — the sanitizer must keep
+    // it as-is (don't strip the make/model out of it).
+    preserveTitle: true,
+  };
+}
+
+/** Tidy the description text: collapse whitespace, trim stray separators. */
+function cleanDescription(text: string): string | null {
+  const cleaned = text
+    .replace(/\s{2,}/g, ' ')
+    .replace(/^[\s,;.()\-–—]+/, '')
+    .replace(/[\s,;.()\-–—]+$/, '')
+    .trim();
+  return cleaned.length ? cleaned : null;
 }

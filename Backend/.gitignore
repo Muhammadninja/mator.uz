@@ -1,5 +1,6 @@
 .env
 .env.*
+!.env.example
 node_modules/
 dist/
 *.tsbuildinfo
@@ -9,3 +10,4 @@ keys/
 .swarm/
 .DS_Store
 .mcp.json
+logs/

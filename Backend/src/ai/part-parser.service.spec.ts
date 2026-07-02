@@ -75,7 +75,7 @@ describe('PartParserService', () => {
     expect(out.brand).toBe('Chevrolet');
   });
 
-  it('sanitizes AI output (model leaked into title gets split out)', async () => {
+  it('sanitizes AI output: detects fields but preserves the AI-returned title verbatim', async () => {
     const aiResult: ParsedPartMetadata = {
       title: 'Фильтр масляный Cobalt оригинал',
       description: null,
@@ -89,10 +89,11 @@ describe('PartParserService', () => {
 
     const out = await parser.parse('что-то непонятное про фильтр');
 
-    expect(out.title).toBe('Фильтр масляный');
+    // INVARIANT: the title is preserved verbatim — brand/model are DETECTED
+    // from it into the fields, but the title text is not rewritten/shortened.
+    expect(out.title).toBe('Фильтр масляный Cobalt оригинал');
     expect(out.brand).toBe('Chevrolet');
     expect(out.models).toEqual(['Cobalt']);
-    expect(out.description?.toLowerCase()).toContain('оригинал');
   });
 
   it('marks source as mock when AI is not live', async () => {
@@ -143,5 +144,33 @@ describe('PartParserService', () => {
     expect(out.models).toEqual([]);
     expect(out.gm_number).toBeNull();
     expect(out.price).toBeNull();
+  });
+
+  it('never corrupts the title on a multi-line caption (title = first line only)', async () => {
+    // Under the official one-field-per-line format this 3-line caption parses
+    // structurally (line 1 = title). It must never merge later lines into the
+    // title — regression guard against the old "Магнитола для Производство Корея".
+    const fake = fakeClaude({ isLive: true, throws: true });
+    const parser = new PartParserService(fake.service);
+
+    const out = await parser.parse(
+      'Магнитола для Nexia 3\nПроизводство Корея, новая\nсостояние отличное',
+    );
+
+    expect(out.source).toBe('structured');
+    expect(out.title).toBe('Магнитола для Nexia 3'); // first line only, verbatim
+    expect(out.title).not.toBe('Магнитола для Производство Корея'); // the old bug
+    expect(out.brand).toBe('Chevrolet');
+    expect(out.models).toEqual(['Nexia 3']);
+  });
+
+  it('degrades to a non-corrupting rule-based result for a single-line caption (AI throws)', async () => {
+    const fake = fakeClaude({ isLive: true, throws: true });
+    const parser = new PartParserService(fake.service);
+
+    const out = await parser.parse('Магнитола для Nexia 3 96234567 450000');
+
+    expect(out.source).toBe('rule-based'); // single line → fallback
+    expect(out.title).toBe('Магнитола для Nexia 3 96234567 450000'); // verbatim
   });
 });

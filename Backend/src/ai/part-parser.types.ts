@@ -22,10 +22,16 @@ export interface ParsedPartMetadata {
 /** Rule-based parse output: metadata plus a confidence score in [0, 1]. */
 export interface RuleBasedResult extends ParsedPartMetadata {
   confidence: number;
+  /**
+   * When true, the title is already the seller's verbatim first paragraph and
+   * must NOT be rewritten by the sanitizer (no make/model/OEM/condition
+   * stripping). Set by the multi-paragraph fallback path.
+   */
+  preserveTitle?: boolean;
 }
 
 /** How a final result was produced — useful for logging/metrics. */
-export type ParseSource = 'rule-based' | 'ai-fallback' | 'mock';
+export type ParseSource = 'structured' | 'rule-based' | 'ai-fallback' | 'mock';
 
 export interface ParseOutcome extends ParsedPartMetadata {
   source: ParseSource;

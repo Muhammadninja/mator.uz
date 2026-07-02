@@ -61,18 +61,39 @@ export class PhotoroomService {
    * Имя метода сохранено для обратной совместимости с вызывающим кодом.
    */
   async removeBackground(imageBuffer: Buffer): Promise<Buffer> {
+    return (await this.removeBackgroundTimed(imageBuffer)).buffer;
+  }
+
+  /**
+   * Идентичен removeBackground по логике и порядку шагов, но дополнительно
+   * возвращает разбивку времени: `photoroomMs` — сетевой вызов Photoroom /v2/edit,
+   * `sharpMs` — вся локальная обработка Sharp (проверка альфы + localBeautify +
+   * composeOnBackground). Предназначен только для профилирования.
+   */
+  async removeBackgroundTimed(
+    imageBuffer: Buffer,
+  ): Promise<{ buffer: Buffer; photoroomMs: number; sharpMs: number }> {
     // 1. Один объединённый вызов Photoroom /v2/edit: removeBackground + beautify.
     //    (AI upscale убран — финальный размер 1000px, телефонные фото и так
     //    крупнее; апскейл с последующим даунскейлом — пустая трата времени.)
-    const cutout = await this.editImage(imageBuffer);
+    const t0 = process.hrtime.bigint();
+    const cutout = await this.callPhotoroomEdit(imageBuffer);
+    const t1 = process.hrtime.bigint();
 
-    // 2. Локальная чистка краёв альфы вырезанного объекта (детерминированно)
-    //    перед измерением bbox.
+    // Локальная обработка Sharp (детерминированная, без внешних зависимостей):
+    //   assertTransparent — проверка альфы вырезанного объекта;
+    //   localBeautify     — чистка краёв альфы + резкость;
+    //   composeOnBackground — bbox → scale ~80% → center → фон → 1000×1000.
+    await this.assertTransparent(cutout);
     const finished = await this.localBeautify(cutout);
+    const buffer = await this.composeOnBackground(finished);
+    const t2 = process.hrtime.bigint();
 
-    // 3. object detection (bbox) → scale ~80% → center → Mator background →
-    //    1000×1000 → save (вызывающий код заливает результат в Cloudinary).
-    return this.composeOnBackground(finished);
+    return {
+      buffer,
+      photoroomMs: Number(t1 - t0) / 1e6,
+      sharpMs: Number(t2 - t1) / 1e6,
+    };
   }
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -82,9 +103,10 @@ export class PhotoroomService {
   /**
    * Один запрос к /v2/edit, выполняющий и удаление фона, и AI-бьютификацию.
    * Обязательный шаг: при неудаче бросает (нет смысла продолжать без выреза).
-   * Результат должен быть прозрачным PNG.
+   * Возвращает сырой прозрачный PNG (проверка альфы — отдельным шагом Sharp у
+   * вызывающего кода, чтобы сетевое время не смешивалось с локальным).
    */
-  private async editImage(imageBuffer: Buffer): Promise<Buffer> {
+  private async callPhotoroomEdit(imageBuffer: Buffer): Promise<Buffer> {
     const result = await this.callPhotoroom(
       () => {
         const form = new FormData();
@@ -99,7 +121,6 @@ export class PhotoroomService {
       'edit (removeBackground + beautify)',
       { required: true },
     );
-    await this.assertTransparent(result!);
     return result!;
   }
 

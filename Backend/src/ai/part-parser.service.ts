@@ -18,6 +18,7 @@ import { ClaudeMcpService } from './claude-mcp.service';
 import type { ParseOutcome } from './part-parser.types';
 import { sanitizeMetadata } from './part-sanitizer';
 import { RULE_CONFIDENCE_THRESHOLD, ruleBasedParse } from './rule-based-parser';
+import { parseStructuredCaption } from './structured-parser';
 
 export class PartParserService {
   private readonly logger = new Logger(PartParserService.name);
@@ -32,11 +33,26 @@ export class PartParserService {
    * Returns the result plus how it was produced and the rule-based confidence.
    */
   async parse(rawText: string): Promise<ParseOutcome> {
+    // ── Primary path: structured paragraph format ────────────────────────────
+    // Title/description are preserved exactly as written; vehicle make/model is
+    // detected from the title without modifying it. NOT run through the
+    // sanitizer (which would strip brand/model/OEM out of the title).
+    const structured = parseStructuredCaption(rawText);
+    if (structured) {
+      this.logger.debug(
+        `structured caption accepted for "${truncate(rawText)}"`,
+      );
+      return { ...structured, source: 'structured', confidence: 1 };
+    }
+
+    // ── Fallback: hybrid rule-based + AI pipeline for unstructured captions ───
     const ruleResult = ruleBasedParse(rawText);
     const { confidence } = ruleResult;
 
     // ── High confidence → accept rule-based result, no AI ────────────────────
     if (confidence >= RULE_CONFIDENCE_THRESHOLD) {
+      // The sanitizer preserves the seller's title verbatim on every path
+      // (whitespace-normalize only), so no per-call flag is needed.
       const sanitized = sanitizeMetadata(ruleResult);
       this.logger.debug(
         `rule-based accepted (confidence=${confidence}) for "${truncate(rawText)}"`,
