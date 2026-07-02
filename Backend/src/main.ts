@@ -18,9 +18,55 @@ function parseCorsOrigins(): string[] {
     .filter(Boolean);
 }
 
+/**
+ * Last-resort safety net. An uncaught exception or unhandled rejection means
+ * the process is in an unknown state — Node will otherwise either crash
+ * silently (no log) or, for unhandledRejection, just print a warning and keep
+ * running in that unknown state. Log it through Nest's Logger (consistent
+ * with the rest of the app, PM2-captured) and exit non-zero so PM2 restarts
+ * us cleanly rather than limping on.
+ */
+function installProcessErrorHandlers(getApp: () => import('@nestjs/common').INestApplication | undefined) {
+  const logger = new Logger('Process');
+
+  const fatal = (label: string, err: unknown) => {
+    logger.error(
+      `${label}: ${err instanceof Error ? err.message : String(err)}`,
+      err instanceof Error ? err.stack : undefined,
+    );
+    const app = getApp();
+    // Best-effort graceful close (runs OnModuleDestroy, e.g. stopping the
+    // Telegram bot) before exiting; don't let a hung close() block the exit.
+    const exit = () => process.exit(1);
+    if (app) {
+      void app.close().finally(exit);
+      setTimeout(exit, 5000).unref();
+    } else {
+      exit();
+    }
+  };
+
+  process.on('uncaughtException', (err) => fatal('Uncaught exception', err));
+  process.on('unhandledRejection', (reason) => fatal('Unhandled rejection', reason));
+}
+
 async function bootstrap() {
   const logger = new Logger('Bootstrap');
-  const app = await NestFactory.create(AppModule);
+
+  let app: import('@nestjs/common').INestApplication | undefined;
+  installProcessErrorHandlers(() => app);
+
+  app = await NestFactory.create(AppModule);
+
+  // Run OnModuleDestroy/OnApplicationShutdown hooks on SIGTERM/SIGINT (PM2
+  // restart/redeploy, systemd stop, ctrl-C) — e.g. TelegramService.onModuleDestroy
+  // stopping the long-polling bot cleanly instead of leaving it dangling.
+  app.enableShutdownHooks();
+
+  // Trust the first hop (Nginx) so req.ip reflects the real client IP instead
+  // of the proxy's — required for per-IP throttling (@nestjs/throttler) to key
+  // on individual clients rather than bucketing everyone behind Nginx together.
+  app.getHttpAdapter().getInstance().set('trust proxy', 1);
 
   // Security headers. The API serves JSON (and SSE for the AI advisor), so the
   // restrictive CSP defaults don't apply; disable CSP to avoid breaking the

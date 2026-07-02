@@ -36,11 +36,13 @@ describe('ruleBasedParse', () => {
     expect(r.models).toContain('Nexia 3');
   });
 
-  it('keeps condition words out of the title', () => {
+  it('detects condition words into the description but keeps them in the title', () => {
+    // INVARIANT: single-line title is the whole seller line, verbatim. Condition
+    // words are DETECTED into the description but NOT removed from the title.
     const r = ruleBasedParse('ступица передняя spark matiz правая сторона');
-    expect(r.title).toMatch(/ступица/i);
-    expect(r.title?.toLowerCase()).not.toContain('правая сторона');
-    expect(r.description?.toLowerCase()).toContain('правая сторона');
+    expect(r.title).toBe('ступица передняя spark matiz правая сторона'); // verbatim
+    expect(r.title?.toLowerCase()).toContain('правая сторона'); // stays in title
+    expect(r.description?.toLowerCase()).toContain('правая сторона'); // also detected
     expect(r.models).toEqual(expect.arrayContaining(['Spark', 'Matiz']));
   });
 
@@ -64,6 +66,59 @@ describe('ruleBasedParse', () => {
     expect(r.title).toMatch(/генератор/i);
     // Only the title signal — below threshold, so AI fallback kicks in.
     expect(r.confidence).toBeLessThan(RULE_CONFIDENCE_THRESHOLD);
+  });
+});
+
+describe('ruleBasedParse — multi-paragraph hardening', () => {
+  it('never merges a later paragraph into the title (the "Магнитола для Производство Корея" bug)', () => {
+    const r = ruleBasedParse('Магнитола для Nexia 3\n\nПроизводство Корея, новая');
+    // The title is the verbatim first paragraph — NOT flattened, NOT merged.
+    expect(r.title).toBe('Магнитола для Nexia 3');
+    expect(r.title).not.toContain('Производство');
+    // Regression guard for the exact corrupt value that was observed.
+    expect(r.title).not.toBe('Магнитола для Производство Корея');
+  });
+
+  it('keeps the detected make/model IN the title (does not strip it)', () => {
+    const r = ruleBasedParse('Магнитола для Nexia 3\n\nПроизводство Корея, новая');
+    expect(r.title).toContain('Nexia 3'); // model NOT removed from the title
+    expect(r.brand).toBe('Chevrolet'); // ...but still detected into the field
+    expect(r.models).toEqual(['Nexia 3']);
+    expect(r.preserveTitle).toBe(true);
+  });
+
+  it('uses only the first paragraph for the title and the rest for description', () => {
+    const r = ruleBasedParse('Магнитола для Nexia 3\n\nПроизводство Корея, новая');
+    expect(r.title).toBe('Магнитола для Nexia 3');
+    expect(r.description).toBe('Производство Корея, новая');
+  });
+
+  it('detects GM/OEM and price from the later paragraphs, keeping the title clean', () => {
+    const r = ruleBasedParse('Тормозные колодки\n\nкомплект\n\n96535062\n\n120000');
+    expect(r.title).toBe('Тормозные колодки');
+    expect(r.gm_number).toBe('96535062');
+    expect(r.price).toBe(120000);
+    // Neither the OEM nor the price leaked into the title.
+    expect(r.title).not.toMatch(/\d/);
+  });
+
+  it('normalizes whitespace in the first-paragraph title without rewriting it', () => {
+    const r = ruleBasedParse('Магнитола   BOSCH   для  Nexia 3\n\nновая');
+    expect(r.title).toBe('Магнитола BOSCH для Nexia 3'); // collapsed spaces, words intact
+  });
+
+  it('single-paragraph title is the whole seller line, verbatim (invariant)', () => {
+    const r = ruleBasedParse('Фильтр масла Cobalt оригинал 96535062 25000 сум');
+    // INVARIANT: nothing is stripped from the title — model/OEM/price stay in.
+    expect(r.title).toBe('Фильтр масла Cobalt оригинал 96535062 25000 сум');
+    expect(r.title).toContain('Cobalt'); // model NOT removed
+    expect(r.title).toContain('96535062'); // OEM NOT removed
+    // ...but the fields are still detected independently.
+    expect(r.brand).toBe('Chevrolet');
+    expect(r.models).toEqual(['Cobalt']);
+    expect(r.gm_number).toBe('96535062');
+    expect(r.price).toBe(25000);
+    expect(r.preserveTitle).toBe(true);
   });
 });
 

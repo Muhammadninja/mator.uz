@@ -3,13 +3,14 @@ import { ConfigService } from '@nestjs/config';
 import { SellerStatus } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
 import axios from 'axios';
-import { Context, Telegraf } from 'telegraf';
+import { Context, Markup, Telegraf } from 'telegraf';
 import { message } from 'telegraf/filters';
+import type { ParseOutcome } from '../ai/part-parser.types';
 import { PartParserService } from '../ai/part-parser.service';
 import { PhotoroomService } from '../ai/photoroom.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SellersService } from '../sellers/sellers.service';
-import { CloudinaryService } from '../cloudinary/cloudinary.service';
+import { CloudinaryService, UploadedImage } from '../cloudinary/cloudinary.service';
 import { MediaGroupBuffer } from './media-group-buffer';
 
 // Telegram delivers an album as N separate photo updates sharing a
@@ -18,8 +19,63 @@ import { MediaGroupBuffer } from './media-group-buffer';
 const MEDIA_GROUP_DEBOUNCE_MS = 1500;
 const MAX_IMAGES_PER_LISTING = 10;
 // Process album images in parallel, but bound concurrency so we don't hammer
-// Photoroom/Cloudinary or spike memory with many large buffers at once.
-const IMAGE_CONCURRENCY = 3;
+// Photoroom/Cloudinary or spike memory with many large buffers at once. The
+// bound is configurable via IMAGE_CONCURRENCY; the default (5) overlaps enough
+// remote waits (Photoroom/Cloudinary) to keep the pool busy without risking
+// rate limits or memory spikes.
+const IMAGE_CONCURRENCY_DEFAULT = 5;
+const IMAGE_CONCURRENCY_MIN = 1;
+const IMAGE_CONCURRENCY_MAX = 10;
+
+/**
+ * Resolve the album image-processing concurrency from a raw env value. Accepts
+ * an integer in [IMAGE_CONCURRENCY_MIN, IMAGE_CONCURRENCY_MAX]; anything missing,
+ * non-integer, or out of range falls back to IMAGE_CONCURRENCY_DEFAULT and logs
+ * a warning (except when simply unset, which is the expected default case).
+ */
+export function resolveImageConcurrency(raw: string | undefined, logger: Logger): number {
+  if (raw === undefined || raw.trim() === '') return IMAGE_CONCURRENCY_DEFAULT;
+
+  const value = Number(raw);
+  if (
+    !Number.isInteger(value) ||
+    value < IMAGE_CONCURRENCY_MIN ||
+    value > IMAGE_CONCURRENCY_MAX
+  ) {
+    logger.warn(
+      `Invalid IMAGE_CONCURRENCY="${raw}" (expected an integer ` +
+        `${IMAGE_CONCURRENCY_MIN}–${IMAGE_CONCURRENCY_MAX}); ` +
+        `falling back to ${IMAGE_CONCURRENCY_DEFAULT}.`,
+    );
+    return IMAGE_CONCURRENCY_DEFAULT;
+  }
+  return value;
+}
+// A pending confirmation expires automatically after this long (10 minutes).
+const CONFIRMATION_TTL_MS = 10 * 60 * 1000;
+
+// Inline-button callback payloads for the confirmation step.
+const CONFIRM_ADD = 'product:add';
+const CONFIRM_CANCEL = 'product:cancel';
+
+/**
+ * A fully-processed listing awaiting the seller's confirmation. Everything
+ * expensive (parse, vehicle detection, image processing/upload, price) is
+ * already done; only the final database write is deferred to confirmation.
+ */
+interface PendingProduct {
+  sellerId: number;
+  tgUserId: number;
+  metadata: ParseOutcome;
+  /** Validated non-null title (guaranteed by the guard in handleListing). */
+  title: string;
+  processedUrls: string[];
+  /** Cloudinary public_ids of the uploaded preview assets, for cleanup on
+   *  cancel/expiry/replacement (kept on successful confirmation). */
+  publicIds: string[];
+  price: Decimal;
+  expiry: NodeJS.Timeout;
+}
 
 function extractPriceFallback(text: string): Decimal {
   const currencyMatch = text.match(/(\d+)\s*(uzs|UZS|сўм|сум)/i);
@@ -45,12 +101,24 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   private mediaBuffer!: MediaGroupBuffer;
   private readonly groupCtx = new Map<string, Context>();
 
+  // One pending confirmation per Telegram user, keyed by tgUserId. Holds the
+  // fully-processed listing until the seller presses "Добавить товар".
+  private readonly pending = new Map<number, PendingProduct>();
+
+  // Album image-processing concurrency, resolved once from IMAGE_CONCURRENCY.
+  private readonly imageConcurrency: number;
+
   constructor(
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
     private readonly sellers: SellersService,
     private readonly cloudinary: CloudinaryService,
-  ) {}
+  ) {
+    this.imageConcurrency = resolveImageConcurrency(
+      this.config.get<string>('IMAGE_CONCURRENCY'),
+      this.logger,
+    );
+  }
 
   onModuleInit() {
     const token = this.config.get<string>('TELEGRAM_BOT_TOKEN');
@@ -68,12 +136,27 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
     this.bot = new Telegraf(token);
     this.registerHandlers();
-    this.bot.launch().then(() => this.logger.log('Bot started (long polling)'));
+    // launch() only resolves once polling stops (i.e. on shutdown) — log
+    // start-up separately. A launch failure (e.g. a transient network error
+    // reaching api.telegram.org) must not crash the whole backend as an
+    // unhandled rejection; log it and leave the bot offline instead.
+    this.bot
+      .launch()
+      .then(() => this.logger.log('Bot stopped (long polling ended)'))
+      .catch((err: unknown) =>
+        this.logger.error(
+          `Bot launch failed: ${err instanceof Error ? err.message : String(err)}`,
+          err instanceof Error ? err.stack : undefined,
+        ),
+      );
+    this.logger.log('Bot starting (long polling)...');
   }
 
   onModuleDestroy() {
     this.mediaBuffer?.clear();
     this.groupCtx.clear();
+    for (const session of this.pending.values()) clearTimeout(session.expiry);
+    this.pending.clear();
     this.bot?.stop('SIGTERM');
   }
 
@@ -122,6 +205,41 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       // Single photo — process immediately as a one-image listing.
       await this.handleListing(ctx, from.id, [bestPhoto.file_id], caption);
     });
+
+    // Confirmation buttons on the preview message.
+    this.bot.action(CONFIRM_ADD, async (ctx) => {
+      await ctx.answerCbQuery();
+      // Remove the keyboard first so a second tap can't re-trigger the action.
+      await this.removePreviewKeyboard(ctx);
+      const from = ctx.from;
+      if (from) await this.commitPending(ctx, from.id);
+    });
+
+    this.bot.action(CONFIRM_CANCEL, async (ctx) => {
+      await ctx.answerCbQuery();
+      // Remove the keyboard first so a second tap can't re-trigger the action.
+      await this.removePreviewKeyboard(ctx);
+      const from = ctx.from;
+      // Delete the uploaded preview assets before dropping the session.
+      if (from) await this.discardPending(from.id);
+      await ctx.reply('❌ Добавление товара отменено.\nОтправьте фото и подпись заново, чтобы добавить другой товар.');
+    });
+  }
+
+  /**
+   * Strip the inline keyboard from the preview message (the one that carried the
+   * pressed button) without deleting the message. Best-effort: if the edit fails
+   * — e.g. the keyboard was already removed by an earlier tap, or the message is
+   * too old — the error is logged and swallowed so the action still proceeds.
+   */
+  private async removePreviewKeyboard(ctx: Context): Promise<void> {
+    try {
+      await ctx.editMessageReplyMarkup(undefined);
+    } catch (err) {
+      this.logger.debug(
+        `Could not remove preview keyboard: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   // ── Listing pipeline (1..N images, one caption) ─────────────────────────────
@@ -154,15 +272,27 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     const images = fileIds.slice(0, MAX_IMAGES_PER_LISTING);
 
     try {
-      // Parse the caption once; process every image through the full pipeline,
-      // preserving album order.
-      const metadata = await this.partParser.parse(caption);
+      // Parse the caption once and process every image (album order preserved)
+      // concurrently: caption parsing and image processing are independent, so
+      // running them together hides the parse latency (notably the AI fallback)
+      // behind the image pipeline instead of stacking it before.
+      const [metadata, uploaded] = await Promise.all([
+        this.partParser.parse(caption),
+        this.processImages(images),
+      ]);
       this.logger.log(
         `Parsed via ${metadata.source} (confidence=${metadata.confidence}) — ` +
         `title="${metadata.title ?? '∅'}", images=${images.length}`,
       );
 
+      const processedUrls = uploaded.map((u) => u.url);
+      const publicIds = uploaded.map((u) => u.publicId);
+
+      // Title guard now runs after processing (parse no longer gates it), so any
+      // images already uploaded on a rejected title must be cleaned up to avoid
+      // orphaned Cloudinary assets.
       if (!metadata.title || metadata.title.length < 3) {
+        if (publicIds.length > 0) await this.cloudinary.deleteAssets(publicIds);
         await ctx.reply(
           '❌ Не удалось распознать название детали. Опишите товар подробнее:\n' +
           '_Пример: Фильтр масляный Cobalt Gentra 96535062 25000 сум_',
@@ -171,12 +301,160 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         return;
       }
 
-      const processedUrls = await this.processImages(images);
-      if (processedUrls.length === 0) {
+      if (uploaded.length === 0) {
         await ctx.reply('⚠️ Не удалось обработать ни одно изображение. Попробуйте ещё раз.');
         return;
       }
 
+      const price =
+        metadata.price !== null ? new Decimal(metadata.price) : extractPriceFallback(caption);
+
+      // Everything is processed. Instead of writing to the DB now, stash the
+      // result as a pending confirmation and show the seller a preview with
+      // Add / Cancel buttons. The DB write happens in commitPending().
+      // `metadata.title` is non-null here (validated by the guard above).
+      this.setPending(ctx, {
+        sellerId: seller.id,
+        tgUserId,
+        metadata,
+        title: metadata.title,
+        processedUrls,
+        publicIds,
+        price,
+      });
+
+      await this.sendPreview(ctx, metadata, processedUrls, price);
+    } catch (error: unknown) {
+      const errMsg =
+        error instanceof Error
+          ? error.message
+          : typeof error === 'object'
+            ? JSON.stringify(error)
+            : String(error);
+      this.logger.error(`Pipeline error: ${errMsg}`, error instanceof Error ? error.stack : undefined);
+      await ctx.reply(`⚠️ Произошла ошибка при обработке товара.\n\`${errMsg}\``, { parse_mode: 'Markdown' });
+    }
+  }
+
+  // ── Pending confirmation session ────────────────────────────────────────────
+  /**
+   * Store (or replace) the single pending confirmation for a user. If one was
+   * already pending, it is discarded — its uploaded Cloudinary assets are
+   * deleted — and the user is told the previous draft was replaced. Sessions
+   * expire automatically after CONFIRMATION_TTL_MS (also deleting their assets).
+   */
+  private setPending(ctx: Context, draft: Omit<PendingProduct, 'expiry'>): void {
+    if (this.pending.has(draft.tgUserId)) {
+      void this.discardPending(draft.tgUserId); // deletes the replaced draft's assets
+      void ctx.reply('♻️ Предыдущий неподтверждённый товар заменён новым.');
+    }
+
+    const expiry = setTimeout(() => {
+      // Auto-expiry: drop the session and clean up its uploaded assets.
+      void this.discardPending(draft.tgUserId);
+    }, CONFIRMATION_TTL_MS);
+    // Don't keep the process alive just for a pending confirmation.
+    expiry.unref?.();
+
+    this.pending.set(draft.tgUserId, { ...draft, expiry });
+  }
+
+  /**
+   * Remove a pending session WITHOUT deleting its Cloudinary assets. Used by a
+   * successful commit, where the assets are kept for the saved product.
+   */
+  private takePending(tgUserId: number): PendingProduct | undefined {
+    const session = this.pending.get(tgUserId);
+    if (session) {
+      clearTimeout(session.expiry);
+      this.pending.delete(tgUserId);
+    }
+    return session;
+  }
+
+  /**
+   * Discard a pending session AND delete its uploaded Cloudinary assets. Used on
+   * cancel, auto-expiry, and replacement. Cleanup failures are logged by
+   * CloudinaryService and never throw, so the discard always completes.
+   */
+  private async discardPending(tgUserId: number): Promise<void> {
+    const session = this.takePending(tgUserId);
+    if (session && session.publicIds.length > 0) {
+      await this.cloudinary.deleteAssets(session.publicIds);
+    }
+  }
+
+  /**
+   * Preview shown before the DB write. Distinct from the success message: it
+   * asks the seller to review and carries the Add / Cancel inline buttons.
+   */
+  private async sendPreview(
+    ctx: Context,
+    metadata: ParseOutcome,
+    processedUrls: string[],
+    price: Decimal,
+  ): Promise<void> {
+    const vehicle =
+      metadata.brand || metadata.models.length > 0
+        ? `${metadata.brand ?? ''} ${metadata.models.join(', ')}`.trim()
+        : '—';
+
+    const caption =
+      `📋 *Проверьте товар перед добавлением.*\n\n` +
+      `🔩 *Название:* ${metadata.title}\n` +
+      `📝 *Описание:* ${metadata.description ?? '—'}\n` +
+      `🚗 *Автомобиль:* ${vehicle}\n` +
+      `🔢 *OEM/GM №:* ${metadata.gm_number ?? '—'}\n` +
+      `💰 *Цена:* ${price.toFixed(0)} UZS`;
+
+    const buttons = Markup.inlineKeyboard([
+      Markup.button.callback('✅ Добавить товар', CONFIRM_ADD),
+      Markup.button.callback('❌ Отменить', CONFIRM_CANCEL),
+    ]);
+
+    // Single image → photo + caption + buttons; album → media group preview
+    // followed by the caption+buttons as a separate message (media groups can't
+    // carry an inline keyboard).
+    try {
+      if (processedUrls.length === 1) {
+        await ctx.replyWithPhoto(processedUrls[0], {
+          caption,
+          parse_mode: 'Markdown',
+          ...buttons,
+        });
+        return;
+      }
+      const media = processedUrls.slice(0, MAX_IMAGES_PER_LISTING).map((url) => ({
+        type: 'photo' as const,
+        media: url,
+      }));
+      await ctx.replyWithMediaGroup(media);
+      await ctx.reply(caption, { parse_mode: 'Markdown', ...buttons });
+    } catch (err) {
+      this.logger.warn(
+        `Failed to send preview media, falling back to text: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      await ctx.reply(caption, { parse_mode: 'Markdown', ...buttons });
+    }
+  }
+
+  /**
+   * Commit a confirmed pending product: perform the database writes, then send a
+   * simple success message (the preview already showed the full product). No-op
+   * with a notice if there is nothing pending. Uploaded assets are kept.
+   */
+  private async commitPending(ctx: Context, tgUserId: number): Promise<void> {
+    // Take the session (without deleting its Cloudinary assets — the saved
+    // product keeps them). Consuming it up front also makes a double-tap safe.
+    const session = this.takePending(tgUserId);
+    if (!session) {
+      await ctx.reply('⌛ Нет товара для подтверждения (возможно, время истекло). Отправьте фото и подпись заново.');
+      return;
+    }
+
+    const { sellerId, metadata, title, processedUrls, price } = session;
+
+    try {
       let brandId: number | null = null;
       if (metadata.brand) {
         const brand = await this.prisma.brand.upsert({
@@ -203,10 +481,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       const gmKey = metadata.gm_number ?? `tg_${tgUserId}_${Date.now()}`;
       const product = await this.prisma.product.upsert({
         where: { gmNumber: gmKey },
-        update: { title: metadata.title, description: metadata.description, imageUrl: primaryUrl },
+        update: { title, description: metadata.description, imageUrl: primaryUrl },
         create: {
           gmNumber: metadata.gm_number,
-          title: metadata.title,
+          title,
           description: metadata.description,
           imageUrl: primaryUrl,
         },
@@ -231,29 +509,15 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         });
       }
 
-      const price =
-        metadata.price !== null ? new Decimal(metadata.price) : extractPriceFallback(caption);
-
-      const stock = await this.prisma.stock.upsert({
-        where: { sellerId_productId: { sellerId: seller.id, productId: product.id } },
+      await this.prisma.stock.upsert({
+        where: { sellerId_productId: { sellerId, productId: product.id } },
         update: { priceUzs: price },
-        create: { sellerId: seller.id, productId: product.id, priceUzs: price },
+        create: { sellerId, productId: product.id, priceUzs: price },
       });
 
-      const report =
-        `✅ *Товар добавлен в каталог MATOR.uz*\n\n` +
-        `🔩 *Название:* ${metadata.title}\n` +
-        `📝 *Описание:* ${metadata.description ?? '—'}\n` +
-        `🏭 *Марка:* ${metadata.brand ?? '—'}\n` +
-        `🚗 *Модель:* ${metadata.models.length > 0 ? metadata.models.join(', ') : '—'}\n` +
-        `🔢 *OEM/GM №:* ${metadata.gm_number ?? '—'}\n` +
-        `💰 *Цена:* ${price.toFixed(0)} UZS\n` +
-        `📦 *Stock ID:* #${stock.id}\n` +
-        `🆔 *Product ID:* #${product.id}`;
-
-      // Send the processed image(s) back to the seller (by Cloudinary URL —
-      // Telegram fetches them; the processed buffers are not retained).
-      await this.replyWithResult(ctx, processedUrls, report);
+      // The preview already served as the confirmation UI — the success message
+      // only needs to confirm the write completed. Do not resend product details.
+      await ctx.reply('✅ Товар успешно добавлен.\nОтправьте фото и подпись следующего товара, чтобы добавить ещё.');
     } catch (error: unknown) {
       const errMsg =
         error instanceof Error
@@ -261,37 +525,8 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
           : typeof error === 'object'
             ? JSON.stringify(error)
             : String(error);
-      this.logger.error(`Pipeline error: ${errMsg}`, error instanceof Error ? error.stack : undefined);
-      await ctx.reply(`⚠️ Произошла ошибка при обработке товара.\n\`${errMsg}\``, { parse_mode: 'Markdown' });
-    }
-  }
-
-  /**
-   * Send the processed result back to the seller:
-   *   • single image  → photo + caption (report) in one message;
-   *   • multiple       → media group (≤10) with the report on the first item.
-   * Telegram media-group captions are plain text, so we strip Markdown markers
-   * for the album case. Falls back to a text-only reply if media sending fails.
-   */
-  private async replyWithResult(ctx: Context, urls: string[], report: string): Promise<void> {
-    const images = urls.slice(0, MAX_IMAGES_PER_LISTING);
-    try {
-      if (images.length === 1) {
-        await ctx.replyWithPhoto(images[0], { caption: report, parse_mode: 'Markdown' });
-        return;
-      }
-      // Media group: caption only on the first photo, plain text (no Markdown).
-      const media = images.map((url, i) => ({
-        type: 'photo' as const,
-        media: url,
-        ...(i === 0 ? { caption: report.replace(/[*_`]/g, '') } : {}),
-      }));
-      await ctx.replyWithMediaGroup(media);
-    } catch (err) {
-      this.logger.warn(
-        `Failed to send result media, falling back to text: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      await ctx.reply(report, { parse_mode: 'Markdown' });
+      this.logger.error(`Commit error: ${errMsg}`, error instanceof Error ? error.stack : undefined);
+      await ctx.reply(`⚠️ Произошла ошибка при добавлении товара.\n\`${errMsg}\``, { parse_mode: 'Markdown' });
     }
   }
 
@@ -302,8 +537,8 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
    * order is preserved (results placed by index); a single image failing is
    * logged and skipped — the caller handles the all-failed case.
    */
-  private async processImages(fileIds: string[]): Promise<string[]> {
-    const results = new Array<string | null>(fileIds.length).fill(null);
+  private async processImages(fileIds: string[]): Promise<UploadedImage[]> {
+    const results = new Array<UploadedImage | null>(fileIds.length).fill(null);
     let next = 0;
 
     const worker = async () => {
@@ -314,22 +549,22 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       }
     };
 
-    const workers = Array.from({ length: Math.min(IMAGE_CONCURRENCY, fileIds.length) }, worker);
+    const workers = Array.from({ length: Math.min(this.imageConcurrency, fileIds.length) }, worker);
     await Promise.all(workers);
 
     // Drop failed slots, keep album order.
-    return results.filter((u): u is string => u !== null);
+    return results.filter((u): u is UploadedImage => u !== null);
   }
 
-  /** Process a single image; returns its Cloudinary URL or null on failure. */
-  private async processOneImage(fileId: string): Promise<string | null> {
+  /** Process a single image; returns its uploaded asset or null on failure. */
+  private async processOneImage(fileId: string): Promise<UploadedImage | null> {
     try {
       const fileLink = await this.bot.telegram.getFileLink(fileId);
       const response = await axios.get<ArrayBuffer>(fileLink.href, {
         responseType: 'arraybuffer',
         timeout: 20_000,
       });
-      // Photoroom (remove bg + beautify) + local Sharp; only upload on success.
+      // (optional) AI upscale + remove bg + local Sharp; only upload on success.
       const cleaned = await this.photoroom.removeBackground(Buffer.from(response.data));
       return await this.cloudinary.uploadBuffer(cleaned);
     } catch (err) {
