@@ -27,6 +27,24 @@ import type { ParsedPartMetadata } from './part-parser.types';
 import { parsePrice } from './price-parser';
 import { matchCatalog } from './vehicle-catalog';
 
+// Currency indicators accepted at the end of a price line. Mirrors the set the
+// rule-based parser recognizes (kept inline to avoid a circular import, since
+// rule-based-parser imports splitParagraphs from this module). Covers: sum, som,
+// сум, сом, so'm, сўм, сoʻм, soʻm, UZS (+ usd, $, у.е.), with both apostrophe
+// forms (' U+0027 / ʻ U+02BB) and mixed Latin/Cyrillic OCR spellings.
+const PRICE_CURRENCY_SRC = [
+  'uzs',
+  'usd',
+  "s[oо][ʼʻ'`’]m", // so'm / soʻm
+  "[сc][oо][ʼʻ'`’]м", // сoʻм
+  'с[ўу]м', // сўм / сум
+  'с[оo]м', // сом
+  's[uу]m', // sum
+  's[oо]m', // som
+  '\\$',
+  'у\\.?\\s?е\\.?',
+].join('|');
+
 /** The four structured fields a label can introduce. */
 type FieldKey = 'title' | 'description' | 'gm' | 'price';
 
@@ -104,6 +122,25 @@ function parseGmValue(p: string): string | null {
 }
 
 /**
+ * A value that is a GM part number of EXACTLY 11 digits (rule #4). The line may
+ * carry light decoration — a "GM"/"OEM" prefix or trailing punctuation — but its
+ * digit core must be exactly 11 and there must be no OTHER digit run on the line
+ * (so "96549774112 350000" is NOT accepted as a bare GM, keeping the line-3/4
+ * exception from firing on a merged line). Returns the 11-digit string or null.
+ */
+function parseGm11Exact(p: string): string | null {
+  // Strip a leading GM/OEM/№ label and surrounding punctuation, keep the core.
+  const core = p
+    .replace(/^\s*(gm|oem|gm\/oem|oem\/gm|№|#)\s*[:.]?\s*/i, '')
+    .trim();
+  // Must be exactly 11 digits, optionally wrapped in a little punctuation, and
+  // contain no second number.
+  if (!/^\D*\d{11}\D*$/.test(core)) return null;
+  const digits = core.replace(/\D/g, '');
+  return digits.length === 11 ? digits : null;
+}
+
+/**
  * A value that is a price: a number, optionally with thousands separators (".",
  * ",", or space) and/or a trailing currency word. Delegates to the shared
  * parsePrice so "130.000" → 130000 (dot as thousands) while "130.00" → 130
@@ -114,9 +151,8 @@ function parsePriceValue(p: string): number | null {
   // Guard: the price field must be only a number (+ optional currency word),
   // matching the previous strict-anchor behavior so prose lines don't parse as
   // prices. parsePrice itself then applies the thousands/decimal rules.
-  if (!/^\s*\d[\d.,\s]*\s*(uzs|сум|сўм|so'm|som|usd|\$|у\.е\.?)?\s*$/i.test(p)) {
-    return null;
-  }
+  const guard = new RegExp(`^\\s*\\d[\\d.,\\s]*\\s*(?:${PRICE_CURRENCY_SRC})?\\s*$`, 'i');
+  if (!guard.test(p)) return null;
   return parsePrice(p);
 }
 
@@ -248,6 +284,53 @@ function parsePositional(lines: string[]): ParsedPartMetadata | null {
 }
 
 /**
+ * HIGHEST-PRIORITY exception — the fully-structured 4-line listing:
+ *
+ *   Line 1: title
+ *   Line 2: description
+ *   Line 3: GM part number (EXACTLY 11 digits)
+ *   Line 4: price
+ *
+ * When line 3 is a valid 11-digit GM number AND line 4 is a valid price, we take
+ * those two values DIRECTLY from their lines and never re-extract GM/price from
+ * the title or description. Only the vehicle make/model is still detected — from
+ * the title AND description combined (rule: make/model may come from either).
+ * Any line 5+ is folded into the description.
+ *
+ * Returns null when the caption does not match this exact shape, so the caller
+ * falls through to the normal labeled/positional/rule-based/AI path.
+ */
+function parsePositionalExact(paragraphs: string[]): ParsedPartMetadata | null {
+  if (paragraphs.length < 4) return null;
+
+  const gm = parseGm11Exact(paragraphs[2]);
+  if (gm === null) return null; // line 3 is not a clean 11-digit GM → exception off
+
+  const price = parsePriceValue(paragraphs[3]);
+  if (price === null) return null; // line 4 is not a valid price → exception off
+
+  const title = paragraphs[0];
+  if (!title || title.trim().length < 3) return null;
+
+  // Description = line 2 plus any line 5+.
+  const descriptionLines = [paragraphs[1], ...paragraphs.slice(4)].filter(Boolean);
+  const description = descriptionLines.length ? descriptionLines.join(' ') : null;
+
+  // Make/model may live in the title OR the description — detect from both, but
+  // GM/price are already fixed from lines 3 & 4 and are NOT touched here.
+  const catalog = matchCatalog(`${title} ${description ?? ''}`);
+
+  return {
+    title: title.trim(),
+    description: description?.trim() || null,
+    brand: catalog.brand,
+    models: catalog.models,
+    gm_number: gm, // directly from line 3
+    price, // directly from line 4
+  };
+}
+
+/**
  * Attempt to parse a caption as a structured format (labeled or positional).
  * Returns null when the caption doesn't fit either, so the caller falls back to
  * the AI/rule-based parser.
@@ -257,6 +340,12 @@ function parsePositional(lines: string[]): ParsedPartMetadata | null {
 export function parseStructuredCaption(raw: string): ParsedPartMetadata | null {
   const paragraphs = splitParagraphs(raw);
   if (paragraphs.length === 0) return null;
+
+  // ── HIGHEST PRIORITY: the exact 4-line Title/Description/GM(11)/Price shape ──
+  // If lines 3 & 4 carry a valid 11-digit GM and a valid price, use them
+  // directly and skip GM/price extraction from the title/description entirely.
+  const exact = parsePositionalExact(paragraphs);
+  if (exact !== null) return exact;
 
   // A caption is treated as LABELED when its first paragraph is a label — every
   // labeled example leads with "Название". In that case we commit to the labeled

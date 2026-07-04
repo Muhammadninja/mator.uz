@@ -146,6 +146,87 @@ describe('parseStructuredCaption', () => {
   });
 });
 
+describe('parseStructuredCaption — highest-priority 11-digit exception', () => {
+  // Rule: when line 3 is a valid 11-digit GM AND line 4 is a valid price, take
+  // GM/price DIRECTLY from lines 3 & 4; do not extract them from title/desc.
+  it('uses GM and price directly from lines 3 & 4 (11-digit GM)', () => {
+    const r = parseStructuredCaption(
+      'Фара передняя Cobalt\n\nОригинал, Корея\n\n96549774112\n\n350000 сум',
+    );
+    expect(r?.title).toBe('Фара передняя Cobalt');
+    expect(r?.description).toBe('Оригинал, Корея');
+    expect(r?.gm_number).toBe('96549774112'); // line 3, verbatim 11 digits
+    expect(r?.price).toBe(350000); // line 4
+    expect(r?.brand).toBe('Chevrolet'); // make/model still from title
+    expect(r?.models).toEqual(['Cobalt']);
+  });
+
+  it('does NOT take GM/price from the title even if the title also has numbers', () => {
+    // Title carries a stray 8-digit code and a price-like number; they must be
+    // IGNORED because lines 3 & 4 already supply the authoritative GM/price.
+    const r = parseStructuredCaption(
+      'Фара 12345678 за 999999\n\nописание\n\n96549774112\n\n350000',
+    );
+    expect(r?.gm_number).toBe('96549774112'); // from line 3, NOT the title's 12345678
+    expect(r?.price).toBe(350000); // from line 4, NOT the title's 999999
+  });
+
+  it('detects make/model from the DESCRIPTION when the title lacks them', () => {
+    const r = parseStructuredCaption(
+      'Магнитола\n\nChevrolet Cobalt новая\n\n96549774112\n\n200000 сум',
+    );
+    expect(r?.brand).toBe('Chevrolet'); // recovered from line 2 (description)
+    expect(r?.models).toContain('Cobalt');
+    expect(r?.gm_number).toBe('96549774112');
+    expect(r?.price).toBe(200000);
+  });
+
+  it('parses the price via the improved parser (130.000 → 130000)', () => {
+    const r = parseStructuredCaption(
+      'Деталь Cobalt\n\nописание\n\n96549774112\n\n130.000',
+    );
+    expect(r?.price).toBe(130000); // dot = thousands separator
+  });
+
+  it('accepts the newer currency variants on line 4', () => {
+    for (const cur of ["so'm", 'soʻm', 'сўм', 'сoʻм', 'UZS']) {
+      const r = parseStructuredCaption(
+        `Деталь Cobalt\n\nописание\n\n96549774112\n\n350000 ${cur}`,
+      );
+      expect(r?.price).toBe(350000);
+      expect(r?.gm_number).toBe('96549774112');
+    }
+  });
+
+  it('does NOT fire the exception when line 3 is only 8 digits (falls back)', () => {
+    // 8-digit line 3 is not the strict 11-digit GM, so the normal lenient
+    // positional parser handles it (and still detects the 8-digit GM).
+    const r = parseStructuredCaption('Магнитола\n\nописание\n\n96234567\n\n450000');
+    expect(r?.gm_number).toBe('96234567'); // lenient positional path, unchanged
+    expect(r?.price).toBe(450000);
+  });
+
+  it('does NOT fire the exception when line 4 is not a valid price', () => {
+    // Line 3 is a valid 11-digit GM but line 4 is prose → exception off; the
+    // lenient positional parser still keeps the 11-digit GM and folds line 4 in.
+    const r = parseStructuredCaption('Магнитола\n\nописание\n\n96549774112\n\nне цена');
+    expect(r?.gm_number).toBe('96549774112'); // still detected positionally
+    expect(r?.price).toBeNull();
+    expect(r?.description).toContain('не цена');
+  });
+
+  it('does NOT treat a merged "GM price" line 3 as the exception', () => {
+    // Line 3 has TWO numbers; it is not a clean bare 11-digit GM, so the strict
+    // exception does not fire (guards against a mis-shaped listing).
+    const r = parseStructuredCaption(
+      'Фара Cobalt\n\nописание\n\n96549774112 350000\n\n999',
+    );
+    // The exception must not have fired with gm=11-digit + price=999; the strict
+    // GM guard rejects the two-number line 3.
+    expect(r?.gm_number === '96549774112' && r?.price === 999).toBe(false);
+  });
+});
+
 describe('parseStructuredCaption — labeled formats', () => {
   const EXPECTED = {
     title: 'Магнитола для Nexia 3',
