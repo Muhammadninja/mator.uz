@@ -122,6 +122,96 @@ describe('ruleBasedParse — multi-paragraph hardening', () => {
   });
 });
 
+describe('ruleBasedParse — title→description recovery (two-line listings)', () => {
+  it('recovers price from the description when the title has none', () => {
+    // Title has brand+model+part name but NO price; description supplies it.
+    const r = ruleBasedParse('Фара передняя Cobalt\n\nоригинал 350000 сум');
+    expect(r.title).toBe('Фара передняя Cobalt'); // title untouched
+    expect(r.models).toContain('Cobalt'); // from the title
+    expect(r.price).toBe(350000); // recovered from the description
+  });
+
+  it('recovers an 11-digit GM number from the description', () => {
+    const r = ruleBasedParse('Фара передняя Cobalt\n\nоригинал 96549774112 350000 сум');
+    expect(r.gm_number).toBe('96549774112'); // exactly 11 digits, from description
+    expect(r.price).toBe(350000);
+  });
+
+  it('recovers brand/model from the description when the title lacks them', () => {
+    const r = ruleBasedParse('Магнитола\n\nChevrolet Cobalt новая 200000 сум');
+    expect(r.title).toBe('Магнитола');
+    expect(r.brand).toBe('Chevrolet'); // recovered from description
+    expect(r.models).toContain('Cobalt');
+    expect(r.price).toBe(200000);
+  });
+
+  it('PREFERS title values over description values (title wins)', () => {
+    // Both lines carry a price; the title's must win (rule #3).
+    const r = ruleBasedParse('Диск тормозной 100000 сум\n\nбыло 999999 сум');
+    expect(r.price).toBe(100000); // title price, NOT the description's 999999
+  });
+
+  it('does NOT overwrite a model already found in the title', () => {
+    const r = ruleBasedParse('Бампер Spark\n\nподходит на Cobalt тоже');
+    // Title model wins; the description's model list does not replace it.
+    expect(r.models).toContain('Spark');
+  });
+
+  it('prefers an 11-digit GM number over a shorter number in the description', () => {
+    const r = ruleBasedParse('Фара Cobalt\n\n96549774112 250000 сум');
+    expect(r.gm_number).toBe('96549774112'); // full 11-digit code preferred
+    expect(r.price).toBe(250000);
+  });
+
+  it('accepts an 8-digit GM number from the description (real GM length)', () => {
+    // Per the agreed rule: description GM = 8–11 digits, preferring 11.
+    const r = ruleBasedParse('Фильтр Cobalt\n\n96535062 50000 сум');
+    expect(r.gm_number).toBe('96535062'); // 8-digit GM accepted
+    expect(r.price).toBe(50000);
+  });
+
+  it('rejects a too-short (5-digit) article number as a GM on the desc path', () => {
+    const r = ruleBasedParse('Фара Cobalt\n\nартикул 12345, цена 40000 сум');
+    expect(r.gm_number).toBeNull(); // 5 digits < 8, not a GM number
+    expect(r.price).toBe(40000);
+  });
+});
+
+describe('extractPrice — currency variants and unrelated numbers', () => {
+  it.each([
+    ["so'm", 'Фара 350000 so\'m'],
+    ['soʻm', 'Фара 350000 soʻm'],
+    ['сўм', 'Фара 350000 сўм'],
+    ['сoʻм', 'Фара 350000 сoʻм'],
+    ['сом', 'Фара 350000 сом'],
+    ['som', 'Фара 350000 som'],
+    ['UZS', 'Фара 350000 UZS'],
+  ])('parses price with currency "%s"', (_label, text) => {
+    const r = ruleBasedParse(text);
+    expect(r.price).toBe(350000);
+  });
+
+  it('ignores a phone number as a price', () => {
+    const r = ruleBasedParse('Фара Cobalt\n\nтел +998901234567 звоните');
+    expect(r.price).toBeNull(); // phone is not a price
+  });
+
+  it('ignores a year as a price', () => {
+    const r = ruleBasedParse('Фара Cobalt\n\nмашина 2015 года');
+    expect(r.price).toBeNull(); // 2015 is a year, not a price
+  });
+
+  it('ignores mileage as a price', () => {
+    const r = ruleBasedParse('Двигатель Cobalt\n\nпробег 120000 км');
+    expect(r.price).toBeNull(); // 120000 km is mileage, not a price
+  });
+
+  it('still takes a currency-marked price even when a year is present', () => {
+    const r = ruleBasedParse('Фара Cobalt\n\n2015 года, цена 250000 сум');
+    expect(r.price).toBe(250000);
+  });
+});
+
 describe('computeConfidence', () => {
   it('sums the configured weights', () => {
     expect(
