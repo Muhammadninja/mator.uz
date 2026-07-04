@@ -1,9 +1,33 @@
 import {
   RULE_CONFIDENCE_THRESHOLD,
   computeConfidence,
+  extractPriceFromText,
   normalizeText,
   ruleBasedParse,
 } from './rule-based-parser';
+
+describe('extractPriceFromText — the shared text→price entry point', () => {
+  // This is what the Telegram price fallback (extractPriceFallback) now uses, so
+  // these guard the production fallback path against the old "130.000 → 130/0" bug.
+  it.each([
+    ['130.000 сум', 130000],
+    ['1.250.000 сум', 1250000],
+    ["130.000 so'm", 130000],
+    ['350000 сум', 350000],
+    ['130.00 сум', 130],
+    ['Фильтр масла 96535062 25000 сум', 25000], // skips the GM code, takes the price
+  ])('extracts %s → %s', (input, expected) => {
+    expect(extractPriceFromText(input)).toBe(expected);
+  });
+
+  it('returns null when there is no price', () => {
+    expect(extractPriceFromText('нет цены тут')).toBeNull();
+  });
+
+  it('ignores a bare phone number (not a price)', () => {
+    expect(extractPriceFromText('звоните 998901234567')).toBeNull();
+  });
+});
 
 describe('normalizeText', () => {
   it('collapses whitespace and trims', () => {

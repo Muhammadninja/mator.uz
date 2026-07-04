@@ -76,6 +76,18 @@ interface PriceHit {
   raw: string[];
 }
 
+/**
+ * Extract a price VALUE from free text (a full seller caption), returning the
+ * parsed number or null. This is the SINGLE robust text→price entry point:
+ * it finds the number adjacent to a currency word (or a safe bare number),
+ * ignoring GM codes / phones / years / mileage, and runs it through the shared
+ * parsePrice so "130.000 сум" → 130000. Exported so callers outside the parser
+ * (e.g. the Telegram fallback) never reimplement price extraction.
+ */
+export function extractPriceFromText(text: string): number | null {
+  return extractPrice(text).value;
+}
+
 // Price: a number explicitly followed by a currency word is strongest. Falls
 // back to the largest "big" bare number (> 1000) which is almost always a price.
 function extractPrice(text: string): PriceHit {
