@@ -35,7 +35,13 @@ export const VEHICLE_CATALOG: CatalogBrand[] = [
       { canonical: 'Nexia 2', aliases: ['nexia 2', 'nexia2', 'нексия 2', 'нексия2', 'некся 2'] },
       { canonical: 'Damas', aliases: ['damas', 'дамас', 'damass', 'дамаз'] },
       { canonical: 'Labo', aliases: ['labo', 'лабо', 'labbo'] },
-      { canonical: 'Lacetti (Gentra)', aliases: ['lacetti', 'лачетти', 'лачети', 'laceti', 'lachetti', 'gentra', 'джентра', 'гентра', 'жентра', 'jentra'] },
+      // Lacetti and Gentra are distinct model names and must canonicalize to
+      // themselves. In UZ the Lacetti sedan was rebadged as the Gentra, so they
+      // were once bundled as "Lacetti (Gentra)" — but that made BOTH names
+      // resolve to the combined string. Kept as two separate models, each with
+      // only its own alias family, so "Lacetti" → Lacetti and "Gentra" → Gentra.
+      { canonical: 'Lacetti', aliases: ['lacetti', 'лачетти', 'лачети', 'laceti', 'lachetti'] },
+      { canonical: 'Gentra', aliases: ['gentra', 'джентра', 'гентра', 'жентра', 'jentra', 'gentr'] },
       { canonical: 'Matiz', aliases: ['matiz', 'матиз', 'matis', 'матис'] },
       { canonical: 'Captiva', aliases: ['captiva', 'каптива', 'kaptiva'] },
       { canonical: 'Tracker', aliases: ['tracker', 'трекер', 'treker'] },

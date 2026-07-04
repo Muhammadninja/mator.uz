@@ -167,3 +167,41 @@ describe('canonicalize', () => {
     expect(canonicalizeModel('UnknownModel')).toBe('UnknownModel');
   });
 });
+
+describe('Gentra / Lacetti are distinct models (regression: "Lacetti (Gentra)")', () => {
+  // Root cause: a single Chevrolet model canonical "Lacetti (Gentra)" bundled the
+  // lacetti AND gentra alias families, so both names resolved to the combined
+  // string. They are now two separate models resolving to themselves.
+
+  it('Gentra resolves to Gentra (never "Lacetti (Gentra)")', () => {
+    expect(canonicalizeModel('gentra')).toBe('Gentra');
+    expect(canonicalizeModel('Gentra')).toBe('Gentra');
+    expect(matchCatalog('Магнитола Gentra').models).toEqual(['Gentra']);
+  });
+
+  it('Lacetti resolves to Lacetti (never "Lacetti (Gentra)")', () => {
+    expect(canonicalizeModel('lacetti')).toBe('Lacetti');
+    expect(matchCatalog('Фара Lacetti').models).toEqual(['Lacetti']);
+  });
+
+  it('neither model is converted into the other', () => {
+    expect(canonicalizeModel('gentra')).not.toContain('Lacetti');
+    expect(canonicalizeModel('lacetti')).not.toContain('Gentra');
+  });
+
+  it('preserves Latin & Cyrillic spelling variants and the gentr abbreviation', () => {
+    for (const g of ['gentra', 'джентра', 'гентра', 'жентра', 'jentra', 'gentr']) {
+      expect(canonicalizeModel(g)).toBe('Gentra');
+    }
+    for (const l of ['lacetti', 'лачетти', 'лачети', 'laceti', 'lachetti']) {
+      expect(canonicalizeModel(l)).toBe('Lacetti');
+    }
+  });
+
+  it('detects Cobalt, Gentra and Lacetti as three separate models in one caption', () => {
+    const r = matchCatalog('колодки тормозные cobalt gentra lacetti');
+    expect(r.brand).toBe('Chevrolet');
+    expect(r.models).toEqual(expect.arrayContaining(['Cobalt', 'Gentra', 'Lacetti']));
+    expect(r.models).not.toContain('Lacetti (Gentra)');
+  });
+});

@@ -408,8 +408,18 @@ function parseMultiParagraph(paragraphs: string[]): RuleBasedResult {
   }
 
   // 3. MERGE — title wins; description fills only what the title is missing.
-  const brand = fromTitle.brand ?? fromDesc?.brand ?? null;
-  const models = fromTitle.models.length ? fromTitle.models : fromDesc?.models ?? [];
+  //
+  // Make/model fallback is deliberately restricted to LINE 2 (the description)
+  // only — never lines 3+ (GM/price). The vehicle is guaranteed to be in the
+  // title or the description, so a number line can never be a make/model source.
+  // (GM/price recovery below still uses the full rest text, unchanged.)
+  const descBrandModel =
+    !titleHasAllFields && paragraphs[1] !== undefined
+      ? matchCatalog(normalizeText(paragraphs[1]))
+      : { brand: null, models: [] as string[] };
+
+  const brand = fromTitle.brand ?? descBrandModel.brand;
+  const models = fromTitle.models.length ? fromTitle.models : descBrandModel.models;
   const gm_number = fromTitle.gm_number ?? fromDesc?.gm_number ?? null;
   const price = fromTitle.price ?? fromDesc?.price ?? null;
 
