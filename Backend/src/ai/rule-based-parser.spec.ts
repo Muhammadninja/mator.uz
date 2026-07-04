@@ -178,6 +178,15 @@ describe('ruleBasedParse — title→description recovery (two-line listings)', 
     expect(r.price).toBe(200000);
   });
 
+  it('make/model fallback uses line 2 only — a vehicle on line 3 is NOT used', () => {
+    // Title has no vehicle; line 2 (description) has none either; a model name
+    // sits on line 3 alongside the GM. It must NOT populate make/model, since the
+    // fallback only ever looks at line 2.
+    const r = ruleBasedParse('Магнитола\n\nоригинал новая\n\nCobalt 96549774112\n\n350000');
+    expect(r.brand).toBeNull();
+    expect(r.models).toEqual([]);
+  });
+
   it('PREFERS title values over description values (title wins)', () => {
     // Both lines carry a price; the title's must win (rule #3).
     const r = ruleBasedParse('Диск тормозной 100000 сум\n\nбыло 999999 сум');

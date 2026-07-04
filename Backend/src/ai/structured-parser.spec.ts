@@ -146,6 +146,60 @@ describe('parseStructuredCaption', () => {
   });
 });
 
+describe('parseStructuredCaption — make/model from title OR description (lines 1–2 only)', () => {
+  // The vehicle is guaranteed to be in line 1 (title) or line 2 (description),
+  // never in line 3 (GM) or line 4 (price). These cover all structured shapes.
+
+  it('extracts make/model when ONLY the title has them (8-digit positional)', () => {
+    const r = parseStructuredCaption('Магнитола Chevrolet Cobalt\nновая\n96234567\n450000');
+    expect(r?.brand).toBe('Chevrolet');
+    expect(r?.models).toContain('Cobalt');
+  });
+
+  it('extracts make/model when ONLY the title has them (11-digit exact)', () => {
+    const r = parseStructuredCaption('Фара Chevrolet Cobalt\nоригинал\n96549774112\n350000');
+    expect(r?.brand).toBe('Chevrolet');
+    expect(r?.models).toContain('Cobalt');
+  });
+
+  it('recovers make/model from the DESCRIPTION when the title lacks them (8-digit)', () => {
+    const r = parseStructuredCaption('Магнитола\nChevrolet Cobalt новая\n96234567\n450000');
+    expect(r?.brand).toBe('Chevrolet'); // from line 2
+    expect(r?.models).toContain('Cobalt');
+  });
+
+  it('recovers make/model from the DESCRIPTION when the title lacks them (11-digit)', () => {
+    const r = parseStructuredCaption('Магнитола\nChevrolet Cobalt\n96549774112\n450000');
+    expect(r?.brand).toBe('Chevrolet');
+    expect(r?.models).toContain('Cobalt');
+  });
+
+  it('recovers make/model from a DESCRIPTION label (labeled format)', () => {
+    const r = parseStructuredCaption(
+      'Название: Магнитола\nОписание: Chevrolet Cobalt\nGM: 96234567\nЦена: 450000',
+    );
+    expect(r?.brand).toBe('Chevrolet');
+    expect(r?.models).toContain('Cobalt');
+  });
+
+  it('never mines line 3 (GM) or line 4 (price) for make/model', () => {
+    // No vehicle in lines 1–2; lines 3 & 4 are a real GM and price. brand/models
+    // MUST stay empty — a GM number or price is never a make/model source.
+    const r = parseStructuredCaption('Магнитола\nоригинал новая\n96549774112\n350000');
+    expect(r?.brand).toBeNull();
+    expect(r?.models).toEqual([]);
+    // GM/price are still correct and untouched.
+    expect(r?.gm_number).toBe('96549774112');
+    expect(r?.price).toBe(350000);
+  });
+
+  it('title make/model win; description is a fallback only', () => {
+    // Title has the model; description names a different one — the title wins.
+    const r = parseStructuredCaption('Фара Spark\nтакже Cobalt\n96549774112\n350000');
+    expect(r?.models).toContain('Spark'); // from the title (primary)
+  });
+});
+
 describe('parseStructuredCaption — highest-priority 11-digit exception', () => {
   // Rule: when line 3 is a valid 11-digit GM AND line 4 is a valid price, take
   // GM/price DIRECTLY from lines 3 & 4; do not extract them from title/desc.
