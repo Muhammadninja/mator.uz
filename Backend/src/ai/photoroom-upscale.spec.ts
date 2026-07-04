@@ -17,8 +17,7 @@ import {
 
 const DEFAULT_CFG: UpscaleConfig = {
   enabled: true,
-  minLongSide: 2000,
-  alwaysUpscaleBelow: 1200,
+  maxPixels: 1_000_000,
   mode: 'ai.fast',
 };
 
@@ -66,33 +65,31 @@ function makeService(cfg: Partial<UpscaleConfig> = {}): {
   };
 }
 
-describe('shouldUpscale — threshold logic', () => {
-  it('960×1280 → upscale (long side 1280 < 2000)', () => {
-    expect(shouldUpscale(Math.max(960, 1280), DEFAULT_CFG)).toBe(true);
+describe('shouldUpscale — pixel-limit logic (≤ 1,000,000 px)', () => {
+  it('960×1280 = 1,228,800 px → NOT upscale (over 1,000,000 limit)', () => {
+    expect(shouldUpscale(960 * 1280, DEFAULT_CFG)).toBe(false);
   });
 
-  // Boundary semantics (resolved against a contradictory spec): the rule
-  // "longSide ≥ minLongSide ⇒ skip" wins, so a long side of exactly 2000 SKIPS.
-  // This upholds "Images ≥2000px must never call the Upscale API". (The spec's
-  // "1500×2000 → Upscale called" example is treated as a typo — long side 2000.)
-  it('1500×2000 → NOT upscale (long side 2000 = min boundary, skip)', () => {
-    expect(shouldUpscale(Math.max(1500, 2000), DEFAULT_CFG)).toBe(false);
+  it('800×1000 = 800,000 px → upscale (under the limit)', () => {
+    expect(shouldUpscale(800 * 1000, DEFAULT_CFG)).toBe(true);
   });
 
-  it('long side 1999 → upscale (just under min)', () => {
-    expect(shouldUpscale(1999, DEFAULT_CFG)).toBe(true);
+  // Boundary: exactly 1,000,000 px is at the limit and MUST upscale
+  // ("1,000,000 pixels or fewer" is included).
+  it('1000×1000 = 1,000,000 px → upscale (at the limit, inclusive)', () => {
+    expect(shouldUpscale(1000 * 1000, DEFAULT_CFG)).toBe(true);
   });
 
-  it('2000×3000 → NOT upscale (long side 3000 ≥ 2000)', () => {
-    expect(shouldUpscale(Math.max(2000, 3000), DEFAULT_CFG)).toBe(false);
+  it('1,000,001 px → NOT upscale (just over the limit)', () => {
+    expect(shouldUpscale(1_000_001, DEFAULT_CFG)).toBe(false);
   });
 
-  it('4000×3000 → NOT upscale (long side 4000 ≥ 2000)', () => {
-    expect(shouldUpscale(Math.max(4000, 3000), DEFAULT_CFG)).toBe(false);
+  it('2000×3000 = 6,000,000 px → NOT upscale (well over the limit)', () => {
+    expect(shouldUpscale(2000 * 3000, DEFAULT_CFG)).toBe(false);
   });
 
   it('disabled config never upscales', () => {
-    expect(shouldUpscale(500, { ...DEFAULT_CFG, enabled: false })).toBe(false);
+    expect(shouldUpscale(500 * 500, { ...DEFAULT_CFG, enabled: false })).toBe(false);
   });
 });
 
@@ -100,8 +97,7 @@ describe('resolveUpscaleConfig — env parsing & validation', () => {
   it('uses spec defaults when env is empty', () => {
     expect(resolveUpscaleConfig({})).toEqual({
       enabled: true,
-      minLongSide: 2000,
-      alwaysUpscaleBelow: 1200,
+      maxPixels: 1_000_000,
       mode: 'ai.fast',
     });
   });
@@ -110,19 +106,15 @@ describe('resolveUpscaleConfig — env parsing & validation', () => {
     expect(resolveUpscaleConfig({ AI_UPSCALE_ENABLED: 'false' }).enabled).toBe(false);
   });
 
-  it('parses overridden numeric thresholds', () => {
-    const cfg = resolveUpscaleConfig({
-      AI_UPSCALE_MIN_LONG_SIDE: '2400',
-      AI_UPSCALE_ALWAYS_UPSCALE_BELOW: '1000',
-    });
-    expect(cfg.minLongSide).toBe(2400);
-    expect(cfg.alwaysUpscaleBelow).toBe(1000);
+  it('parses an overridden pixel limit', () => {
+    const cfg = resolveUpscaleConfig({ AI_UPSCALE_MAX_PIXELS: '2000000' });
+    expect(cfg.maxPixels).toBe(2_000_000);
   });
 
   it('invalid numeric values fall back to default with a warning', () => {
     const warnings: string[] = [];
-    const cfg = resolveUpscaleConfig({ AI_UPSCALE_MIN_LONG_SIDE: 'abc' }, (m) => warnings.push(m));
-    expect(cfg.minLongSide).toBe(2000);
+    const cfg = resolveUpscaleConfig({ AI_UPSCALE_MAX_PIXELS: 'abc' }, (m) => warnings.push(m));
+    expect(cfg.maxPixels).toBe(1_000_000);
     expect(warnings).toHaveLength(1);
   });
 
@@ -139,32 +131,32 @@ describe('resolveUpscaleConfig — env parsing & validation', () => {
 });
 
 describe('maybeUpscale — integration (metadata → decide → call/fallback)', () => {
-  it('960×1280 → Upscale API IS called', async () => {
+  it('800×1000 = 800,000 px → Upscale API IS called (under the limit)', async () => {
     const { svc, calls } = makeService();
-    const img = await makeImage(960, 1280);
+    const img = await makeImage(800, 1000);
     const out = await svc.maybeUpscale(img);
     expect(calls).toEqual(['upscale (ai.fast)']);
     expect(out.toString()).toBe('UPSCALED'); // returns the upscaled buffer
   });
 
-  it('1500×1999 → Upscale API IS called (mid band, under 2000)', async () => {
+  it('1000×1000 = 1,000,000 px → Upscale API IS called (at the limit)', async () => {
     const { svc, calls } = makeService();
-    const img = await makeImage(1500, 1999);
+    const img = await makeImage(1000, 1000);
     await svc.maybeUpscale(img);
     expect(calls).toEqual(['upscale (ai.fast)']);
   });
 
-  it('2000×3000 → Upscale API is NOT called', async () => {
+  it('960×1280 = 1,228,800 px → Upscale API is NOT called (over the limit)', async () => {
     const { svc, calls } = makeService();
-    const img = await makeImage(2000, 3000);
+    const img = await makeImage(960, 1280);
     const out = await svc.maybeUpscale(img);
     expect(calls).toEqual([]); // never touches the API
-    expect(out).toBe(img); // original returned unchanged
+    expect(out).toBe(img); // original returned unchanged, pipeline continues
   });
 
-  it('4000×3000 → Upscale API is NOT called', async () => {
+  it('2000×3000 = 6,000,000 px → Upscale API is NOT called', async () => {
     const { svc, calls } = makeService();
-    const img = await makeImage(4000, 3000);
+    const img = await makeImage(2000, 3000);
     const out = await svc.maybeUpscale(img);
     expect(calls).toEqual([]);
     expect(out).toBe(img);
@@ -174,7 +166,7 @@ describe('maybeUpscale — integration (metadata → decide → call/fallback)',
     const { svc, calls, setUpscaleResult } = makeService();
     // callPhotoroom for a non-required step returns null on failure.
     setUpscaleResult(null);
-    const img = await makeImage(960, 1280);
+    const img = await makeImage(800, 1000);
 
     const out = await svc.maybeUpscale(img);
 

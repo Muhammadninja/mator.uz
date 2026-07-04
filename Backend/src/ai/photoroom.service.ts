@@ -28,23 +28,21 @@ const MAX_ATTEMPTS = 1;
 // ── AI Upscale (optional pre-stage before background removal) ────────────────
 // Defaults per spec. Overridable via env (see resolveUpscaleConfig):
 //   AI_UPSCALE_ENABLED=true
-//   AI_UPSCALE_MIN_LONG_SIDE=2000          → long side ≥ this ⇒ SKIP upscale
-//   AI_UPSCALE_ALWAYS_UPSCALE_BELOW=1200   → long side < this ⇒ ALWAYS upscale
+//   AI_UPSCALE_MAX_PIXELS=1000000          → width*height > this ⇒ SKIP upscale
 //   AI_UPSCALE_MODE=ai.fast                → Photoroom upscale.mode
-// Decision (see shouldUpscale): long side ≥ MIN_LONG_SIDE ⇒ skip; otherwise
-// upscale (both the <1200 and 1200–2000 ranges upscale — kept explicit so the
-// two bands can diverge later without touching call sites).
+// Decision (see shouldUpscale): PhotoRoom's AI Upscale only accepts inputs of at
+// most 1,000,000 pixels (width × height). Images above that limit are skipped as
+// an EXPECTED condition (not an error) — the pipeline continues from the previous
+// step's output. Images at or below the limit are upscaled.
 const AI_UPSCALE_ENABLED_DEFAULT = true;
-const AI_UPSCALE_MIN_LONG_SIDE_DEFAULT = 2000;
-const AI_UPSCALE_ALWAYS_UPSCALE_BELOW_DEFAULT = 1200;
+const AI_UPSCALE_MAX_PIXELS_DEFAULT = 1_000_000;
 const AI_UPSCALE_MODE_DEFAULT = 'ai.fast';
 // Photoroom-supported upscale modes. Invalid config falls back to the default.
 const AI_UPSCALE_MODES = ['ai.fast', 'ai.slow'] as const;
 
 export interface UpscaleConfig {
   enabled: boolean;
-  minLongSide: number;
-  alwaysUpscaleBelow: number;
+  maxPixels: number;
   mode: string;
 }
 
@@ -88,37 +86,31 @@ export function resolveUpscaleConfig(
 
   return {
     enabled,
-    minLongSide: parseIntEnv(env.AI_UPSCALE_MIN_LONG_SIDE, AI_UPSCALE_MIN_LONG_SIDE_DEFAULT, 'AI_UPSCALE_MIN_LONG_SIDE'),
-    alwaysUpscaleBelow: parseIntEnv(
-      env.AI_UPSCALE_ALWAYS_UPSCALE_BELOW,
-      AI_UPSCALE_ALWAYS_UPSCALE_BELOW_DEFAULT,
-      'AI_UPSCALE_ALWAYS_UPSCALE_BELOW',
-    ),
+    maxPixels: parseIntEnv(env.AI_UPSCALE_MAX_PIXELS, AI_UPSCALE_MAX_PIXELS_DEFAULT, 'AI_UPSCALE_MAX_PIXELS'),
     mode,
   };
 }
 
 /**
- * Decide whether AI Upscale should run for an image with the given long side.
- *  • long side ≥ minLongSide            → skip (already high-res).
- *  • long side < alwaysUpscaleBelow     → upscale (low-res).
- *  • alwaysUpscaleBelow ≤ ls < minLongSide → upscale (mid-res band).
- * The two sub-2000 bands both upscale today, but are kept as an explicit branch
- * so they can diverge later. Disabled config always returns false.
+ * Decide whether AI Upscale should run for an image with the given pixel count
+ * (width × height). PhotoRoom's AI Upscale rejects inputs larger than maxPixels
+ * (1,000,000 by default), so:
+ *  • totalPixels ≤ maxPixels → upscale (within PhotoRoom's limit).
+ *  • totalPixels > maxPixels → skip (over the limit; expected, not an error).
+ * Disabled config always returns false.
  */
-export function shouldUpscale(longSide: number, cfg: UpscaleConfig): boolean {
+export function shouldUpscale(totalPixels: number, cfg: UpscaleConfig): boolean {
   if (!cfg.enabled) return false;
-  if (longSide >= cfg.minLongSide) return false;
-  if (longSide < cfg.alwaysUpscaleBelow) return true;
-  return true;
+  return totalPixels <= cfg.maxPixels;
 }
 
 /**
  * Pipeline (детерминированный, единый для всех изображений каталога):
  *   original seller photo
- *     0. (optional) Photoroom upscale → AI Upscale для низко-/среднеразрешённых
- *                                      фото (по длинной стороне); на неудаче —
- *                                      исходник. Фото ≥2000px не апскейлятся.
+ *     0. (optional) Photoroom upscale → AI Upscale только если исходник
+ *                                      ≤1 000 000 пикселей (width×height); фото
+ *                                      сверх лимита PhotoRoom пропускаются штатно
+ *                                      (не ошибка); на неудаче — исходник.
  *     1. Photoroom /v2/edit          → ТОЛЬКО removeBackground → прозрачный PNG
  *     2. localBeautify (Sharp)       → тон/цвет-коррекция RGB (normalize/gamma/
  *                                      modulate) + дефриндж альфы, БЕЗ AI
@@ -212,9 +204,12 @@ export class PhotoroomService {
 
   /**
    * Optionally AI-upscale the ORIGINAL image before background removal. Reads the
-   * dimensions via Sharp metadata only (no decode/resize) to compute the long
-   * side, then applies the configured thresholds (see shouldUpscale). Upscales
-   * only when required; images ≥ minLongSide never touch the Upscale API.
+   * dimensions via Sharp metadata only (no decode/resize) to compute the total
+   * pixel count (width × height), then applies the configured limit (see
+   * shouldUpscale). Upscales only when the image is within PhotoRoom's limit;
+   * images over maxPixels (1,000,000 by default) never touch the Upscale API and
+   * the pipeline continues from the previous step's output. Skipping an oversized
+   * image is an EXPECTED condition, not a failure — logged accordingly.
    *
    * Best-effort: if metadata can't be read, or the Upscale call fails/times out,
    * the ORIGINAL buffer is returned so the product upload always proceeds.
@@ -222,13 +217,13 @@ export class PhotoroomService {
   private async maybeUpscale(imageBuffer: Buffer): Promise<Buffer> {
     if (!this.upscaleConfig.enabled) return imageBuffer;
 
-    let longSide: number;
+    let width: number;
+    let height: number;
     try {
       const meta = await sharp(imageBuffer).metadata();
-      const width = meta.width ?? 0;
-      const height = meta.height ?? 0;
-      longSide = Math.max(width, height);
-      if (longSide === 0) return imageBuffer; // unknown dimensions → skip safely
+      width = meta.width ?? 0;
+      height = meta.height ?? 0;
+      if (width === 0 || height === 0) return imageBuffer; // unknown dimensions → skip safely
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn(
@@ -237,7 +232,20 @@ export class PhotoroomService {
       return imageBuffer;
     }
 
-    if (!shouldUpscale(longSide, this.upscaleConfig)) return imageBuffer;
+    const totalPixels = width * height;
+    if (!shouldUpscale(totalPixels, this.upscaleConfig)) {
+      // Not a failure: PhotoRoom's AI Upscale rejects inputs above the pixel
+      // limit, so we intentionally skip the step and continue with the previous
+      // step's image. Logged as info to make the skip clearly distinguishable
+      // from an upscale failure.
+      // eslint-disable-next-line no-console
+      console.info(
+        `PhotoroomService: skipping AI Upscale — image is ${width}×${height} = ` +
+          `${totalPixels.toLocaleString('en-US')}px, over PhotoRoom's ` +
+          `${this.upscaleConfig.maxPixels.toLocaleString('en-US')}px limit; continuing without upscale.`,
+      );
+      return imageBuffer;
+    }
 
     const upscaled = await this.upscaleImage(imageBuffer);
     // Soft-fail: on any Upscale failure keep the original (upscaleImage logged it).
