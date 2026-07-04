@@ -232,6 +232,10 @@ model Product {
   title       String         @db.VarChar(255)
   description String?        @db.Text
   imageUrl    String?        @map("image_url") // primary image mirror (back-compat)
+  // Fits every vehicle. Fitment is otherwise derived from part_models rows:
+  // isUniversal=false + 1 row → SINGLE, N rows → MULTIPLE; when true there are
+  // no part_models rows for the product.
+  isUniversal Boolean        @default(false) @map("is_universal")
   createdAt   DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt   DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
   partModels  PartModel[]

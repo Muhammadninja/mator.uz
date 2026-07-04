@@ -25,7 +25,7 @@
 
 import type { ParsedPartMetadata } from './part-parser.types';
 import { parsePrice } from './price-parser';
-import { matchCatalog } from './vehicle-catalog';
+import { deriveVehicleCompatibility } from './vehicle-catalog';
 
 // Currency indicators accepted at the end of a price line. Mirrors the set the
 // rule-based parser recognizes (kept inline to avoid a circular import, since
@@ -157,11 +157,12 @@ function parsePriceValue(p: string): number | null {
 }
 
 /**
- * Assemble the final metadata from resolved field values. The vehicle make/model
- * is detected from the TITLE first and, if still missing, from the DESCRIPTION —
- * i.e. only lines 1 & 2 (rule: make/model live in the title or description, never
- * in the GM/price lines). GM (line 3) and price (line 4) are NEVER fed to the
- * catalog matcher. The title/description text themselves are left unchanged.
+ * Assemble the final metadata from resolved field values. Vehicle compatibility
+ * is the UNION of the TITLE and the DESCRIPTION — i.e. only lines 1 & 2 (rule:
+ * make/model live in the title or description, never in the GM/price lines).
+ * GM (line 3) and price (line 4) are NEVER fed to the catalog matcher. A
+ * universal-fitment claim in either chunk wins and suppresses model extraction.
+ * The title/description text themselves are left unchanged.
  */
 function build(fields: {
   title: string | null;
@@ -173,39 +174,16 @@ function build(fields: {
   if (title.length < 3) return null;
 
   const description = fields.description?.trim() || null;
-  const catalog = matchMakeModel(title, description);
+  const compat = deriveVehicleCompatibility([title, description]);
   return {
     title,
     description,
-    brand: catalog.brand,
-    models: catalog.models,
+    brand: compat.brand,
+    models: compat.models,
+    vehicles: compat.vehicles,
+    isUniversal: compat.isUniversal,
     gm_number: fields.gm,
     price: fields.price,
-  };
-}
-
-/**
- * Detect vehicle make/model from the TITLE first, falling back to the
- * DESCRIPTION for whatever the title is missing. ONLY these two sources are ever
- * consulted — GM and price lines are never passed in. Title values win; the
- * description only supplies a missing brand or an empty model list.
- */
-function matchMakeModel(
-  title: string,
-  description: string | null,
-): { brand: string | null; models: string[] } {
-  const fromTitle = matchCatalog(title);
-  // Title has both → done, no need to look at the description.
-  if (fromTitle.brand && fromTitle.models.length > 0) {
-    return { brand: fromTitle.brand, models: fromTitle.models };
-  }
-  if (!description) {
-    return { brand: fromTitle.brand, models: fromTitle.models };
-  }
-  const fromDesc = matchCatalog(description);
-  return {
-    brand: fromTitle.brand ?? fromDesc.brand,
-    models: fromTitle.models.length ? fromTitle.models : fromDesc.models,
   };
 }
 
@@ -347,19 +325,15 @@ function parsePositionalExact(paragraphs: string[]): ParsedPartMetadata | null {
   const descriptionLines = [paragraphs[1], ...paragraphs.slice(4)].filter(Boolean);
   const description = descriptionLines.length ? descriptionLines.join(' ') : null;
 
-  // Make/model come from the TITLE first, then the DESCRIPTION — only lines 1 & 2
-  // are consulted. GM/price are already fixed from lines 3 & 4 and never passed
-  // to the catalog matcher.
-  const catalog = matchMakeModel(title.trim(), description?.trim() || null);
-
-  return {
+  // Vehicle compatibility = union of TITLE and DESCRIPTION — only lines 1 & 2
+  // (+ extra description lines 5+) are consulted. GM/price are already fixed
+  // from lines 3 & 4 and never passed to the catalog matcher.
+  return build({
     title: title.trim(),
     description: description?.trim() || null,
-    brand: catalog.brand,
-    models: catalog.models,
-    gm_number: gm, // directly from line 3
+    gm, // directly from line 3
     price, // directly from line 4
-  };
+  });
 }
 
 /**
