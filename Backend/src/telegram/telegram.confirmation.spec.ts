@@ -7,7 +7,26 @@
 
 import { Decimal } from '@prisma/client/runtime/library';
 import type { ParseOutcome } from '../ai/part-parser.types';
-import { TelegramService } from './telegram.service';
+import { TelegramService, extractPriceFallback } from './telegram.service';
+
+// Guards the PRODUCTION price fallback (used when the main parser returns a null
+// price) — it now delegates to the shared parser instead of a private regex that
+// stopped at the dot ("130.000 сум" → 130/0). This is on the real DB-insert path.
+describe('extractPriceFallback — production price fallback', () => {
+  it.each([
+    ['130.000 сум', '130000'],
+    ['1.250.000 сум', '1250000'],
+    ["130.000 so'm", '130000'],
+    ['350000 сум', '350000'],
+    ['Фильтр масла 96535062 25000 сум', '25000'], // ignores the GM code
+  ])('parses %s → %s UZS', (caption, expected) => {
+    expect(extractPriceFallback(caption).toString()).toBe(expected);
+  });
+
+  it('returns Decimal(0) when no price can be found', () => {
+    expect(extractPriceFallback('нет цены').toString()).toBe('0');
+  });
+});
 
 // Surface just the private members we drive in these tests. We build the
 // instance from the prototype and cast through `unknown`, so this stands alone

@@ -7,6 +7,7 @@ import { Context, Markup, Telegraf } from 'telegraf';
 import { message } from 'telegraf/filters';
 import type { ParseOutcome } from '../ai/part-parser.types';
 import { PartParserService } from '../ai/part-parser.service';
+import { extractPriceFromText } from '../ai/rule-based-parser';
 import { PhotoroomService } from '../ai/photoroom.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SellersService } from '../sellers/sellers.service';
@@ -77,14 +78,23 @@ interface PendingProduct {
   expiry: NodeJS.Timeout;
 }
 
-function extractPriceFallback(text: string): Decimal {
-  const currencyMatch = text.match(/(\d+)\s*(uzs|UZS|сўм|сум)/i);
-  if (currencyMatch) return new Decimal(currencyMatch[1]);
-  const matches = text.match(/\d+/g);
-  if (!matches) return new Decimal(0);
-  const candidates = matches.map(Number).filter((n) => n > 1000);
-  if (candidates.length > 0) return new Decimal(Math.max(...candidates));
-  return new Decimal(Math.max(...matches.map(Number)));
+/**
+ * Last-resort price extraction from the raw caption, used ONLY when the main
+ * parser (PartParserService) returns a null price. It delegates to the SAME
+ * shared parsePrice used everywhere else, so a thousands-grouped price like
+ * "130.000" resolves to 130000 here too — this path previously used a private
+ * regex that stopped at the dot ("130.000 сум" → 130) and lacked the currency
+ * variants / unrelated-number guards, silently corrupting fallback prices.
+ *
+ * extractPriceFromText finds the number next to a currency word (or a safe bare
+ * number), ignoring GM codes / phones / years / mileage, and applies the shared
+ * parsePrice (thousands/decimal rules + currency stripping). Returns Decimal(0)
+ * when no price can be found, preserving the previous "never throw, default to
+ * 0" contract for the caller.
+ */
+export function extractPriceFallback(text: string): Decimal {
+  const value = extractPriceFromText(text);
+  return value !== null ? new Decimal(value) : new Decimal(0);
 }
 
 @Injectable()
