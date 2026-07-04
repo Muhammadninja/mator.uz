@@ -131,6 +131,15 @@ describe('ruleBasedParse — title→description recovery (two-line listings)', 
     expect(r.price).toBe(350000); // recovered from the description
   });
 
+  it('parses 130.000 from the description as 130000 (thousands, not 130)', () => {
+    // Regression guard for the reported bug: a dot-grouped price in the
+    // description must use the shared parser (130.000 → 130000), with or
+    // without a currency word.
+    expect(ruleBasedParse('Фара Cobalt\n\nоригинал 130.000 сум').price).toBe(130000);
+    expect(ruleBasedParse('Фара Cobalt\n\nоригинал 130.000').price).toBe(130000);
+    expect(ruleBasedParse('Фара Cobalt\n\nцена 1.250.000 сум').price).toBe(1250000);
+  });
+
   it('recovers an 11-digit GM number from the description', () => {
     const r = ruleBasedParse('Фара передняя Cobalt\n\nоригинал 96549774112 350000 сум');
     expect(r.gm_number).toBe('96549774112'); // exactly 11 digits, from description
