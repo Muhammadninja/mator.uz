@@ -24,6 +24,7 @@
 // so the caller can fall back to the existing rule-based + AI pipeline.
 
 import type { ParsedPartMetadata } from './part-parser.types';
+import { parsePrice } from './price-parser';
 import { matchCatalog } from './vehicle-catalog';
 
 /** The four structured fields a label can introduce. */
@@ -102,15 +103,21 @@ function parseGmValue(p: string): string | null {
   return digits;
 }
 
-/** A value that is a price: a number, optionally with thousands separators
- *  and/or a trailing currency word. Returns the numeric value. */
+/**
+ * A value that is a price: a number, optionally with thousands separators (".",
+ * ",", or space) and/or a trailing currency word. Delegates to the shared
+ * parsePrice so "130.000" → 130000 (dot as thousands) while "130.00" → 130
+ * (dot as decimal). The value must be the WHOLE field (currency aside) — a
+ * paragraph carrying other text is not a bare price and is rejected.
+ */
 function parsePriceValue(p: string): number | null {
-  const m = p.match(/^\s*(\d[\d.,\s]*)\s*(uzs|сум|сўм|so'm|som|usd|\$|у\.е\.?)?\s*$/i);
-  if (!m) return null;
-  const digits = m[1].replace(/[.,\s]/g, '');
-  if (!digits) return null;
-  const value = parseInt(digits, 10);
-  return Number.isFinite(value) && value > 0 ? value : null;
+  // Guard: the price field must be only a number (+ optional currency word),
+  // matching the previous strict-anchor behavior so prose lines don't parse as
+  // prices. parsePrice itself then applies the thousands/decimal rules.
+  if (!/^\s*\d[\d.,\s]*\s*(uzs|сум|сўм|so'm|som|usd|\$|у\.е\.?)?\s*$/i.test(p)) {
+    return null;
+  }
+  return parsePrice(p);
 }
 
 /** Assemble the final metadata from resolved field values, detecting the
