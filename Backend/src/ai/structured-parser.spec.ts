@@ -70,6 +70,8 @@ describe('parseStructuredCaption', () => {
       description: 'Производство Корея, новая',
       brand: 'Chevrolet',
       models: ['Nexia 3'],
+      vehicles: [{ brand: 'Chevrolet', model: 'Nexia 3' }],
+      isUniversal: false,
       gm_number: '96234567',
       price: 450000,
     });
@@ -193,10 +195,74 @@ describe('parseStructuredCaption — make/model from title OR description (lines
     expect(r?.price).toBe(350000);
   });
 
-  it('title make/model win; description is a fallback only', () => {
-    // Title has the model; description names a different one — the title wins.
+  it('title AND description models are UNIONED (description no longer ignored)', () => {
+    // Title has one model; the description names another — BOTH are kept.
     const r = parseStructuredCaption('Фара Spark\nтакже Cobalt\n96549774112\n350000');
-    expect(r?.models).toContain('Spark'); // from the title (primary)
+    expect(r?.models).toEqual(expect.arrayContaining(['Spark', 'Cobalt']));
+    expect(r?.vehicles).toEqual(
+      expect.arrayContaining([
+        { brand: 'Chevrolet', model: 'Spark' },
+        { brand: 'Chevrolet', model: 'Cobalt' },
+      ]),
+    );
+  });
+});
+
+describe('parseStructuredCaption — SINGLE / MULTIPLE / UNIVERSAL compatibility', () => {
+  it('single vehicle → one pair, isUniversal false', () => {
+    const r = parseStructuredCaption('Магнитола Cobalt\nновая\n96234567\n450000');
+    expect(r?.isUniversal).toBe(false);
+    expect(r?.vehicles).toEqual([{ brand: 'Chevrolet', model: 'Cobalt' }]);
+  });
+
+  it('vehicles split across title and description merge deduplicated', () => {
+    const r = parseStructuredCaption(
+      'Бампер Cobalt\nПодходит также Gentra и Lacetti, и на Cobalt\n96234567\n450000',
+    );
+    expect(r?.vehicles).toHaveLength(3); // Cobalt deduplicated across lines
+    expect(r?.vehicles).toEqual(
+      expect.arrayContaining([
+        { brand: 'Chevrolet', model: 'Cobalt' },
+        { brand: 'Chevrolet', model: 'Gentra' },
+        { brand: 'Chevrolet', model: 'Lacetti' },
+      ]),
+    );
+  });
+
+  it('slash-separated multi-model title ("Malibu 2 / Equinox") yields all pairs', () => {
+    const r = parseStructuredCaption('Стойка Malibu 2 / Equinox\nоригинал\n96234567\n450000');
+    expect(r?.vehicles).toEqual(
+      expect.arrayContaining([
+        { brand: 'Chevrolet', model: 'Malibu' },
+        { brand: 'Chevrolet', model: 'Equinox' },
+      ]),
+    );
+  });
+
+  it('cross-brand listing keeps each model under its own brand', () => {
+    const r = parseStructuredCaption('Подшипник Cobalt, Kia Rio\nоригинал\n96234567\n450000');
+    expect(r?.vehicles).toEqual(
+      expect.arrayContaining([
+        { brand: 'Chevrolet', model: 'Cobalt' },
+        { brand: 'Kia', model: 'Rio' },
+      ]),
+    );
+  });
+
+  it('UNIVERSAL claim in the title → no vehicles, GM/price intact', () => {
+    const r = parseStructuredCaption('Коврики универсальные\nрезиновые\n96234567\n120000');
+    expect(r?.isUniversal).toBe(true);
+    expect(r?.vehicles).toEqual([]);
+    expect(r?.models).toEqual([]);
+    expect(r?.brand).toBeNull();
+    expect(r?.gm_number).toBe('96234567');
+    expect(r?.price).toBe(120000);
+  });
+
+  it('UNIVERSAL claim in the description beats a model in the title', () => {
+    const r = parseStructuredCaption('Ароматизатор Cobalt\nДля всех автомобилей\n96234567\n20000');
+    expect(r?.isUniversal).toBe(true);
+    expect(r?.vehicles).toEqual([]);
   });
 });
 
@@ -287,6 +353,8 @@ describe('parseStructuredCaption — labeled formats', () => {
     description: 'Производство Корея, новая',
     brand: 'Chevrolet',
     models: ['Nexia 3'],
+    vehicles: [{ brand: 'Chevrolet', model: 'Nexia 3' }],
+    isUniversal: false,
     gm_number: '96234567',
     price: 450000,
   };
@@ -403,6 +471,8 @@ describe('parseStructuredCaption — official single-format equivalence', () => 
     description: 'Производство Корея, новая',
     brand: 'Chevrolet',
     models: ['Nexia 3'],
+    vehicles: [{ brand: 'Chevrolet', model: 'Nexia 3' }],
+    isUniversal: false,
     gm_number: '96234567',
     price: 450000,
   };

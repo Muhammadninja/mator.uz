@@ -1,6 +1,8 @@
 import {
   canonicalizeBrand,
   canonicalizeModel,
+  deriveVehicleCompatibility,
+  isUniversalFitment,
   matchCatalog,
 } from './vehicle-catalog';
 
@@ -203,5 +205,138 @@ describe('Gentra / Lacetti are distinct models (regression: "Lacetti (Gentra)")'
     expect(r.brand).toBe('Chevrolet');
     expect(r.models).toEqual(expect.arrayContaining(['Cobalt', 'Gentra', 'Lacetti']));
     expect(r.models).not.toContain('Lacetti (Gentra)');
+  });
+});
+
+// ── Vehicle compatibility: per-model brand pairs ─────────────────────────────
+describe('matchCatalog — (brand, model) pairs', () => {
+  it('pairs a single model with its inferred brand', () => {
+    const r = matchCatalog('бампер cobalt');
+    expect(r.vehicles).toEqual([{ brand: 'Chevrolet', model: 'Cobalt' }]);
+  });
+
+  it('cross-brand caption keeps each model under ITS OWN brand', () => {
+    const r = matchCatalog('стойка cobalt / solaris');
+    expect(r.vehicles).toHaveLength(2);
+    expect(r.vehicles).toEqual(
+      expect.arrayContaining([
+        { brand: 'Chevrolet', model: 'Cobalt' },
+        { brand: 'Hyundai', model: 'Solaris' },
+      ]),
+    );
+  });
+
+  it('explicit brands pair with their own models (Chevrolet Cobalt, Hyundai Solaris)', () => {
+    const r = matchCatalog('chevrolet cobalt, hyundai solaris');
+    expect(r.brands).toEqual(expect.arrayContaining(['Chevrolet', 'Hyundai']));
+    expect(r.vehicles).toEqual(
+      expect.arrayContaining([
+        { brand: 'Chevrolet', model: 'Cobalt' },
+        { brand: 'Hyundai', model: 'Solaris' },
+      ]),
+    );
+  });
+
+  it('an explicit brand that owns a shared model wins (Daewoo Matiz stays Daewoo)', () => {
+    const r = matchCatalog('фара daewoo matiz');
+    expect(r.vehicles).toEqual([{ brand: 'Daewoo', model: 'Matiz' }]);
+  });
+
+  it('a shared model with no explicit brand falls to the first catalog owner', () => {
+    const r = matchCatalog('фара matiz');
+    expect(r.vehicles).toEqual([{ brand: 'Chevrolet', model: 'Matiz' }]);
+  });
+
+  it('mixed explicit/implicit brands (Gentra, Kia Rio)', () => {
+    const r = matchCatalog('прокладка gentra, kia rio');
+    expect(r.vehicles).toEqual(
+      expect.arrayContaining([
+        { brand: 'Chevrolet', model: 'Gentra' },
+        { brand: 'Kia', model: 'Rio' },
+      ]),
+    );
+  });
+});
+
+// ── Universal fitment detection ──────────────────────────────────────────────
+describe('isUniversalFitment', () => {
+  it.each([
+    'Универсальный',
+    'универсальные коврики',
+    'Для всех автомобилей',
+    'Подходит ко всем автомобилям',
+    'подходит на все машины',
+    'Любые марки',
+    'Любые модели',
+    'Ко всем маркам',
+    'Ко всем моделям',
+    'Universal',
+    'Fits all vehicles',
+    'fits all cars',
+    'All models',
+    'All cars',
+    'barcha avtomobillarga mos',
+  ])('detects universal claim in "%s"', (text) => {
+    expect(isUniversalFitment(text)).toBe(true);
+  });
+
+  it.each([
+    'Бампер Cobalt',
+    'фильтр масляный 96535062',
+    'все детали в наличии', // "все" without a vehicle noun
+    'вселенная', // "все…" as a word prefix, not the standalone word
+  ])('does not fire on ordinary text "%s"', (text) => {
+    expect(isUniversalFitment(text)).toBe(false);
+  });
+});
+
+// ── deriveVehicleCompatibility: union of title + description ─────────────────
+describe('deriveVehicleCompatibility', () => {
+  it('merges models split between title and description (union, deduplicated)', () => {
+    const r = deriveVehicleCompatibility(['Бампер Cobalt', 'Подходит также Gentra и Lacetti']);
+    expect(r.isUniversal).toBe(false);
+    expect(r.vehicles).toHaveLength(3);
+    expect(r.vehicles).toEqual(
+      expect.arrayContaining([
+        { brand: 'Chevrolet', model: 'Cobalt' },
+        { brand: 'Chevrolet', model: 'Gentra' },
+        { brand: 'Chevrolet', model: 'Lacetti' },
+      ]),
+    );
+    expect(r.models).toEqual(expect.arrayContaining(['Cobalt', 'Gentra', 'Lacetti']));
+    expect(r.brand).toBe('Chevrolet');
+  });
+
+  it('duplicate mentions across chunks collapse to one pair', () => {
+    const r = deriveVehicleCompatibility(['Фара Cobalt', 'для Cobalt (кобальт)']);
+    expect(r.vehicles).toEqual([{ brand: 'Chevrolet', model: 'Cobalt' }]);
+    expect(r.models).toEqual(['Cobalt']);
+  });
+
+  it('universal claim wins over any model mention (highest priority)', () => {
+    const r = deriveVehicleCompatibility(['Универсальные коврики', 'подходят на Cobalt']);
+    expect(r).toEqual({ isUniversal: true, vehicles: [], brand: null, models: [] });
+  });
+
+  it('universal claim in the description alone also wins', () => {
+    const r = deriveVehicleCompatibility(['Ароматизатор', 'Для всех автомобилей']);
+    expect(r.isUniversal).toBe(true);
+    expect(r.vehicles).toEqual([]);
+  });
+
+  it('folds extra (AI) models into the union with catalog-resolved brands', () => {
+    const r = deriveVehicleCompatibility(['Патрубок'], {
+      brand: 'Chevrolet',
+      models: ['кобальт', 'Solaris'],
+    });
+    expect(r.vehicles).toEqual([
+      { brand: 'Chevrolet', model: 'Cobalt' },
+      { brand: 'Hyundai', model: 'Solaris' }, // catalog owner beats the AI brand
+    ]);
+  });
+
+  it('returns empty result for chunks with no vehicles', () => {
+    const r = deriveVehicleCompatibility(['Фильтр масляный', null, undefined]);
+    expect(r).toEqual({ isUniversal: false, vehicles: [], brand: null, models: [] });
   });
 });

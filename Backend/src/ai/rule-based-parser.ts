@@ -9,7 +9,7 @@ import type { RuleBasedResult } from './part-parser.types';
 import { CONDITION_WORDS } from './part-sanitizer';
 import { parsePrice } from './price-parser';
 import { splitParagraphs } from './structured-parser';
-import { matchCatalog } from './vehicle-catalog';
+import { deriveVehicleCompatibility, matchCatalog } from './vehicle-catalog';
 
 // ── Confidence weights (tweak the parser's behavior from one place) ──────────
 export const CONFIDENCE_WEIGHTS = {
@@ -305,7 +305,9 @@ function parseFlat(text: string): RuleBasedResult {
     working = working.replace(r, ' ');
   }
 
-  const catalog = matchCatalog(working);
+  // Vehicle compatibility from the price/GM-scrubbed working copy: universal
+  // claim wins, otherwise every catalog match paired with its own brand.
+  const compat = deriveVehicleCompatibility([working]);
 
   // Condition words → description (extracted, not removed from the title).
   const description = extractConditionWords(text);
@@ -313,7 +315,8 @@ function parseFlat(text: string): RuleBasedResult {
   // Title = the seller's line, verbatim except whitespace normalization.
   const title = normalizeTitle(text);
 
-  const hasBrandOrModel = Boolean(catalog.brand) || catalog.models.length > 0;
+  const hasBrandOrModel =
+    Boolean(compat.brand) || compat.models.length > 0 || compat.isUniversal;
   const goodTitle = looksLikeGoodTitle(title);
   const confidence = computeConfidence({
     hasGm: Boolean(gmHit.value),
@@ -325,8 +328,10 @@ function parseFlat(text: string): RuleBasedResult {
   return {
     title,
     description,
-    brand: catalog.brand,
-    models: catalog.models,
+    brand: compat.brand,
+    models: compat.models,
+    vehicles: compat.vehicles,
+    isUniversal: compat.isUniversal,
     gm_number: gmHit.value,
     price: priceHit.value,
     confidence,
@@ -344,6 +349,8 @@ interface ExtractedFields {
   /** GM/price raw tokens, so the caller can scrub them from description text. */
   gmRaw: string[];
   priceRaw: string[];
+  /** The chunk with price/GM tokens scrubbed — safe input for the catalog. */
+  working: string;
 }
 
 /**
@@ -369,19 +376,21 @@ function extractFields(chunk: string, strictGm11: boolean): ExtractedFields {
     price: priceHit.value,
     gmRaw: gmHit.raw,
     priceRaw: priceHit.raw,
+    working,
   };
 }
 
 /**
  * Multi-line caption: line 1 is the TITLE, the remaining lines are the
- * DESCRIPTION. We analyze the title first and, per the new requirement, fall
- * back to the description to RECOVER any field the title did not supply:
+ * DESCRIPTION. GM/price: the title is analyzed first and the description only
+ * RECOVERS what the title did not supply (title values always win, rule #3;
+ * description GM must be EXACTLY 11 digits, rule #4).
  *
- *   1. Extract brand / model / GM / price from the title.
- *   2. If any of those is missing, extract the SAME fields from the description
- *      and fill only the gaps — TITLE VALUES ALWAYS WIN (rule #3).
- *   3. GM numbers in the description must be EXACTLY 11 digits (rule #4); the
- *      title keeps the flexible detector for backward compatibility.
+ * Vehicle compatibility is different: it is the UNION of the TITLE (line 1)
+ * and the DESCRIPTION (line 2) — the description is no longer ignored when the
+ * title already names a model. Only lines 1 & 2 are ever fed to the catalog
+ * matcher — never lines 3+ (GM/price) — and both chunks are price/GM-scrubbed
+ * first. A universal-fitment claim in either line wins over model extraction.
  *
  * The title text is still preserved verbatim (whitespace-normalized) — make /
  * model / OEM / price are extracted into fields but never stripped from it, and
@@ -407,19 +416,16 @@ function parseMultiParagraph(paragraphs: string[]): RuleBasedResult {
     fromDesc = extractFields(restText, true);
   }
 
-  // 3. MERGE — title wins; description fills only what the title is missing.
-  //
-  // Make/model fallback is deliberately restricted to LINE 2 (the description)
-  // only — never lines 3+ (GM/price). The vehicle is guaranteed to be in the
-  // title or the description, so a number line can never be a make/model source.
-  // (GM/price recovery below still uses the full rest text, unchanged.)
-  const descBrandModel =
-    !titleHasAllFields && paragraphs[1] !== undefined
-      ? matchCatalog(normalizeText(paragraphs[1]))
-      : { brand: null, models: [] as string[] };
+  // 3. Vehicle compatibility = UNION of line 1 and line 2 (price/GM-scrubbed).
+  // Lines 3+ are never a make/model source — a number line can't contribute.
+  const line2Fields =
+    paragraphs[1] !== undefined
+      ? extractFields(normalizeText(paragraphs[1]), true)
+      : null;
+  const compat = deriveVehicleCompatibility([fromTitle.working, line2Fields?.working]);
+  const { brand, models, vehicles, isUniversal } = compat;
 
-  const brand = fromTitle.brand ?? descBrandModel.brand;
-  const models = fromTitle.models.length ? fromTitle.models : descBrandModel.models;
+  // 4. MERGE GM/price — title wins; description fills only the gaps.
   const gm_number = fromTitle.gm_number ?? fromDesc?.gm_number ?? null;
   const price = fromTitle.price ?? fromDesc?.price ?? null;
 
@@ -436,7 +442,7 @@ function parseMultiParagraph(paragraphs: string[]): RuleBasedResult {
   // Title = first paragraph, verbatim except whitespace normalization.
   const title = normalizeTitle(titleParagraph);
 
-  const hasBrandOrModel = Boolean(brand) || models.length > 0;
+  const hasBrandOrModel = Boolean(brand) || models.length > 0 || isUniversal;
   const goodTitle = looksLikeGoodTitle(title);
   const confidence = computeConfidence({
     hasGm: Boolean(gm_number),
@@ -450,6 +456,8 @@ function parseMultiParagraph(paragraphs: string[]): RuleBasedResult {
     description,
     brand,
     models,
+    vehicles,
+    isUniversal,
     gm_number,
     price,
     confidence,

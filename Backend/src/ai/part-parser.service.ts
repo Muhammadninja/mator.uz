@@ -15,10 +15,26 @@
 import { Logger } from '@nestjs/common';
 
 import { ClaudeMcpService } from './claude-mcp.service';
-import type { ParseOutcome } from './part-parser.types';
+import type { ParsedPartMetadata, ParseOutcome, ParseSource } from './part-parser.types';
 import { sanitizeMetadata } from './part-sanitizer';
 import { RULE_CONFIDENCE_THRESHOLD, ruleBasedParse } from './rule-based-parser';
 import { parseStructuredCaption } from './structured-parser';
+
+/** Finalize a metadata object into a ParseOutcome with guaranteed
+ *  vehicles/isUniversal (every upstream path fills them; default defensively). */
+function toOutcome(
+  meta: ParsedPartMetadata,
+  source: ParseSource,
+  confidence: number,
+): ParseOutcome {
+  return {
+    ...meta,
+    vehicles: meta.vehicles ?? [],
+    isUniversal: meta.isUniversal ?? false,
+    source,
+    confidence,
+  };
+}
 
 export class PartParserService {
   private readonly logger = new Logger(PartParserService.name);
@@ -42,7 +58,7 @@ export class PartParserService {
       this.logger.debug(
         `structured caption accepted for "${truncate(rawText)}"`,
       );
-      return { ...structured, source: 'structured', confidence: 1 };
+      return toOutcome(structured, 'structured', 1);
     }
 
     // ── Fallback: hybrid rule-based + AI pipeline for unstructured captions ───
@@ -57,7 +73,7 @@ export class PartParserService {
       this.logger.debug(
         `rule-based accepted (confidence=${confidence}) for "${truncate(rawText)}"`,
       );
-      return { ...sanitized, source: 'rule-based', confidence };
+      return toOutcome(sanitized, 'rule-based', confidence);
     }
 
     // ── Low confidence → AI fallback ─────────────────────────────────────────
@@ -68,15 +84,15 @@ export class PartParserService {
     try {
       const aiRaw = await this.claude.parsePartText(rawText);
       const sanitized = sanitizeMetadata(aiRaw);
-      const source = this.claude.isLive ? 'ai-fallback' : 'mock';
-      return { ...sanitized, source, confidence };
+      const source: ParseSource = this.claude.isLive ? 'ai-fallback' : 'mock';
+      return toOutcome(sanitized, source, confidence);
     } catch (error: unknown) {
       // AI failed (timeout, bad JSON, no key). Degrade gracefully to whatever
       // the rules found — sanitized — rather than dropping the listing.
       const msg = error instanceof Error ? error.message : String(error);
       this.logger.warn(`AI fallback failed (${msg}); using rule-based result`);
       const sanitized = sanitizeMetadata(ruleResult);
-      return { ...sanitized, source: 'rule-based', confidence };
+      return toOutcome(sanitized, 'rule-based', confidence);
     }
   }
 }

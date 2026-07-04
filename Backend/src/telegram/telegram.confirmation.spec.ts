@@ -44,6 +44,8 @@ const metadata: ParseOutcome = {
   description: 'Производство Корея, новая',
   brand: 'Chevrolet',
   models: ['Nexia 3'],
+  vehicles: [{ brand: 'Chevrolet', model: 'Nexia 3' }],
+  isUniversal: false,
   gm_number: '96234567',
   price: 450000,
   source: 'structured',
@@ -78,7 +80,10 @@ function makePrisma() {
       deleteMany: upsert('productImage.deleteMany', { count: 0 }),
       createMany: upsert('productImage.createMany', { count: 1 }),
     },
-    partModel: { upsert: upsert('partModel', {}) },
+    partModel: {
+      upsert: upsert('partModel', {}),
+      deleteMany: upsert('partModel.deleteMany', { count: 0 }),
+    },
     stock: { upsert: upsert('stock', { id: 500 }) },
   };
 }
@@ -165,14 +170,14 @@ describe('TelegramService — confirmation session', () => {
 
     await svc.commitPending(ctx, 1);
 
-    // The full write sequence ran…
+    // The full write sequence ran (product first — vehicle links need its id)…
     expect(prisma.calls).toEqual([
+      'product',
       'brand',
       'carModel',
-      'product',
+      'partModel',
       'productImage.deleteMany',
       'productImage.createMany',
-      'partModel',
       'stock',
     ]);
     // …and the session is consumed.
@@ -182,6 +187,34 @@ describe('TelegramService — confirmation session', () => {
     expect(ctx.replies.some((r) => r.includes('Название'))).toBe(false);
     expect(ctx.replies.some((r) => r.includes('OEM'))).toBe(false);
     expect(ctx.replies.some((r) => r.includes('Product ID'))).toBe(false);
+  });
+
+  it('commit of a UNIVERSAL part clears vehicle links and creates none', async () => {
+    const prisma = makePrisma();
+    const svc = makeService(prisma, makeCloudinary());
+    const ctx = makeCtx();
+    const universal = {
+      ...draft(1),
+      metadata: {
+        ...metadata,
+        brand: null,
+        models: [],
+        vehicles: [],
+        isUniversal: true,
+      },
+    };
+    svc.setPending(ctx, universal);
+
+    await svc.commitPending(ctx, 1);
+
+    // No brand/carModel/partModel upserts — only the stale-row cleanup.
+    expect(prisma.calls).toEqual([
+      'product',
+      'partModel.deleteMany',
+      'productImage.deleteMany',
+      'productImage.createMany',
+      'stock',
+    ]);
   });
 
   it('commit with nothing pending tells the user instead of writing', async () => {

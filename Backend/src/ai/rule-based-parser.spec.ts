@@ -193,10 +193,16 @@ describe('ruleBasedParse — title→description recovery (two-line listings)', 
     expect(r.price).toBe(100000); // title price, NOT the description's 999999
   });
 
-  it('does NOT overwrite a model already found in the title', () => {
+  it('UNIONS title and description models (description no longer ignored)', () => {
     const r = ruleBasedParse('Бампер Spark\n\nподходит на Cobalt тоже');
-    // Title model wins; the description's model list does not replace it.
-    expect(r.models).toContain('Spark');
+    // Both lines contribute: the title model stays AND the description adds.
+    expect(r.models).toEqual(expect.arrayContaining(['Spark', 'Cobalt']));
+    expect(r.vehicles).toEqual(
+      expect.arrayContaining([
+        { brand: 'Chevrolet', model: 'Spark' },
+        { brand: 'Chevrolet', model: 'Cobalt' },
+      ]),
+    );
   });
 
   it('prefers an 11-digit GM number over a shorter number in the description', () => {
@@ -295,5 +301,76 @@ describe('computeConfidence', () => {
       hasGoodTitle: true,
     });
     expect(score).toBeLessThan(RULE_CONFIDENCE_THRESHOLD);
+  });
+});
+
+// ── Vehicle compatibility: SINGLE / MULTIPLE / UNIVERSAL (rule-based path) ────
+describe('ruleBasedParse — vehicle compatibility', () => {
+  it('single vehicle → one (brand, model) pair', () => {
+    const r = ruleBasedParse('Фара передняя Cobalt 96549774 350000 сум');
+    expect(r.isUniversal).toBe(false);
+    expect(r.vehicles).toEqual([{ brand: 'Chevrolet', model: 'Cobalt' }]);
+  });
+
+  it('multiple vehicles in the TITLE → all pairs extracted', () => {
+    const r = ruleBasedParse('Колодки Cobalt / Gentra 96549774 150000 сум');
+    expect(r.vehicles).toEqual(
+      expect.arrayContaining([
+        { brand: 'Chevrolet', model: 'Cobalt' },
+        { brand: 'Chevrolet', model: 'Gentra' },
+      ]),
+    );
+  });
+
+  it('multiple vehicles in the DESCRIPTION → all pairs extracted', () => {
+    const r = ruleBasedParse('Свеча зажигания\n\nДля Cobalt, Gentra и Lacetti 50000 сум');
+    expect(r.models).toEqual(expect.arrayContaining(['Cobalt', 'Gentra', 'Lacetti']));
+    expect(r.vehicles).toHaveLength(3);
+  });
+
+  it('title+description vehicles merge into one deduplicated set', () => {
+    const r = ruleBasedParse('Бампер Cobalt\n\nПодходит также Gentra и Lacetti, и на Cobalt');
+    expect(r.vehicles).toHaveLength(3); // Cobalt deduplicated across lines
+    expect(r.vehicles).toEqual(
+      expect.arrayContaining([
+        { brand: 'Chevrolet', model: 'Cobalt' },
+        { brand: 'Chevrolet', model: 'Gentra' },
+        { brand: 'Chevrolet', model: 'Lacetti' },
+      ]),
+    );
+  });
+
+  it('cross-brand listing keeps every model under its own brand', () => {
+    const r = ruleBasedParse('Стойка стабилизатора Cobalt, Solaris 90000 сум');
+    expect(r.vehicles).toEqual(
+      expect.arrayContaining([
+        { brand: 'Chevrolet', model: 'Cobalt' },
+        { brand: 'Hyundai', model: 'Solaris' },
+      ]),
+    );
+  });
+
+  it('UNIVERSAL claim → isUniversal, no vehicles, no models', () => {
+    const r = ruleBasedParse('Коврики универсальные 96535062 120000 сум');
+    expect(r.isUniversal).toBe(true);
+    expect(r.vehicles).toEqual([]);
+    expect(r.models).toEqual([]);
+    expect(r.brand).toBeNull();
+    // GM/price extraction is unaffected by the universal claim.
+    expect(r.gm_number).toBe('96535062');
+    expect(r.price).toBe(120000);
+  });
+
+  it('UNIVERSAL claim in the description wins over a model in the title', () => {
+    const r = ruleBasedParse('Ароматизатор Cobalt\n\nПодходит ко всем автомобилям 20000 сум');
+    expect(r.isUniversal).toBe(true);
+    expect(r.vehicles).toEqual([]);
+  });
+
+  it('GM and price extraction behave exactly as before on multi-vehicle text', () => {
+    const r = ruleBasedParse('Фильтр масла Cobalt Gentra оригинал 96535062 25000 сум');
+    expect(r.gm_number).toBe('96535062');
+    expect(r.price).toBe(25000);
+    expect(r.models).toEqual(expect.arrayContaining(['Cobalt', 'Gentra']));
   });
 });

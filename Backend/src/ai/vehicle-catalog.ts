@@ -5,6 +5,8 @@
 // The AI fallback must NOT look anything up on the internet — known
 // brands/models are resolved here first.
 
+import type { ParsedVehicle } from './part-parser.types';
+
 export interface CatalogModel {
   /** Canonical model name, e.g. "Cobalt". */
   canonical: string;
@@ -736,6 +738,8 @@ const BRAND_BY_ALIAS = new Map<string, string>();
 const MODEL_BY_ALIAS = new Map<string, ModelEntry>();
 /** model canonical (lowercase) → canonical, for canonicalization */
 const MODEL_CANON_BY_LOWER = new Map<string, string>();
+/** model canonical (lowercase) → ALL owning brands, in catalog order. */
+const MODEL_BRANDS_BY_CANON = new Map<string, string[]>();
 
 for (const brand of VEHICLE_CATALOG) {
   for (const alias of [brand.canonical.toLowerCase(), ...brand.aliases]) {
@@ -750,6 +754,10 @@ for (const brand of VEHICLE_CATALOG) {
       }
     }
     MODEL_CANON_BY_LOWER.set(model.canonical.toLowerCase(), model.canonical);
+    const canonLower = model.canonical.toLowerCase();
+    const owners = MODEL_BRANDS_BY_CANON.get(canonLower) ?? [];
+    if (!owners.includes(brand.canonical)) owners.push(brand.canonical);
+    MODEL_BRANDS_BY_CANON.set(canonLower, owners);
   }
 }
 
@@ -765,8 +773,12 @@ const BRAND_ALIASES_SORTED = [...BRAND_BY_ALIAS.keys()].sort(
 export interface CatalogMatch {
   /** Canonical brand name, or null if none detected. */
   brand: string | null;
+  /** ALL explicitly mentioned canonical brands, de-duplicated. */
+  brands: string[];
   /** Canonical model names, de-duplicated, in first-seen order. */
   models: string[];
+  /** (brand, model) pairs — each model paired with ITS OWN brand. */
+  vehicles: ParsedVehicle[];
   /** The exact alias substrings that matched (for stripping from title). */
   matchedTokens: string[];
 }
@@ -815,23 +827,49 @@ export function matchCatalog(text: string): CatalogMatch {
     }
   }
 
-  let brand: string | null = null;
+  // Collect EVERY explicitly mentioned brand (not just the first) so that a
+  // cross-brand listing ("Chevrolet Cobalt, Hyundai Solaris") can pair each
+  // model with its own brand below.
+  const brands: string[] = [];
   for (const alias of BRAND_ALIASES_SORTED) {
     const re = aliasRegex(alias);
     const m = re.exec(lower);
     if (m) {
-      brand = BRAND_BY_ALIAS.get(alias)!;
+      const canonical = BRAND_BY_ALIAS.get(alias)!;
+      if (!brands.includes(canonical)) brands.push(canonical);
       matchedTokens.push(consume(m));
-      break;
     }
   }
 
+  let brand: string | null = brands[0] ?? null;
   // If no explicit brand but a model implies exactly one, use it.
   if (!brand && brandsFromModels.size === 1) {
     brand = [...brandsFromModels][0];
   }
 
-  return { brand, models, matchedTokens };
+  const vehicles: ParsedVehicle[] = models.map((model) => ({
+    brand: resolveVehicleBrand(model, brands),
+    model,
+  }));
+
+  return { brand, brands, models, vehicles, matchedTokens };
+}
+
+/**
+ * Pick the brand a detected model belongs to. An explicitly mentioned brand
+ * wins when the catalog lists the model under it (so "Daewoo Matiz" pairs
+ * Matiz with Daewoo, not with Chevrolet which also has a Matiz); otherwise the
+ * first catalog owner wins; a model unknown to the catalog falls back to the
+ * first explicit brand (or null).
+ */
+export function resolveVehicleBrand(
+  modelCanonical: string,
+  explicitBrands: string[],
+): string | null {
+  const owners = MODEL_BRANDS_BY_CANON.get(modelCanonical.toLowerCase()) ?? [];
+  return (
+    explicitBrands.find((b) => owners.includes(b)) ?? owners[0] ?? explicitBrands[0] ?? null
+  );
 }
 
 /** Resolve a free-form brand string to its canonical name, or null. */
@@ -848,4 +886,97 @@ export function canonicalizeModel(value: string): string {
   const entry = MODEL_BY_ALIAS.get(lower);
   if (entry) return entry.canonical;
   return MODEL_CANON_BY_LOWER.get(lower) ?? value.trim();
+}
+
+// ── Universal fitment ("fits all vehicles") detection ───────────────────────
+//
+// JS \b doesn't treat cyrillic letters as word chars, so every cyrillic pattern
+// carries an explicit left boundary of "start or non-letter/digit".
+const UNIVERSAL_PATTERNS: RegExp[] = [
+  // Универсальный / универсальная / универсальные …
+  /(?:^|[^a-zа-яё0-9])универсальн/i,
+  // Universal / universalniy (latin, incl. translit)
+  /(?:^|[^a-zа-яё0-9])universal/i,
+  // (для/ко/на …) все[х|м] автомобилей|машин|марок|моделей|авто
+  /(?:^|[^a-zа-яё0-9])все[хм]?\s+(?:авто|машин|марк|модел)/i,
+  // Любые марки / любой модели / любым машинам …
+  /(?:^|[^a-zа-яё0-9])люб(?:ой|ая|ое|ые|ых|ым|ыми|ому|ую|ом)\s+(?:авто|машин|марк|модел)/i,
+  // All cars / all models / all vehicles / all makes / all brands
+  /(?:^|[^a-z0-9])all\s+(?:cars?|models?|vehicles?|makes?|brands?)(?=$|[^a-z])/i,
+  // Fits all …
+  /(?:^|[^a-z0-9])fits?\s+all(?=$|[^a-z])/i,
+  // Uzbek (latin): barcha/hamma avtomobillarga|mashinalarga|modellarga|markalarga
+  /(?:^|[^a-z0-9])(?:barcha|hamma)\s+(?:avto|mashin|model|marka)/i,
+];
+
+/** True when the text clearly says the part fits EVERY vehicle. */
+export function isUniversalFitment(text: string): boolean {
+  return UNIVERSAL_PATTERNS.some((re) => re.test(text));
+}
+
+// ── Compatibility derivation (union of title + description) ─────────────────
+
+export interface VehicleCompatibility {
+  /** Universal fitment claim found — vehicles/models are then empty. */
+  isUniversal: boolean;
+  /** Deduplicated (brand, model) pairs, first-seen order across all chunks. */
+  vehicles: ParsedVehicle[];
+  /** Legacy aggregate: first chunk that yields a brand wins (title first). */
+  brand: string | null;
+  /** Legacy aggregate: deduplicated model canonicals, first-seen order. */
+  models: string[];
+}
+
+/**
+ * Derive vehicle compatibility from the listing's free-text chunks — callers
+ * pass ONLY the title and the description (never the GM or price lines).
+ *
+ * Priority: a universal-fitment claim in ANY chunk wins and suppresses model
+ * extraction entirely. Otherwise the result is the UNION of catalog matches
+ * across all chunks (the description is no longer ignored when the title
+ * already names a model), deduplicated, each model paired with its own brand.
+ *
+ * `extra` merges externally extracted models (the AI fallback) into the union,
+ * pairing each with the catalog owner or, failing that, the extra brand.
+ */
+export function deriveVehicleCompatibility(
+  chunks: Array<string | null | undefined>,
+  extra?: { brand: string | null; models: string[] },
+): VehicleCompatibility {
+  const texts = chunks.filter((c): c is string => Boolean(c && c.trim()));
+
+  if (texts.some((t) => isUniversalFitment(t))) {
+    return { isUniversal: true, vehicles: [], brand: null, models: [] };
+  }
+
+  const vehicles: ParsedVehicle[] = [];
+  const seen = new Set<string>();
+  const add = (v: ParsedVehicle) => {
+    const key = `${v.brand ?? ''} ${v.model}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      vehicles.push(v);
+    }
+  };
+
+  let brand: string | null = null;
+  for (const text of texts) {
+    const match = matchCatalog(text);
+    match.vehicles.forEach(add);
+    if (!brand && match.brand) brand = match.brand;
+  }
+
+  if (extra) {
+    const extraBrand = canonicalizeBrand(extra.brand);
+    const explicit = extraBrand ? [extraBrand] : [];
+    for (const raw of extra.models) {
+      const model = canonicalizeModel(String(raw));
+      if (!model) continue;
+      add({ brand: resolveVehicleBrand(model, explicit), model });
+    }
+    if (!brand && extraBrand) brand = extraBrand;
+  }
+
+  const models = [...new Set(vehicles.map((v) => v.model))];
+  return { isUniversal: false, vehicles, brand, models };
 }

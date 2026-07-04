@@ -13,6 +13,7 @@ import type { ParsedPartMetadata } from './part-parser.types';
 import {
   canonicalizeBrand,
   canonicalizeModel,
+  deriveVehicleCompatibility,
   matchCatalog,
 } from './vehicle-catalog';
 
@@ -105,9 +106,35 @@ export function sanitizeMetadata(input: ParsedPartMetadata): ParsedPartMetadata 
 
   // ── brand/models → canonical, from catalog ────────────────────────────────
   let brand = canonicalizeBrand(input.brand);
-  const models = Array.isArray(input.models)
+  let models = Array.isArray(input.models)
     ? [...new Set(input.models.map((m) => canonicalizeModel(String(m).trim())).filter(Boolean))]
     : [];
+
+  // ── vehicle compatibility ──────────────────────────────────────────────────
+  // Structured/rule-based results carry line-aware `vehicles`/`isUniversal`
+  // already (pass them through). The AI fallback does not — derive them here
+  // from the title+description UNION, folding the AI's own brand/models in as
+  // extras, with the same universal-claim priority as the other paths.
+  let isUniversal = input.isUniversal ?? false;
+  let vehicles = input.vehicles ?? [];
+  if (!isUniversal && input.vehicles === undefined) {
+    const compat = deriveVehicleCompatibility([input.title, input.description], {
+      brand: input.brand ?? null,
+      models,
+    });
+    isUniversal = compat.isUniversal;
+    vehicles = compat.vehicles;
+    if (!isUniversal) {
+      brand = brand ?? compat.brand;
+      models = compat.models;
+    }
+  }
+  if (isUniversal) {
+    // Universal fitment suppresses every per-vehicle field.
+    brand = null;
+    models = [];
+    vehicles = [];
+  }
 
   const descriptionParts: string[] = [];
   if (input.description && input.description.trim()) {
@@ -120,10 +147,18 @@ export function sanitizeMetadata(input: ParsedPartMetadata): ParsedPartMetadata 
   if (title) {
     // DETECT brand/model in the title to populate the structured fields. This
     // only reads the title — the tokens stay in the title text unchanged.
-    const catalogHit = matchCatalog(title);
-    if (!brand && catalogHit.brand) brand = catalogHit.brand;
-    for (const m of catalogHit.models) {
-      if (!models.includes(m)) models.push(m);
+    // Skipped for universal parts: nothing per-vehicle may survive on them.
+    if (!isUniversal) {
+      const catalogHit = matchCatalog(title);
+      if (!brand && catalogHit.brand) brand = catalogHit.brand;
+      for (const v of catalogHit.vehicles) {
+        if (!models.includes(v.model)) {
+          models.push(v.model);
+          if (!vehicles.some((x) => x.brand === v.brand && x.model === v.model)) {
+            vehicles = [...vehicles, v];
+          }
+        }
+      }
     }
 
     // The ONLY transform applied to the title: collapse whitespace. No word
@@ -151,6 +186,8 @@ export function sanitizeMetadata(input: ParsedPartMetadata): ParsedPartMetadata 
     description,
     brand: brand && brand.trim() ? brand.trim() : null,
     models,
+    vehicles,
+    isUniversal,
     gm_number,
     price,
   };

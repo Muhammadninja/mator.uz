@@ -13,6 +13,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { SellersService } from '../sellers/sellers.service';
 import { CloudinaryService, UploadedImage } from '../cloudinary/cloudinary.service';
 import { MediaGroupBuffer } from './media-group-buffer';
+import { persistVehicleLinks } from './vehicle-links';
 
 // Telegram delivers an album as N separate photo updates sharing a
 // media_group_id, arriving back-to-back; only one carries the caption. We
@@ -95,6 +96,35 @@ interface PendingProduct {
 export function extractPriceFallback(text: string): Decimal {
   const value = extractPriceFromText(text);
   return value !== null ? new Decimal(value) : new Decimal(0);
+}
+
+/**
+ * Human-readable vehicle line for the preview caption. Universal parts say so
+ * explicitly; otherwise (brand, model) pairs are grouped per brand so a
+ * single-brand listing reads exactly as before ("Chevrolet Cobalt, Gentra")
+ * while a cross-brand one stays unambiguous ("Chevrolet Cobalt; Hyundai Solaris").
+ */
+export function formatVehicleLine(metadata: ParseOutcome): string {
+  if (metadata.isUniversal) return 'Все автомобили (универсальная деталь)';
+
+  if (metadata.vehicles.length > 0) {
+    const byBrand = new Map<string, string[]>();
+    for (const v of metadata.vehicles) {
+      const key = v.brand ?? '';
+      const models = byBrand.get(key) ?? [];
+      models.push(v.model);
+      byBrand.set(key, models);
+    }
+    return [...byBrand.entries()]
+      .map(([brand, models]) => `${brand} ${models.join(', ')}`.trim())
+      .join('; ');
+  }
+
+  // Legacy fields (no pairs detected but a bare brand may still exist).
+  if (metadata.brand || metadata.models.length > 0) {
+    return `${metadata.brand ?? ''} ${metadata.models.join(', ')}`.trim();
+  }
+  return '—';
 }
 
 @Injectable()
@@ -404,10 +434,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     processedUrls: string[],
     price: Decimal,
   ): Promise<void> {
-    const vehicle =
-      metadata.brand || metadata.models.length > 0
-        ? `${metadata.brand ?? ''} ${metadata.models.join(', ')}`.trim()
-        : '—';
+    const vehicle = formatVehicleLine(metadata);
 
     const caption =
       `📋 *Проверьте товар перед добавлением.*\n\n` +
@@ -465,40 +492,28 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     const { sellerId, metadata, title, processedUrls, price } = session;
 
     try {
-      let brandId: number | null = null;
-      if (metadata.brand) {
-        const brand = await this.prisma.brand.upsert({
-          where: { name: metadata.brand },
-          update: {},
-          create: { name: metadata.brand },
-        });
-        brandId = brand.id;
-      }
-
-      const modelIds: number[] = [];
-      if (brandId !== null && metadata.models.length > 0) {
-        for (const modelName of metadata.models) {
-          const carModel = await this.prisma.carModel.upsert({
-            where: { brandId_name: { brandId, name: modelName } },
-            update: {},
-            create: { brandId, name: modelName },
-          });
-          modelIds.push(carModel.id);
-        }
-      }
-
       const primaryUrl = processedUrls[0];
       const gmKey = metadata.gm_number ?? `tg_${tgUserId}_${Date.now()}`;
       const product = await this.prisma.product.upsert({
         where: { gmNumber: gmKey },
-        update: { title, description: metadata.description, imageUrl: primaryUrl },
+        update: {
+          title,
+          description: metadata.description,
+          imageUrl: primaryUrl,
+          isUniversal: metadata.isUniversal,
+        },
         create: {
           gmNumber: metadata.gm_number,
           title,
           description: metadata.description,
           imageUrl: primaryUrl,
+          isUniversal: metadata.isUniversal,
         },
       });
+
+      // Vehicle compatibility: universal → no part_models rows; otherwise one
+      // row per (brand, model) pair, each model under ITS OWN brand.
+      await persistVehicleLinks(this.prisma, product.id, metadata);
 
       // Replace the product gallery with the new ordered set (first = primary).
       await this.prisma.productImage.deleteMany({ where: { productId: product.id } });
@@ -510,14 +525,6 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
           isPrimary: i === 0,
         })),
       });
-
-      for (const modelId of modelIds) {
-        await this.prisma.partModel.upsert({
-          where: { partId_modelId: { partId: product.id, modelId } },
-          update: {},
-          create: { partId: product.id, modelId },
-        });
-      }
 
       await this.prisma.stock.upsert({
         where: { sellerId_productId: { sellerId, productId: product.id } },
