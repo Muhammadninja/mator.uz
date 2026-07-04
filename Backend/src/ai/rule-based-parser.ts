@@ -7,6 +7,7 @@
 
 import type { RuleBasedResult } from './part-parser.types';
 import { CONDITION_WORDS } from './part-sanitizer';
+import { parsePrice } from './price-parser';
 import { splitParagraphs } from './structured-parser';
 import { matchCatalog } from './vehicle-catalog';
 
@@ -55,15 +56,18 @@ interface PriceHit {
 function extractPrice(text: string): PriceHit {
   const raw: string[] = [];
 
-  // Price = a digit run (optionally with "." / "," thousands separators, but
-  // NOT spaces) immediately before a currency word. Disallowing spaces inside
-  // the number keeps a separate preceding number (e.g. an OEM code) out of it.
-  const currencyRe = /(\d[\d.,]*)\s*(uzs|сум|сўм|so'm|som|usd|\$|у\.е\.?)/gi;
+  // Price = a digit run immediately before a currency word. The number may use
+  // "." / "," thousands separators AND spaces between 3-digit groups (so
+  // "130 000 сум" is caught), but a group after a space must be exactly 3 digits
+  // — this keeps a separate preceding number (e.g. an OEM code) from bleeding in.
+  // The matched string is parsed by the shared parsePrice, so "130.000" → 130000
+  // (thousands) while "130.00" → 130 (decimal).
+  const currencyRe = /(\d[\d.,]*(?:\s\d{3})*(?:[.,]\d{1,2})?)\s*(uzs|сум|сўм|so'm|som|usd|\$|у\.е\.?)/gi;
   let best: number | null = null;
   let m: RegExpExecArray | null;
   while ((m = currencyRe.exec(text)) !== null) {
-    const n = parseInt(m[1].replace(/[.,]/g, ''), 10);
-    if (Number.isFinite(n) && n > 0) {
+    const n = parsePrice(m[1]);
+    if (n !== null) {
       best = best === null ? n : Math.max(best, n);
       raw.push(m[0]);
     }
@@ -72,11 +76,21 @@ function extractPrice(text: string): PriceHit {
 
   // No currency marker — take the largest number > 1000 that isn't a long
   // OEM-looking code (OEM is handled separately and removed first by caller).
-  const numbers = [...text.matchAll(/\b(\d{4,7})\b/g)].map((x) => x[1]);
-  const candidates = numbers.map(Number).filter((n) => n > 1000);
+  // Also accept dot/comma/space-grouped numbers here (e.g. "130.000" with no
+  // currency word) via parsePrice, so a thousands-grouped price is not missed.
+  const groupedRe = /\b\d{1,3}(?:[.,\s]\d{3})+\b|\b\d{4,7}\b/g;
+  const candidates: number[] = [];
+  const rawByValue = new Map<number, string>();
+  for (const match of text.matchAll(groupedRe)) {
+    const value = parsePrice(match[0]);
+    if (value !== null && value > 1000) {
+      candidates.push(value);
+      if (!rawByValue.has(value)) rawByValue.set(value, match[0]);
+    }
+  }
   if (candidates.length) {
     const value = Math.max(...candidates);
-    return { value, raw: [String(value)] };
+    return { value, raw: [rawByValue.get(value) ?? String(value)] };
   }
 
   return { value: null, raw: [] };
