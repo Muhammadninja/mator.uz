@@ -10,10 +10,13 @@ import {
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
+import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { DevicesService } from './devices.service';
 import { RegisterDeviceDto } from './dto/register-device.dto';
 
+@ApiTags('Notifications / Devices')
+@ApiBearerAuth('jwt')
 @Controller('v1/devices')
 @UseGuards(JwtAuthGuard)
 export class DevicesController {

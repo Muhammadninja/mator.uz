@@ -10,11 +10,14 @@ import {
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
+import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { OrdersService } from './orders.service';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { ListOrdersQueryDto } from './dto/list-orders.query.dto';
 
+@ApiTags('Orders')
+@ApiBearerAuth('jwt')
 @Controller('v1/orders')
 @UseGuards(JwtAuthGuard)
 export class OrdersController {

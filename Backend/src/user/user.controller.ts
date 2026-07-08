@@ -8,12 +8,15 @@ import {
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
+import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { UserService } from './user.service';
 import { UpdateMeDto } from './dto/update-me.dto';
 import { NotificationsService } from '../notifications/notifications.service';
 import { UpdatePreferencesDto } from '../notifications/dto/update-preferences.dto';
 
+@ApiTags('User')
+@ApiBearerAuth('jwt')
 @Controller('v1/me')
 @UseGuards(JwtAuthGuard)
 export class UserController {

@@ -1,8 +1,11 @@
 import { Controller, Post, Param, Request, UseGuards, HttpCode, HttpStatus } from '@nestjs/common';
+import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { BookingsService } from './bookings.service';
 
 /** Provider-agnostic booking lifecycle (works for both masters and STOs). */
+@ApiTags('Providers / Bookings')
+@ApiBearerAuth('jwt')
 @Controller('v1/bookings')
 @UseGuards(JwtAuthGuard)
 export class BookingsController {

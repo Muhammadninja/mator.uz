@@ -11,12 +11,15 @@ import {
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
+import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CartService } from './cart.service';
 import { AddCartItemDto } from './dto/add-cart-item.dto';
 import { UpdateCartItemDto } from './dto/update-cart-item.dto';
 import { ApplyPromoDto } from './dto/apply-promo.dto';
 
+@ApiTags('Cart')
+@ApiBearerAuth('jwt')
 @Controller('v1/cart')
 @UseGuards(JwtAuthGuard)
 export class CartController {

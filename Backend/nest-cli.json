@@ -7,6 +7,14 @@
     "assets": [
       { "include": "ai/assets/**/*", "outDir": "dist" }
     ],
-    "watchAssets": true
+    "watchAssets": true,
+    "plugins": [
+      {
+        "name": "@nestjs/swagger",
+        "options": {
+          "introspectComments": true
+        }
+      }
+    ]
   }
 }

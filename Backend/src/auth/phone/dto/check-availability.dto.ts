@@ -1,3 +1,4 @@
+import { ApiPropertyOptional } from '@nestjs/swagger';
 import { IsString, IsOptional, IsObject, Matches } from 'class-validator';
 import { E164_REGEX } from './request-otp.dto';
 
@@ -9,6 +10,7 @@ export class CheckAvailabilityDto {
   @IsString()
   country_iso2?: string;
 
+  @ApiPropertyOptional({ type: 'object', additionalProperties: true, description: 'Optional client analytics envelope; ignored server-side.' })
   @IsOptional()
   @IsObject()
   client?: Record<string, unknown>;
