@@ -11,11 +11,14 @@ import {
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
+import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { NotificationsService } from './notifications.service';
 import { UpdatePreferencesDto } from './dto/update-preferences.dto';
 import { ListNotificationsQuery } from './dto/list-notifications.query';
 
+@ApiTags('Notifications')
+@ApiBearerAuth('jwt')
 @Controller('v1/notifications')
 @UseGuards(JwtAuthGuard)
 export class NotificationsController {

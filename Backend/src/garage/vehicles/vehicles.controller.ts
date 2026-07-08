@@ -12,11 +12,14 @@ import {
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
+import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
 import { VehiclesService } from './vehicles.service';
 import { CreateVehicleDto } from './dto/create-vehicle.dto';
 import { UpdateVehicleDto } from './dto/update-vehicle.dto';
 
+@ApiTags('Garage / Vehicles')
+@ApiBearerAuth('jwt')
 @Controller('v1/garage/vehicles')
 @UseGuards(JwtAuthGuard)
 export class VehiclesController {

@@ -10,6 +10,7 @@ import {
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
+import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { ProviderType } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { ProvidersService } from './providers.service';
@@ -17,6 +18,7 @@ import { BookingsService } from './bookings.service';
 import { NearbyQueryDto } from './dto/nearby.query.dto';
 import { CreateBookingDto } from './dto/create-booking.dto';
 
+@ApiTags('Providers / Masters')
 @Controller('v1/masters')
 export class MastersController {
   constructor(
@@ -39,6 +41,7 @@ export class MastersController {
 
   @Post(':id/bookings')
   @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth('jwt')
   @HttpCode(HttpStatus.CREATED)
   createBooking(
     @Request() req: { user: { id: string } },

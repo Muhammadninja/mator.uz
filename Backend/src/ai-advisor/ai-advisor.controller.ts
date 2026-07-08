@@ -11,6 +11,7 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import type { Response } from 'express';
+import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { NotificationType } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { AiAdvisorService } from './ai-advisor.service';
@@ -19,6 +20,8 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { CreateAiSessionDto } from './dto/create-session.dto';
 import { SendMessageDto } from './dto/send-message.dto';
 
+@ApiTags('AI Advisor')
+@ApiBearerAuth('jwt')
 @Controller('v1/ai/sessions')
 @UseGuards(JwtAuthGuard)
 export class AiAdvisorController {

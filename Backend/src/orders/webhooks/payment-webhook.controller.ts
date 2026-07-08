@@ -1,4 +1,5 @@
 import { Controller, Post, Body, Headers, HttpCode, HttpStatus } from '@nestjs/common';
+import { ApiTags } from '@nestjs/swagger';
 import { SkipThrottle } from '@nestjs/throttler';
 import { PaymeService } from './payme.service';
 import { ClickService } from './click.service';
@@ -7,6 +8,7 @@ import { ClickService } from './click.service';
  * Provider-to-server callbacks. No JWT (the providers authenticate themselves:
  * Payme via Basic auth, Click via MD5 signature) and throttle-exempt.
  */
+@ApiTags('Payments / Webhooks')
 @Controller('v1/payments')
 @SkipThrottle()
 export class PaymentWebhookController {

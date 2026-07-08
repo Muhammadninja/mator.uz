@@ -9,12 +9,15 @@ import {
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
+import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { SellerStatus } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { AdminService } from './admin.service';
 
+@ApiTags('Admin')
+@ApiBearerAuth('jwt')
 @Controller('api/admin')
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles('ADMIN')

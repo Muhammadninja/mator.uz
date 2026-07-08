@@ -9,10 +9,13 @@ import {
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
+import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PaymentsService } from './payments.service';
 import { CreateInvoiceDto } from './dto/create-invoice.dto';
 
+@ApiTags('Payments')
+@ApiBearerAuth('jwt')
 @Controller('v1/payments')
 @UseGuards(JwtAuthGuard)
 export class PaymentsController {

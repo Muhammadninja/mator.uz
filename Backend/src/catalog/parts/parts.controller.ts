@@ -1,7 +1,9 @@
 import { Controller, Get, Param, Query, HttpCode, HttpStatus } from '@nestjs/common';
+import { ApiTags } from '@nestjs/swagger';
 import { PartsService } from './parts.service';
 import { ListPartsQueryDto } from './dto/list-parts.query.dto';
 
+@ApiTags('Catalog / Parts')
 @Controller('v1/catalog/parts')
 export class PartsController {
   constructor(private readonly parts: PartsService) {}

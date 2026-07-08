@@ -12,6 +12,7 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import type { Response } from 'express';
+import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
 import { PhoneAuthService } from './phone/phone-auth.service';
@@ -39,6 +40,7 @@ import { MyIdCallbackDto } from './myid/dto/myid-callback.dto';
  * OTP endpoints live here alongside the email, social, MyID, and token flows.
  * (Consolidated from the former V1AuthController and AuthCompatController.)
  */
+@ApiTags('Auth')
 @Controller('v1/auth')
 export class AuthController {
   constructor(
@@ -136,6 +138,7 @@ export class AuthController {
 
   @Post('sign-out')
   @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth('jwt')
   @HttpCode(HttpStatus.NO_CONTENT)
   async signOut(@Body() dto: RefreshDto) {
     await this.tokens.revoke(this.resolveRefresh(dto));
@@ -157,6 +160,7 @@ export class AuthController {
   // ── MyID (requires an authenticated session) ─────────────────────────────────
   @Post('myid/initiate')
   @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth('jwt')
   @HttpCode(HttpStatus.CREATED)
   myIdInitiate(@Request() req: { user: { id: string } }, @Body() dto: MyIdInitiateDto) {
     return this.myId.initiate(req.user.id, dto);
@@ -164,6 +168,7 @@ export class AuthController {
 
   @Post('myid/callback')
   @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth('jwt')
   @HttpCode(HttpStatus.OK)
   myIdCallback(@Request() req: { user: { id: string } }, @Body() dto: MyIdCallbackDto) {
     return this.myId.callback(req.user.id, dto);
@@ -171,6 +176,7 @@ export class AuthController {
 
   @Get('myid/status')
   @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth('jwt')
   @HttpCode(HttpStatus.OK)
   myIdStatus(
     @Request() req: { user: { id: string } },
@@ -182,6 +188,7 @@ export class AuthController {
   // ── Session / token ───────────────────────────────────────────────────────────
   @Get('me')
   @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth('jwt')
   @HttpCode(HttpStatus.OK)
   me(@Request() req: { user: Record<string, unknown> }) {
     return this.authService.getMe(req.user);
@@ -215,6 +222,7 @@ export class AuthController {
 
   @Post('logout')
   @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth('jwt')
   @HttpCode(HttpStatus.OK)
   async logout(@Body() dto: RefreshDto) {
     await this.tokens.revoke(this.resolveRefresh(dto));

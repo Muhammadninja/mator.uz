@@ -1,4 +1,5 @@
 import { Controller, Get, HttpCode, HttpStatus, ServiceUnavailableException } from '@nestjs/common';
+import { ApiTags } from '@nestjs/swagger';
 import { SkipThrottle } from '@nestjs/throttler';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -7,6 +8,7 @@ import { PrismaService } from '../prisma/prisma.service';
  * checks DB reachability with a trivial query; `/health/live` is a cheap
  * process-up signal that never touches the database.
  */
+@ApiTags('Health')
 @Controller('health')
 @SkipThrottle()
 export class HealthController {

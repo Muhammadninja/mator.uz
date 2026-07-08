@@ -1,3 +1,4 @@
+import { ApiPropertyOptional } from '@nestjs/swagger';
 import { IsString, IsOptional, IsObject, IsIn, Matches } from 'class-validator';
 
 // E.164: +<country><number>, 7–15 digits total.
@@ -18,6 +19,7 @@ export class RequestOtpDto {
 
   // Accepted (and ignored server-side) so the client's analytics envelope and
   // captcha token don't trip forbidNonWhitelisted.
+  @ApiPropertyOptional({ type: 'object', additionalProperties: true, description: 'Optional client analytics envelope; ignored server-side.' })
   @IsOptional()
   @IsObject()
   client?: Record<string, unknown>;
