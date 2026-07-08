@@ -112,6 +112,9 @@ async function bootstrap() {
   const document = SwaggerModule.createDocument(app, swaggerConfig);
   SwaggerModule.setup('docs', app, document);
 
+  // Fire OnModuleDestroy on SIGTERM/SIGINT so the Telegram bot stops its long
+  // poll cleanly on restart (otherwise the next instance gets a 409 Conflict).
+  app.enableShutdownHooks();
   await app.listen(process.env.PORT ?? 3000);
   logger.log(`Mator backend listening on port ${process.env.PORT ?? 3000}`);
 }

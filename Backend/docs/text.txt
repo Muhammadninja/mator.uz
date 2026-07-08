@@ -1,0 +1,13 @@
+4b. Keep it running permanently (use this for real) — pm2
+
+sudo npm i -g pm2
+pm2 start dist/main.js --name mator-bot
+pm2 save
+pm2 startup            # copy-paste and run the command it prints back
+
+Managing it afterward
+
+pm2 logs mator-bot     # watch output
+pm2 restart mator-bot  # after a code update
+pm2 stop mator-bot
+pm2 status
