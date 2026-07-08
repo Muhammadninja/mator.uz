@@ -6,7 +6,7 @@ module.exports = {
   apps: [
     {
       name: 'mator-backend',
-      script: 'dist/main.js',
+      script: 'dist/src/main.js',
       cwd: __dirname,
       exec_mode: 'fork',
       instances: 1,
