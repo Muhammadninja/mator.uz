@@ -485,6 +485,17 @@ export class PhotoroomService {
     // side is close to the edge, the object fits comfortably → leave it exactly
     // as-is (this is the "do not modify" path for correctly-sized/small parts).
     const occupancy = Math.max(bboxW / canvasW, bboxH / canvasH);
+
+    // Diagnostic: log the measured geometry and the normalization decision so we
+    // can see WHY a given image was (or was not) normalized.
+    // eslint-disable-next-line no-console
+    console.info(
+      `PhotoroomService: normalize check — bbox=${bboxW}×${bboxH}, ` +
+        `canvas=${canvasW}×${canvasH}, occupancy=${occupancy.toFixed(4)} ` +
+        `(threshold=${OBJECT_MAX_CANVAS_RATIO}) → ` +
+        `${occupancy <= OBJECT_MAX_CANVAS_RATIO ? 'SKIP (fits comfortably)' : 'SCALE DOWN to ~' + OBJECT_CANVAS_RATIO}`,
+    );
+
     if (occupancy <= OBJECT_MAX_CANVAS_RATIO) return objectPng;
 
     // Oversized: scale the bbox DOWN to fit inside an (0.8·W)×(0.8·H) box,
