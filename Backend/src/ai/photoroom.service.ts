@@ -1,23 +1,30 @@
 import axios from 'axios';
 import FormData from 'form-data';
-import { readFile } from 'fs/promises';
-import path from 'path';
+// TODO(background-disabled): used only by the disabled background-compositing
+// logic (getBackground / composeOnBackground). Commented out to keep the build
+// clean while the feature is off; restore alongside that logic.
+// import { readFile } from 'fs/promises';
+// import path from 'path';
 import sharp from 'sharp';
 
 const PHOTOROOM_ENDPOINT = 'https://image-api.photoroom.com/v2/edit';
 
-// Локальный маркетплейс-фон. Только этот файл — никаких AI-фонов/студий/промптов.
-const BACKGROUND_PATH = path.join(__dirname, 'assets', '6.jpeg');
-
-// Финальный размер выходного изображения (квадрат маркетплейса).
-const OUTPUT_SIZE = 1000;
-
-// Объект должен занимать 75–85% площади кадра. Берём середину диапазона как
-// целевую долю; фактический bounding box объекта вписывается в этот квадрат,
-// что гарантирует визуально одинаковый размер деталей во всём каталоге.
-const OBJECT_RATIO_MIN = 0.75;
-const OBJECT_RATIO_MAX = 0.85;
-const OBJECT_RATIO_TARGET = (OBJECT_RATIO_MIN + OBJECT_RATIO_MAX) / 2; // 0.80
+// TODO(background-disabled): маркетплейс-фон и параметры компоновки временно
+// отключены (см. removeBackground / composeOnBackground). Константы сохранены
+// закомментированными для восстановления функции. Раскомментируйте вместе с
+// composeOnBackground / getBackground.
+// // Локальный маркетплейс-фон. Только этот файл — никаких AI-фонов/студий/промптов.
+// const BACKGROUND_PATH = path.join(__dirname, 'assets', '6.jpeg');
+//
+// // Финальный размер выходного изображения (квадрат маркетплейса).
+// const OUTPUT_SIZE = 1000;
+//
+// // Объект должен занимать 75–85% площади кадра. Берём середину диапазона как
+// // целевую долю; фактический bounding box объекта вписывается в этот квадрат,
+// // что гарантирует визуально одинаковый размер деталей во всём каталоге.
+// const OBJECT_RATIO_MIN = 0.75;
+// const OBJECT_RATIO_MAX = 0.85;
+// const OBJECT_RATIO_TARGET = (OBJECT_RATIO_MIN + OBJECT_RATIO_MAX) / 2; // 0.80
 
 // One combined /v2/edit call (removeBackground + beautify) is fast; cap the
 // wait and fail fast rather than stalling for minutes. No silent retries — a
@@ -105,6 +112,11 @@ export function shouldUpscale(totalPixels: number, cfg: UpscaleConfig): boolean 
 }
 
 /**
+ * TODO(background-disabled): шаги 3–7 (bbox → scale → center → маркетплейс-фон →
+ * финальная резкость) ВРЕМЕННО ОТКЛЮЧЕНЫ. Текущий пайплайн заканчивается на шаге 2
+ * и возвращает прозрачный PNG из PhotoRoom (после localBeautify) — БЕЗ фона.
+ * Описание ниже сохранено для восстановления функции (см. composeOnBackground).
+ *
  * Pipeline (детерминированный, единый для всех изображений каталога):
  *   original seller photo
  *     0. (optional) Photoroom upscale → AI Upscale только если исходник
@@ -114,11 +126,11 @@ export function shouldUpscale(totalPixels: number, cfg: UpscaleConfig): boolean 
  *     1. Photoroom /v2/edit          → ТОЛЬКО removeBackground → прозрачный PNG
  *     2. localBeautify (Sharp)       → тон/цвет-коррекция RGB (normalize/gamma/
  *                                      modulate) + дефриндж альфы, БЕЗ AI
- *     3. object detection (bbox)     → trim прозрачной рамки (Sharp)
- *     4. scale to ~80% canvas        → объект вписывается в OBJECT_RATIO_TARGET
- *     5. center on canvas            → одинаковые отступы
- *     6. apply Mator background      → композитинг → 1000×1000
- *     7. final sharpen (Sharp)       → лёгкая резкость на готовом кадре
+ *     [DISABLED] 3. object detection (bbox)     → trim прозрачной рамки (Sharp)
+ *     [DISABLED] 4. scale to ~80% canvas        → объект вписывается в OBJECT_RATIO_TARGET
+ *     [DISABLED] 5. center on canvas            → одинаковые отступы
+ *     [DISABLED] 6. apply Mator background      → композитинг → 1000×1000
+ *     [DISABLED] 7. final sharpen (Sharp)       → лёгкая резкость на готовом кадре
  *     → save (вызывающий код заливает в Cloudinary)
  *
  * AI Upscale убран намеренно: выход — 1000px, а телефонные фото уже крупнее, так
@@ -132,8 +144,10 @@ export function shouldUpscale(totalPixels: number, cfg: UpscaleConfig): boolean 
 export class PhotoroomService {
   private readonly apiKey: string;
 
-  // Кэш фона в памяти — читаем файл один раз.
-  private backgroundCache: Buffer | null = null;
+  // TODO(background-disabled): фон отключён — кэш фона больше не используется.
+  // Сохранено закомментированным для восстановления вместе с getBackground.
+  // // Кэш фона в памяти — читаем файл один раз.
+  // private backgroundCache: Buffer | null = null;
 
   // AI-Upscale config, resolved once from env (see resolveUpscaleConfig).
   private readonly upscaleConfig: UpscaleConfig;
@@ -150,7 +164,15 @@ export class PhotoroomService {
 
   /**
    * Полный пайплайн обработки фото детали.
-   * Возвращает финальное изображение 1000×1000 (PNG) с маркетплейс-фоном.
+   *
+   * TODO(background-disabled): Добавление/замена маркетплейс-фона временно
+   * ОТКЛЮЧЕНО. Пайплайн возвращает прозрачный PNG сразу после PhotoRoom +
+   * локального enhance (localBeautify), БЕЗ композитинга на фон. Логика фона
+   * сохранена ниже (см. composeOnBackground / getBackground) и закомментирована,
+   * чтобы её можно было восстановить. Чтобы вернуть фон: раскомментируйте
+   * composeOnBackground и связанные части, и снова возвращайте его результат.
+   *
+   * Текущий результат: прозрачный PNG, возвращённый PhotoRoom (после enhance).
    */
   async removeBackground(imageBuffer: Buffer): Promise<Buffer> {
     // 0. (optional) AI Upscale — только для низко-/среднеразрешённых фото; на
@@ -160,13 +182,16 @@ export class PhotoroomService {
     const cutout = await this.callPhotoroomEdit(source);
 
     // Локальная обработка Sharp (детерминированная, без внешних зависимостей):
-    //   assertTransparent   — проверка альфы вырезанного объекта;
-    //   localBeautify       — тон/цвет-коррекция RGB + дефриндж альфы;
-    //   composeOnBackground — bbox → scale ~80% → center → фон → 1000×1000 →
-    //                         финальная резкость.
+    //   assertTransparent   — проверка альфы вырезанного объекта (КАЧЕСТВО, оставлено);
+    //   localBeautify       — тон/цвет-коррекция RGB + дефриндж альфы (enhance).
     await this.assertTransparent(cutout);
     const finished = await this.localBeautify(cutout);
-    return this.composeOnBackground(finished);
+
+    // TODO(background-disabled): раньше здесь объект компоновался на маркетплейс-
+    // фон (bbox → scale ~80% → center → фон → 1000×1000 → финальная резкость).
+    // Шаг отключён — возвращаем прозрачный PNG как есть, без фона.
+    //   return this.composeOnBackground(finished);
+    return finished;
   }
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -392,80 +417,89 @@ export class PhotoroomService {
   // ──────────────────────────────────────────────────────────────────────────
   // 4–7. BBOX → SCALE 75–85% → CENTER → MARKETPLACE BACKGROUND
   // ──────────────────────────────────────────────────────────────────────────
-
-  private async getBackground(): Promise<Buffer> {
-    if (!this.backgroundCache) {
-      const raw = await readFile(BACKGROUND_PATH);
-      this.backgroundCache = await sharp(raw)
-        .resize(OUTPUT_SIZE, OUTPUT_SIZE, { fit: 'cover', position: 'centre' })
-        .removeAlpha()
-        .toBuffer();
-    }
-    return this.backgroundCache;
-  }
-
-  /**
-   * Размещает вырезанный объект на маркетплейс-фоне с единообразным размером:
-   *  4. bounding box — trim полностью прозрачной рамки (Sharp.trim);
-   *  5. scale — объект вписывается в квадрат OBJECT_RATIO_TARGET × OUTPUT_SIZE
-   *     (≈80% кадра, в пределах требуемых 75–85%), пропорции сохраняются;
-   *  6. center — одинаковые отступы со всех сторон;
-   *  7. background — композитинг поверх локального фона, итог 1000×1000.
-   *
-   * Из-за фиксированной целевой доли (OBJECT_RATIO_TARGET) ВСЕ изображения
-   * каталога получают визуально одинаковый размер объекта.
-   */
-  private async composeOnBackground(objectPng: Buffer): Promise<Buffer> {
-    const background = await this.getBackground();
-    const box = Math.round(OUTPUT_SIZE * OBJECT_RATIO_TARGET);
-
-    // 4. bounding box: обрезаем прозрачную рамку, чтобы под масштаб попал сам
-    //    объект, а не пустое пространство. trim() бросает, если обрезать нечего.
-    let trimmed: Buffer;
-    try {
-      trimmed = await sharp(objectPng).trim().toBuffer();
-    } catch {
-      trimmed = objectPng;
-    }
-
-    // 5. scale: вписываем bbox в box×box с сохранением пропорций. В отличие от
-    //    прежней версии разрешаем УВЕЛИЧЕНИЕ (без withoutEnlargement), иначе
-    //    мелкие объекты не дотягивали бы до 75–85% и размер был бы непостоянным.
-    const resizedObject = await sharp(trimmed)
-      .resize(box, box, {
-        fit: 'inside',
-        background: { r: 0, g: 0, b: 0, alpha: 0 },
-      })
-      .toBuffer();
-
-    const { width = box, height = box } = await sharp(resizedObject).metadata();
-
-    // 6. center.
-    const left = Math.round((OUTPUT_SIZE - width) / 2);
-    const top = Math.round((OUTPUT_SIZE - height) / 2);
-
-    // 7. background.
-    const composited = await sharp(background)
-      .composite([{ input: resizedObject, left, top }])
-      .toBuffer();
-
-    // 8. Финальная резкость — ЕДИНСТВЕННЫЙ sharpen в пайплайне, и он здесь
-    //    намеренно: на уже готовом 1000×1000, ПОСЛЕ resize, поэтому ресемплинг
-    //    его не размывает (раньше sharpen стоял до масштабирования и почти терялся).
-    //    Объект непрозрачный и лежит на матовом фоне, так что резкость по краю
-    //    выреза не даёт ореолов на прозрачности.
-    //
-    //    Параметры подобраны консервативно, чтобы металл/пластик выглядел чётким,
-    //    но не «перешарпленным»:
-    //      sigma 0.8 — небольшой радиус: подчёркивает реальную микротекстуру
-    //                  (резьба, литьё, маркировка), а не создаёт кайму;
-    //      m1 0.5    — приглушаем усиление в плоских областях (ровная краска, фон),
-    //                  чтобы не лезли шум и «зерно»;
-    //      m2 1.5    — умеренное усиление на кромках (где и нужна чёткость);
-    //                  низкое значение защищает от гало по контуру детали.
-    return sharp(composited)
-      .sharpen({ sigma: 0.8, m1: 0.5, m2: 1.5 })
-      .png({ compressionLevel: 9 })
-      .toBuffer();
-  }
+  //
+  // TODO(background-disabled): вся логика добавления/замены маркетплейс-фона
+  // временно ОТКЛЮЧЕНА по требованию — бот возвращает прозрачный PNG из PhotoRoom
+  // без фона. Код сохранён целиком (закомментирован), чтобы функцию можно было
+  // восстановить. Чтобы вернуть фон:
+  //   1) раскомментируйте getBackground и composeOnBackground ниже;
+  //   2) раскомментируйте импорты readFile / path и константы BACKGROUND_PATH /
+  //      OUTPUT_SIZE / OBJECT_RATIO_* и поле backgroundCache;
+  //   3) в removeBackground верните `return this.composeOnBackground(finished);`.
+  //
+  // private async getBackground(): Promise<Buffer> {
+  //   if (!this.backgroundCache) {
+  //     const raw = await readFile(BACKGROUND_PATH);
+  //     this.backgroundCache = await sharp(raw)
+  //       .resize(OUTPUT_SIZE, OUTPUT_SIZE, { fit: 'cover', position: 'centre' })
+  //       .removeAlpha()
+  //       .toBuffer();
+  //   }
+  //   return this.backgroundCache;
+  // }
+  //
+  // /**
+  //  * Размещает вырезанный объект на маркетплейс-фоне с единообразным размером:
+  //  *  4. bounding box — trim полностью прозрачной рамки (Sharp.trim);
+  //  *  5. scale — объект вписывается в квадрат OBJECT_RATIO_TARGET × OUTPUT_SIZE
+  //  *     (≈80% кадра, в пределах требуемых 75–85%), пропорции сохраняются;
+  //  *  6. center — одинаковые отступы со всех сторон;
+  //  *  7. background — композитинг поверх локального фона, итог 1000×1000.
+  //  *
+  //  * Из-за фиксированной целевой доли (OBJECT_RATIO_TARGET) ВСЕ изображения
+  //  * каталога получают визуально одинаковый размер объекта.
+  //  */
+  // private async composeOnBackground(objectPng: Buffer): Promise<Buffer> {
+  //   const background = await this.getBackground();
+  //   const box = Math.round(OUTPUT_SIZE * OBJECT_RATIO_TARGET);
+  //
+  //   // 4. bounding box: обрезаем прозрачную рамку, чтобы под масштаб попал сам
+  //   //    объект, а не пустое пространство. trim() бросает, если обрезать нечего.
+  //   let trimmed: Buffer;
+  //   try {
+  //     trimmed = await sharp(objectPng).trim().toBuffer();
+  //   } catch {
+  //     trimmed = objectPng;
+  //   }
+  //
+  //   // 5. scale: вписываем bbox в box×box с сохранением пропорций. В отличие от
+  //   //    прежней версии разрешаем УВЕЛИЧЕНИЕ (без withoutEnlargement), иначе
+  //   //    мелкие объекты не дотягивали бы до 75–85% и размер был бы непостоянным.
+  //   const resizedObject = await sharp(trimmed)
+  //     .resize(box, box, {
+  //       fit: 'inside',
+  //       background: { r: 0, g: 0, b: 0, alpha: 0 },
+  //     })
+  //     .toBuffer();
+  //
+  //   const { width = box, height = box } = await sharp(resizedObject).metadata();
+  //
+  //   // 6. center.
+  //   const left = Math.round((OUTPUT_SIZE - width) / 2);
+  //   const top = Math.round((OUTPUT_SIZE - height) / 2);
+  //
+  //   // 7. background.
+  //   const composited = await sharp(background)
+  //     .composite([{ input: resizedObject, left, top }])
+  //     .toBuffer();
+  //
+  //   // 8. Финальная резкость — ЕДИНСТВЕННЫЙ sharpen в пайплайне, и он здесь
+  //   //    намеренно: на уже готовом 1000×1000, ПОСЛЕ resize, поэтому ресемплинг
+  //   //    его не размывает (раньше sharpen стоял до масштабирования и почти терялся).
+  //   //    Объект непрозрачный и лежит на матовом фоне, так что резкость по краю
+  //   //    выреза не даёт ореолов на прозрачности.
+  //   //
+  //   //    Параметры подобраны консервативно, чтобы металл/пластик выглядел чётким,
+  //   //    но не «перешарпленным»:
+  //   //      sigma 0.8 — небольшой радиус: подчёркивает реальную микротекстуру
+  //   //                  (резьба, литьё, маркировка), а не создаёт кайму;
+  //   //      m1 0.5    — приглушаем усиление в плоских областях (ровная краска, фон),
+  //   //                  чтобы не лезли шум и «зерно»;
+  //   //      m2 1.5    — умеренное усиление на кромках (где и нужна чёткость);
+  //   //                  низкое значение защищает от гало по контуру детали.
+  //   return sharp(composited)
+  //     .sharpen({ sigma: 0.8, m1: 0.5, m2: 1.5 })
+  //     .png({ compressionLevel: 9 })
+  //     .toBuffer();
+  // }
 }
