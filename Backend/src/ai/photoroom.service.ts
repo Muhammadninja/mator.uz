@@ -32,6 +32,21 @@ const PHOTOROOM_ENDPOINT = 'https://image-api.photoroom.com/v2/edit';
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_ATTEMPTS = 1;
 
+// After background removal the extracted object is normalized ONLY when it is
+// oversized. We measure how much of the canvas the object occupies (its largest
+// extent relative to the canvas):
+//   • occupancy ≤ OBJECT_MAX_CANVAS_RATIO → the object already fits comfortably;
+//     it is left EXACTLY as PhotoRoom/enhancement returned it (no resize/recenter).
+//   • occupancy >  OBJECT_MAX_CANVAS_RATIO → the object is close to / touching the
+//     edges; it is scaled DOWN so it occupies ~OBJECT_CANVAS_RATIO of the canvas
+//     and centered. Small objects are never upscaled and the object is never
+//     cropped; the canvas size / resolution stays unchanged.
+const OBJECT_CANVAS_RATIO = 0.8;
+// "Close to or touching the edges": an object whose largest side spans more than
+// this fraction of the canvas is treated as oversized and normalized to
+// OBJECT_CANVAS_RATIO. At or below it, the object is left untouched.
+const OBJECT_MAX_CANVAS_RATIO = 0.85;
+
 // ── AI Upscale (optional pre-stage before background removal) ────────────────
 // Defaults per spec. Overridable via env (see resolveUpscaleConfig):
 //   AI_UPSCALE_ENABLED=true
@@ -187,11 +202,17 @@ export class PhotoroomService {
     await this.assertTransparent(cutout);
     const finished = await this.localBeautify(cutout);
 
+    // Normalize the object ONLY if it is oversized: if it already fits
+    // comfortably it is returned unchanged; if it is close to / touching the
+    // edges it is scaled down to ~80% of the canvas and centered. Canvas size,
+    // resolution and transparency are preserved; no background is added.
+    //
     // TODO(background-disabled): раньше здесь объект компоновался на маркетплейс-
     // фон (bbox → scale ~80% → center → фон → 1000×1000 → финальная резкость).
-    // Шаг отключён — возвращаем прозрачный PNG как есть, без фона.
+    // Композитинг на фон отключён; нормализация идёт на ПРОЗРАЧНОМ холсте
+    // исходного размера. Чтобы вернуть фон — см. composeOnBackground.
     //   return this.composeOnBackground(finished);
-    return finished;
+    return this.normalizeOversizedObject(finished);
   }
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -410,6 +431,102 @@ export class PhotoroomService {
       //    (артефакт сегментации). Радиус 1 не размывает деталь, чистит только
       //    1-пиксельную кромку. Геометрию не трогает.
       .median(1)
+      .png({ compressionLevel: 9 })
+      .toBuffer();
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // NORMALIZE OVERSIZED OBJECT (conditional scale-down → center; else untouched)
+  // ──────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Normalize the cut-out ONLY if it is oversized. Measures how much of the
+   * canvas the object's bounding box occupies (its largest extent relative to the
+   * canvas) and:
+   *   • object fits comfortably (occupancy ≤ OBJECT_MAX_CANVAS_RATIO) → returns
+   *     the input UNCHANGED — no resize, no recenter, byte-for-byte as PhotoRoom/
+   *     enhancement produced it (appropriately-sized and small parts are left be);
+   *   • object is close to / touching the edges (occupancy > OBJECT_MAX_CANVAS_RATIO)
+   *     → scales it DOWN to occupy ~OBJECT_CANVAS_RATIO of the canvas and centers
+   *     it on a transparent canvas of the SAME dimensions.
+   *
+   * Invariants in both branches: canvas size and resolution are preserved, the
+   * object is never upscaled and never cropped, and the background stays fully
+   * transparent (transparent PNG out).
+   */
+  private async normalizeOversizedObject(objectPng: Buffer): Promise<Buffer> {
+    // Canvas = the input's own dimensions. This is the unchanged output size.
+    const meta = await sharp(objectPng).metadata();
+    const canvasW = meta.width ?? 0;
+    const canvasH = meta.height ?? 0;
+    // Degenerate metadata (should not happen for a real PNG): return unchanged
+    // rather than risk producing a broken canvas.
+    if (canvasW === 0 || canvasH === 0) return objectPng;
+
+    // Bounding box: trim the fully-transparent border so we measure the object
+    // itself, not any existing padding. trim() throws when there is nothing to
+    // trim (the object already spans edge to edge) — that IS the oversized case,
+    // so treat the whole canvas as the bbox and fall through to the scale branch.
+    let trimmed: Buffer;
+    let bboxW: number;
+    let bboxH: number;
+    try {
+      trimmed = await sharp(objectPng).trim().toBuffer();
+      const tMeta = await sharp(trimmed).metadata();
+      bboxW = tMeta.width ?? canvasW;
+      bboxH = tMeta.height ?? canvasH;
+    } catch {
+      trimmed = objectPng;
+      bboxW = canvasW;
+      bboxH = canvasH;
+    }
+
+    // Occupancy = largest extent of the object relative to the canvas. If neither
+    // side is close to the edge, the object fits comfortably → leave it exactly
+    // as-is (this is the "do not modify" path for correctly-sized/small parts).
+    const occupancy = Math.max(bboxW / canvasW, bboxH / canvasH);
+
+    // Diagnostic: log the measured geometry and the normalization decision so we
+    // can see WHY a given image was (or was not) normalized.
+    // eslint-disable-next-line no-console
+    console.info(
+      `PhotoroomService: normalize check — bbox=${bboxW}×${bboxH}, ` +
+        `canvas=${canvasW}×${canvasH}, occupancy=${occupancy.toFixed(4)} ` +
+        `(threshold=${OBJECT_MAX_CANVAS_RATIO}) → ` +
+        `${occupancy <= OBJECT_MAX_CANVAS_RATIO ? 'SKIP (fits comfortably)' : 'SCALE DOWN to ~' + OBJECT_CANVAS_RATIO}`,
+    );
+
+    if (occupancy <= OBJECT_MAX_CANVAS_RATIO) return objectPng;
+
+    // Oversized: scale the bbox DOWN to fit inside an (0.8·W)×(0.8·H) box,
+    // aspect ratio preserved. fit: 'inside' keeps both sides ≤ the box (no crop,
+    // no overflow); withoutEnlargement is a safety belt so we can only ever
+    // shrink here (small objects are already returned untouched above).
+    const boxW = Math.max(1, Math.round(canvasW * OBJECT_CANVAS_RATIO));
+    const boxH = Math.max(1, Math.round(canvasH * OBJECT_CANVAS_RATIO));
+    const resizedObject = await sharp(trimmed)
+      .resize(boxW, boxH, {
+        fit: 'inside',
+        withoutEnlargement: true,
+        background: { r: 0, g: 0, b: 0, alpha: 0 },
+      })
+      .toBuffer();
+
+    const { width = boxW, height = boxH } = await sharp(resizedObject).metadata();
+
+    // Center on a transparent canvas of the ORIGINAL size (no background).
+    const left = Math.round((canvasW - width) / 2);
+    const top = Math.round((canvasH - height) / 2);
+
+    return sharp({
+      create: {
+        width: canvasW,
+        height: canvasH,
+        channels: 4,
+        background: { r: 0, g: 0, b: 0, alpha: 0 },
+      },
+    })
+      .composite([{ input: resizedObject, left, top }])
       .png({ compressionLevel: 9 })
       .toBuffer();
   }
