@@ -12,6 +12,7 @@ import { PhotoroomService } from '../ai/photoroom.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SellersService } from '../sellers/sellers.service';
 import { CloudinaryService, UploadedImage } from '../cloudinary/cloudinary.service';
+import { CatalogProjectionService } from '../catalog/projection/catalog-projection.service';
 import { MediaGroupBuffer } from './media-group-buffer';
 import { persistVehicleLinks } from './vehicle-links';
 
@@ -153,6 +154,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     private readonly prisma: PrismaService,
     private readonly sellers: SellersService,
     private readonly cloudinary: CloudinaryService,
+    private readonly catalogProjection: CatalogProjectionService,
   ) {
     this.imageConcurrency = resolveImageConcurrency(
       this.config.get<string>('IMAGE_CONCURRENCY'),
@@ -526,11 +528,18 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         })),
       });
 
-      await this.prisma.stock.upsert({
+      const stock = await this.prisma.stock.upsert({
         where: { sellerId_productId: { sellerId, productId: product.id } },
         update: { priceUzs: price },
         create: { sellerId, productId: product.id, priceUzs: price },
       });
+
+      // Live projection into the buyer catalog: this confirmed listing becomes a
+      // CatalogPart immediately, so no manual backfill is needed. Projection is
+      // best-effort — the supply-side write already succeeded, so a projection
+      // failure must not fail the seller's confirmation; it is logged and the
+      // next update (or a backfill) will reconcile.
+      await this.projectToCatalog(stock.id);
 
       // The preview already served as the confirmation UI — the success message
       // only needs to confirm the write completed. Do not resend product details.
@@ -544,6 +553,24 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
             : String(error);
       this.logger.error(`Commit error: ${errMsg}`, error instanceof Error ? error.stack : undefined);
       await ctx.reply(`⚠️ Произошла ошибка при добавлении товара.\n\`${errMsg}\``, { parse_mode: 'Markdown' });
+    }
+  }
+
+  /**
+   * Project a just-written Stock row into the buyer catalog through the single
+   * authoritative mapping (CatalogProjectionService). Best-effort: the
+   * supply-side write has already committed, so a projection failure is logged
+   * and swallowed rather than surfaced to the seller — the next Stock change or
+   * a backfill run will reconcile the missing CatalogPart.
+   */
+  private async projectToCatalog(stockId: number): Promise<void> {
+    try {
+      await this.catalogProjection.projectStock(stockId);
+    } catch (err) {
+      this.logger.error(
+        `Catalog projection failed for stock #${stockId}: ${err instanceof Error ? err.message : String(err)}`,
+        err instanceof Error ? err.stack : undefined,
+      );
     }
   }
 
