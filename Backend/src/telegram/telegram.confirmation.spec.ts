@@ -39,6 +39,20 @@ interface AnyService {
   commitPending: (ctx: unknown, tgUserId: number) => Promise<void>;
 }
 
+// Records the stock ids the live catalog projection was asked to project. The
+// projection itself is exercised by the CatalogProjectionService's own tests;
+// here we only assert the Telegram commit fires it with the written stock id.
+function makeProjection() {
+  const projected: number[] = [];
+  return {
+    projected,
+    projectStock: async (stockId: number) => {
+      projected.push(stockId);
+      return `part_stock_${stockId}`;
+    },
+  };
+}
+
 const metadata: ParseOutcome = {
   title: 'Магнитола для Nexia 3',
   description: 'Производство Корея, новая',
@@ -117,14 +131,20 @@ function makeCloudinary() {
   };
 }
 
-function makeService(prisma: unknown, cloudinary: unknown): AnyService {
+function makeService(
+  prisma: unknown,
+  cloudinary: unknown,
+  catalogProjection: unknown = makeProjection(),
+): AnyService {
   // Bypass the constructor's Nest DI wiring — we only exercise the private
-  // confirmation helpers, which depend on `prisma`, `cloudinary`, and `pending`.
+  // confirmation helpers, which depend on `prisma`, `cloudinary`,
+  // `catalogProjection`, and `pending`.
   const svc = Object.create(TelegramService.prototype) as unknown as AnyService;
   Object.assign(svc, {
     logger: { log() {}, warn() {}, error() {} },
     prisma,
     cloudinary,
+    catalogProjection,
     pending: new Map<number, unknown>(),
   });
   return svc;
@@ -187,6 +207,38 @@ describe('TelegramService — confirmation session', () => {
     expect(ctx.replies.some((r) => r.includes('Название'))).toBe(false);
     expect(ctx.replies.some((r) => r.includes('OEM'))).toBe(false);
     expect(ctx.replies.some((r) => r.includes('Product ID'))).toBe(false);
+  });
+
+  it('commit projects the written stock into the buyer catalog (live read model)', async () => {
+    const prisma = makePrisma();
+    const projection = makeProjection();
+    const svc = makeService(prisma, makeCloudinary(), projection);
+    const ctx = makeCtx();
+    svc.setPending(ctx, draft(1));
+
+    await svc.commitPending(ctx, 1);
+
+    // The just-upserted Stock (stub returns { id: 500 }) is projected exactly
+    // once, so the CatalogPart exists immediately — no manual backfill needed.
+    expect(projection.projected).toEqual([500]);
+  });
+
+  it('a catalog-projection failure does not fail the commit (best-effort)', async () => {
+    const prisma = makePrisma();
+    const failing = {
+      projectStock: async () => {
+        throw new Error('projection boom');
+      },
+    };
+    const svc = makeService(prisma, makeCloudinary(), failing);
+    const ctx = makeCtx();
+    svc.setPending(ctx, draft(1));
+
+    await svc.commitPending(ctx, 1);
+
+    // Supply-side write already committed; the seller still sees success.
+    expect(ctx.replies.some((r) => r.includes('Товар успешно добавлен'))).toBe(true);
+    expect(svc.pending.has(1)).toBe(false);
   });
 
   it('commit of a UNIVERSAL part clears vehicle links and creates none', async () => {
