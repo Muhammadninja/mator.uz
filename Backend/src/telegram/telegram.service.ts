@@ -581,7 +581,11 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         responseType: 'arraybuffer',
         timeout: 20_000,
       });
-      // (optional) AI upscale + remove bg + local Sharp; only upload on success.
+      // (optional) AI upscale + PhotoRoom remove bg + local Sharp enhance; only
+      // upload on success. TODO(background-disabled): marketplace-background
+      // compositing is currently OFF (see PhotoroomService.removeBackground), so
+      // `cleaned` is the transparent PNG returned by PhotoRoom, not a 1000×1000
+      // image on a background.
       const cleaned = await this.photoroom.removeBackground(Buffer.from(response.data));
       return await this.cloudinary.uploadBuffer(cleaned);
     } catch (err) {

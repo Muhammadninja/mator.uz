@@ -1,1 +1,14 @@
 node_modules
+keys/
+*.pem
+.claude-flow/
+.swarm/
+.DS_Store
+.mcp.json
+.env
+.env.*
+dist/
+*.tsbuildinfo
+.claude/
+CLAUDE.md
+ruvector.db
