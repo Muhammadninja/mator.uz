@@ -166,6 +166,21 @@ describe('classifyPart — region, GM and OEM', () => {
     expect(classifyPart('Колодки Kia K5', null).originRegion).toBe(PartOriginRegion.KOREA);
   });
 
+  // The rarer Japanese makes must be detected from the DICTIONARY (make), not
+  // only from a "Japan" keyword in the text.
+  it.each([
+    ['Колодки Subaru Forester', 'Subaru'],
+    ['Фильтр Suzuki Swift', 'Suzuki'],
+    ['Амортизатор Infiniti QX50', 'Infiniti'],
+    ['Ремень Acura MDX', 'Acura'],
+    ['Фара Daihatsu Terios', 'Daihatsu'],
+    ['Тормоза Isuzu D-Max', 'Isuzu'],
+  ])('%s → make detected and region JAPAN (no "Japan" keyword)', (text, make) => {
+    const r = classifyPart(text, null);
+    expect(r.make).toBe(make);
+    expect(r.originRegion).toBe(PartOriginRegion.JAPAN);
+  });
+
   // ── is_gm: describes the PART, from explicit evidence only ─────────────────
   it('GM vehicle make alone does NOT set isGm (Chevrolet part is not a GM part)', () => {
     expect(classifyPart('Фара Chevrolet Cobalt', null).isGm).toBe(false);
@@ -210,5 +225,25 @@ describe('classifyPart — region, GM and OEM', () => {
 
   it('no OEM keyword → isOem false', () => {
     expect(classifyPart('Колодки Xitoy', null).isOem).toBe(false);
+  });
+
+  // ── OEM and GM are INDEPENDENT dimensions (OEM ≠ GM) ───────────────────────
+  it('Denso for Toyota is OEM but NOT GM (an OEM supplier is not GM)', () => {
+    const r = classifyPart('Свеча Denso оригинал Toyota Camry', null);
+    expect(r.isOem).toBe(true);
+    expect(r.isGm).toBe(false);
+    expect(r.originRegion).toBe(PartOriginRegion.JAPAN);
+  });
+
+  it('ACDelco is GM but NOT OEM here (no OEM/original keyword present)', () => {
+    const r = classifyPart('Фильтр ACDelco', null);
+    expect(r.isGm).toBe(true);
+    expect(r.isOem).toBe(false);
+  });
+
+  it('a GM Genuine original part is BOTH GM and OEM', () => {
+    const r = classifyPart('GM Genuine оригинал', null);
+    expect(r.isGm).toBe(true);
+    expect(r.isOem).toBe(true);
   });
 });
