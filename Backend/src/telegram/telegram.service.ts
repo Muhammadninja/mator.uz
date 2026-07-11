@@ -7,6 +7,7 @@ import { Context, Markup, Telegraf } from 'telegraf';
 import { message } from 'telegraf/filters';
 import type { ParseOutcome } from '../ai/part-parser.types';
 import { PartParserService } from '../ai/part-parser.service';
+import { classifyPart } from '../ai/part-classifier';
 import { extractPriceFromText } from '../ai/rule-based-parser';
 import { PhotoroomService } from '../ai/photoroom.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -508,6 +509,21 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     try {
       const primaryUrl = processedUrls[0];
       const gmKey = metadata.gm_number ?? `tg_${tgUserId}_${Date.now()}`;
+
+      // Classify the listing (title + description, RU/UZ/EN) into the stored
+      // catalog attributes: main/vehicle category (always assigned), region of
+      // origin, and OEM/GM flags. These are persisted on the Product and later
+      // projected into the buyer catalog for indexed filtering.
+      const classification = classifyPart(title, metadata.description);
+      const classifiedFields = {
+        mainCategory: classification.mainCategory,
+        vehicleCategory: classification.vehicleCategory,
+        partBrand: classification.make,
+        originRegion: classification.originRegion,
+        isOem: classification.isOem,
+        isGm: classification.isGm,
+      };
+
       const product = await this.prisma.product.upsert({
         where: { gmNumber: gmKey },
         update: {
@@ -515,6 +531,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
           description: metadata.description,
           imageUrl: primaryUrl,
           isUniversal: metadata.isUniversal,
+          ...classifiedFields,
         },
         create: {
           gmNumber: metadata.gm_number,
@@ -522,6 +539,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
           description: metadata.description,
           imageUrl: primaryUrl,
           isUniversal: metadata.isUniversal,
+          ...classifiedFields,
         },
       });
 

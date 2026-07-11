@@ -1,5 +1,6 @@
 import { SearchService } from '../../src/catalog/search/search.service';
 import { PartsService } from '../../src/catalog/parts/parts.service';
+import { CategoriesService } from '../../src/catalog/categories/categories.service';
 import { createPrismaMock, PrismaMock } from '../utils/harness';
 
 function buildPart(over: Partial<any> = {}): any {
@@ -84,5 +85,120 @@ describe('Catalog/Search smoke', () => {
     const res = await svc.compatibility('part_belt', 'veh_1');
     expect(res.status).toBe('fits');
     expect(res.matched_trims).toEqual([{ trim_id: 'trim_lt', years: [2022] }]);
+  });
+
+  it('presents the classified attributes in the item shape', async () => {
+    const svc = new PartsService(prisma);
+    prisma.catalogPart.count.mockResolvedValue(1);
+    prisma.catalogPart.findMany.mockResolvedValue([
+      buildPart({
+        mainCategory: 'BELTS_AND_HOSES',
+        vehicleCategory: 'ENGINE',
+        partBrandName: 'Chevrolet',
+        originRegion: 'CHINA',
+        isOem: true,
+        isGm: true,
+        isUniversal: false,
+      }),
+    ]);
+    prisma.catalogPart.groupBy.mockResolvedValue([]);
+    prisma.catalogPart.aggregate.mockResolvedValue({ _min: { priceUzs: 0 }, _max: { priceUzs: 0 } });
+    prisma.partBrand.findMany.mockResolvedValue([]);
+
+    const res = await svc.list({} as any);
+    expect(res.items[0]).toMatchObject({
+      main_category: 'BELTS_AND_HOSES',
+      vehicle_category: 'ENGINE',
+      origin_region: 'CHINA',
+      is_oem: true,
+      is_gm: true,
+    });
+  });
+
+  // Capture the `where` the service builds so we can assert the server-side filters.
+  async function whereForQuery(query: any) {
+    const svc = new PartsService(prisma);
+    prisma.catalogPart.count.mockResolvedValue(0);
+    prisma.catalogPart.findMany.mockResolvedValue([]);
+    prisma.catalogPart.groupBy.mockResolvedValue([]);
+    prisma.catalogPart.aggregate.mockResolvedValue({ _min: { priceUzs: 0 }, _max: { priceUzs: 0 } });
+    prisma.partBrand.findMany.mockResolvedValue([]);
+    await svc.list(query);
+    return prisma.catalogPart.findMany.mock.calls[0][0].where;
+  }
+
+  it('filters by main category enum', async () => {
+    const where = await whereForQuery({ category: 'brakes' });
+    expect(where.AND).toContainEqual({ mainCategory: 'BRAKES' });
+  });
+
+  it('filters by make via fit rows OR universal (independent of garage)', async () => {
+    const where = await whereForQuery({ make: 'Chevrolet' });
+    const makeClause = where.AND.find((c: any) => c.OR?.some((o: any) => o.fits));
+    expect(makeClause.OR).toContainEqual({ isUniversal: true });
+    expect(JSON.stringify(makeClause)).toContain('Chevrolet');
+  });
+
+  it('filters by region, gm_only and oem_only', async () => {
+    const where = await whereForQuery({ region: ['china', 'korea'], gm_only: 'true', oem_only: 'true' });
+    expect(where.AND).toContainEqual({ originRegion: { in: ['CHINA', 'KOREA'] } });
+    expect(where.AND).toContainEqual({ isGm: true });
+    expect(where.AND).toContainEqual({ isOem: true });
+  });
+
+  it('garage vehicle restricts to compatible parts (universal OR make/model OR trim)', async () => {
+    prisma.vehicle.findUnique.mockResolvedValue({
+      trimId: 'trim_lt',
+      engineId: null,
+      year: 2019,
+      make: { name: 'Chevrolet' },
+      model: { name: 'Cobalt' },
+    });
+    const where = await whereForQuery({ vehicle_id: 'veh_1' });
+    const vClause = where.AND.find((c: any) => Array.isArray(c.OR));
+    expect(vClause.OR).toContainEqual({ isUniversal: true });
+    expect(JSON.stringify(vClause)).toContain('Cobalt');
+    expect(JSON.stringify(vClause)).toContain('trim_lt');
+  });
+});
+
+describe('Catalog/Categories smoke', () => {
+  let prisma: PrismaMock;
+  beforeEach(() => (prisma = createPrismaMock()));
+
+  it('main scope returns all 12 categories with live counts, unmatched → 0', async () => {
+    const svc = new CategoriesService(prisma);
+    prisma.catalogPart.groupBy.mockResolvedValue([
+      { mainCategory: 'BRAKES', _count: { _all: 12 } },
+      { mainCategory: 'ENGINE', _count: { _all: 25 } },
+    ]);
+
+    const res = await svc.list({});
+    expect(res.total).toBe(12);
+    expect(res.items).toHaveLength(12);
+    const brakes = res.items.find((c) => c.id === 'BRAKES')!;
+    expect(brakes).toMatchObject({ name: 'Brakes', slug: 'brakes', count: 12 });
+    const batteries = res.items.find((c) => c.id === 'BATTERIES')!;
+    expect(batteries.count).toBe(0); // unmatched category → 0
+  });
+
+  it('vehicle scope returns the 8 vehicle-specific categories', async () => {
+    const svc = new CategoriesService(prisma);
+    prisma.catalogPart.groupBy.mockResolvedValue([{ vehicleCategory: 'BRAKE_SYSTEM', _count: { _all: 4 } }]);
+
+    const res = await svc.list({ scope: 'vehicle' });
+    expect(res.total).toBe(8);
+    expect(res.items.find((c) => c.id === 'BRAKE_SYSTEM')!.count).toBe(4);
+  });
+
+  it('scopes counts to a garage vehicle (universal OR fitting make/model)', async () => {
+    const svc = new CategoriesService(prisma);
+    prisma.vehicle.findUnique.mockResolvedValue({ make: { name: 'Chevrolet' }, model: { name: 'Cobalt' } });
+    prisma.catalogPart.groupBy.mockResolvedValue([]);
+
+    await svc.list({ vehicle_id: 'veh_1' });
+    const where = prisma.catalogPart.groupBy.mock.calls[0][0].where;
+    expect(where.OR).toContainEqual({ isUniversal: true });
+    expect(JSON.stringify(where)).toContain('Cobalt');
   });
 });

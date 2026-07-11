@@ -33,12 +33,18 @@ function buildStock(over: Partial<any> = {}): StockRow {
       description: null,
       imageUrl: null,
       isUniversal: false,
+      mainCategory: 'BELTS_AND_HOSES',
+      vehicleCategory: 'ENGINE',
+      partBrand: 'Chevrolet',
+      originRegion: 'USA',
+      isOem: true,
+      isGm: true,
       images: [
         { url: 'https://cdn/img0.webp', sortOrder: 0 },
         { url: 'https://cdn/img1.webp', sortOrder: 1 },
       ],
       partModels: [
-        { model: { brand: { id: 2, name: 'Chevrolet' } } },
+        { model: { name: 'Cobalt', brand: { id: 2, name: 'Chevrolet' } } },
       ],
       ...(over.product ?? {}),
     },
@@ -91,6 +97,53 @@ describe('CatalogProjectionService — mapping', () => {
       expect(part.update).toMatchObject({ priceUzs: 185000, stockQty: 3, inStock: true });
     });
 
+    it('projects the classified attributes verbatim from the Product', () => {
+      svc.buildProjectionOps(buildStock());
+      const part = upsertArg(prisma, 'catalogPart').create;
+      expect(part).toMatchObject({
+        mainCategory: 'BELTS_AND_HOSES',
+        vehicleCategory: 'ENGINE',
+        partBrandName: 'Chevrolet',
+        originRegion: 'USA',
+        isOem: true,
+        isGm: true,
+        isUniversal: false,
+      });
+    });
+
+    it('replaces fit rows and denormalizes make/model with contract slugs', () => {
+      svc.buildProjectionOps(buildStock());
+      // Old rows cleared for idempotency…
+      expect(prisma.catalogPartFit.deleteMany).toHaveBeenCalledWith({ where: { partId: 'part_stock_500' } });
+      // …then the new fit rows created.
+      const createArg = prisma.catalogPartFit.createMany.mock.calls.at(-1)?.[0];
+      expect(createArg.data).toEqual([
+        {
+          partId: 'part_stock_500',
+          makeSlug: 'make_chevrolet',
+          modelSlug: 'model_chevrolet_cobalt',
+          makeName: 'Chevrolet',
+          modelName: 'Cobalt',
+        },
+      ]);
+    });
+
+    it('creates no fit rows for a universal (modelless) product', () => {
+      svc.buildProjectionOps(
+        buildStock({
+          product: {
+            id: 100,
+            gmNumber: null,
+            title: 'Universal clip',
+            isUniversal: true,
+            images: [],
+            partModels: [],
+          },
+        }),
+      );
+      expect(prisma.catalogPartFit.createMany).not.toHaveBeenCalled();
+    });
+
     it('ensures the uncategorized fallback category', () => {
       svc.buildProjectionOps(buildStock());
       const cat = upsertArg(prisma, 'partCategory');
@@ -125,8 +178,8 @@ describe('CatalogProjectionService — mapping', () => {
             isUniversal: false,
             images: [],
             partModels: [
-              { model: { brand: { id: 2, name: 'Chevrolet' } } },
-              { model: { brand: { id: 5, name: 'Hyundai' } } },
+              { model: { name: 'Cobalt', brand: { id: 2, name: 'Chevrolet' } } },
+              { model: { name: 'Solaris', brand: { id: 5, name: 'Hyundai' } } },
             ],
           },
         }),

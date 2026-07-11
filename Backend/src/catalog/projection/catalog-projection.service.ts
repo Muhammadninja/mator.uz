@@ -174,6 +174,15 @@ export class CatalogProjectionService {
       stockQty: stock.quantity,
       // deliveryEtaDaysMin/Max: no source → left null (both optional)
       images,
+      // Classified attributes projected verbatim from the supply-side Product
+      // (set by the Telegram classifier) — enables indexed buyer-side filtering.
+      mainCategory: product.mainCategory,
+      vehicleCategory: product.vehicleCategory,
+      partBrandName: product.partBrand,
+      originRegion: product.originRegion,
+      isOem: product.isOem,
+      isGm: product.isGm,
+      isUniversal: product.isUniversal,
     };
 
     ops.push(
@@ -184,11 +193,59 @@ export class CatalogProjectionService {
       }),
     );
 
-    // Vehicle compatibility (PartCompatibility) is intentionally NOT projected:
+    // Make/model fitment: denormalize the supply-side PartModel links into
+    // catalog_part_fits so the buyer catalog can filter by make/model with an
+    // index. Replace-then-insert keeps the projection idempotent (a re-projection
+    // of a changed listing reconciles removed/added models). Universal parts have
+    // no PartModel rows, so they contribute no fits (matched via isUniversal).
+    ops.push(this.prisma.catalogPartFit.deleteMany({ where: { partId } }));
+    const fitRows = this.buildFitRows(partId, product.partModels);
+    if (fitRows.length > 0) {
+      ops.push(this.prisma.catalogPartFit.createMany({ data: fitRows, skipDuplicates: true }));
+    }
+
+    // Trim/engine-level PartCompatibility is still intentionally NOT projected:
     // the supply side links to CarModel while the buyer side links to
     // VehicleTrim/VehicleEngine — a different taxonomy with NO shared ids. We do
     // not fabricate compatibility rows. (Documented in the original backfill.)
 
     return ops;
+  }
+
+  /** Deterministic slug from a name, matching the frontend id convention
+   *  (e.g. "Chevrolet" → "chevrolet", "Land Cruiser 200" → "land-cruiser-200"). */
+  private static slugify(name: string): string {
+    return name
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+  }
+
+  /**
+   * Build the deduplicated make/model fit rows for a product from its PartModel
+   * links. Each row carries canonical make/model names plus slugs matching the
+   * frontend contract's make_<slug> / model_<make>_<model> id convention. Rows
+   * are keyed by (partId, modelSlug); duplicates (same model under a product) are
+   * collapsed.
+   */
+  private buildFitRows(
+    partId: string,
+    partModels: Array<{ model: { name: string; brand: { name: string } } }>,
+  ): { partId: string; makeSlug: string; modelSlug: string; makeName: string; modelName: string }[] {
+    const byModelSlug = new Map<
+      string,
+      { partId: string; makeSlug: string; modelSlug: string; makeName: string; modelName: string }
+    >();
+    for (const pm of partModels) {
+      const makeName = pm.model.brand.name;
+      const modelName = pm.model.name;
+      const makeSlug = `make_${CatalogProjectionService.slugify(makeName)}`;
+      const modelSlug = `model_${CatalogProjectionService.slugify(makeName)}_${CatalogProjectionService.slugify(modelName)}`;
+      if (!byModelSlug.has(modelSlug)) {
+        byModelSlug.set(modelSlug, { partId, makeSlug, modelSlug, makeName, modelName });
+      }
+    }
+    return [...byModelSlug.values()];
   }
 }

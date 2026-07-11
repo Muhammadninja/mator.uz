@@ -127,6 +127,46 @@ enum PartCondition {
   REFURBISHED
 }
 
+// ── Parts taxonomy (classified by the Telegram bot from title + description) ──
+// Two-level category hierarchy. MAIN categories are the home-page grid; VEHICLE
+// categories group parts once a make/model is chosen. Both are stored on every
+// product so the buyer catalog can filter/facet without extra processing.
+enum PartMainCategory {
+  BRAKES
+  BATTERIES
+  FILTERS
+  IGNITION
+  ENGINE
+  ELECTRICAL_PARTS
+  OIL_AND_FLUIDS
+  BELTS_AND_HOSES
+  WIPERS
+  LIGHTING
+  SUSPENSION
+  EXTERIOR
+}
+
+enum PartVehicleCategory {
+  BRAKE_SYSTEM
+  MAINTENANCE_AND_FLUIDS
+  SUSPENSION_AND_STEERING
+  ELECTRICAL_AND_LIGHTING
+  ENGINE
+  TRANSMISSION
+  HEATING_AND_COOLING
+  TUNING_AND_ACCESSORIES
+}
+
+// Market of origin of the part, inferred from the vehicle make and/or explicit
+// keywords in the listing (Xitoy/Китай/China, Korea/Корея, …).
+enum PartOriginRegion {
+  CHINA
+  EUROPE
+  RUSSIA
+  KOREA
+  USA
+}
+
 enum BookingStatus {
   HOLD
   CONFIRMED
@@ -236,12 +276,24 @@ model Product {
   // isUniversal=false + 1 row → SINGLE, N rows → MULTIPLE; when true there are
   // no part_models rows for the product.
   isUniversal Boolean        @default(false) @map("is_universal")
+  // Classified by the Telegram bot from title + description (RU/UZ/EN). Nullable
+  // so pre-classification rows stay valid; the classifier always assigns a
+  // main/vehicle category (fallback when unsure), and the region/flags when
+  // inferable. Projected verbatim into catalog_parts for buyer-side filtering.
+  mainCategory    PartMainCategory?    @map("main_category")
+  vehicleCategory PartVehicleCategory? @map("vehicle_category")
+  partBrand       String?              @map("part_brand") @db.VarChar(120)
+  originRegion    PartOriginRegion?    @map("origin_region")
+  isOem           Boolean              @default(false) @map("is_oem")
+  isGm            Boolean              @default(false) @map("is_gm")
   createdAt   DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt   DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
   partModels  PartModel[]
   stocks      Stock[]
   images      ProductImage[]
 
+  @@index([mainCategory])
+  @@index([vehicleCategory])
   @@map("products")
 }
 
@@ -780,18 +832,52 @@ model CatalogPart {
   deliveryEtaDaysMin Int?               @map("delivery_eta_days_min")
   deliveryEtaDaysMax Int?               @map("delivery_eta_days_max")
   images            String[]
+  // Classified taxonomy + attributes, projected from the supply-side Product.
+  // Indexed for efficient buyer-side filtering/faceting.
+  mainCategory      PartMainCategory?    @map("main_category")
+  vehicleCategory   PartVehicleCategory? @map("vehicle_category")
+  partBrandName     String?              @map("part_brand_name") @db.VarChar(120)
+  originRegion      PartOriginRegion?    @map("origin_region")
+  isOem             Boolean              @default(false) @map("is_oem")
+  isGm              Boolean              @default(false) @map("is_gm")
+  isUniversal       Boolean              @default(false) @map("is_universal")
   createdAt         DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt         DateTime            @updatedAt @map("updated_at") @db.Timestamptz(3)
   brand             PartBrand?          @relation(fields: [brandId], references: [id], onDelete: SetNull)
   category          PartCategory        @relation(fields: [categoryId], references: [id], onDelete: Restrict)
   seller            CatalogSeller       @relation(fields: [sellerId], references: [id], onDelete: Restrict)
   compatibilities   PartCompatibility[]
+  fits              CatalogPartFit[]
 
   @@index([categoryId])
   @@index([brandId])
   @@index([sellerId])
   @@index([inStock])
+  @@index([mainCategory])
+  @@index([vehicleCategory])
+  @@index([originRegion])
+  @@index([isGm])
+  @@index([isOem])
   @@map("catalog_parts")
+}
+
+// Denormalized make/model fitment for the buyer catalog, projected from the
+// supply-side PartModel links. Enables indexed server-side filtering by vehicle
+// make and model (independent of the trim/engine-level PartCompatibility used
+// for garage-vehicle fit). Names are canonical (see vehicle-catalog.ts); slugs
+// mirror the frontend contract's make/model ids (e.g. make_chevrolet).
+model CatalogPartFit {
+  partId    String      @map("part_id") @db.VarChar(64)
+  makeSlug  String      @map("make_slug") @db.VarChar(80)
+  modelSlug String      @map("model_slug") @db.VarChar(96)
+  makeName  String      @map("make_name") @db.VarChar(120)
+  modelName String      @map("model_name") @db.VarChar(120)
+  part      CatalogPart @relation(fields: [partId], references: [id], onDelete: Cascade)
+
+  @@id([partId, modelSlug])
+  @@index([makeSlug])
+  @@index([modelSlug])
+  @@map("catalog_part_fits")
 }
 
 model PartCompatibility {
