@@ -29,11 +29,45 @@
 import { PrismaClient } from '@prisma/client';
 import { CatalogProjectionService } from '../src/catalog/projection/catalog-projection.service';
 import { PrismaService } from '../src/prisma/prisma.service';
+import { classifyPart } from '../src/ai/part-classifier';
 
 const prisma = new PrismaClient();
 
+/**
+ * Reclassify existing Products that predate the classifier so their stored
+ * category/region/OEM/GM fields are populated before projection. Idempotent —
+ * re-running re-derives the same values; safe to run repeatedly.
+ */
+async function reclassifyProducts() {
+  const products = await prisma.product.findMany({
+    select: { id: true, title: true, description: true, gmNumber: true },
+    orderBy: { id: 'asc' },
+  });
+  let updated = 0;
+  for (const p of products) {
+    const c = classifyPart(p.title, p.description, p.gmNumber);
+    await prisma.product.update({
+      where: { id: p.id },
+      data: {
+        mainCategory: c.mainCategory,
+        vehicleCategory: c.vehicleCategory,
+        partBrand: c.make,
+        originRegion: c.originRegion,
+        isOem: c.isOem,
+        isGm: c.isGm,
+      },
+    });
+    updated += 1;
+  }
+  console.log(`[backfill] reclassified ${updated} product(s)`);
+}
+
 async function main() {
   console.log('[backfill] starting supply → buyer catalog backfill');
+
+  // Populate the classified attributes on existing products first, so the
+  // projection below copies real category/region/OEM/GM values (not nulls).
+  await reclassifyProducts();
 
   // Reuse the single authoritative mapping. CatalogProjectionService only needs
   // a PrismaClient to build/run its projection ops; PrismaService extends

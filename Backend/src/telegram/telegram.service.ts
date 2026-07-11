@@ -7,6 +7,7 @@ import { Context, Markup, Telegraf } from 'telegraf';
 import { message } from 'telegraf/filters';
 import type { ParseOutcome } from '../ai/part-parser.types';
 import { PartParserService } from '../ai/part-parser.service';
+import { classifyPart } from '../ai/part-classifier';
 import { extractPriceFromText } from '../ai/rule-based-parser';
 import { PhotoroomService } from '../ai/photoroom.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -313,6 +314,18 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
     const images = fileIds.slice(0, MAX_IMAGES_PER_LISTING);
 
+    // PhotoRoom processing can take up to ~30 s, so tell the seller to wait
+    // BEFORE we start (the next step — the preview — only appears once processing
+    // finishes). Best-effort: a failed notice must not abort the upload, so it is
+    // logged and swallowed.
+    try {
+      await ctx.reply('⏳ Пожалуйста, подождите. Обработка загруженных фото может занять до 30 секунд.');
+    } catch (err) {
+      this.logger.debug(
+        `Could not send processing notice: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
     try {
       // Parse the caption once and process every image (album order preserved)
       // concurrently: caption parsing and image processing are independent, so
@@ -496,6 +509,21 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     try {
       const primaryUrl = processedUrls[0];
       const gmKey = metadata.gm_number ?? `tg_${tgUserId}_${Date.now()}`;
+
+      // Classify the listing (title + description + OEM number, RU/UZ/EN) into
+      // the stored catalog attributes: main/vehicle category (always assigned),
+      // region of origin, and OEM/GM flags. These are persisted on the Product
+      // and later projected into the buyer catalog for indexed filtering.
+      const classification = classifyPart(title, metadata.description, metadata.gm_number);
+      const classifiedFields = {
+        mainCategory: classification.mainCategory,
+        vehicleCategory: classification.vehicleCategory,
+        partBrand: classification.make,
+        originRegion: classification.originRegion,
+        isOem: classification.isOem,
+        isGm: classification.isGm,
+      };
+
       const product = await this.prisma.product.upsert({
         where: { gmNumber: gmKey },
         update: {
@@ -503,6 +531,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
           description: metadata.description,
           imageUrl: primaryUrl,
           isUniversal: metadata.isUniversal,
+          ...classifiedFields,
         },
         create: {
           gmNumber: metadata.gm_number,
@@ -510,6 +539,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
           description: metadata.description,
           imageUrl: primaryUrl,
           isUniversal: metadata.isUniversal,
+          ...classifiedFields,
         },
       });
 
@@ -608,11 +638,8 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         responseType: 'arraybuffer',
         timeout: 20_000,
       });
-      // (optional) AI upscale + PhotoRoom remove bg + local Sharp enhance; only
-      // upload on success. TODO(background-disabled): marketplace-background
-      // compositing is currently OFF (see PhotoroomService.removeBackground), so
-      // `cleaned` is the transparent PNG returned by PhotoRoom, not a 1000×1000
-      // image on a background.
+      // PhotoRoom (removeBackground + beautify.mode=ai.car) → transparent PNG,
+      // uploaded as-is on success. No local post-processing.
       const cleaned = await this.photoroom.removeBackground(Buffer.from(response.data));
       return await this.cloudinary.uploadBuffer(cleaned);
     } catch (err) {

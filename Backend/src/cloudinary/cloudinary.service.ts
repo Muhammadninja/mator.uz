@@ -25,7 +25,7 @@ export class CloudinaryService implements OnModuleInit {
   async uploadBuffer(buffer: Buffer, folder = 'mator/products'): Promise<UploadedImage> {
     return new Promise((resolve, reject) => {
       cloudinary.uploader
-        .upload_stream({ folder, resource_type: 'image', format: 'webp' }, (err, result: UploadApiResponse) => {
+        .upload_stream({ folder, resource_type: 'image', format: 'png' }, (err, result: UploadApiResponse) => {
           if (err) return reject(new Error(`Cloudinary: ${err.message ?? JSON.stringify(err)}`));
           if (!result) return reject(new Error('Cloudinary: no result returned'));
           resolve({ url: result.secure_url, publicId: result.public_id });

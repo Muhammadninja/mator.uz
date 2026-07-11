@@ -1,365 +1,67 @@
 import axios from 'axios';
 import FormData from 'form-data';
-// TODO(background-disabled): used only by the disabled background-compositing
-// logic (getBackground / composeOnBackground). Commented out to keep the build
-// clean while the feature is off; restore alongside that logic.
-// import { readFile } from 'fs/promises';
-// import path from 'path';
-import sharp from 'sharp';
 
+// PhotoRoom Image Editing API v2 (single edit call).
 const PHOTOROOM_ENDPOINT = 'https://image-api.photoroom.com/v2/edit';
 
-// TODO(background-disabled): маркетплейс-фон и параметры компоновки временно
-// отключены (см. removeBackground / composeOnBackground). Константы сохранены
-// закомментированными для восстановления функции. Раскомментируйте вместе с
-// composeOnBackground / getBackground.
-// // Локальный маркетплейс-фон. Только этот файл — никаких AI-фонов/студий/промптов.
-// const BACKGROUND_PATH = path.join(__dirname, 'assets', '6.jpeg');
-//
-// // Финальный размер выходного изображения (квадрат маркетплейса).
-// const OUTPUT_SIZE = 1000;
-//
-// // Объект должен занимать 75–85% площади кадра. Берём середину диапазона как
-// // целевую долю; фактический bounding box объекта вписывается в этот квадрат,
-// // что гарантирует визуально одинаковый размер деталей во всём каталоге.
-// const OBJECT_RATIO_MIN = 0.75;
-// const OBJECT_RATIO_MAX = 0.85;
-// const OBJECT_RATIO_TARGET = (OBJECT_RATIO_MIN + OBJECT_RATIO_MAX) / 2; // 0.80
+// "AI Car" is PhotoRoom's car beautifier (beautify.mode=ai.car): it removes
+// reflections and enhances the car/part image. We run it together with
+// background removal in ONE /v2/edit call and return the transparent PNG as-is.
+const BEAUTIFY_MODE_AI_CAR = 'ai.car';
 
-// One combined /v2/edit call (removeBackground + beautify) is fast; cap the
-// wait and fail fast rather than stalling for minutes. No silent retries — a
-// single retry on a slow endpoint was the main multi-minute stall.
-const REQUEST_TIMEOUT_MS = 30_000;
-const MAX_ATTEMPTS = 1;
-
-// After background removal the extracted object is normalized ONLY when it is
-// oversized. We measure how much of the canvas the object occupies (its largest
-// extent relative to the canvas):
-//   • occupancy ≤ OBJECT_MAX_CANVAS_RATIO → the object already fits comfortably;
-//     it is left EXACTLY as PhotoRoom/enhancement returned it (no resize/recenter).
-//   • occupancy >  OBJECT_MAX_CANVAS_RATIO → the object is close to / touching the
-//     edges; it is scaled DOWN so it occupies ~OBJECT_CANVAS_RATIO of the canvas
-//     and centered. Small objects are never upscaled and the object is never
-//     cropped; the canvas size / resolution stays unchanged.
-const OBJECT_CANVAS_RATIO = 0.8;
-// "Close to or touching the edges": an object whose largest side spans more than
-// this fraction of the canvas is treated as oversized and normalized to
-// OBJECT_CANVAS_RATIO. At or below it, the object is left untouched.
-const OBJECT_MAX_CANVAS_RATIO = 0.85;
-
-// ── AI Upscale (optional pre-stage before background removal) ────────────────
-// Defaults per spec. Overridable via env (see resolveUpscaleConfig):
-//   AI_UPSCALE_ENABLED=true
-//   AI_UPSCALE_MAX_PIXELS=1000000          → width*height > this ⇒ SKIP upscale
-//   AI_UPSCALE_MODE=ai.fast                → Photoroom upscale.mode
-// Decision (see shouldUpscale): PhotoRoom's AI Upscale only accepts inputs of at
-// most 1,000,000 pixels (width × height). Images above that limit are skipped as
-// an EXPECTED condition (not an error) — the pipeline continues from the previous
-// step's output. Images at or below the limit are upscaled.
-const AI_UPSCALE_ENABLED_DEFAULT = true;
-const AI_UPSCALE_MAX_PIXELS_DEFAULT = 1_000_000;
-const AI_UPSCALE_MODE_DEFAULT = 'ai.fast';
-// Photoroom-supported upscale modes. Invalid config falls back to the default.
-const AI_UPSCALE_MODES = ['ai.fast', 'ai.slow'] as const;
-
-export interface UpscaleConfig {
-  enabled: boolean;
-  maxPixels: number;
-  mode: string;
-}
+// PhotoRoom processing may take up to ~30 s; allow generous headroom over that so
+// a slow-but-successful job is not cut off by the client timeout. Single attempt
+// (no silent retries) — a retry on a slow endpoint only stacks the wait.
+const REQUEST_TIMEOUT_MS = 60_000;
 
 /**
- * Resolve the AI-Upscale config from environment variables, with the spec
- * defaults and light validation. Invalid numeric values fall back to their
- * default; an unsupported mode falls back to ai.fast. `warn` receives a message
- * for each invalid value (so the caller can log via its own logger).
- */
-export function resolveUpscaleConfig(
-  env: NodeJS.ProcessEnv,
-  warn: (msg: string) => void = () => {},
-): UpscaleConfig {
-  const parseIntEnv = (raw: string | undefined, def: number, name: string): number => {
-    if (raw === undefined || raw.trim() === '') return def;
-    const n = Number(raw);
-    if (!Number.isInteger(n) || n <= 0) {
-      warn(`Invalid ${name}="${raw}" (expected a positive integer); using ${def}.`);
-      return def;
-    }
-    return n;
-  };
-
-  const enabled =
-    env.AI_UPSCALE_ENABLED === undefined
-      ? AI_UPSCALE_ENABLED_DEFAULT
-      : env.AI_UPSCALE_ENABLED !== 'false';
-
-  const rawMode = env.AI_UPSCALE_MODE;
-  let mode = AI_UPSCALE_MODE_DEFAULT;
-  if (rawMode !== undefined && rawMode.trim() !== '') {
-    if ((AI_UPSCALE_MODES as readonly string[]).includes(rawMode)) {
-      mode = rawMode;
-    } else {
-      warn(
-        `Invalid AI_UPSCALE_MODE="${rawMode}" (expected one of ${AI_UPSCALE_MODES.join(', ')}); ` +
-          `using ${AI_UPSCALE_MODE_DEFAULT}.`,
-      );
-    }
-  }
-
-  return {
-    enabled,
-    maxPixels: parseIntEnv(env.AI_UPSCALE_MAX_PIXELS, AI_UPSCALE_MAX_PIXELS_DEFAULT, 'AI_UPSCALE_MAX_PIXELS'),
-    mode,
-  };
-}
-
-/**
- * Decide whether AI Upscale should run for an image with the given pixel count
- * (width × height). PhotoRoom's AI Upscale rejects inputs larger than maxPixels
- * (1,000,000 by default), so:
- *  • totalPixels ≤ maxPixels → upscale (within PhotoRoom's limit).
- *  • totalPixels > maxPixels → skip (over the limit; expected, not an error).
- * Disabled config always returns false.
- */
-export function shouldUpscale(totalPixels: number, cfg: UpscaleConfig): boolean {
-  if (!cfg.enabled) return false;
-  return totalPixels <= cfg.maxPixels;
-}
-
-/**
- * TODO(background-disabled): шаги 3–7 (bbox → scale → center → маркетплейс-фон →
- * финальная резкость) ВРЕМЕННО ОТКЛЮЧЕНЫ. Текущий пайплайн заканчивается на шаге 2
- * и возвращает прозрачный PNG из PhotoRoom (после localBeautify) — БЕЗ фона.
- * Описание ниже сохранено для восстановления функции (см. composeOnBackground).
+ * PhotoroomService — the single, minimal image step for seller uploads.
  *
- * Pipeline (детерминированный, единый для всех изображений каталога):
- *   original seller photo
- *     0. (optional) Photoroom upscale → AI Upscale только если исходник
- *                                      ≤1 000 000 пикселей (width×height); фото
- *                                      сверх лимита PhotoRoom пропускаются штатно
- *                                      (не ошибка); на неудаче — исходник.
- *     1. Photoroom /v2/edit          → ТОЛЬКО removeBackground → прозрачный PNG
- *     2. localBeautify (Sharp)       → тон/цвет-коррекция RGB (normalize/gamma/
- *                                      modulate) + дефриндж альфы, БЕЗ AI
- *     [DISABLED] 3. object detection (bbox)     → trim прозрачной рамки (Sharp)
- *     [DISABLED] 4. scale to ~80% canvas        → объект вписывается в OBJECT_RATIO_TARGET
- *     [DISABLED] 5. center on canvas            → одинаковые отступы
- *     [DISABLED] 6. apply Mator background      → композитинг → 1000×1000
- *     [DISABLED] 7. final sharpen (Sharp)       → лёгкая резкость на готовом кадре
- *     → save (вызывающий код заливает в Cloudinary)
+ * Pipeline (nothing else — no upscale, no resize, no compositing, no local
+ * post-processing):
+ *   1. receive the uploaded image buffer,
+ *   2. send it to PhotoRoom /v2/edit with removeBackground + beautify.mode=ai.car,
+ *   3. return the transparent PNG produced by PhotoRoom, exactly as received.
  *
- * AI Upscale убран намеренно: выход — 1000px, а телефонные фото уже крупнее, так
- * что апскейл с последующим даунскейлом только тратил время без выигрыша.
- *
- * AI Beautify (beautify.mode) убран намеренно: добавлял ~17–19 с к запросу при
- * выигрыше, который воспроизводится локально. Финиш — детерминированно через
- * Sharp (localBeautify + final sharpen). Photoroom используется СТРОГО для
- * вырезания фона; он НЕ генерирует фон, тени, студию и не меняет геометрию.
+ * The caller uploads the returned buffer to Cloudinary unchanged.
  */
 export class PhotoroomService {
   private readonly apiKey: string;
-
-  // TODO(background-disabled): фон отключён — кэш фона больше не используется.
-  // Сохранено закомментированным для восстановления вместе с getBackground.
-  // // Кэш фона в памяти — читаем файл один раз.
-  // private backgroundCache: Buffer | null = null;
-
-  // AI-Upscale config, resolved once from env (see resolveUpscaleConfig).
-  private readonly upscaleConfig: UpscaleConfig;
 
   constructor() {
     const key = process.env.PHOTOROOM_API_KEY;
     if (!key) throw new Error('PHOTOROOM_API_KEY is not set');
     this.apiKey = key;
-    this.upscaleConfig = resolveUpscaleConfig(process.env, (msg) =>
-      // eslint-disable-next-line no-console
-      console.warn(`PhotoroomService: ${msg}`),
-    );
   }
 
   /**
-   * Полный пайплайн обработки фото детали.
-   *
-   * TODO(background-disabled): Добавление/замена маркетплейс-фона временно
-   * ОТКЛЮЧЕНО. Пайплайн возвращает прозрачный PNG сразу после PhotoRoom +
-   * локального enhance (localBeautify), БЕЗ композитинга на фон. Логика фона
-   * сохранена ниже (см. composeOnBackground / getBackground) и закомментирована,
-   * чтобы её можно было восстановить. Чтобы вернуть фон: раскомментируйте
-   * composeOnBackground и связанные части, и снова возвращайте его результат.
-   *
-   * Текущий результат: прозрачный PNG, возвращённый PhotoRoom (после enhance).
+   * Send the image to PhotoRoom (remove background + AI Car beautify) and return
+   * the transparent PNG it produces, with no further processing. Throws on
+   * failure (there is no meaningful fallback — without the cutout there is
+   * nothing to upload).
    */
   async removeBackground(imageBuffer: Buffer): Promise<Buffer> {
-    // 0. (optional) AI Upscale — только для низко-/среднеразрешённых фото; на
-    //    неудаче/таймауте возвращает исходник (никогда не роняет загрузку).
-    // 1. Вызов Photoroom /v2/edit: ТОЛЬКО removeBackground (beautify убран).
-    const source = await this.maybeUpscale(imageBuffer);
-    const cutout = await this.callPhotoroomEdit(source);
+    const form = new FormData();
+    form.append('imageFile', imageBuffer, { filename: 'image.jpg', contentType: 'image/jpeg' });
+    form.append('removeBackground', 'true');
+    form.append('beautify.mode', BEAUTIFY_MODE_AI_CAR);
+    // PNG carries the alpha channel; it is what we return to the caller as-is.
+    form.append('export.format', 'png');
 
-    // Локальная обработка Sharp (детерминированная, без внешних зависимостей):
-    //   assertTransparent   — проверка альфы вырезанного объекта (КАЧЕСТВО, оставлено);
-    //   localBeautify       — тон/цвет-коррекция RGB + дефриндж альфы (enhance).
-    await this.assertTransparent(cutout);
-    const finished = await this.localBeautify(cutout);
-
-    // Normalize the object ONLY if it is oversized: if it already fits
-    // comfortably it is returned unchanged; if it is close to / touching the
-    // edges it is scaled down to ~80% of the canvas and centered. Canvas size,
-    // resolution and transparency are preserved; no background is added.
-    //
-    // TODO(background-disabled): раньше здесь объект компоновался на маркетплейс-
-    // фон (bbox → scale ~80% → center → фон → 1000×1000 → финальная резкость).
-    // Композитинг на фон отключён; нормализация идёт на ПРОЗРАЧНОМ холсте
-    // исходного размера. Чтобы вернуть фон — см. composeOnBackground.
-    //   return this.composeOnBackground(finished);
-    return this.normalizeOversizedObject(finished);
-  }
-
-  // ──────────────────────────────────────────────────────────────────────────
-  // 1. PHOTOROOM EDIT (single call: remove background + beautify)
-  // ──────────────────────────────────────────────────────────────────────────
-
-  /**
-   * Один запрос к /v2/edit, выполняющий и удаление фона, и AI-бьютификацию.
-   * Обязательный шаг: при неудаче бросает (нет смысла продолжать без выреза).
-   * Возвращает сырой прозрачный PNG (проверка альфы — отдельным шагом Sharp у
-   * вызывающего кода, чтобы сетевое время не смешивалось с локальным).
-   */
-  private async callPhotoroomEdit(imageBuffer: Buffer): Promise<Buffer> {
-    const result = await this.callPhotoroom(
-      () => {
-        const form = new FormData();
-        form.append('imageFile', imageBuffer, { filename: 'image.jpg', contentType: 'image/jpeg' });
-        form.append('removeBackground', 'true');
-        // beautify.mode УБРАН намеренно: AI-бьютификатор добавлял ~17–19 с к
-        // запросу (removeBackground один — ~1.5 с). Всю финишную обработку теперь
-        // делаем локально через Sharp (localBeautify + финальный sharpen), без AI.
-        // PNG обязателен — только он несёт alpha-канал.
-        form.append('format', 'png');
-        return form;
-      },
-      'edit (removeBackground)',
-      { required: true },
-    );
-    return result!;
-  }
-
-  // ──────────────────────────────────────────────────────────────────────────
-  // 0. AI UPSCALE (optional pre-stage, conditional on image dimensions)
-  // ──────────────────────────────────────────────────────────────────────────
-
-  /**
-   * Optionally AI-upscale the ORIGINAL image before background removal. Reads the
-   * dimensions via Sharp metadata only (no decode/resize) to compute the total
-   * pixel count (width × height), then applies the configured limit (see
-   * shouldUpscale). Upscales only when the image is within PhotoRoom's limit;
-   * images over maxPixels (1,000,000 by default) never touch the Upscale API and
-   * the pipeline continues from the previous step's output. Skipping an oversized
-   * image is an EXPECTED condition, not a failure — logged accordingly.
-   *
-   * Best-effort: if metadata can't be read, or the Upscale call fails/times out,
-   * the ORIGINAL buffer is returned so the product upload always proceeds.
-   */
-  private async maybeUpscale(imageBuffer: Buffer): Promise<Buffer> {
-    if (!this.upscaleConfig.enabled) return imageBuffer;
-
-    let width: number;
-    let height: number;
     try {
-      const meta = await sharp(imageBuffer).metadata();
-      width = meta.width ?? 0;
-      height = meta.height ?? 0;
-      if (width === 0 || height === 0) return imageBuffer; // unknown dimensions → skip safely
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        `PhotoroomService: could not read image metadata for upscale decision — ${err instanceof Error ? err.message : String(err)}`,
-      );
-      return imageBuffer;
+      const response = await axios.post(PHOTOROOM_ENDPOINT, form, {
+        headers: {
+          ...form.getHeaders(),
+          'x-api-key': this.apiKey,
+          Accept: 'image/png, application/json',
+        },
+        responseType: 'arraybuffer',
+        timeout: REQUEST_TIMEOUT_MS,
+      });
+      return Buffer.from(response.data);
+    } catch (error) {
+      throw new Error(`PhotoroomService: AI Car edit failed — ${this.errorDetail(error)}`);
     }
-
-    const totalPixels = width * height;
-    if (!shouldUpscale(totalPixels, this.upscaleConfig)) {
-      // Not a failure: PhotoRoom's AI Upscale rejects inputs above the pixel
-      // limit, so we intentionally skip the step and continue with the previous
-      // step's image. Logged as info to make the skip clearly distinguishable
-      // from an upscale failure.
-      // eslint-disable-next-line no-console
-      console.info(
-        `PhotoroomService: skipping AI Upscale — image is ${width}×${height} = ` +
-          `${totalPixels.toLocaleString('en-US')}px, over PhotoRoom's ` +
-          `${this.upscaleConfig.maxPixels.toLocaleString('en-US')}px limit; continuing without upscale.`,
-      );
-      return imageBuffer;
-    }
-
-    const upscaled = await this.upscaleImage(imageBuffer);
-    // Soft-fail: on any Upscale failure keep the original (upscaleImage logged it).
-    return upscaled ?? imageBuffer;
-  }
-
-  /**
-   * Single Photoroom /v2/edit call requesting ONLY AI upscale (upscale.mode).
-   * Non-required → returns null on failure/timeout so maybeUpscale can fall back
-   * to the original image. Output format is JPEG here: the upscaled image is fed
-   * back into the removeBackground call (which needs a plain photo, not alpha).
-   */
-  private async upscaleImage(imageBuffer: Buffer): Promise<Buffer | null> {
-    return this.callPhotoroom(
-      () => {
-        const form = new FormData();
-        form.append('imageFile', imageBuffer, { filename: 'image.jpg', contentType: 'image/jpeg' });
-        form.append('upscale.mode', this.upscaleConfig.mode);
-        form.append('format', 'jpg');
-        return form;
-      },
-      `upscale (${this.upscaleConfig.mode})`,
-      { required: false },
-    );
-  }
-
-  /**
-   * Единый вызов Photoroom с retry/timeout. На 4xx повтор не делаем.
-   * required=true → бросаем при неудаче; required=false → возвращаем null,
-   * чтобы вызывающий шаг мог мягко деградировать.
-   */
-  private async callPhotoroom(
-    buildForm: () => FormData,
-    label: string,
-    opts: { required: boolean },
-  ): Promise<Buffer | null> {
-    let lastError: unknown;
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      const form = buildForm();
-      try {
-        const response = await axios.post(PHOTOROOM_ENDPOINT, form, {
-          headers: {
-            ...form.getHeaders(),
-            'x-api-key': this.apiKey,
-            Accept: 'image/png, application/json',
-          },
-          responseType: 'arraybuffer',
-          timeout: REQUEST_TIMEOUT_MS,
-        });
-        return Buffer.from(response.data);
-      } catch (error) {
-        lastError = error;
-        // 4xx — ошибка запроса, повтор не поможет.
-        if (axios.isAxiosError(error) && error.response && error.response.status < 500) {
-          break;
-        }
-        if (attempt < MAX_ATTEMPTS) continue;
-      }
-    }
-
-    const detail = this.errorDetail(lastError);
-    if (opts.required) {
-      throw new Error(`PhotoroomService: ${label} failed — ${detail}`);
-    }
-    // Мягкая деградация для необязательных AI-шагов.
-    // eslint-disable-next-line no-console
-    console.warn(`PhotoroomService: ${label} failed, using previous image — ${detail}`);
-    return null;
   }
 
   private errorDetail(error: unknown): string {
@@ -372,240 +74,4 @@ export class PhotoroomService {
     }
     return error instanceof Error ? error.message : String(error);
   }
-
-  /** Проверяет, что Photoroom вернул реально прозрачный фон. */
-  private async assertTransparent(png: Buffer): Promise<void> {
-    const meta = await sharp(png).metadata();
-    if (!meta.hasAlpha) {
-      throw new Error('PhotoroomService: removeBackground returned an image without an alpha channel');
-    }
-    const stats = await sharp(png).stats();
-    const alpha = stats.channels[stats.channels.length - 1];
-    if (alpha.min > 8) {
-      throw new Error(
-        `PhotoroomService: removeBackground returned a non-transparent background ` +
-          `(alpha min=${alpha.min}, max=${alpha.max})`,
-      );
-    }
-  }
-
-  // ──────────────────────────────────────────────────────────────────────────
-  // 3b. LOCAL FINISH (deterministic, no external dependency)
-  // ──────────────────────────────────────────────────────────────────────────
-
-  /**
-   * Локальная тон/цвет-коррекция вырезанного объекта — замена AI-бьютификатора,
-   * консервативная и естественная (детали не должны выглядеть «обработанными AI»).
-   * Оптимизировано под автозапчасти, снятые на простом фоне: как правило это
-   * тускловатые, слегка недоэкспонированные телефонные фото металла/пластика.
-   *
-   * ВАЖНО по порядку операций:
-   *  • Тон/цвет применяем ЗДЕСЬ (до масштабирования), т.к. это поточечные
-   *    операции — результат не зависит от разрешения.
-   *  • Резкость сюда НЕ ставим: раньше sharpen стоял до resize в composeOnBackground,
-   *    и ресемплинг «съедал» её. Финальный sharpen теперь на готовом 1000×1000
-   *    (см. composeOnBackground), где он и виден.
-   *
-   * Операции идут ПРЯМО по RGBA: normalise/gamma/modulate в Sharp работают по
-   * цветовым каналам и оставляют альфу нетронутой, поэтому прозрачность выреза
-   * сохраняется естественно — без ручного extract/join альфы.
-   */
-  private async localBeautify(cutout: Buffer): Promise<Buffer> {
-    return sharp(cutout)
-      .ensureAlpha()
-      // 1) normalize — растягивает гистограмму RGB к полному диапазону. Телефонные
-      //    фото деталей почти всегда «сплюснуты» по контрасту (тусклый серый
-      //    металл на среднем фоне). Клип 1/99 перцентилей защищает от того, чтобы
-      //    один яркий блик или тёмная тень задрали весь контраст (без него
-      //    хромированные блики выбивали бы белым).
-      .normalise({ lower: 1, upper: 99 })
-      // 2) gamma 1.05 — лёгкое осветление средних тонов. Детали часто чуть
-      //    недоэкспонированы; gamma поднимает тени/полутени, не пережигая яркие
-      //    блики (в отличие от простого brightness), сохраняя объём металла.
-      .gamma(1.05)
-      // 3) modulate — очень слабый подъём яркости и насыщенности. 1.03/1.05
-      //    оживляет цвет краски/маркировок и делает металл менее «грязным», но
-      //    остаётся в пределах естественного — крашеные детали не «кислотят».
-      .modulate({ brightness: 1.03, saturation: 1.05 })
-      // 4) median(1) — лёгкий дефриндж полупрозрачной «бахромы» по контуру выреза
-      //    (артефакт сегментации). Радиус 1 не размывает деталь, чистит только
-      //    1-пиксельную кромку. Геометрию не трогает.
-      .median(1)
-      .png({ compressionLevel: 9 })
-      .toBuffer();
-  }
-
-  // ──────────────────────────────────────────────────────────────────────────
-  // NORMALIZE OVERSIZED OBJECT (conditional scale-down → center; else untouched)
-  // ──────────────────────────────────────────────────────────────────────────
-
-  /**
-   * Normalize the cut-out ONLY if it is oversized. Measures how much of the
-   * canvas the object's bounding box occupies (its largest extent relative to the
-   * canvas) and:
-   *   • object fits comfortably (occupancy ≤ OBJECT_MAX_CANVAS_RATIO) → returns
-   *     the input UNCHANGED — no resize, no recenter, byte-for-byte as PhotoRoom/
-   *     enhancement produced it (appropriately-sized and small parts are left be);
-   *   • object is close to / touching the edges (occupancy > OBJECT_MAX_CANVAS_RATIO)
-   *     → scales it DOWN to occupy ~OBJECT_CANVAS_RATIO of the canvas and centers
-   *     it on a transparent canvas of the SAME dimensions.
-   *
-   * Invariants in both branches: canvas size and resolution are preserved, the
-   * object is never upscaled and never cropped, and the background stays fully
-   * transparent (transparent PNG out).
-   */
-  private async normalizeOversizedObject(objectPng: Buffer): Promise<Buffer> {
-    // Canvas = the input's own dimensions. This is the unchanged output size.
-    const meta = await sharp(objectPng).metadata();
-    const canvasW = meta.width ?? 0;
-    const canvasH = meta.height ?? 0;
-    // Degenerate metadata (should not happen for a real PNG): return unchanged
-    // rather than risk producing a broken canvas.
-    if (canvasW === 0 || canvasH === 0) return objectPng;
-
-    // Bounding box: trim the fully-transparent border so we measure the object
-    // itself, not any existing padding. trim() throws when there is nothing to
-    // trim (the object already spans edge to edge) — that IS the oversized case,
-    // so treat the whole canvas as the bbox and fall through to the scale branch.
-    let trimmed: Buffer;
-    let bboxW: number;
-    let bboxH: number;
-    try {
-      trimmed = await sharp(objectPng).trim().toBuffer();
-      const tMeta = await sharp(trimmed).metadata();
-      bboxW = tMeta.width ?? canvasW;
-      bboxH = tMeta.height ?? canvasH;
-    } catch {
-      trimmed = objectPng;
-      bboxW = canvasW;
-      bboxH = canvasH;
-    }
-
-    // Occupancy = largest extent of the object relative to the canvas. If neither
-    // side is close to the edge, the object fits comfortably → leave it exactly
-    // as-is (this is the "do not modify" path for correctly-sized/small parts).
-    const occupancy = Math.max(bboxW / canvasW, bboxH / canvasH);
-    if (occupancy <= OBJECT_MAX_CANVAS_RATIO) return objectPng;
-
-    // Oversized: scale the bbox DOWN to fit inside an (0.8·W)×(0.8·H) box,
-    // aspect ratio preserved. fit: 'inside' keeps both sides ≤ the box (no crop,
-    // no overflow); withoutEnlargement is a safety belt so we can only ever
-    // shrink here (small objects are already returned untouched above).
-    const boxW = Math.max(1, Math.round(canvasW * OBJECT_CANVAS_RATIO));
-    const boxH = Math.max(1, Math.round(canvasH * OBJECT_CANVAS_RATIO));
-    const resizedObject = await sharp(trimmed)
-      .resize(boxW, boxH, {
-        fit: 'inside',
-        withoutEnlargement: true,
-        background: { r: 0, g: 0, b: 0, alpha: 0 },
-      })
-      .toBuffer();
-
-    const { width = boxW, height = boxH } = await sharp(resizedObject).metadata();
-
-    // Center on a transparent canvas of the ORIGINAL size (no background).
-    const left = Math.round((canvasW - width) / 2);
-    const top = Math.round((canvasH - height) / 2);
-
-    return sharp({
-      create: {
-        width: canvasW,
-        height: canvasH,
-        channels: 4,
-        background: { r: 0, g: 0, b: 0, alpha: 0 },
-      },
-    })
-      .composite([{ input: resizedObject, left, top }])
-      .png({ compressionLevel: 9 })
-      .toBuffer();
-  }
-
-  // ──────────────────────────────────────────────────────────────────────────
-  // 4–7. BBOX → SCALE 75–85% → CENTER → MARKETPLACE BACKGROUND
-  // ──────────────────────────────────────────────────────────────────────────
-  //
-  // TODO(background-disabled): вся логика добавления/замены маркетплейс-фона
-  // временно ОТКЛЮЧЕНА по требованию — бот возвращает прозрачный PNG из PhotoRoom
-  // без фона. Код сохранён целиком (закомментирован), чтобы функцию можно было
-  // восстановить. Чтобы вернуть фон:
-  //   1) раскомментируйте getBackground и composeOnBackground ниже;
-  //   2) раскомментируйте импорты readFile / path и константы BACKGROUND_PATH /
-  //      OUTPUT_SIZE / OBJECT_RATIO_* и поле backgroundCache;
-  //   3) в removeBackground верните `return this.composeOnBackground(finished);`.
-  //
-  // private async getBackground(): Promise<Buffer> {
-  //   if (!this.backgroundCache) {
-  //     const raw = await readFile(BACKGROUND_PATH);
-  //     this.backgroundCache = await sharp(raw)
-  //       .resize(OUTPUT_SIZE, OUTPUT_SIZE, { fit: 'cover', position: 'centre' })
-  //       .removeAlpha()
-  //       .toBuffer();
-  //   }
-  //   return this.backgroundCache;
-  // }
-  //
-  // /**
-  //  * Размещает вырезанный объект на маркетплейс-фоне с единообразным размером:
-  //  *  4. bounding box — trim полностью прозрачной рамки (Sharp.trim);
-  //  *  5. scale — объект вписывается в квадрат OBJECT_RATIO_TARGET × OUTPUT_SIZE
-  //  *     (≈80% кадра, в пределах требуемых 75–85%), пропорции сохраняются;
-  //  *  6. center — одинаковые отступы со всех сторон;
-  //  *  7. background — композитинг поверх локального фона, итог 1000×1000.
-  //  *
-  //  * Из-за фиксированной целевой доли (OBJECT_RATIO_TARGET) ВСЕ изображения
-  //  * каталога получают визуально одинаковый размер объекта.
-  //  */
-  // private async composeOnBackground(objectPng: Buffer): Promise<Buffer> {
-  //   const background = await this.getBackground();
-  //   const box = Math.round(OUTPUT_SIZE * OBJECT_RATIO_TARGET);
-  //
-  //   // 4. bounding box: обрезаем прозрачную рамку, чтобы под масштаб попал сам
-  //   //    объект, а не пустое пространство. trim() бросает, если обрезать нечего.
-  //   let trimmed: Buffer;
-  //   try {
-  //     trimmed = await sharp(objectPng).trim().toBuffer();
-  //   } catch {
-  //     trimmed = objectPng;
-  //   }
-  //
-  //   // 5. scale: вписываем bbox в box×box с сохранением пропорций. В отличие от
-  //   //    прежней версии разрешаем УВЕЛИЧЕНИЕ (без withoutEnlargement), иначе
-  //   //    мелкие объекты не дотягивали бы до 75–85% и размер был бы непостоянным.
-  //   const resizedObject = await sharp(trimmed)
-  //     .resize(box, box, {
-  //       fit: 'inside',
-  //       background: { r: 0, g: 0, b: 0, alpha: 0 },
-  //     })
-  //     .toBuffer();
-  //
-  //   const { width = box, height = box } = await sharp(resizedObject).metadata();
-  //
-  //   // 6. center.
-  //   const left = Math.round((OUTPUT_SIZE - width) / 2);
-  //   const top = Math.round((OUTPUT_SIZE - height) / 2);
-  //
-  //   // 7. background.
-  //   const composited = await sharp(background)
-  //     .composite([{ input: resizedObject, left, top }])
-  //     .toBuffer();
-  //
-  //   // 8. Финальная резкость — ЕДИНСТВЕННЫЙ sharpen в пайплайне, и он здесь
-  //   //    намеренно: на уже готовом 1000×1000, ПОСЛЕ resize, поэтому ресемплинг
-  //   //    его не размывает (раньше sharpen стоял до масштабирования и почти терялся).
-  //   //    Объект непрозрачный и лежит на матовом фоне, так что резкость по краю
-  //   //    выреза не даёт ореолов на прозрачности.
-  //   //
-  //   //    Параметры подобраны консервативно, чтобы металл/пластик выглядел чётким,
-  //   //    но не «перешарпленным»:
-  //   //      sigma 0.8 — небольшой радиус: подчёркивает реальную микротекстуру
-  //   //                  (резьба, литьё, маркировка), а не создаёт кайму;
-  //   //      m1 0.5    — приглушаем усиление в плоских областях (ровная краска, фон),
-  //   //                  чтобы не лезли шум и «зерно»;
-  //   //      m2 1.5    — умеренное усиление на кромках (где и нужна чёткость);
-  //   //                  низкое значение защищает от гало по контуру детали.
-  //   return sharp(composited)
-  //     .sharpen({ sigma: 0.8, m1: 0.5, m2: 1.5 })
-  //     .png({ compressionLevel: 9 })
-  //     .toBuffer();
-  // }
 }
