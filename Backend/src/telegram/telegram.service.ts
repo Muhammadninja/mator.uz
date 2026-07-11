@@ -313,6 +313,18 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
     const images = fileIds.slice(0, MAX_IMAGES_PER_LISTING);
 
+    // PhotoRoom processing can take up to ~30 s, so tell the seller to wait
+    // BEFORE we start (the next step — the preview — only appears once processing
+    // finishes). Best-effort: a failed notice must not abort the upload, so it is
+    // logged and swallowed.
+    try {
+      await ctx.reply('⏳ Пожалуйста, подождите. Обработка загруженных фото может занять до 30 секунд.');
+    } catch (err) {
+      this.logger.debug(
+        `Could not send processing notice: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
     try {
       // Parse the caption once and process every image (album order preserved)
       // concurrently: caption parsing and image processing are independent, so
@@ -608,11 +620,8 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         responseType: 'arraybuffer',
         timeout: 20_000,
       });
-      // (optional) AI upscale + PhotoRoom remove bg + local Sharp enhance; only
-      // upload on success. TODO(background-disabled): marketplace-background
-      // compositing is currently OFF (see PhotoroomService.removeBackground), so
-      // `cleaned` is the transparent PNG returned by PhotoRoom, not a 1000×1000
-      // image on a background.
+      // PhotoRoom (removeBackground + beautify.mode=ai.car) → transparent PNG,
+      // uploaded as-is on success. No local post-processing.
       const cleaned = await this.photoroom.removeBackground(Buffer.from(response.data));
       return await this.cloudinary.uploadBuffer(cleaned);
     } catch (err) {
