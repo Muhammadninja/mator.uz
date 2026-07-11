@@ -510,11 +510,11 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       const primaryUrl = processedUrls[0];
       const gmKey = metadata.gm_number ?? `tg_${tgUserId}_${Date.now()}`;
 
-      // Classify the listing (title + description, RU/UZ/EN) into the stored
-      // catalog attributes: main/vehicle category (always assigned), region of
-      // origin, and OEM/GM flags. These are persisted on the Product and later
-      // projected into the buyer catalog for indexed filtering.
-      const classification = classifyPart(title, metadata.description);
+      // Classify the listing (title + description + OEM number, RU/UZ/EN) into
+      // the stored catalog attributes: main/vehicle category (always assigned),
+      // region of origin, and OEM/GM flags. These are persisted on the Product
+      // and later projected into the buyer catalog for indexed filtering.
+      const classification = classifyPart(title, metadata.description, metadata.gm_number);
       const classifiedFields = {
         mainCategory: classification.mainCategory,
         vehicleCategory: classification.vehicleCategory,

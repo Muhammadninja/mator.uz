@@ -40,12 +40,12 @@ const prisma = new PrismaClient();
  */
 async function reclassifyProducts() {
   const products = await prisma.product.findMany({
-    select: { id: true, title: true, description: true },
+    select: { id: true, title: true, description: true, gmNumber: true },
     orderBy: { id: 'asc' },
   });
   let updated = 0;
   for (const p of products) {
-    const c = classifyPart(p.title, p.description);
+    const c = classifyPart(p.title, p.description, p.gmNumber);
     await prisma.product.update({
       where: { id: p.id },
       data: {

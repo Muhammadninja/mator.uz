@@ -4,7 +4,7 @@ import { ApiPropertyOptional } from '@nestjs/swagger';
 
 // Region-of-origin values accepted on the wire (lowercase market names), mapped
 // to the PartOriginRegion enum in the service.
-export const PART_REGION_VALUES = ['china', 'europe', 'russia', 'korea', 'usa'] as const;
+export const PART_REGION_VALUES = ['china', 'europe', 'russia', 'korea', 'usa', 'japan'] as const;
 
 /**
  * Query contract for GET /v1/catalog/parts. Field names match the frontend

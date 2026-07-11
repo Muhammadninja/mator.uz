@@ -24,6 +24,7 @@ const REGION_BY_WIRE: Record<string, PartOriginRegion> = {
   russia: PartOriginRegion.RUSSIA,
   korea: PartOriginRegion.KOREA,
   usa: PartOriginRegion.USA,
+  japan: PartOriginRegion.JAPAN,
 };
 
 const MAIN_CATEGORY_VALUES = new Set(Object.values(PartMainCategory));

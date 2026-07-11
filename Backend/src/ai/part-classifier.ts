@@ -36,10 +36,6 @@ export interface PartClassification {
 const FALLBACK_MAIN: PartMainCategory = PartMainCategory.ENGINE;
 const FALLBACK_VEHICLE: PartVehicleCategory = PartVehicleCategory.ENGINE;
 
-// GM-family makes (canonical names from vehicle-catalog). The contract's
-// `gm_only` restricts to these.
-const GM_MAKES = new Set(['Chevrolet', 'Ravon', 'Daewoo']);
-
 // Home market per canonical make → region of origin. Used to infer originRegion
 // from the detected make when the text has no explicit origin keyword.
 const MAKE_REGION: Record<string, PartOriginRegion> = {
@@ -48,9 +44,15 @@ const MAKE_REGION: Record<string, PartOriginRegion> = {
   Ravon: PartOriginRegion.USA, // GM-Uzbekistan platform (US/GM lineage)
   Hyundai: PartOriginRegion.KOREA,
   Kia: PartOriginRegion.KOREA,
-  Toyota: PartOriginRegion.KOREA, // JP not in the enum; nearest supported market
   Ford: PartOriginRegion.USA,
   Tesla: PartOriginRegion.USA,
+  // Japanese makes.
+  Toyota: PartOriginRegion.JAPAN,
+  Lexus: PartOriginRegion.JAPAN,
+  Honda: PartOriginRegion.JAPAN,
+  Nissan: PartOriginRegion.JAPAN,
+  Mazda: PartOriginRegion.JAPAN,
+  Mitsubishi: PartOriginRegion.JAPAN,
   BYD: PartOriginRegion.CHINA,
   Chery: PartOriginRegion.CHINA,
   Geely: PartOriginRegion.CHINA,
@@ -76,11 +78,6 @@ const MAKE_REGION: Record<string, PartOriginRegion> = {
   Volvo: PartOriginRegion.EUROPE,
   Renault: PartOriginRegion.EUROPE,
   'Land Rover': PartOriginRegion.EUROPE,
-  Lexus: PartOriginRegion.KOREA, // JP not supported; nearest market
-  Mazda: PartOriginRegion.KOREA,
-  Nissan: PartOriginRegion.KOREA,
-  Honda: PartOriginRegion.KOREA,
-  Mitsubishi: PartOriginRegion.KOREA,
   Lada: PartOriginRegion.RUSSIA,
   GAZ: PartOriginRegion.RUSSIA,
   ZAZ: PartOriginRegion.RUSSIA,
@@ -93,6 +90,7 @@ const MAKE_REGION: Record<string, PartOriginRegion> = {
 const REGION_KEYWORDS: Record<PartOriginRegion, string[]> = {
   [PartOriginRegion.CHINA]: ['китай', 'китайск', 'xitoy', 'xitoyda', 'china', 'chinese', 'кнр'],
   [PartOriginRegion.KOREA]: ['корея', 'корейск', 'koreya', 'korea', 'korean', 'koreys'],
+  [PartOriginRegion.JAPAN]: ['япон', 'японск', 'yaponiya', 'yapon', 'japan', 'japanese', 'jdm', 'made in japan'],
   [PartOriginRegion.EUROPE]: ['европа', 'европейск', 'yevropa', 'europe', 'european', 'германия', 'germaniya', 'germany', 'польша', 'polsha', 'poland'],
   [PartOriginRegion.RUSSIA]: ['россия', 'российск', 'rossiya', 'russia', 'russian', 'рф'],
   [PartOriginRegion.USA]: ['сша', 'америка', 'американск', 'amerika', 'usa', 'american', 'ссша'],
@@ -100,6 +98,41 @@ const REGION_KEYWORDS: Record<PartOriginRegion, string[]> = {
 
 // OEM / original quality keywords. "OEM" and "zavod/завод" (factory) count too.
 const OEM_KEYWORDS = ['оригинал', 'ориг', 'original', 'orginal', 'oem', 'zavod', 'завод', 'заводск', 'zavodskoy', 'asl', 'haqiqiy'];
+
+// GM-part evidence, matched against the LISTING TEXT (title + description +
+// manufacturer) — NOT the vehicle it fits. Set is_gm only when the part itself
+// is GM: a GM parts-brand marker (GM / General Motors / ACDelco / GM OEM /
+// GM Genuine) OR the "GM" number label sellers use for GM-genuine catalog codes.
+const GM_TEXT_KEYWORDS = [
+  'general motors',
+  'genuine gm',
+  'gm genuine',
+  'gm oem',
+  'gm original',
+  'acdelco',
+  'ac delco',
+  'дженерал моторс',
+  'джи эм',
+  'gm parts',
+  'оригинал gm',
+  'gm ориг',
+];
+// "GM" / "ГМ" as a standalone token (a GM-genuine marker), e.g. "GM 96440756" or
+// "запчасть GM". Word-bounded so it won't match inside unrelated words.
+const GM_TOKEN = /(^|[^a-zа-яё0-9])(gm|гм)(?=[^a-zа-яё0-9]|$)/i;
+
+/**
+ * Decide whether the PART itself is a GM part, from explicit evidence only:
+ * GM-specific keywords/manufacturer markers in the listing text, or a standalone
+ * "GM" token that sellers use to label a GM-genuine catalog code. The vehicle
+ * make is deliberately NOT used — a GM-compatible aftermarket part is not a GM
+ * part. `oemNumber` is included in the scanned text so a labeled GM OEM shows up.
+ */
+export function detectGmPart(text: string, oemNumber?: string | null): boolean {
+  const haystack = oemNumber ? `${text} ${oemNumber.toLowerCase()}` : text;
+  if (GM_TEXT_KEYWORDS.some((kw) => haystack.includes(kw))) return true;
+  return GM_TOKEN.test(haystack);
+}
 
 // ── Category taxonomy ───────────────────────────────────────────────────────
 // Each entry maps a part concept to a (main, vehicle) category pair and the
@@ -319,13 +352,19 @@ function classifyRegion(text: string, make: string | null): PartOriginRegion | n
 }
 
 /**
- * Classify a listing's title + description into the stored catalog attributes.
- * Always returns a main + vehicle category (fallback when nothing scores), so
- * the value is never empty; region/GM/OEM are populated when inferable.
+ * Classify a listing's title + description (+ optional OEM number) into the
+ * stored catalog attributes. Always returns a main + vehicle category (fallback
+ * when nothing scores), so the value is never empty; region/GM/OEM are populated
+ * when there is evidence.
+ *
+ * is_gm describes the PART, not the vehicle it fits: it is set only on explicit
+ * GM evidence in the text/manufacturer/OEM (see detectGmPart), never inferred
+ * from the vehicle make.
  */
 export function classifyPart(
   title: string | null | undefined,
   description: string | null | undefined,
+  oemNumber?: string | null,
 ): PartClassification {
   const combined = normalize([title ?? '', description ?? ''].join(' '));
 
@@ -333,11 +372,13 @@ export function classifyPart(
   const main = category?.main ?? FALLBACK_MAIN;
   const vehicle = category?.vehicle ?? FALLBACK_VEHICLE;
 
-  // Make (and thus GM/region defaults) from the shared vehicle catalog.
+  // Make from the shared vehicle catalog — used for region-of-origin inference
+  // only (NOT for is_gm).
   const make = matchCatalog(combined).brand;
-  const isGm = make ? GM_MAKES.has(make) : false;
   const originRegion = classifyRegion(combined, make);
   const isOem = OEM_KEYWORDS.some((kw) => combined.includes(kw));
+  // GM is a property of the part, from explicit evidence only.
+  const isGm = detectGmPart(combined, oemNumber);
 
   return { mainCategory: main, vehicleCategory: vehicle, originRegion, isOem, isGm, make };
 }

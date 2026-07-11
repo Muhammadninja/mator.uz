@@ -165,6 +165,7 @@ enum PartOriginRegion {
   RUSSIA
   KOREA
   USA
+  JAPAN
 }
 
 enum BookingStatus {

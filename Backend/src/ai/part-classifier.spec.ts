@@ -128,12 +128,76 @@ describe('classifyPart — region, GM and OEM', () => {
     expect(classifyPart('Универсальный коврик', null).originRegion).toBeNull();
   });
 
-  it('GM make (Chevrolet) → isGm true', () => {
-    expect(classifyPart('Фара Chevrolet Cobalt', null).isGm).toBe(true);
+  // ── JAPAN as a first-class origin region ──────────────────────────────────
+  it('Japanese make Toyota with no keyword → JAPAN', () => {
+    expect(classifyPart('Колодки Toyota Camry', null).originRegion).toBe(PartOriginRegion.JAPAN);
   });
 
-  it('non-GM make (BMW) → isGm false', () => {
+  it('Japanese make Honda → JAPAN', () => {
+    expect(classifyPart('Фильтр Honda Civic', null).originRegion).toBe(PartOriginRegion.JAPAN);
+  });
+
+  it('Japanese make Nissan → JAPAN', () => {
+    expect(classifyPart('Амортизатор Nissan Teana', null).originRegion).toBe(PartOriginRegion.JAPAN);
+  });
+
+  it('Japanese make Lexus → JAPAN', () => {
+    expect(classifyPart('Фара Lexus RX', null).originRegion).toBe(PartOriginRegion.JAPAN);
+  });
+
+  it('Japanese make Mazda → JAPAN', () => {
+    expect(classifyPart('Ремень Mazda 6', null).originRegion).toBe(PartOriginRegion.JAPAN);
+  });
+
+  it('Japanese make Mitsubishi → JAPAN', () => {
+    expect(classifyPart('Колодки Mitsubishi', null).originRegion).toBe(PartOriginRegion.JAPAN);
+  });
+
+  it('explicit Япония keyword → JAPAN', () => {
+    expect(classifyPart('Свеча Япония', null).originRegion).toBe(PartOriginRegion.JAPAN);
+  });
+
+  it('explicit "made in Japan" → JAPAN', () => {
+    expect(classifyPart('Spark plug made in Japan', null).originRegion).toBe(PartOriginRegion.JAPAN);
+  });
+
+  it('Korean makes still map to KOREA (unchanged)', () => {
+    expect(classifyPart('Фильтр Hyundai Solaris', null).originRegion).toBe(PartOriginRegion.KOREA);
+    expect(classifyPart('Колодки Kia K5', null).originRegion).toBe(PartOriginRegion.KOREA);
+  });
+
+  // ── is_gm: describes the PART, from explicit evidence only ─────────────────
+  it('GM vehicle make alone does NOT set isGm (Chevrolet part is not a GM part)', () => {
+    expect(classifyPart('Фара Chevrolet Cobalt', null).isGm).toBe(false);
+  });
+
+  it('non-GM make → isGm false', () => {
     expect(classifyPart('Фара BMW X5', null).isGm).toBe(false);
+  });
+
+  it('explicit "General Motors" in text → isGm true', () => {
+    expect(classifyPart('Ремень General Motors', null).isGm).toBe(true);
+  });
+
+  it('ACDelco (GM parts brand) → isGm true', () => {
+    expect(classifyPart('Фильтр ACDelco', null).isGm).toBe(true);
+  });
+
+  it('standalone GM token in text → isGm true', () => {
+    expect(classifyPart('Колодки GM оригинал', null).isGm).toBe(true);
+  });
+
+  it('GM label on the OEM number → isGm true', () => {
+    expect(classifyPart('Ремень генератора', null, 'GM 96440756').isGm).toBe(true);
+  });
+
+  it('plain numeric OEM with no GM marker → isGm false', () => {
+    expect(classifyPart('Ремень генератора', null, '96440756').isGm).toBe(false);
+  });
+
+  it('GM substring inside a word does NOT trigger isGm', () => {
+    // "программа" contains no GM token; ensure no false positive on partials.
+    expect(classifyPart('Программатор ключей', null).isGm).toBe(false);
   });
 
   it('оригинал → isOem true', () => {
