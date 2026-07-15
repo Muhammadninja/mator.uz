@@ -1,6 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Prisma, PartCondition } from '@prisma/client';
+import { Prisma, PartCondition, PartNumberType } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+
+/** Prefix of the synthetic Product.gmNumber key used when a listing has no real
+ *  part number — such values must never be projected as searchable numbers. */
+const SYNTHETIC_KEY_PREFIX = 'tg_';
 
 /**
  * CatalogProjectionService — the SINGLE, authoritative mapping from the
@@ -35,6 +39,37 @@ export class CatalogProjectionService {
   static catalogSellerId = (sellerId: number) => `seller_${sellerId}`;
   static partBrandId = (brandId: number) => `brand_${brandId}`;
   static catalogPartId = (stockId: number) => `part_stock_${stockId}`;
+
+  /**
+   * Build the (gmNumbers, oemNumbers) search arrays for the buyer catalog from a
+   * Product's stored numbers and labeled type, WITHOUT cross-copying:
+   *   • GM      → the number is searchable only as a GM number
+   *   • OEM     → the number is searchable only as an OEM number
+   *   • UNKNOWN → the (unlabeled) number is searchable as BOTH — we cannot claim
+   *               a type, so both searches must find it
+   * Synthetic idempotency keys (tg_…) and blanks are excluded. Exported as a pure
+   * static so the backfill script and tests reuse the exact same rule.
+   */
+  static numberSearchArrays(
+    gmNumber: string | null,
+    oemNumber: string | null,
+    type: PartNumberType,
+  ): { gmNumbers: string[]; oemNumbers: string[] } {
+    const real = (n: string | null): string | null =>
+      n && n.trim() && !n.startsWith(SYNTHETIC_KEY_PREFIX) ? n.trim() : null;
+    const gm = real(gmNumber);
+    const oem = real(oemNumber);
+
+    if (type === PartNumberType.OEM) {
+      return { gmNumbers: [], oemNumbers: oem ? [oem] : [] };
+    }
+    if (type === PartNumberType.GM) {
+      return { gmNumbers: gm ? [gm] : [], oemNumbers: [] };
+    }
+    // UNKNOWN: the raw value lives in gmNumber; expose it to both searches.
+    const both = gm ?? oem;
+    return { gmNumbers: both ? [both] : [], oemNumbers: both ? [both] : [] };
+  }
 
   // Single synthetic fallback category. CatalogPart.categoryId is NOT NULL and
   // the supply side has no category concept, so every part lands here until a
@@ -161,12 +196,26 @@ export class CatalogProjectionService {
     const partId = CatalogProjectionService.catalogPartId(stock.id);
     const images = product.images.map((img) => img.url);
 
+    // Project the part number into the GM/OEM search arrays by its LABELED type,
+    // without cross-copying. A GM-labeled number is searchable only as GM, an
+    // OEM-labeled one only as OEM, and an UNKNOWN (unlabeled) number is exposed
+    // to BOTH searches (its true type is unknown). Synthetic idempotency keys
+    // (tg_…, produced when a listing carried no number) are never real numbers,
+    // so they are excluded from both arrays.
+    const { gmNumbers, oemNumbers } = CatalogProjectionService.numberSearchArrays(
+      product.gmNumber,
+      product.oemNumber,
+      product.partNumberType,
+    );
+
     const partData = {
       title: product.title,
       brandId,
       categoryId: CatalogProjectionService.UNCATEGORIZED_ID,
       sellerId,
-      oemNumbers: product.gmNumber ? [product.gmNumber] : [],
+      oemNumbers,
+      gmNumbers,
+      partNumberType: product.partNumberType,
       priceUzs: stock.priceUzs,
       // currency: schema default "UZS"
       condition: PartCondition.NEW, // supply side has no condition — schema default

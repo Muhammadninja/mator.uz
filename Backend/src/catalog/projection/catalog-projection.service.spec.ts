@@ -29,6 +29,8 @@ function buildStock(over: Partial<any> = {}): StockRow {
     product: {
       id: 100,
       gmNumber: '96535062',
+      oemNumber: null,
+      partNumberType: 'UNKNOWN',
       title: 'Timing belt',
       description: null,
       imageUrl: null,
@@ -86,7 +88,10 @@ describe('CatalogProjectionService — mapping', () => {
         brandId: 'brand_2', // exactly one linked vehicle brand → used
         categoryId: CatalogProjectionService.UNCATEGORIZED_ID,
         sellerId: 'seller_7',
+        // Unlabeled (UNKNOWN) number → searchable as BOTH GM and OEM.
         oemNumbers: ['96535062'],
+        gmNumbers: ['96535062'],
+        partNumberType: 'UNKNOWN',
         priceUzs: 185000,
         condition: PartCondition.NEW,
         inStock: true, // quantity 3 > 0
@@ -236,6 +241,45 @@ describe('CatalogProjectionService — mapping', () => {
     it('updateProjection is an alias for projectStock', async () => {
       prisma.stock.findUnique.mockResolvedValue(buildStock());
       expect(await svc.updateProjection(500)).toBe('part_stock_500');
+    });
+  });
+});
+
+describe('CatalogProjectionService.numberSearchArrays', () => {
+  const { numberSearchArrays } = CatalogProjectionService;
+
+  it('GM-labeled → searchable only as GM', () => {
+    expect(numberSearchArrays('96535062', null, 'GM' as any)).toEqual({
+      gmNumbers: ['96535062'],
+      oemNumbers: [],
+    });
+  });
+
+  it('OEM-labeled → searchable only as OEM', () => {
+    expect(numberSearchArrays(null, '96535062', 'OEM' as any)).toEqual({
+      gmNumbers: [],
+      oemNumbers: ['96535062'],
+    });
+  });
+
+  it('UNKNOWN (unlabeled) → searchable as BOTH', () => {
+    expect(numberSearchArrays('96535062', null, 'UNKNOWN' as any)).toEqual({
+      gmNumbers: ['96535062'],
+      oemNumbers: ['96535062'],
+    });
+  });
+
+  it('excludes synthetic idempotency keys (tg_…) from both arrays', () => {
+    expect(numberSearchArrays('tg_123_456', null, 'UNKNOWN' as any)).toEqual({
+      gmNumbers: [],
+      oemNumbers: [],
+    });
+  });
+
+  it('yields empty arrays when there is no number', () => {
+    expect(numberSearchArrays(null, null, 'UNKNOWN' as any)).toEqual({
+      gmNumbers: [],
+      oemNumbers: [],
     });
   });
 });

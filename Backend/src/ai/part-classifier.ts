@@ -5,8 +5,10 @@
 //   • main category      (PartMainCategory, 12 home-page buckets)
 //   • vehicle category    (PartVehicleCategory, 8 make/model buckets)
 //   • region of origin    (PartOriginRegion: CHINA/EUROPE/RUSSIA/KOREA/USA)
-//   • OEM quality flag     (original / zavod / OEM)
-//   • GM-only flag         (make ∈ Chevrolet / Ravon / Daewoo)
+//   • OEM label flag       (explicit "OEM" part-number label ONLY — never an
+//                           authenticity word like original/оригинал/genuine)
+//   • GM label flag        (explicit "GM" label/token or genuine-GM marker ONLY —
+//                           never inferred from the vehicle make or an auth word)
 //
 // Design goals (mirrors the part-parser's rule-based layer, offline only):
 //   • Works across Russian, Uzbek (latin + cyrillic) and English + abbreviations.
@@ -19,6 +21,7 @@
 // catalog.ts); this module reuses that for region/GM inference.
 
 import { PartMainCategory, PartVehicleCategory, PartOriginRegion } from '@prisma/client';
+import type { PartNumberType } from './part-parser.types';
 import { matchCatalog } from './vehicle-catalog';
 
 export interface PartClassification {
@@ -29,6 +32,20 @@ export interface PartClassification {
   isGm: boolean;
   /** Canonical vehicle make (first detected), or null — convenience for callers. */
   make: string | null;
+}
+
+/**
+ * Map a seller-labeled part-number type to the stored (isOem, isGm) flags. This
+ * is the ONLY place the classifier decides those flags, and it does so purely
+ * from `PartNumberType` — the single label rule (part-number.ts) is upstream.
+ *   OEM → { isOem: true,  isGm: false }
+ *   GM  → { isOem: false, isGm: true }
+ *   UNKNOWN (or undefined) → both false.
+ */
+function flagsFromPartNumberType(
+  type: PartNumberType | undefined,
+): { isOem: boolean; isGm: boolean } {
+  return { isOem: type === 'OEM', isGm: type === 'GM' };
 }
 
 // Fallbacks when nothing scores. Engine + Maintenance are the broadest,
@@ -102,43 +119,16 @@ const REGION_KEYWORDS: Record<PartOriginRegion, string[]> = {
   [PartOriginRegion.USA]: ['сша', 'америка', 'американск', 'amerika', 'usa', 'american', 'ссша'],
 };
 
-// OEM / original quality keywords. "OEM" and "zavod/завод" (factory) count too.
-const OEM_KEYWORDS = ['оригинал', 'ориг', 'original', 'orginal', 'oem', 'zavod', 'завод', 'заводск', 'zavodskoy', 'asl', 'haqiqiy'];
-
-// GM-part evidence, matched against the LISTING TEXT (title + description +
-// manufacturer) — NOT the vehicle it fits. Set is_gm only when the part itself
-// is GM: a GM parts-brand marker (GM / General Motors / ACDelco / GM OEM /
-// GM Genuine) OR the "GM" number label sellers use for GM-genuine catalog codes.
-const GM_TEXT_KEYWORDS = [
-  'general motors',
-  'genuine gm',
-  'gm genuine',
-  'gm oem',
-  'gm original',
-  'acdelco',
-  'ac delco',
-  'дженерал моторс',
-  'джи эм',
-  'gm parts',
-  'оригинал gm',
-  'gm ориг',
-];
-// "GM" / "ГМ" as a standalone token (a GM-genuine marker), e.g. "GM 96440756" or
-// "запчасть GM". Word-bounded so it won't match inside unrelated words.
-const GM_TOKEN = /(^|[^a-zа-яё0-9])(gm|гм)(?=[^a-zа-яё0-9]|$)/i;
-
-/**
- * Decide whether the PART itself is a GM part, from explicit evidence only:
- * GM-specific keywords/manufacturer markers in the listing text, or a standalone
- * "GM" token that sellers use to label a GM-genuine catalog code. The vehicle
- * make is deliberately NOT used — a GM-compatible aftermarket part is not a GM
- * part. `oemNumber` is included in the scanned text so a labeled GM OEM shows up.
- */
-export function detectGmPart(text: string, oemNumber?: string | null): boolean {
-  const haystack = oemNumber ? `${text} ${oemNumber.toLowerCase()}` : text;
-  if (GM_TEXT_KEYWORDS.some((kw) => haystack.includes(kw))) return true;
-  return GM_TOKEN.test(haystack);
-}
+// is_oem / is_gm are NOT computed here. They are PURE FUNCTIONS of the seller's
+// part-number label (`PartNumberType`), whose SINGLE authoritative rule lives in
+// part-number.ts (classifyPartNumberType). The classifier consumes that type:
+//   OEM     → isOem = true,  isGm = false
+//   GM      → isGm  = true,  isOem = false
+//   UNKNOWN → both false
+// Nothing about the product's authenticity (original/оригинал/genuine/factory/
+// заводской) or its manufacturer brand (ACDelco/General Motors) may set these
+// flags — that would be a second, divergent implementation of the label rule.
+// See flagsFromPartNumberType below.
 
 // ── Category taxonomy ───────────────────────────────────────────────────────
 // Each entry maps a part concept to a (main, vehicle) category pair and the
@@ -358,19 +348,20 @@ function classifyRegion(text: string, make: string | null): PartOriginRegion | n
 }
 
 /**
- * Classify a listing's title + description (+ optional OEM number) into the
- * stored catalog attributes. Always returns a main + vehicle category (fallback
- * when nothing scores), so the value is never empty; region/GM/OEM are populated
- * when there is evidence.
+ * Classify a listing's title + description into the stored catalog attributes.
+ * Always returns a main + vehicle category (fallback when nothing scores), so the
+ * value is never empty; region is populated from keywords/make when inferable.
  *
- * is_gm describes the PART, not the vehicle it fits: it is set only on explicit
- * GM evidence in the text/manufacturer/OEM (see detectGmPart), never inferred
- * from the vehicle make.
+ * is_oem / is_gm are NOT derived here. They come EXCLUSIVELY from the seller's
+ * part-number label (`partNumberType`), whose single authoritative rule lives in
+ * part-number.ts — so there is exactly one implementation of the OEM/GM labeling
+ * rule in the codebase. Category / region / make still inspect the text; the
+ * label flags do not. `partNumberType` defaults to UNKNOWN (both flags false).
  */
 export function classifyPart(
   title: string | null | undefined,
   description: string | null | undefined,
-  oemNumber?: string | null,
+  partNumberType?: PartNumberType,
 ): PartClassification {
   const combined = normalize([title ?? '', description ?? ''].join(' '));
 
@@ -379,12 +370,13 @@ export function classifyPart(
   const vehicle = category?.vehicle ?? FALLBACK_VEHICLE;
 
   // Make from the shared vehicle catalog — used for region-of-origin inference
-  // only (NOT for is_gm).
+  // only (NOT for is_gm / is_oem).
   const make = matchCatalog(combined).brand;
   const originRegion = classifyRegion(combined, make);
-  const isOem = OEM_KEYWORDS.some((kw) => combined.includes(kw));
-  // GM is a property of the part, from explicit evidence only.
-  const isGm = detectGmPart(combined, oemNumber);
+
+  // is_oem / is_gm: pure function of the seller's part-number label. Never from
+  // authenticity words, manufacturer markers, or the vehicle make.
+  const { isOem, isGm } = flagsFromPartNumberType(partNumberType);
 
   return { mainCategory: main, vehicleCategory: vehicle, originRegion, isOem, isGm, make };
 }

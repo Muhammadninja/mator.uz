@@ -12,6 +12,14 @@ export interface ParsedVehicle {
   model: string;
 }
 
+/**
+ * How the seller labeled the part number. We NEVER infer this from the number
+ * itself or from the LLM — only from an explicit "GM"/"OEM" label next to the
+ * value. An unlabeled number (bare digits, "Артикул", "Part No.") stays UNKNOWN
+ * so it remains searchable as BOTH a GM and an OEM number.
+ */
+export type PartNumberType = 'GM' | 'OEM' | 'UNKNOWN';
+
 export interface ParsedPartMetadata {
   /** Part name only — e.g. "Фильтр масляный". Never contains brand/model/price/OEM. */
   title: string | null;
@@ -34,8 +42,19 @@ export interface ParsedPartMetadata {
    * are empty and no per-vehicle links must be created.
    */
   isUniversal?: boolean;
-  /** OEM/GM number as a digit string — e.g. "96535062". */
+  /**
+   * The seller's part number as a digit string — e.g. "96535062". This is the
+   * RAW value regardless of label; `part_number_type` records whether the seller
+   * called it GM, OEM, or left it unlabeled. Kept named `gm_number` for backward
+   * compatibility with existing persistence (Product.gmNumber unique key).
+   */
   gm_number: string | null;
+  /**
+   * How the seller labeled `gm_number`. Optional so legacy object literals stay
+   * valid; the parser/sanitizer always fill it. Defaults to 'UNKNOWN' — an
+   * unlabeled number is NEVER guessed to be GM or OEM.
+   */
+  part_number_type?: PartNumberType;
   /** Numeric price without currency — e.g. 25000. */
   price: number | null;
 }
@@ -61,4 +80,6 @@ export interface ParseOutcome extends ParsedPartMetadata {
   vehicles: ParsedVehicle[];
   /** Always present on a final outcome. */
   isUniversal: boolean;
+  /** Always present on a final outcome (defaults to 'UNKNOWN'). */
+  part_number_type: PartNumberType;
 }

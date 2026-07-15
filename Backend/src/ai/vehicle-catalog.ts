@@ -833,6 +833,19 @@ const MODEL_CANON_BY_LOWER = new Map<string, string>();
 /** model canonical (lowercase) → ALL owning brands, in catalog order. */
 const MODEL_BRANDS_BY_CANON = new Map<string, string[]>();
 
+/**
+ * A purely-numeric token (digits only, e.g. "100", "80", "2106", "469"). Such a
+ * token must NEVER be a standalone matchable model alias: countless listings
+ * carry a bare number in unrelated text ("100% синтетика", "100 мл", "80 000",
+ * a quantity, a viscosity, a catalog code), and matching it would fabricate a
+ * vehicle (e.g. a lone "100" → Audi 100). Numeric-only models are still
+ * matchable through their BRAND-QUALIFIED aliases ("audi 100", "ваз 2106",
+ * "москвич 412") and nicknames ("сотка", "шестерка", "буханка"). This filter is
+ * applied to BOTH the auto-registered canonical and any hand-authored aliases,
+ * so it fixes the whole class generically, not just Audi 80/100.
+ */
+const isNumericOnly = (token: string): boolean => /^\d+$/.test(token);
+
 for (const brand of VEHICLE_CATALOG) {
   for (const alias of [brand.canonical.toLowerCase(), ...brand.aliases]) {
     if (!BRAND_BY_ALIAS.has(alias)) BRAND_BY_ALIAS.set(alias, brand.canonical);
@@ -840,11 +853,16 @@ for (const brand of VEHICLE_CATALOG) {
   for (const model of brand.models) {
     const all = [model.canonical.toLowerCase(), ...model.aliases];
     for (const alias of all) {
+      // Never index a bare numeric token as a matchable alias — it would match a
+      // stray number in unrelated text and hallucinate a vehicle.
+      if (isNumericOnly(alias)) continue;
       // First brand wins for shared model names (e.g. "Nexia" under Chevrolet).
       if (!MODEL_BY_ALIAS.has(alias)) {
         MODEL_BY_ALIAS.set(alias, { canonical: model.canonical, brand: brand.canonical });
       }
     }
+    // Canonicalization maps still include the numeric canonical, so a match made
+    // via a qualified alias (e.g. "audi 100") still canonicalizes "100" → "100".
     MODEL_CANON_BY_LOWER.set(model.canonical.toLowerCase(), model.canonical);
     const canonLower = model.canonical.toLowerCase();
     const owners = MODEL_BRANDS_BY_CANON.get(canonLower) ?? [];

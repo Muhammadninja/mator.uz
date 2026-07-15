@@ -7,9 +7,11 @@ import { Context, Markup, Telegraf } from 'telegraf';
 import { message } from 'telegraf/filters';
 import type { ParseOutcome } from '../ai/part-parser.types';
 import { PartParserService } from '../ai/part-parser.service';
+import { lookupOemCompatibility } from '../ai/oem-compatibility.service';
+import { splitPartNumber } from '../ai/part-number';
 import { classifyPart } from '../ai/part-classifier';
 import { extractPriceFromText } from '../ai/rule-based-parser';
-import { PhotoroomService } from '../ai/photoroom.service';
+import { ImageEnhanceService } from '../ai/image-enhance.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SellersService } from '../sellers/sellers.service';
 import { CloudinaryService, UploadedImage } from '../cloudinary/cloudinary.service';
@@ -23,9 +25,9 @@ import { persistVehicleLinks } from './vehicle-links';
 const MEDIA_GROUP_DEBOUNCE_MS = 1500;
 const MAX_IMAGES_PER_LISTING = 10;
 // Process album images in parallel, but bound concurrency so we don't hammer
-// Photoroom/Cloudinary or spike memory with many large buffers at once. The
+// FLUX/Cloudinary or spike memory with many large buffers at once. The
 // bound is configurable via IMAGE_CONCURRENCY; the default (5) overlaps enough
-// remote waits (Photoroom/Cloudinary) to keep the pool busy without risking
+// remote waits (FLUX/Cloudinary) to keep the pool busy without risking
 // rate limits or memory spikes.
 const IMAGE_CONCURRENCY_DEFAULT = 5;
 const IMAGE_CONCURRENCY_MIN = 1;
@@ -134,8 +136,9 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(TelegramService.name);
   private bot: Telegraf;
 
-  private readonly photoroom = new PhotoroomService();
-  private readonly partParser = new PartParserService();
+  private readonly imageEnhance = new ImageEnhanceService();
+  // Initialized in the constructor (needs `this.prisma` for the OEM lookup).
+  private readonly partParser: PartParserService;
 
   // Buffer for in-flight album uploads. `ctx` for the flush is captured per
   // group via the closure below (the latest ctx of the album is sufficient —
@@ -160,6 +163,12 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     this.imageConcurrency = resolveImageConcurrency(
       this.config.get<string>('IMAGE_CONCURRENCY'),
       this.logger,
+    );
+    // Compatibility from an OEM number is resolved ONLY through the verified
+    // internal database; the parser is given a lookup bound to Prisma. No match
+    // → no compatibility (never inferred from the number or the LLM).
+    this.partParser = new PartParserService(undefined, (oem) =>
+      lookupOemCompatibility(this.prisma, oem),
     );
   }
 
@@ -314,7 +323,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
     const images = fileIds.slice(0, MAX_IMAGES_PER_LISTING);
 
-    // PhotoRoom processing can take up to ~30 s, so tell the seller to wait
+    // AI processing can take up to ~30 s, so tell the seller to wait
     // BEFORE we start (the next step — the preview — only appears once processing
     // finishes). Best-effort: a failed notice must not abort the upload, so it is
     // logged and swallowed.
@@ -450,13 +459,21 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     price: Decimal,
   ): Promise<void> {
     const vehicle = formatVehicleLine(metadata);
+    // Label the number by how the seller marked it — never guess. An unlabeled
+    // number shows the neutral "OEM/GM №" so we don't claim a type we don't know.
+    const numberLabel =
+      metadata.part_number_type === 'GM'
+        ? 'GM №'
+        : metadata.part_number_type === 'OEM'
+          ? 'OEM №'
+          : 'OEM/GM №';
 
     const caption =
       `📋 *Проверьте товар перед добавлением.*\n\n` +
       `🔩 *Название:* ${metadata.title}\n` +
       `📝 *Описание:* ${metadata.description ?? '—'}\n` +
       `🚗 *Автомобиль:* ${vehicle}\n` +
-      `🔢 *OEM/GM №:* ${metadata.gm_number ?? '—'}\n` +
+      `🔢 *${numberLabel}:* ${metadata.gm_number ?? '—'}\n` +
       `💰 *Цена:* ${price.toFixed(0)} UZS`;
 
     const buttons = Markup.inlineKeyboard([
@@ -510,11 +527,20 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       const primaryUrl = processedUrls[0];
       const gmKey = metadata.gm_number ?? `tg_${tgUserId}_${Date.now()}`;
 
-      // Classify the listing (title + description + OEM number, RU/UZ/EN) into
-      // the stored catalog attributes: main/vehicle category (always assigned),
-      // region of origin, and OEM/GM flags. These are persisted on the Product
-      // and later projected into the buyer catalog for indexed filtering.
-      const classification = classifyPart(title, metadata.description, metadata.gm_number);
+      // Split the seller's part number into the GM / OEM columns by its LABELED
+      // type — never cross-copy. A GM-labeled number fills gmNumber only; an
+      // OEM-labeled one fills oemNumber only; an unlabeled (UNKNOWN) number stays
+      // in gmNumber (the unique key) and is exposed to both searches at
+      // projection time. The type itself is persisted so the split is auditable.
+      const partNumberType = metadata.part_number_type ?? 'UNKNOWN';
+      const { oemNumber } = splitPartNumber(metadata.gm_number, partNumberType);
+
+      // Classify the listing (title + description, RU/UZ/EN) into the stored
+      // catalog attributes: main/vehicle category (always assigned) and region of
+      // origin. The OEM/GM flags come EXCLUSIVELY from `partNumberType` (the
+      // single label rule), passed in — not re-scanned from text. Persisted on
+      // the Product and later projected into the buyer catalog for filtering.
+      const classification = classifyPart(title, metadata.description, partNumberType);
       const classifiedFields = {
         mainCategory: classification.mainCategory,
         vehicleCategory: classification.vehicleCategory,
@@ -522,6 +548,8 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         originRegion: classification.originRegion,
         isOem: classification.isOem,
         isGm: classification.isGm,
+        oemNumber,
+        partNumberType,
       };
 
       const product = await this.prisma.product.upsert({
@@ -605,7 +633,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Download → Photoroom pipeline → Cloudinary for each image. Runs with a small
+   * Download → image-enhance pipeline → Cloudinary for each image. Runs with a small
    * concurrency limit (images are independent) instead of fully sequentially, so
    * an album of N photos no longer takes N× the single-image latency. Album
    * order is preserved (results placed by index); a single image failing is
@@ -638,9 +666,9 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         responseType: 'arraybuffer',
         timeout: 20_000,
       });
-      // PhotoRoom (removeBackground + beautify.mode=ai.car) → transparent PNG,
+      // FLUX.2 Max (enhance → 1000×1000 product photo on a white background),
       // uploaded as-is on success. No local post-processing.
-      const cleaned = await this.photoroom.removeBackground(Buffer.from(response.data));
+      const cleaned = await this.imageEnhance.removeBackground(Buffer.from(response.data));
       return await this.cloudinary.uploadBuffer(cleaned);
     } catch (err) {
       this.logger.warn(
