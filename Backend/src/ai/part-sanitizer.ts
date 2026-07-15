@@ -12,7 +12,6 @@
 import type { ParsedPartMetadata } from './part-parser.types';
 import {
   canonicalizeBrand,
-  canonicalizeModel,
   deriveVehicleCompatibility,
   matchCatalog,
 } from './vehicle-catalog';
@@ -104,30 +103,34 @@ export function sanitizeMetadata(input: ParsedPartMetadata): ParsedPartMetadata 
     gm_number = digits.length >= 4 ? digits : null;
   }
 
-  // ── brand/models → canonical, from catalog ────────────────────────────────
-  let brand = canonicalizeBrand(input.brand);
-  let models = Array.isArray(input.models)
-    ? [...new Set(input.models.map((m) => canonicalizeModel(String(m).trim())).filter(Boolean))]
-    : [];
-
-  // ── vehicle compatibility ──────────────────────────────────────────────────
-  // Structured/rule-based results carry line-aware `vehicles`/`isUniversal`
-  // already (pass them through). The AI fallback does not — derive them here
-  // from the title+description UNION, folding the AI's own brand/models in as
-  // extras, with the same universal-claim priority as the other paths.
+  // ── vehicle compatibility (TEXT ONLY — no inference) ───────────────────────
+  // Make/model may come from exactly two sources: (a) the listing TEXT (handled
+  // here + in the title pass below), or (b) the verified internal OEM database
+  // (merged by the caller AFTER sanitizing — see PartParserService). We must
+  // NEVER trust a brand/model that an upstream layer inferred but that does not
+  // appear in the text: the AI fallback can hallucinate a vehicle from an OEM
+  // number, so its `brand`/`models` are deliberately IGNORED here. They are only
+  // honored if `matchCatalog` independently finds them in the title/description.
+  //
+  // Structured/rule-based results already carry line-aware `vehicles`/
+  // `isUniversal` derived from their own text; pass those through unchanged.
+  let brand: string | null = canonicalizeBrand(input.brand ?? null);
+  let models: string[] = [];
   let isUniversal = input.isUniversal ?? false;
   let vehicles = input.vehicles ?? [];
-  if (!isUniversal && input.vehicles === undefined) {
-    const compat = deriveVehicleCompatibility([input.title, input.description], {
-      brand: input.brand ?? null,
-      models,
-    });
+  if (input.vehicles === undefined) {
+    // AI / legacy path: derive purely from the listing text. No `extra` bridge —
+    // the AI's own brand/models are NOT fed in, so an OEM-hallucinated vehicle
+    // cannot survive unless the text actually names it.
+    const compat = deriveVehicleCompatibility([input.title, input.description]);
     isUniversal = compat.isUniversal;
     vehicles = compat.vehicles;
-    if (!isUniversal) {
-      brand = brand ?? compat.brand;
-      models = compat.models;
-    }
+    brand = compat.brand;
+    models = compat.models;
+  } else {
+    // Structured/rule-based: models/brand already reflect the text.
+    models = [...new Set(vehicles.map((v) => v.model))];
+    if (!brand) brand = vehicles.find((v) => v.brand)?.brand ?? null;
   }
   if (isUniversal) {
     // Universal fitment suppresses every per-vehicle field.
@@ -189,6 +192,9 @@ export function sanitizeMetadata(input: ParsedPartMetadata): ParsedPartMetadata 
     vehicles,
     isUniversal,
     gm_number,
+    // Preserve the seller-labeled type as-is; the sanitizer never re-classifies
+    // a number (that would risk guessing GM/OEM from the digits).
+    part_number_type: input.part_number_type,
     price,
   };
 }

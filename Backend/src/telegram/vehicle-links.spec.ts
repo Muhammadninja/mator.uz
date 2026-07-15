@@ -127,6 +127,51 @@ describe('persistVehicleLinks', () => {
     expect(partModels.size).toBe(1); // product 100 keeps its link
   });
 
+  it('RE-LIST WITH NO VEHICLE: clears the previous links (regression: stale Audi 100)', async () => {
+    const { db, partModels } = makeDb();
+    // First published naming a vehicle…
+    await persistVehicleLinks(db, 100, {
+      isUniversal: false,
+      vehicles: [{ brand: 'Audi', model: '100' }],
+    });
+    expect(partModels.size).toBe(1);
+
+    // …then re-listed (same product, matched by GM number) with title/description/
+    // GM only — NO vehicle. The old link must NOT linger; before the fix it did,
+    // and projected a phantom "Audi 100" fit into catalog_part_fits.
+    await persistVehicleLinks(db, 100, { isUniversal: false, vehicles: [] });
+    expect(partModels.size).toBe(0);
+  });
+
+  it('RE-LIST WITH A DIFFERENT VEHICLE: replaces old links instead of accumulating', async () => {
+    const { db, partModels } = makeDb();
+    await persistVehicleLinks(db, 100, {
+      isUniversal: false,
+      vehicles: [{ brand: 'Audi', model: '100' }],
+    });
+    await persistVehicleLinks(db, 100, {
+      isUniversal: false,
+      vehicles: [{ brand: 'Chevrolet', model: 'Cobalt' }],
+    });
+    // Only the new vehicle survives — the stale Audi 100 is reconciled away.
+    expect(partModels.size).toBe(1);
+  });
+
+  it('reconcile-clear only touches the given product (a no-vehicle re-list of one keeps the other)', async () => {
+    const { db, partModels } = makeDb();
+    await persistVehicleLinks(db, 100, {
+      isUniversal: false,
+      vehicles: [{ brand: 'Chevrolet', model: 'Cobalt' }],
+    });
+    await persistVehicleLinks(db, 200, {
+      isUniversal: false,
+      vehicles: [{ brand: 'Audi', model: '100' }],
+    });
+    // Re-list product 200 with no vehicle: only its link is cleared.
+    await persistVehicleLinks(db, 200, { isUniversal: false, vehicles: [] });
+    expect(partModels.size).toBe(1); // product 100 still linked
+  });
+
   it('cross-brand pairs create each model under ITS OWN brand', async () => {
     const { db, brands, carModels, partModels } = makeDb();
 

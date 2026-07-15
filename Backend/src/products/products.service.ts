@@ -54,7 +54,12 @@ export class ProductsService {
     }
 
     if (query.gmNumber) {
-      where.gmNumber = { contains: query.gmNumber, mode: 'insensitive' };
+      // Match either the GM column or the OEM column: a labeled-OEM number lives
+      // in oemNumber, while GM-labeled and unlabeled (UNKNOWN) numbers live in
+      // gmNumber. Searching both keeps a part findable by its number regardless
+      // of how the seller labeled it — UNKNOWN is deliberately searchable as both.
+      const term = { contains: query.gmNumber, mode: 'insensitive' as const };
+      where.OR = [{ gmNumber: term }, { oemNumber: term }];
     }
 
     if (query.brand || query.model) {

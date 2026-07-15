@@ -82,6 +82,10 @@ export function presentPartItem(part: PartWithRelations, vehicle: VehicleCompatC
     is_gm: part.isGm,
     is_universal: part.isUniversal,
     oem_numbers: part.oemNumbers,
+    gm_numbers: part.gmNumbers,
+    // 'GM' | 'OEM' | 'UNKNOWN' — never guessed; UNKNOWN means the seller left the
+    // number unlabeled and it is intentionally searchable as both.
+    part_number_type: part.partNumberType,
     price_uzs: Number(part.priceUzs),
     price_label: formatUzs(part.priceUzs),
     currency: part.currency,

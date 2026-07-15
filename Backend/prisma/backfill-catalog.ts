@@ -19,7 +19,12 @@
  *   • Transactional — each Stock's projection (its parents + its listing) is
  *                     written in a single prisma.$transaction.
  *   • Prisma-only   — no raw SQL.
- *   • Read-only on the supply side — Product/Stock/Image/PartModel untouched.
+ *
+ * The PROJECTION step is read-only on the supply side. The reclassify/reconcile
+ * step below DOES write two supply-side tables — Product (classified attributes)
+ * and part_models (fitment reconciliation, to purge stale/hallucinated links) —
+ * both idempotently and derived only from existing listing text. Stock and
+ * ProductImage are never written.
  *
  * This script does NOT modify the Telegram pipeline or any API endpoint.
  *
@@ -30,22 +35,37 @@ import { PrismaClient } from '@prisma/client';
 import { CatalogProjectionService } from '../src/catalog/projection/catalog-projection.service';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { classifyPart } from '../src/ai/part-classifier';
+import { deriveVehicleCompatibility } from '../src/ai/vehicle-catalog';
+import { persistVehicleLinks } from '../src/telegram/vehicle-links';
 
 const prisma = new PrismaClient();
 
 /**
  * Reclassify existing Products that predate the classifier so their stored
- * category/region/OEM/GM fields are populated before projection. Idempotent —
+ * category/region/OEM/GM fields are populated before projection, AND reconcile
+ * their part_models against the current text-derived compatibility. Idempotent —
  * re-running re-derives the same values; safe to run repeatedly.
+ *
+ * The part_models reconciliation is a ONE-TIME CLEANUP of stale fitment: earlier
+ * pipeline versions could persist a vehicle inferred from a GM/OEM number, and
+ * before the persistVehicleLinks fix a re-listing never removed a previously
+ * written link. Here we re-derive make/model from the listing TEXT ONLY (the
+ * same rule the sanitizer enforces — never from the number, never from an LLM)
+ * and clear-then-recreate part_models so phantom rows like "Audi 100" on a
+ * title/description/GM-only listing are dropped. The verified OEM database is
+ * NOT consulted here (cleanup stays conservative; the live parse path is what
+ * adds verified-OEM compatibility going forward).
  */
 async function reclassifyProducts() {
   const products = await prisma.product.findMany({
-    select: { id: true, title: true, description: true, gmNumber: true },
+    select: { id: true, title: true, description: true, partNumberType: true },
     orderBy: { id: 'asc' },
   });
   let updated = 0;
   for (const p of products) {
-    const c = classifyPart(p.title, p.description, p.gmNumber);
+    // OEM/GM flags come from the stored part-number label (single source of
+    // truth); category/region/make still come from the text.
+    const c = classifyPart(p.title, p.description, p.partNumberType);
     await prisma.product.update({
       where: { id: p.id },
       data: {
@@ -57,9 +77,18 @@ async function reclassifyProducts() {
         isGm: c.isGm,
       },
     });
+
+    // Reconcile part_models from the TEXT-derived compatibility, dropping stale
+    // links (isUniversal → cleared; specific → clear+recreate; none → cleared).
+    const compat = deriveVehicleCompatibility([p.title, p.description]);
+    await persistVehicleLinks(prisma, p.id, {
+      isUniversal: compat.isUniversal,
+      vehicles: compat.vehicles,
+    });
+
     updated += 1;
   }
-  console.log(`[backfill] reclassified ${updated} product(s)`);
+  console.log(`[backfill] reclassified + reconciled fitment for ${updated} product(s)`);
 }
 
 async function main() {

@@ -61,6 +61,7 @@ const metadata: ParseOutcome = {
   vehicles: [{ brand: 'Chevrolet', model: 'Nexia 3' }],
   isUniversal: false,
   gm_number: '96234567',
+  part_number_type: 'UNKNOWN',
   price: 450000,
   source: 'structured',
   confidence: 1,
@@ -190,9 +191,13 @@ describe('TelegramService — confirmation session', () => {
 
     await svc.commitPending(ctx, 1);
 
-    // The full write sequence ran (product first — vehicle links need its id)…
+    // The full write sequence ran (product first — vehicle links need its id).
+    // partModel.deleteMany runs before the (brand, carModel, partModel) writes:
+    // persistVehicleLinks now reconciles fitment (clear-then-recreate) so a
+    // re-listed product never keeps stale vehicle links.
     expect(prisma.calls).toEqual([
       'product',
+      'partModel.deleteMany',
       'brand',
       'carModel',
       'partModel',

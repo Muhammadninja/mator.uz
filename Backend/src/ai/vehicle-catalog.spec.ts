@@ -44,6 +44,54 @@ describe('matchCatalog', () => {
   });
 });
 
+describe('matchCatalog — a bare numeric token never matches a model (regression: Audi 100)', () => {
+  // A purely-numeric model canonical/alias ("100", "80", "2106", "469", …) must
+  // NOT be a standalone matchable alias: a stray number in unrelated text would
+  // otherwise fabricate a vehicle. Only brand-qualified forms and nicknames match.
+  it('a lone "100" in unrelated text does NOT match Audi 100', () => {
+    for (const text of ['Масло 100% синтетика', 'Объём 100 мл', 'Фильтр 100']) {
+      const r = matchCatalog(text);
+      expect(r.brand).toBeNull();
+      expect(r.models).toEqual([]);
+    }
+  });
+
+  it('a lone "80" does NOT match Audi 80', () => {
+    const r = matchCatalog('Ресурс 80 тысяч км');
+    expect(r.brand).toBeNull();
+    expect(r.models).toEqual([]);
+  });
+
+  it('bare Russian model numbers ("2106", "412", "469") do NOT match', () => {
+    for (const text of ['Партия 2106 штук', 'Код 412', 'Вес 469 г']) {
+      const r = matchCatalog(text);
+      expect(r.brand).toBeNull();
+      expect(r.models).toEqual([]);
+    }
+  });
+
+  it('an unlabeled part number never matches a model', () => {
+    const r = matchCatalog('Фильтр масляный 93745764');
+    expect(r.brand).toBeNull();
+    expect(r.models).toEqual([]);
+  });
+
+  it('brand-qualified and nickname forms of numeric models STILL match', () => {
+    expect(matchCatalog('Фара audi 100')).toMatchObject({ brand: 'Audi', models: ['100'] });
+    expect(matchCatalog('Фара ауди 100')).toMatchObject({ brand: 'Audi', models: ['100'] });
+    expect(matchCatalog('Двигатель сотка')).toMatchObject({ brand: 'Audi', models: ['100'] });
+    expect(matchCatalog('Кузов бочка')).toMatchObject({ brand: 'Audi', models: ['80'] });
+    expect(matchCatalog('Фара ваз 2106')).toMatchObject({ brand: 'Lada', models: ['2106'] });
+    expect(matchCatalog('Двигатель шестерка')).toMatchObject({ brand: 'Lada', models: ['2106'] });
+    expect(matchCatalog('Фара москвич 412')).toMatchObject({ brand: 'Moskvich', models: ['412'] });
+  });
+
+  it('alphanumeric model codes (E46, X5) are unaffected', () => {
+    expect(matchCatalog('Капот e46')).toMatchObject({ brand: 'BMW', models: ['E46'] });
+    expect(matchCatalog('Фара x5')).toMatchObject({ brand: 'BMW', models: ['X5'] });
+  });
+});
+
 describe('matchCatalog — extended brand set', () => {
   it('matches Mercedes chassis codes and infers the brand', () => {
     const r = matchCatalog('капот w124');

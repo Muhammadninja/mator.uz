@@ -28,15 +28,33 @@ describe('sanitizeMetadata', () => {
     expect(r.title).toBe('Фильтр масляный новый'); // "новый" stays in the title
   });
 
-  it('canonicalizes brand and model aliases', () => {
+  it('canonicalizes brand/model aliases that ARE present in the listing text', () => {
+    // Make/model come from the text: the title names the vehicles, so they are
+    // detected and canonicalized (aliases → canonical forms).
+    const r = sanitizeMetadata({
+      ...base,
+      title: 'Генератор шевроле кобальт gentra',
+    });
+    expect(r.brand).toBe('Chevrolet');
+    expect(r.models).toEqual(expect.arrayContaining(['Cobalt', 'Gentra']));
+  });
+
+  it('IGNORES make/model that an upstream layer supplied but the text does NOT name', () => {
+    // The AI fallback can hallucinate a vehicle from an OEM number. When the
+    // title/description do not name it, the sanitizer must drop it entirely —
+    // compatibility is only ever text- or verified-OEM-derived.
     const r = sanitizeMetadata({
       ...base,
       title: 'Генератор',
       brand: 'шевроле',
       models: ['кобальт', 'gentr'],
+      gm_number: '96535062',
     });
-    expect(r.brand).toBe('Chevrolet');
-    expect(r.models).toEqual(expect.arrayContaining(['Cobalt', 'Gentra']));
+    expect(r.brand).toBeNull();
+    expect(r.models).toEqual([]);
+    expect(r.vehicles).toEqual([]);
+    // The number itself is still kept — only the inferred vehicle is dropped.
+    expect(r.gm_number).toBe('96535062');
   });
 
   it('coerces gm_number to a digit string', () => {

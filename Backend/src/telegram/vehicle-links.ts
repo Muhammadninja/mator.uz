@@ -46,20 +46,34 @@ export interface VehicleCompatibilityInput {
 }
 
 /**
- * Write the part_models rows for a product. Universal parts get their stale
- * rows removed (a re-listed product may have had specific links before) and
- * nothing created. Pairs without a resolvable brand are skipped — a CarModel
- * row cannot exist without a Brand. Idempotent: upserts throughout.
+ * Write the part_models rows for a product, RECONCILING against the current
+ * compatibility (not just adding to it). We ALWAYS clear the product's existing
+ * part_models first, then recreate from `compat.vehicles`:
+ *
+ *   • universal part        → cleared, nothing recreated;
+ *   • specific vehicles      → cleared, then one row per (brand, model) pair;
+ *   • NO vehicles (empty)    → cleared, nothing recreated.
+ *
+ * The clear-then-recreate is essential: a product is upserted by its GM number,
+ * so a RE-LISTING of the same product with different (or no) vehicles must drop
+ * the OLD links. Without the unconditional delete, a listing first published as
+ * "Audi 100" and re-published later as title/description/GM-only would keep the
+ * stale Audi 100 row forever — which then projects into catalog_part_fits. This
+ * mirrors how the caller replaces the product gallery (deleteMany + createMany).
+ *
+ * Pairs without a resolvable brand are skipped — a CarModel row cannot exist
+ * without a Brand. Idempotent: re-running with the same input converges.
  */
 export async function persistVehicleLinks(
   db: VehicleLinkDb,
   productId: number,
   compat: VehicleCompatibilityInput,
 ): Promise<void> {
-  if (compat.isUniversal) {
-    await db.partModel.deleteMany({ where: { partId: productId } });
-    return;
-  }
+  // Reconcile: drop every existing link first so removed/changed vehicles do not
+  // linger. This runs for the universal, specific, AND empty cases alike.
+  await db.partModel.deleteMany({ where: { partId: productId } });
+
+  if (compat.isUniversal) return;
 
   for (const vehicle of compat.vehicles) {
     if (!vehicle.brand) continue;

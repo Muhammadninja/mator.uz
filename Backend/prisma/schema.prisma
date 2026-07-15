@@ -168,6 +168,20 @@ enum PartOriginRegion {
   JAPAN
 }
 
+// How a listing's part number was labeled by the seller. We NEVER guess the
+// type from the number itself or from the LLM — an unlabeled number stays
+// UNKNOWN so both GM-number and OEM-number searches can still find it.
+//   GM      → seller labeled it a GM number  (gm_number populated, oem_number null)
+//   OEM     → seller labeled it an OEM number (oem_number populated, gm_number null)
+//   UNKNOWN → unlabeled (Article / Part No. / bare digits) — neither field is
+//             authoritative; the raw value is kept in gm_number for the unique
+//             key but is searchable as both GM and OEM.
+enum PartNumberType {
+  GM
+  OEM
+  UNKNOWN
+}
+
 enum BookingStatus {
   HOLD
   CONFIRMED
@@ -268,15 +282,24 @@ model CarModel {
 }
 
 model Product {
-  id          Int            @id @default(autoincrement())
-  gmNumber    String?        @unique @map("gm_number") @db.VarChar(50)
-  title       String         @db.VarChar(255)
-  description String?        @db.Text
-  imageUrl    String?        @map("image_url") // primary image mirror (back-compat)
+  id              Int                  @id @default(autoincrement())
+  // Raw part number as written by the seller. Kept as the unique idempotency key
+  // for the Telegram upsert (a synthetic key is used when the listing has none).
+  // The AUTHORITATIVE OEM value lives in `oemNumber`; this column is NOT copied
+  // into it. See `partNumberType` for how the seller labeled the number.
+  gmNumber        String?              @unique @map("gm_number") @db.VarChar(50)
+  // OEM number ONLY when the seller explicitly labeled the number as OEM. Never
+  // auto-filled from gmNumber, never inferred from the number or the LLM.
+  oemNumber       String?              @map("oem_number") @db.VarChar(50)
+  // Whether the seller labeled the number GM, OEM, or left it unlabeled (UNKNOWN).
+  partNumberType  PartNumberType       @default(UNKNOWN) @map("part_number_type")
+  title           String               @db.VarChar(255)
+  description     String?              @db.Text
+  imageUrl        String?              @map("image_url") // primary image mirror (back-compat)
   // Fits every vehicle. Fitment is otherwise derived from part_models rows:
   // isUniversal=false + 1 row → SINGLE, N rows → MULTIPLE; when true there are
   // no part_models rows for the product.
-  isUniversal Boolean        @default(false) @map("is_universal")
+  isUniversal     Boolean              @default(false) @map("is_universal")
   // Classified by the Telegram bot from title + description (RU/UZ/EN). Nullable
   // so pre-classification rows stay valid; the classifier always assigns a
   // main/vehicle category (fallback when unsure), and the region/flags when
@@ -287,11 +310,11 @@ model Product {
   originRegion    PartOriginRegion?    @map("origin_region")
   isOem           Boolean              @default(false) @map("is_oem")
   isGm            Boolean              @default(false) @map("is_gm")
-  createdAt   DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt   DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
-  partModels  PartModel[]
-  stocks      Stock[]
-  images      ProductImage[]
+  createdAt       DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
+  partModels      PartModel[]
+  stocks          Stock[]
+  images          ProductImage[]
 
   @@index([mainCategory])
   @@index([vehicleCategory])
@@ -322,6 +345,24 @@ model PartModel {
   @@id([partId, modelId])
   @@index([modelId])
   @@map("part_models")
+}
+
+// Verified internal OEM → vehicle compatibility. This is the ONLY source from
+// which an OEM number may contribute make/model to a listing. It is populated
+// MANUALLY over time (starts empty); the parser NEVER writes rows here and NEVER
+// infers compatibility from the number itself or from the LLM. One OEM number
+// can fit several vehicles, so oemNumber is intentionally NOT unique — one row
+// per (oemNumber, make, model). No match → no compatibility.
+model OemCompatibility {
+  id        Int      @id @default(autoincrement())
+  oemNumber String   @map("oem_number") @db.VarChar(50)
+  make      String   @db.VarChar(120)
+  model     String   @db.VarChar(120)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@unique([oemNumber, make, model])
+  @@index([oemNumber])
+  @@map("oem_compatibility")
 }
 
 model Stock {
@@ -393,15 +434,15 @@ model AuthIdentity {
 }
 
 model RefreshToken {
-  id        Int      @id @default(autoincrement())
-  tokenHash String   @unique @map("token_hash") @db.VarChar(64)
-  userId    String   @map("user_id") @db.Uuid
-  deviceId  String?  @map("device_id") @db.VarChar(64) // session<->device binding; null for web/email logins
-  expiresAt DateTime @map("expires_at") @db.Timestamptz(3)
+  id         Int       @id @default(autoincrement())
+  tokenHash  String    @unique @map("token_hash") @db.VarChar(64)
+  userId     String    @map("user_id") @db.Uuid
+  deviceId   String?   @map("device_id") @db.VarChar(64) // session<->device binding; null for web/email logins
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(3)
   consumedAt DateTime? @map("consumed_at") @db.Timestamptz(3) // soft-rotation marker for reuse detection
-  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
-  user      AppUser  @relation(fields: [userId], references: [id], onDelete: Cascade)
-  device    Device?  @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  user       AppUser   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  device     Device?   @relation(fields: [deviceId], references: [id], onDelete: SetNull)
 
   @@index([userId])
   @@index([expiresAt])
@@ -425,17 +466,17 @@ model EmailVerificationToken {
 
 // Phone OTP (pre-auth; not yet linked to a user). request_id = otp_<ulid>.
 model PhoneOtpRequest {
-  id         String     @id @db.VarChar(64)
-  phoneE164  String     @map("phone_e164") @db.VarChar(20)
-  codeHash   String     @map("code_hash") @db.VarChar(64)
-  channel    OtpChannel @default(SMS)
-  purpose    String     @default("login") @db.VarChar(40)
-  attempts   Int        @default(0)
-  resendCount Int       @default(0) @map("resend_count")
-  expiresAt  DateTime   @map("expires_at") @db.Timestamptz(3)
-  consumedAt DateTime?  @map("consumed_at") @db.Timestamptz(3)
-  lastSentAt DateTime   @default(now()) @map("last_sent_at") @db.Timestamptz(3)
-  createdAt  DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
+  id          String     @id @db.VarChar(64)
+  phoneE164   String     @map("phone_e164") @db.VarChar(20)
+  codeHash    String     @map("code_hash") @db.VarChar(64)
+  channel     OtpChannel @default(SMS)
+  purpose     String     @default("login") @db.VarChar(40)
+  attempts    Int        @default(0)
+  resendCount Int        @default(0) @map("resend_count")
+  expiresAt   DateTime   @map("expires_at") @db.Timestamptz(3)
+  consumedAt  DateTime?  @map("consumed_at") @db.Timestamptz(3)
+  lastSentAt  DateTime   @default(now()) @map("last_sent_at") @db.Timestamptz(3)
+  createdAt   DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
 
   @@index([phoneE164, createdAt]) // supports "N per hour per MSISDN" rate-limit counting
   @@index([expiresAt])
@@ -463,26 +504,26 @@ model MyIdSession {
 
 // Resolved MyID identity payload (myid_ver_<ulid>).
 model MyIdVerification {
-  id                String    @id @db.VarChar(64)
-  userId            String    @map("user_id") @db.Uuid
-  sessionId         String?   @map("session_id") @db.VarChar(64)
-  status            String    @db.VarChar(20)
-  pinfl             String?   @db.VarChar(14)
-  passportSerial    String?   @map("passport_serial") @db.VarChar(2)
-  passportNumber    String?   @map("passport_number") @db.VarChar(20)
-  firstName         String?   @map("first_name") @db.VarChar(100)
-  lastName          String?   @map("last_name") @db.VarChar(100)
-  middleName        String?   @map("middle_name") @db.VarChar(100)
-  dateOfBirth       DateTime? @map("date_of_birth") @db.Date
-  gender            Gender?
-  citizenshipIso3   String?   @map("citizenship_iso3") @db.VarChar(3)
-  addressRegion     String?   @map("address_region") @db.VarChar(120)
-  addressDistrict   String?   @map("address_district") @db.VarChar(120)
-  addressStreet     String?   @map("address_street")
-  biometricMatchScore Decimal? @map("biometric_match_score") @db.Decimal(4, 3)
-  verifiedAt        DateTime? @map("verified_at") @db.Timestamptz(3)
-  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
-  user              AppUser   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id                  String    @id @db.VarChar(64)
+  userId              String    @map("user_id") @db.Uuid
+  sessionId           String?   @map("session_id") @db.VarChar(64)
+  status              String    @db.VarChar(20)
+  pinfl               String?   @db.VarChar(14)
+  passportSerial      String?   @map("passport_serial") @db.VarChar(2)
+  passportNumber      String?   @map("passport_number") @db.VarChar(20)
+  firstName           String?   @map("first_name") @db.VarChar(100)
+  lastName            String?   @map("last_name") @db.VarChar(100)
+  middleName          String?   @map("middle_name") @db.VarChar(100)
+  dateOfBirth         DateTime? @map("date_of_birth") @db.Date
+  gender              Gender?
+  citizenshipIso3     String?   @map("citizenship_iso3") @db.VarChar(3)
+  addressRegion       String?   @map("address_region") @db.VarChar(120)
+  addressDistrict     String?   @map("address_district") @db.VarChar(120)
+  addressStreet       String?   @map("address_street")
+  biometricMatchScore Decimal?  @map("biometric_match_score") @db.Decimal(4, 3)
+  verifiedAt          DateTime? @map("verified_at") @db.Timestamptz(3)
+  createdAt           DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  user                AppUser   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([pinfl])
@@ -490,20 +531,20 @@ model MyIdVerification {
 }
 
 model Address {
-  id           String   @id @db.VarChar(64)
-  userId       String   @map("user_id") @db.Uuid
-  label        String?  @db.VarChar(80)
-  regionCode   String?  @map("region_code") @db.VarChar(10)
-  district     String?  @db.VarChar(120)
-  street       String?
-  fullText     String   @map("full_text")
-  lat          Float?
-  lng          Float?
-  isDefault    Boolean  @default(false) @map("is_default")
-  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
-  user         AppUser  @relation(fields: [userId], references: [id], onDelete: Cascade)
-  orders       Order[]
+  id         String   @id @db.VarChar(64)
+  userId     String   @map("user_id") @db.Uuid
+  label      String?  @db.VarChar(80)
+  regionCode String?  @map("region_code") @db.VarChar(10)
+  district   String?  @db.VarChar(120)
+  street     String?
+  fullText   String   @map("full_text")
+  lat        Float?
+  lng        Float?
+  isDefault  Boolean  @default(false) @map("is_default")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  user       AppUser  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  orders     Order[]
 
   @@index([userId])
   @@map("addresses")
@@ -511,10 +552,10 @@ model Address {
 
 // ── Vehicle catalog (buyer garage reference, slug IDs) ────────────────────────
 model VehicleMake {
-  id        String              @id @db.VarChar(64)
-  name      String              @db.VarChar(120)
-  logoUrl   String?             @map("logo_url")
-  sortOrder Int                 @default(0) @map("sort_order")
+  id        String                  @id @db.VarChar(64)
+  name      String                  @db.VarChar(120)
+  logoUrl   String?                 @map("logo_url")
+  sortOrder Int                     @default(0) @map("sort_order")
   models    VehicleModelRef[]
   vehicles  Vehicle[]
   providers ProviderSupportedMake[]
@@ -535,12 +576,12 @@ model VehicleModelRef {
 }
 
 model VehicleTrim {
-  id             String            @id @db.VarChar(64)
-  modelId        String            @map("model_id") @db.VarChar(64)
-  name           String            @db.VarChar(120)
-  model          VehicleModelRef   @relation(fields: [modelId], references: [id], onDelete: Cascade)
-  vehicles       Vehicle[]
-  assets         Vehicle3dAsset[]
+  id              String              @id @db.VarChar(64)
+  modelId         String              @map("model_id") @db.VarChar(64)
+  name            String              @db.VarChar(120)
+  model           VehicleModelRef     @relation(fields: [modelId], references: [id], onDelete: Cascade)
+  vehicles        Vehicle[]
+  assets          Vehicle3dAsset[]
   compatibilities PartCompatibility[]
 
   @@index([modelId])
@@ -548,27 +589,27 @@ model VehicleTrim {
 }
 
 model VehicleEngine {
-  id             String            @id @db.VarChar(64)
-  name           String            @db.VarChar(120)
-  displacementCc Int?              @map("displacement_cc")
-  fuelType       FuelType?         @map("fuel_type")
-  vehicles       Vehicle[]
+  id              String              @id @db.VarChar(64)
+  name            String              @db.VarChar(120)
+  displacementCc  Int?                @map("displacement_cc")
+  fuelType        FuelType?           @map("fuel_type")
+  vehicles        Vehicle[]
   compatibilities PartCompatibility[]
 
   @@map("vehicle_engines")
 }
 
 model Vehicle3dAsset {
-  id            String          @id @db.VarChar(64)
-  trimId        String?         @map("trim_id") @db.VarChar(64)
-  glbUrl        String          @map("glb_url")
-  ktx2TexturesUrl String?       @map("ktx2_textures_url")
-  version       Int             @default(1)
-  byteSize      Int?            @map("byte_size")
-  checksumSha256 String?        @map("checksum_sha256") @db.VarChar(64)
-  trim          VehicleTrim?    @relation(fields: [trimId], references: [id], onDelete: SetNull)
-  variants      TuningVariant[]
-  vehicles      Vehicle[]
+  id              String          @id @db.VarChar(64)
+  trimId          String?         @map("trim_id") @db.VarChar(64)
+  glbUrl          String          @map("glb_url")
+  ktx2TexturesUrl String?         @map("ktx2_textures_url")
+  version         Int             @default(1)
+  byteSize        Int?            @map("byte_size")
+  checksumSha256  String?         @map("checksum_sha256") @db.VarChar(64)
+  trim            VehicleTrim?    @relation(fields: [trimId], references: [id], onDelete: SetNull)
+  variants        TuningVariant[]
+  vehicles        Vehicle[]
 
   @@index([trimId])
   @@map("vehicle_3d_assets")
@@ -642,27 +683,27 @@ model VehicleStatusEvent {
 
 // ── Service providers (masters + STO; master_/sto_ <ulid>) ────────────────────
 model ServiceProvider {
-  id                String                  @id @db.VarChar(64)
-  providerType      ProviderType            @map("provider_type")
-  displayName       String                  @map("display_name") @db.VarChar(160)
-  shopName          String?                 @map("shop_name") @db.VarChar(160)
-  bio               String?
-  avatarUrl         String?                 @map("avatar_url")
-  ratingAvg         Decimal                 @default(0) @map("rating_avg") @db.Decimal(3, 2)
-  ratingCount       Int                     @default(0) @map("rating_count")
-  geoLat            Float                   @map("geo_lat")
-  geoLng            Float                   @map("geo_lng")
-  geohash           String                  @db.VarChar(12)
-  addressText       String?                 @map("address_text")
-  priceFloorUzs     Decimal?                @map("price_floor_uzs") @db.Decimal(14, 2)
-  priceCeilingUzs   Decimal?                @map("price_ceiling_uzs") @db.Decimal(14, 2)
-  badge             String?                 @db.VarChar(40)
-  contactPhoneE164  String?                 @map("contact_phone_e164") @db.VarChar(20)
-  contactTelegram   String?                 @map("contact_telegram") @db.VarChar(80)
-  contactWebsite    String?                 @map("contact_website")
-  isActive          Boolean                 @default(true) @map("is_active")
-  createdAt         DateTime                @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt         DateTime                @updatedAt @map("updated_at") @db.Timestamptz(3)
+  id               String       @id @db.VarChar(64)
+  providerType     ProviderType @map("provider_type")
+  displayName      String       @map("display_name") @db.VarChar(160)
+  shopName         String?      @map("shop_name") @db.VarChar(160)
+  bio              String?
+  avatarUrl        String?      @map("avatar_url")
+  ratingAvg        Decimal      @default(0) @map("rating_avg") @db.Decimal(3, 2)
+  ratingCount      Int          @default(0) @map("rating_count")
+  geoLat           Float        @map("geo_lat")
+  geoLng           Float        @map("geo_lng")
+  geohash          String       @db.VarChar(12)
+  addressText      String?      @map("address_text")
+  priceFloorUzs    Decimal?     @map("price_floor_uzs") @db.Decimal(14, 2)
+  priceCeilingUzs  Decimal?     @map("price_ceiling_uzs") @db.Decimal(14, 2)
+  badge            String?      @db.VarChar(40)
+  contactPhoneE164 String?      @map("contact_phone_e164") @db.VarChar(20)
+  contactTelegram  String?      @map("contact_telegram") @db.VarChar(80)
+  contactWebsite   String?      @map("contact_website")
+  isActive         Boolean      @default(true) @map("is_active")
+  createdAt        DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt        DateTime     @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   specializations ProviderSpecialization[]
   supportedMakes  ProviderSupportedMake[]
@@ -746,21 +787,21 @@ model ProviderPortfolioItem {
 }
 
 model Booking {
-  id               String          @id @db.VarChar(64)
-  userId           String          @map("user_id") @db.Uuid
-  providerId       String          @map("provider_id") @db.VarChar(64)
-  vehicleId        String?         @map("vehicle_id") @db.VarChar(64)
-  status           BookingStatus   @default(HOLD)
-  scheduledAt      DateTime        @map("scheduled_at") @db.Timestamptz(3)
-  holdExpiresAt    DateTime?       @map("hold_expires_at") @db.Timestamptz(3)
-  totalUzs         Decimal         @map("total_uzs") @db.Decimal(14, 2)
+  id               String           @id @db.VarChar(64)
+  userId           String           @map("user_id") @db.Uuid
+  providerId       String           @map("provider_id") @db.VarChar(64)
+  vehicleId        String?          @map("vehicle_id") @db.VarChar(64)
+  status           BookingStatus    @default(HOLD)
+  scheduledAt      DateTime         @map("scheduled_at") @db.Timestamptz(3)
+  holdExpiresAt    DateTime?        @map("hold_expires_at") @db.Timestamptz(3)
+  totalUzs         Decimal          @map("total_uzs") @db.Decimal(14, 2)
   notes            String?
-  contactPhoneE164 String          @map("contact_phone_e164") @db.VarChar(20)
-  createdAt        DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt        DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
-  user             AppUser         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  provider         ServiceProvider @relation(fields: [providerId], references: [id], onDelete: Restrict)
-  vehicle          Vehicle?        @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
+  contactPhoneE164 String           @map("contact_phone_e164") @db.VarChar(20)
+  createdAt        DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt        DateTime         @updatedAt @map("updated_at") @db.Timestamptz(3)
+  user             AppUser          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider         ServiceProvider  @relation(fields: [providerId], references: [id], onDelete: Restrict)
+  vehicle          Vehicle?         @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
   services         BookingService[]
 
   @@index([userId])
@@ -771,12 +812,12 @@ model Booking {
 
 // Snapshot of the booked service (no FK to keep history immutable).
 model BookingService {
-  id          String  @id @db.VarChar(64)
-  bookingId   String  @map("booking_id") @db.VarChar(64)
-  serviceId   String  @map("service_id") @db.VarChar(64)
-  name        String  @db.VarChar(160)
-  priceUzs    Decimal @map("price_uzs") @db.Decimal(14, 2)
-  booking     Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  id        String  @id @db.VarChar(64)
+  bookingId String  @map("booking_id") @db.VarChar(64)
+  serviceId String  @map("service_id") @db.VarChar(64)
+  name      String  @db.VarChar(160)
+  priceUzs  Decimal @map("price_uzs") @db.Decimal(14, 2)
+  booking   Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
 
   @@index([bookingId])
   @@map("booking_services")
@@ -819,36 +860,44 @@ model CatalogSeller {
 }
 
 model CatalogPart {
-  id                String              @id @db.VarChar(64)
-  title             String              @db.VarChar(255)
-  brandId           String?             @map("brand_id") @db.VarChar(64)
-  categoryId        String              @map("category_id") @db.VarChar(64)
-  sellerId          String              @map("seller_id") @db.VarChar(64)
-  oemNumbers        String[]            @map("oem_numbers")
-  priceUzs          Decimal             @map("price_uzs") @db.Decimal(14, 2)
-  currency          String              @default("UZS") @db.VarChar(3)
-  condition         PartCondition       @default(NEW)
-  inStock           Boolean             @default(true) @map("in_stock")
-  stockQty          Int                 @default(0) @map("stock_qty")
-  deliveryEtaDaysMin Int?               @map("delivery_eta_days_min")
-  deliveryEtaDaysMax Int?               @map("delivery_eta_days_max")
-  images            String[]
+  id                 String               @id @db.VarChar(64)
+  title              String               @db.VarChar(255)
+  brandId            String?              @map("brand_id") @db.VarChar(64)
+  categoryId         String               @map("category_id") @db.VarChar(64)
+  sellerId           String               @map("seller_id") @db.VarChar(64)
+  // OEM numbers this part is sold under. Populated ONLY from a seller-labeled OEM
+  // number or an UNKNOWN (unlabeled) number — never from a GM-labeled number.
+  oemNumbers         String[]             @map("oem_numbers")
+  // GM numbers this part is sold under. Populated ONLY from a seller-labeled GM
+  // number or an UNKNOWN (unlabeled) number. An UNKNOWN number appears in BOTH
+  // arrays so it is findable by either search; a labeled number appears in one.
+  gmNumbers          String[]             @map("gm_numbers")
+  // How the seller labeled the number (mirrors Product.partNumberType).
+  partNumberType     PartNumberType       @default(UNKNOWN) @map("part_number_type")
+  priceUzs           Decimal              @map("price_uzs") @db.Decimal(14, 2)
+  currency           String               @default("UZS") @db.VarChar(3)
+  condition          PartCondition        @default(NEW)
+  inStock            Boolean              @default(true) @map("in_stock")
+  stockQty           Int                  @default(0) @map("stock_qty")
+  deliveryEtaDaysMin Int?                 @map("delivery_eta_days_min")
+  deliveryEtaDaysMax Int?                 @map("delivery_eta_days_max")
+  images             String[]
   // Classified taxonomy + attributes, projected from the supply-side Product.
   // Indexed for efficient buyer-side filtering/faceting.
-  mainCategory      PartMainCategory?    @map("main_category")
-  vehicleCategory   PartVehicleCategory? @map("vehicle_category")
-  partBrandName     String?              @map("part_brand_name") @db.VarChar(120)
-  originRegion      PartOriginRegion?    @map("origin_region")
-  isOem             Boolean              @default(false) @map("is_oem")
-  isGm              Boolean              @default(false) @map("is_gm")
-  isUniversal       Boolean              @default(false) @map("is_universal")
-  createdAt         DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt         DateTime            @updatedAt @map("updated_at") @db.Timestamptz(3)
-  brand             PartBrand?          @relation(fields: [brandId], references: [id], onDelete: SetNull)
-  category          PartCategory        @relation(fields: [categoryId], references: [id], onDelete: Restrict)
-  seller            CatalogSeller       @relation(fields: [sellerId], references: [id], onDelete: Restrict)
-  compatibilities   PartCompatibility[]
-  fits              CatalogPartFit[]
+  mainCategory       PartMainCategory?    @map("main_category")
+  vehicleCategory    PartVehicleCategory? @map("vehicle_category")
+  partBrandName      String?              @map("part_brand_name") @db.VarChar(120)
+  originRegion       PartOriginRegion?    @map("origin_region")
+  isOem              Boolean              @default(false) @map("is_oem")
+  isGm               Boolean              @default(false) @map("is_gm")
+  isUniversal        Boolean              @default(false) @map("is_universal")
+  createdAt          DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt          DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
+  brand              PartBrand?           @relation(fields: [brandId], references: [id], onDelete: SetNull)
+  category           PartCategory         @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  seller             CatalogSeller        @relation(fields: [sellerId], references: [id], onDelete: Restrict)
+  compatibilities    PartCompatibility[]
+  fits               CatalogPartFit[]
 
   @@index([categoryId])
   @@index([brandId])
@@ -902,21 +951,21 @@ model PartCompatibility {
 
 // Curated Top-Featured grid (f<n> in the contract).
 model FeaturedItem {
-  id          String        @id @db.VarChar(64)
-  partId      String?       @map("part_id") @db.VarChar(64)
-  badge       String?       @db.VarChar(40)
-  status      String?       @db.VarChar(40)
-  title       String        @db.VarChar(200)
+  id          String   @id @db.VarChar(64)
+  partId      String?  @map("part_id") @db.VarChar(64)
+  badge       String?  @db.VarChar(40)
+  status      String?  @db.VarChar(40)
+  title       String   @db.VarChar(200)
   description String?
-  priceUzs    Decimal?      @map("price_uzs") @db.Decimal(14, 2)
-  model       String?       @db.VarChar(120)
-  brand       String?       @db.VarChar(120)
-  color       String?       @db.VarChar(60)
-  condition   String?       @db.VarChar(60)
-  oem         String?       @db.VarChar(80)
-  sortOrder   Int           @default(0) @map("sort_order")
-  isActive    Boolean       @default(true) @map("is_active")
-  createdAt   DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  priceUzs    Decimal? @map("price_uzs") @db.Decimal(14, 2)
+  model       String?  @db.VarChar(120)
+  brand       String?  @db.VarChar(120)
+  color       String?  @db.VarChar(60)
+  condition   String?  @db.VarChar(60)
+  oem         String?  @db.VarChar(80)
+  sortOrder   Int      @default(0) @map("sort_order")
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
 
   @@index([isActive, sortOrder])
   @@map("featured_items")
@@ -957,29 +1006,29 @@ model CartItem {
 
 // ── Orders & payments ─────────────────────────────────────────────────────────
 model Order {
-  id               String         @id @db.VarChar(64)
-  userId           String         @map("user_id") @db.Uuid
-  status           OrderStatus    @default(PENDING_PAYMENT)
-  subtotalUzs      Decimal        @map("subtotal_uzs") @db.Decimal(14, 2)
-  deliveryUzs      Decimal        @default(0) @map("delivery_uzs") @db.Decimal(14, 2)
-  serviceFeeUzs    Decimal        @default(0) @map("service_fee_uzs") @db.Decimal(14, 2)
-  discountUzs      Decimal        @default(0) @map("discount_uzs") @db.Decimal(14, 2)
-  totalUzs         Decimal        @map("total_uzs") @db.Decimal(14, 2)
-  currency         String         @default("UZS") @db.VarChar(3)
-  vehicleId        String?        @map("vehicle_id") @db.VarChar(64)
-  deliveryAddressId String?       @map("delivery_address_id") @db.VarChar(64)
-  deliveryMethod   DeliveryMethod? @map("delivery_method")
-  contactPhoneE164 String?        @map("contact_phone_e164") @db.VarChar(20)
-  promoCode        String?        @map("promo_code") @db.VarChar(60)
-  yandexClaimId    String?        @map("yandex_claim_id") @db.VarChar(100)
-  expiresAt        DateTime?      @map("expires_at") @db.Timestamptz(3)
-  createdAt        DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt        DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
-  user             AppUser        @relation(fields: [userId], references: [id], onDelete: Restrict)
-  vehicle          Vehicle?       @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
-  deliveryAddress  Address?       @relation(fields: [deliveryAddressId], references: [id], onDelete: SetNull)
-  items            OrderItem[]
-  payments         Payment[]
+  id                String          @id @db.VarChar(64)
+  userId            String          @map("user_id") @db.Uuid
+  status            OrderStatus     @default(PENDING_PAYMENT)
+  subtotalUzs       Decimal         @map("subtotal_uzs") @db.Decimal(14, 2)
+  deliveryUzs       Decimal         @default(0) @map("delivery_uzs") @db.Decimal(14, 2)
+  serviceFeeUzs     Decimal         @default(0) @map("service_fee_uzs") @db.Decimal(14, 2)
+  discountUzs       Decimal         @default(0) @map("discount_uzs") @db.Decimal(14, 2)
+  totalUzs          Decimal         @map("total_uzs") @db.Decimal(14, 2)
+  currency          String          @default("UZS") @db.VarChar(3)
+  vehicleId         String?         @map("vehicle_id") @db.VarChar(64)
+  deliveryAddressId String?         @map("delivery_address_id") @db.VarChar(64)
+  deliveryMethod    DeliveryMethod? @map("delivery_method")
+  contactPhoneE164  String?         @map("contact_phone_e164") @db.VarChar(20)
+  promoCode         String?         @map("promo_code") @db.VarChar(60)
+  yandexClaimId     String?         @map("yandex_claim_id") @db.VarChar(100)
+  expiresAt         DateTime?       @map("expires_at") @db.Timestamptz(3)
+  createdAt         DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
+  user              AppUser         @relation(fields: [userId], references: [id], onDelete: Restrict)
+  vehicle           Vehicle?        @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
+  deliveryAddress   Address?        @relation(fields: [deliveryAddressId], references: [id], onDelete: SetNull)
+  items             OrderItem[]
+  payments          Payment[]
 
   @@index([userId])
   @@index([status])
@@ -989,17 +1038,17 @@ model Order {
 
 // Snapshot line item (no FK to catalog — immutable order history).
 model OrderItem {
-  id          String   @id @db.VarChar(64)
-  orderId     String   @map("order_id") @db.VarChar(64)
-  partId      String?  @map("part_id") @db.VarChar(64)
-  serviceId   String?  @map("service_id") @db.VarChar(64)
-  providerId  String?  @map("provider_id") @db.VarChar(64)
-  title       String   @db.VarChar(255)
-  quantity    Int      @default(1)
-  priceUzs    Decimal  @map("price_uzs") @db.Decimal(14, 2)
-  lineTotalUzs Decimal @map("line_total_uzs") @db.Decimal(14, 2)
-  scheduledAt DateTime? @map("scheduled_at") @db.Timestamptz(3)
-  order       Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  id           String    @id @db.VarChar(64)
+  orderId      String    @map("order_id") @db.VarChar(64)
+  partId       String?   @map("part_id") @db.VarChar(64)
+  serviceId    String?   @map("service_id") @db.VarChar(64)
+  providerId   String?   @map("provider_id") @db.VarChar(64)
+  title        String    @db.VarChar(255)
+  quantity     Int       @default(1)
+  priceUzs     Decimal   @map("price_uzs") @db.Decimal(14, 2)
+  lineTotalUzs Decimal   @map("line_total_uzs") @db.Decimal(14, 2)
+  scheduledAt  DateTime? @map("scheduled_at") @db.Timestamptz(3)
+  order        Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
   @@index([orderId])
   @@map("order_items")
@@ -1036,24 +1085,24 @@ model Payment {
 
 // ── Devices, push & notifications ─────────────────────────────────────────────
 model Device {
-  id                String         @id @db.VarChar(64)
-  userId            String         @map("user_id") @db.Uuid
-  installId         String         @map("install_id") @db.VarChar(80)
-  platform          DevicePlatform
-  expoPushToken     String?        @map("expo_push_token")
-  fcmToken          String?        @map("fcm_token")
-  apnsToken         String?        @map("apns_token")
-  osVersion         String?        @map("os_version") @db.VarChar(40)
-  appVersion        String?        @map("app_version") @db.VarChar(40)
-  deviceModel       String?        @map("device_model") @db.VarChar(80)
-  locale            String?        @db.VarChar(20)
-  timezone          String?        @db.VarChar(60)
-  permissionsGranted Boolean       @default(false) @map("permissions_granted")
-  lastSeenAt        DateTime       @default(now()) @map("last_seen_at") @db.Timestamptz(3)
-  createdAt         DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt         DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
-  user              AppUser        @relation(fields: [userId], references: [id], onDelete: Cascade)
-  refreshTokens     RefreshToken[]
+  id                 String         @id @db.VarChar(64)
+  userId             String         @map("user_id") @db.Uuid
+  installId          String         @map("install_id") @db.VarChar(80)
+  platform           DevicePlatform
+  expoPushToken      String?        @map("expo_push_token")
+  fcmToken           String?        @map("fcm_token")
+  apnsToken          String?        @map("apns_token")
+  osVersion          String?        @map("os_version") @db.VarChar(40)
+  appVersion         String?        @map("app_version") @db.VarChar(40)
+  deviceModel        String?        @map("device_model") @db.VarChar(80)
+  locale             String?        @db.VarChar(20)
+  timezone           String?        @db.VarChar(60)
+  permissionsGranted Boolean        @default(false) @map("permissions_granted")
+  lastSeenAt         DateTime       @default(now()) @map("last_seen_at") @db.Timestamptz(3)
+  createdAt          DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt          DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
+  user               AppUser        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  refreshTokens      RefreshToken[]
 
   @@unique([userId, installId])
   @@index([userId])
@@ -1061,32 +1110,32 @@ model Device {
 }
 
 model NotificationPreference {
-  id             String   @id @db.VarChar(64)
-  userId         String   @unique @map("user_id") @db.Uuid
-  orders         Boolean  @default(true)
-  payments       Boolean  @default(true)
-  aiReplies      Boolean  @default(true) @map("ai_replies")
-  masterMessages Boolean  @default(true) @map("master_messages")
-  marketing      Boolean  @default(false)
-  quietHoursStart String? @map("quiet_hours_start") @db.VarChar(5)
-  quietHoursEnd   String? @map("quiet_hours_end") @db.VarChar(5)
-  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
-  user           AppUser  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id              String   @id @db.VarChar(64)
+  userId          String   @unique @map("user_id") @db.Uuid
+  orders          Boolean  @default(true)
+  payments        Boolean  @default(true)
+  aiReplies       Boolean  @default(true) @map("ai_replies")
+  masterMessages  Boolean  @default(true) @map("master_messages")
+  marketing       Boolean  @default(false)
+  quietHoursStart String?  @map("quiet_hours_start") @db.VarChar(5)
+  quietHoursEnd   String?  @map("quiet_hours_end") @db.VarChar(5)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  user            AppUser  @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("notification_preferences")
 }
 
 model Notification {
-  id            String           @id @db.VarChar(64)
-  userId        String           @map("user_id") @db.Uuid
-  type          NotificationType
-  title         String           @db.VarChar(200)
-  body          String
-  data          Json?           
-  deeplinkPath  String?          @map("deeplink_path")
-  readAt        DateTime?        @map("read_at") @db.Timestamptz(3)
-  createdAt     DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
-  user          AppUser          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id           String           @id @db.VarChar(64)
+  userId       String           @map("user_id") @db.Uuid
+  type         NotificationType
+  title        String           @db.VarChar(200)
+  body         String
+  data         Json?
+  deeplinkPath String?          @map("deeplink_path")
+  readAt       DateTime?        @map("read_at") @db.Timestamptz(3)
+  createdAt    DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  user         AppUser          @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, readAt])
   @@index([createdAt])
@@ -1116,8 +1165,8 @@ model AiMessage {
   role            AiMessageRole
   content         String
   clientMessageId String?       @map("client_message_id") @db.VarChar(64)
-  attachments     Json?        
-  structured      Json?        
+  attachments     Json?
+  structured      Json?
   tokenCount      Int?          @map("token_count")
   createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
   session         AiSession     @relation(fields: [sessionId], references: [id], onDelete: Cascade)

@@ -1,6 +1,8 @@
 // Tests for classifyPart: multilingual (RU / UZ / EN) category classification
-// plus region-of-origin, OEM and GM inference. Every listing gets a main +
-// vehicle category (fallback when unsure), so the result is never empty.
+// plus region-of-origin (text-based), and the OEM/GM flags which are a PURE
+// FUNCTION of the seller's part-number label (partNumberType) — the single label
+// rule lives in part-number.ts (tested in part-number.spec.ts). Every listing
+// gets a main + vehicle category (fallback when unsure), so it is never empty.
 
 import { PartMainCategory, PartVehicleCategory, PartOriginRegion } from '@prisma/client';
 import { classifyPart } from './part-classifier';
@@ -181,69 +183,64 @@ describe('classifyPart — region, GM and OEM', () => {
     expect(r.originRegion).toBe(PartOriginRegion.JAPAN);
   });
 
-  // ── is_gm: describes the PART, from explicit evidence only ─────────────────
-  it('GM vehicle make alone does NOT set isGm (Chevrolet part is not a GM part)', () => {
-    expect(classifyPart('Фара Chevrolet Cobalt', null).isGm).toBe(false);
-  });
-
-  it('non-GM make → isGm false', () => {
-    expect(classifyPart('Фара BMW X5', null).isGm).toBe(false);
-  });
-
-  it('explicit "General Motors" in text → isGm true', () => {
-    expect(classifyPart('Ремень General Motors', null).isGm).toBe(true);
-  });
-
-  it('ACDelco (GM parts brand) → isGm true', () => {
-    expect(classifyPart('Фильтр ACDelco', null).isGm).toBe(true);
-  });
-
-  it('standalone GM token in text → isGm true', () => {
-    expect(classifyPart('Колодки GM оригинал', null).isGm).toBe(true);
-  });
-
-  it('GM label on the OEM number → isGm true', () => {
-    expect(classifyPart('Ремень генератора', null, 'GM 96440756').isGm).toBe(true);
-  });
-
-  it('plain numeric OEM with no GM marker → isGm false', () => {
-    expect(classifyPart('Ремень генератора', null, '96440756').isGm).toBe(false);
-  });
-
-  it('GM substring inside a word does NOT trigger isGm', () => {
-    // "программа" contains no GM token; ensure no false positive on partials.
-    expect(classifyPart('Программатор ключей', null).isGm).toBe(false);
-  });
-
-  it('оригинал → isOem true', () => {
-    expect(classifyPart('Колодки оригинал', null).isOem).toBe(true);
-  });
-
-  it('OEM keyword → isOem true', () => {
-    expect(classifyPart('Brake pads OEM', null).isOem).toBe(true);
-  });
-
-  it('no OEM keyword → isOem false', () => {
-    expect(classifyPart('Колодки Xitoy', null).isOem).toBe(false);
-  });
-
-  // ── OEM and GM are INDEPENDENT dimensions (OEM ≠ GM) ───────────────────────
-  it('Denso for Toyota is OEM but NOT GM (an OEM supplier is not GM)', () => {
-    const r = classifyPart('Свеча Denso оригинал Toyota Camry', null);
+  // ── is_oem / is_gm are a PURE FUNCTION of partNumberType ───────────────────
+  // The classifier no longer scans text for OEM/GM labels; the single label rule
+  // lives in part-number.ts (see part-number.spec.ts). Here we only pin the
+  // type → flags mapping and that NOTHING in the text can override it.
+  it('partNumberType OEM → isOem true, isGm false', () => {
+    const r = classifyPart('Колодки', null, 'OEM');
     expect(r.isOem).toBe(true);
     expect(r.isGm).toBe(false);
-    expect(r.originRegion).toBe(PartOriginRegion.JAPAN);
   });
 
-  it('ACDelco is GM but NOT OEM here (no OEM/original keyword present)', () => {
-    const r = classifyPart('Фильтр ACDelco', null);
+  it('partNumberType GM → isGm true, isOem false', () => {
+    const r = classifyPart('Колодки', null, 'GM');
     expect(r.isGm).toBe(true);
     expect(r.isOem).toBe(false);
   });
 
-  it('a GM Genuine original part is BOTH GM and OEM', () => {
-    const r = classifyPart('GM Genuine оригинал', null);
+  it('partNumberType UNKNOWN → both false', () => {
+    const r = classifyPart('Колодки', null, 'UNKNOWN');
+    expect(r.isOem).toBe(false);
+    expect(r.isGm).toBe(false);
+  });
+
+  it('omitted partNumberType defaults to UNKNOWN → both false', () => {
+    const r = classifyPart('Колодки', null);
+    expect(r.isOem).toBe(false);
+    expect(r.isGm).toBe(false);
+  });
+
+  // The flags come ONLY from the type — text signals never override it.
+  it('authenticity words in text do NOT set isOem when type is UNKNOWN', () => {
+    // "оригинал"/"original"/"genuine"/"factory"/"заводской" describe the product.
+    expect(classifyPart('Колодки оригинал original genuine factory заводской', null, 'UNKNOWN').isOem).toBe(false);
+  });
+
+  it('a GM/ACDelco marker in text does NOT set isGm when type is UNKNOWN', () => {
+    // Manufacturer/brand markers are product info, not a GM part-number label.
+    expect(classifyPart('Фильтр ACDelco General Motors', null, 'UNKNOWN').isGm).toBe(false);
+  });
+
+  it('a GM vehicle make in text does NOT set isGm', () => {
+    expect(classifyPart('Фара Chevrolet Cobalt', null, 'UNKNOWN').isGm).toBe(false);
+  });
+
+  it('OEM and GM are mutually exclusive per type (never both true from one type)', () => {
+    expect(classifyPart('x', null, 'OEM')).toMatchObject({ isOem: true, isGm: false });
+    expect(classifyPart('x', null, 'GM')).toMatchObject({ isOem: false, isGm: true });
+  });
+
+  // Required end-to-end example: a GM-labeled oil listing. The label rule
+  // (part-number.ts) yields type GM here, so isGm=true / isOem=false — and the
+  // "оригинал" authenticity word cannot flip isOem.
+  it('required GM oil example maps type GM → isGm true, isOem false', () => {
+    const r = classifyPart(
+      'Оригинальное синтетическое масло GM DEXOS-2',
+      'Масло GM 100% синтетическое.',
+      'GM', // resolved upstream by classifyPartNumberType
+    );
     expect(r.isGm).toBe(true);
-    expect(r.isOem).toBe(true);
+    expect(r.isOem).toBe(false);
   });
 });
