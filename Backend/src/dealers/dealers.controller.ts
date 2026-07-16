@@ -4,8 +4,8 @@ import { DealersService } from './dealers.service';
 
 /**
  * "MATOR Certified" dealers (Phase 4C) — read-only, public (an Explore
- * merchandising row, like /v1/categories and /v1/top-featured). Serves the
- * curated CatalogSeller rows in the frontend MatorDealer shape.
+ * merchandising row, like /v1/categories). Serves the curated CatalogSeller
+ * rows in the frontend MatorDealer shape.
  */
 @ApiTags('Dealers')
 @Controller('v1/dealers')

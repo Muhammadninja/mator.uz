@@ -27,7 +27,6 @@ export const IdPrefix = {
   PROVIDER: 'prov',
   SERVICE: 'svc',
   CATALOG_PART: 'part',
-  FEATURED: 'feat',
 } as const;
 
 export type IdPrefix = (typeof IdPrefix)[keyof typeof IdPrefix];

@@ -91,7 +91,6 @@ export function presentPartItem(part: PartWithRelations, vehicle: VehicleCompatC
     price_label: formatUzs(part.priceUzs),
     currency: part.currency,
     in_stock: part.inStock,
-    stock_qty: part.stockQty,
     delivery_eta_days_min: part.deliveryEtaDaysMin,
     delivery_eta_days_max: part.deliveryEtaDaysMax,
     compatibility: computeCompatibility(part.compatibilities, vehicle),

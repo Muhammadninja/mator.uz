@@ -31,7 +31,6 @@ function part(over: Partial<PartWithRelations> = {}): PartWithRelations {
     currency: 'UZS',
     condition: 'NEW',
     inStock: true,
-    stockQty: 3,
     deliveryEtaDaysMin: null,
     deliveryEtaDaysMax: null,
     images: [],
