@@ -24,7 +24,6 @@ import { AccountModule } from './account/account.module';
 import { ShippingModule } from './shipping/shipping.module';
 import { ReferenceModule } from './reference/reference.module';
 import { AddressesModule } from './addresses/addresses.module';
-import { TopFeaturedModule } from './top-featured/top-featured.module';
 import { DealersModule } from './dealers/dealers.module';
 
 @Module({
@@ -54,7 +53,6 @@ import { DealersModule } from './dealers/dealers.module';
     ShippingModule,
     ReferenceModule,
     AddressesModule,
-    TopFeaturedModule,
     DealersModule,
   ],
 })

@@ -17,7 +17,6 @@ Sources:
 - `services/uz-vehicle-catalog.ts` (UZ_BRANDS / UZ_MODELS / UZ_GENERATIONS / UZ_TRIMS / UZ_ENGINES)
 - `constants/catalog-systems.ts` (CATALOG_SYSTEMS)
 - `mocks/mator-catalog.ts` (MATOR_DEALERS)
-- `services/top-featured-service.ts` (MOCK_ITEM_ATTRIBUTES f1–f6)
 
 ---
 
@@ -193,20 +192,13 @@ projected rows are otherwise unaffected.
 
 ---
 
-## FeaturedItem.title / badge / status / description / price (real values)
+## Top Featured — REMOVED from the product (historical)
 
-**Reason:**
-The real featured titles/badges/etc. live in a frontend data file
-(`components/screens-components/search/search-top-featured.data`) that was not
-provided. The seeded `title` is composed from the row's own real values
-(`brand + model`) so the NOT-NULL column is satisfied without inventing text.
-
-**Impact:**
-Featured items carry placeholder titles and no badge/status/description/price
-until the real featured data file is provided.
-
-**Decision:**
-Deferred. Provide `search-top-featured.data` to complete.
+Top Featured (the `FeaturedItem` table, its seed, API, and constants) was a
+product concept that has since been removed entirely by a product decision. It
+is no longer part of the backend. This entry is kept only to record that the
+former "FeaturedItem real values" gap no longer applies — there is nothing to
+provide or complete.
 
 ---
 
@@ -216,8 +208,8 @@ Deferred. Provide `search-top-featured.data` to complete.
 The search page contract (`mocks/search-page-backend-fields.txt`) defines a
 `SearchPromoBannerItem` shape — `id, badge, sponsorLabel, title, description,
 ctaPrimaryLabel, ctaSecondaryLabel?, imageUrl?, deeplink?, campaignId?,
-impressionId?` — served from `GET /search/promo-banners`. But unlike Featured
-(4B) and Dealers (4C), the repo contains **no backend table, no seed data, and
+impressionId?` — served from `GET /search/promo-banners`. But unlike Dealers
+(4C), the repo contains **no backend table, no seed data, and
 no actual banner content whatsoever**: no data array, no `.data` file, and the
 referenced component `components/screens-components/search-promo-banner.tsx` is
 not present in this repo. The only artifact is the field spec.

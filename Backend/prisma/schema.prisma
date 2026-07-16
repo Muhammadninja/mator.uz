@@ -892,7 +892,6 @@ model CatalogPart {
   currency           String               @default("UZS") @db.VarChar(3)
   condition          PartCondition        @default(NEW)
   inStock            Boolean              @default(true) @map("in_stock")
-  stockQty           Int                  @default(0) @map("stock_qty")
   deliveryEtaDaysMin Int?                 @map("delivery_eta_days_min")
   deliveryEtaDaysMax Int?                 @map("delivery_eta_days_max")
   images             String[]
@@ -961,28 +960,6 @@ model PartCompatibility {
   @@index([trimId])
   @@index([engineId])
   @@map("part_compatibilities")
-}
-
-// Curated Top-Featured grid (f<n> in the contract).
-model FeaturedItem {
-  id          String   @id @db.VarChar(64)
-  partId      String?  @map("part_id") @db.VarChar(64)
-  badge       String?  @db.VarChar(40)
-  status      String?  @db.VarChar(40)
-  title       String   @db.VarChar(200)
-  description String?
-  priceUzs    Decimal? @map("price_uzs") @db.Decimal(14, 2)
-  model       String?  @db.VarChar(120)
-  brand       String?  @db.VarChar(120)
-  color       String?  @db.VarChar(60)
-  condition   String?  @db.VarChar(60)
-  oem         String?  @db.VarChar(80)
-  sortOrder   Int      @default(0) @map("sort_order")
-  isActive    Boolean  @default(true) @map("is_active")
-  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
-
-  @@index([isActive, sortOrder])
-  @@map("featured_items")
 }
 
 // ── Cart (server-persisted, one per user) ─────────────────────────────────────

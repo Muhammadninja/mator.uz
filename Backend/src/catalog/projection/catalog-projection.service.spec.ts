@@ -95,11 +95,10 @@ describe('CatalogProjectionService — mapping', () => {
         priceUzs: 185000,
         condition: PartCondition.NEW,
         inStock: true, // quantity 3 > 0
-        stockQty: 3,
         images: ['https://cdn/img0.webp', 'https://cdn/img1.webp'],
       });
       // update carries the same data (idempotent upsert).
-      expect(part.update).toMatchObject({ priceUzs: 185000, stockQty: 3, inStock: true });
+      expect(part.update).toMatchObject({ priceUzs: 185000, inStock: true });
     });
 
     it('projects the classified attributes verbatim from the Product', () => {
@@ -214,7 +213,6 @@ describe('CatalogProjectionService — mapping', () => {
       svc.buildProjectionOps(buildStock({ quantity: 0 }));
       const part = upsertArg(prisma, 'catalogPart').create;
       expect(part.inStock).toBe(false);
-      expect(part.stockQty).toBe(0);
     });
   });
 

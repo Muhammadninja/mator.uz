@@ -8,7 +8,6 @@ import {
 } from './seed-data/vehicle-catalog.seed';
 import {
   SEED_CATEGORIES,
-  SEED_FEATURED,
   SEED_DEALERS,
 } from './seed-data/catalog-reference.seed';
 
@@ -19,8 +18,8 @@ const prisma = new PrismaClient();
  * the stable frontend id), so `npm run seed` can be run repeatedly and converges.
  *
  * Order respects FK dependencies: makes → models → trims (both FK back to
- * make/model). Engines are independent. Categories/featured/dealers are
- * independent reference rows.
+ * make/model). Engines are independent. Categories/dealers are independent
+ * reference rows.
  *
  * DATA ONLY — this file creates NO API and changes NO schema. All values come
  * verbatim from the frontend source of truth (see the seed-data/*.ts headers).
@@ -80,38 +79,6 @@ async function seedCategories() {
   }
 }
 
-async function seedFeatured() {
-  for (const f of SEED_FEATURED) {
-    // FeaturedItem.title is NOT NULL. The frontend row carries no standalone
-    // title (real titles live in a data file not provided — see Phase-2A notes),
-    // so title is composed from the row's own real values (brand + model). No
-    // text is invented; this is recorded in DROPPED_FRONTEND_METADATA.
-    const title = `${f.brand} ${f.model}`.trim();
-    await prisma.featuredItem.upsert({
-      where: { id: f.id },
-      update: {
-        title,
-        model: f.model,
-        brand: f.brand,
-        color: f.color,
-        condition: f.condition,
-        oem: f.oem,
-        sortOrder: f.sortOrder,
-      },
-      create: {
-        id: f.id,
-        title,
-        model: f.model,
-        brand: f.brand,
-        color: f.color,
-        condition: f.condition,
-        oem: f.oem,
-        sortOrder: f.sortOrder,
-      },
-    });
-  }
-}
-
 async function seedDealers() {
   for (const d of SEED_DEALERS) {
     const fields = {
@@ -138,7 +105,6 @@ async function main() {
   await seedAdmin();
   await seedVehicleCatalog();
   await seedCategories();
-  await seedFeatured();
   await seedDealers();
 
   const counts = {
@@ -147,7 +113,6 @@ async function main() {
     vehicle_trims: await prisma.vehicleTrim.count(),
     vehicle_engines: await prisma.vehicleEngine.count(),
     part_categories: await prisma.partCategory.count(),
-    featured_items: await prisma.featuredItem.count(),
     catalog_sellers: await prisma.catalogSeller.count(),
   };
   console.log('[seed] reference-data row counts:');

@@ -64,6 +64,38 @@ const CONFIRMATION_TTL_MS = 10 * 60 * 1000;
 const CONFIRM_ADD = 'product:add';
 const CONFIRM_CANCEL = 'product:cancel';
 
+// Label of the persistent reply-keyboard button that shows the "how to send
+// parts" guide. Also the text `bot.hears` matches to trigger the same guide.
+const HELP_BUTTON_LABEL = 'ℹ️ Как правильно отправлять детали';
+
+// Persistent reply keyboard shown after /start so the guide button is always
+// reachable. `resize` keeps it compact; `persistent` keeps it visible.
+const MAIN_KEYBOARD = Markup.keyboard([[HELP_BUTTON_LABEL]])
+  .resize()
+  .persistent();
+
+// Purely informational guide on how to send parts so the bot recognizes them
+// accurately. Sent on the reply-keyboard button and the /help command; it does
+// NOT touch the listing pipeline.
+const HELP_MESSAGE =
+  '📦 Как правильно отправлять объявления\n\n' +
+  'Чтобы бот максимально точно распознал деталь, отправляйте фотографии вместе с описанием.\n\n' +
+  '✅ Лучше всего отправлять фотографии одним альбомом (Media Group).\n' +
+  'В подписи к альбому (Caption) укажите:\n\n' +
+  '• название детали;\n' +
+  '• описание (если есть);\n' +
+  '• OEM или GM номер (если известен);\n' +
+  '• цену.\n\n' +
+  'Например:\n\n' +
+  'Название: Передний амортизатор Chevrolet Cobalt\n' +
+  'Описание: Новый, оригинал GM.\n' +
+  'OEM/GM: 95917158\n' +
+  'Цена: 850 000 сум\n\n' +
+  '💡 Слова «Название», «Описание», и «Цена» писать необязательно.\n\n' +
+  '💡 Если у детали несколько фотографий, отправляйте их одним альбомом. ' +
+  'Тогда бот обработает все фотографии как одну деталь.\n\n' +
+  '🔎 Если указать OEM или GM номер, покупателям будет намного проще найти вашу деталь через поиск.';
+
 /**
  * A fully-processed listing awaiting the seller's confirmation. Everything
  * expensive (parse, vehicle detection, image processing/upload, price) is
@@ -223,7 +255,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       );
 
       if (seller.status === SellerStatus.ACTIVE) {
-        await ctx.reply('✅ Добро пожаловать! Ваш аккаунт активен. Отправьте фото детали с подписью (можно до 10 фото одним альбомом).');
+        await ctx.reply(
+          '✅ Добро пожаловать! Ваш аккаунт активен. Отправьте фото детали с подписью (можно до 10 фото одним альбомом).',
+          MAIN_KEYBOARD,
+        );
         return;
       }
       if (seller.status === SellerStatus.REJECTED) {
@@ -234,6 +269,16 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         '⏳ Ваша заявка на регистрацию принята и ожидает одобрения администратора.\n' +
         'Как только аккаунт будет активирован, вы сможете добавлять товары.',
       );
+    });
+
+    // Informational guide, reachable two ways: the /help command and the
+    // persistent reply-keyboard button (matched by its exact label). Both send
+    // the same static text and touch nothing in the listing pipeline.
+    this.bot.command('help', async (ctx) => {
+      await ctx.reply(HELP_MESSAGE);
+    });
+    this.bot.hears(HELP_BUTTON_LABEL, async (ctx) => {
+      await ctx.reply(HELP_MESSAGE);
     });
 
     this.bot.on(message('photo'), async (ctx: Context) => {
@@ -274,7 +319,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       const from = ctx.from;
       // Delete the uploaded preview assets before dropping the session.
       if (from) await this.discardPending(from.id);
-      await ctx.reply('❌ Добавление товара отменено.\nОтправьте фото и подпись заново, чтобы добавить другой товар.');
+      await ctx.reply(
+        '❌ Добавление товара отменено.\nОтправьте фото и подпись заново, чтобы добавить другой товар.',
+        MAIN_KEYBOARD,
+      );
     });
   }
 
@@ -317,7 +365,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     }
 
     if (!caption || caption.trim() === '') {
-      await ctx.reply('❌ Пожалуйста, добавьте подпись к фото с названием детали, номером и ценой.');
+      await ctx.reply(
+        '❌ Пожалуйста, добавьте подпись к фото с названием детали, номером и ценой.',
+        MAIN_KEYBOARD,
+      );
       return;
     }
 
@@ -360,13 +411,16 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         await ctx.reply(
           '❌ Не удалось распознать название детали. Опишите товар подробнее:\n' +
           '_Пример: Фильтр масляный Cobalt Gentra 96535062 25000 сум_',
-          { parse_mode: 'Markdown' },
+          { parse_mode: 'Markdown', ...MAIN_KEYBOARD },
         );
         return;
       }
 
       if (uploaded.length === 0) {
-        await ctx.reply('⚠️ Не удалось обработать ни одно изображение. Попробуйте ещё раз.');
+        await ctx.reply(
+          '⚠️ Не удалось обработать ни одно изображение. Попробуйте ещё раз.',
+          MAIN_KEYBOARD,
+        );
         return;
       }
 
@@ -396,7 +450,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
             ? JSON.stringify(error)
             : String(error);
       this.logger.error(`Pipeline error: ${errMsg}`, error instanceof Error ? error.stack : undefined);
-      await ctx.reply(`⚠️ Произошла ошибка при обработке товара.\n\`${errMsg}\``, { parse_mode: 'Markdown' });
+      await ctx.reply(
+        `⚠️ Произошла ошибка при обработке товара.\n\`${errMsg}\``,
+        { parse_mode: 'Markdown', ...MAIN_KEYBOARD },
+      );
     }
   }
 
@@ -517,7 +574,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     // product keeps them). Consuming it up front also makes a double-tap safe.
     const session = this.takePending(tgUserId);
     if (!session) {
-      await ctx.reply('⌛ Нет товара для подтверждения (возможно, время истекло). Отправьте фото и подпись заново.');
+      await ctx.reply(
+        '⌛ Нет товара для подтверждения (возможно, время истекло). Отправьте фото и подпись заново.',
+        MAIN_KEYBOARD,
+      );
       return;
     }
 
@@ -601,7 +661,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
       // The preview already served as the confirmation UI — the success message
       // only needs to confirm the write completed. Do not resend product details.
-      await ctx.reply('✅ Товар успешно добавлен.\nОтправьте фото и подпись следующего товара, чтобы добавить ещё.');
+      await ctx.reply(
+        '✅ Товар успешно добавлен.\nОтправьте фото и подпись следующего товара, чтобы добавить ещё.',
+        MAIN_KEYBOARD,
+      );
     } catch (error: unknown) {
       const errMsg =
         error instanceof Error
@@ -610,7 +673,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
             ? JSON.stringify(error)
             : String(error);
       this.logger.error(`Commit error: ${errMsg}`, error instanceof Error ? error.stack : undefined);
-      await ctx.reply(`⚠️ Произошла ошибка при добавлении товара.\n\`${errMsg}\``, { parse_mode: 'Markdown' });
+      await ctx.reply(
+        `⚠️ Произошла ошибка при добавлении товара.\n\`${errMsg}\``,
+        { parse_mode: 'Markdown', ...MAIN_KEYBOARD },
+      );
     }
   }
 

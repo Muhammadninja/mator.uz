@@ -220,7 +220,6 @@ export class CatalogProjectionService {
       // currency: schema default "UZS"
       condition: PartCondition.NEW, // supply side has no condition — schema default
       inStock: stock.quantity > 0,
-      stockQty: stock.quantity,
       // deliveryEtaDaysMin/Max: no source → left null (both optional)
       images,
       // Classified attributes projected verbatim from the supply-side Product
