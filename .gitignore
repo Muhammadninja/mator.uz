@@ -12,3 +12,7 @@ dist/
 .claude/
 CLAUDE.md
 ruvector.db
+constants/
+mocks/
+services/
+**/.DS_Store
