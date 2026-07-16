@@ -564,12 +564,13 @@ model VehicleMake {
 }
 
 model VehicleModelRef {
-  id       String        @id @db.VarChar(64)
-  makeId   String        @map("make_id") @db.VarChar(64)
-  name     String        @db.VarChar(120)
-  make     VehicleMake   @relation(fields: [makeId], references: [id], onDelete: Cascade)
-  trims    VehicleTrim[]
-  vehicles Vehicle[]
+  id        String        @id @db.VarChar(64)
+  makeId    String        @map("make_id") @db.VarChar(64)
+  name      String        @db.VarChar(120)
+  sortOrder Int           @default(0) @map("sort_order")
+  make      VehicleMake   @relation(fields: [makeId], references: [id], onDelete: Cascade)
+  trims     VehicleTrim[]
+  vehicles  Vehicle[]
 
   @@index([makeId])
   @@map("vehicle_models")
@@ -579,6 +580,7 @@ model VehicleTrim {
   id              String              @id @db.VarChar(64)
   modelId         String              @map("model_id") @db.VarChar(64)
   name            String              @db.VarChar(120)
+  sortOrder       Int                 @default(0) @map("sort_order")
   model           VehicleModelRef     @relation(fields: [modelId], references: [id], onDelete: Cascade)
   vehicles        Vehicle[]
   assets          Vehicle3dAsset[]
@@ -593,6 +595,7 @@ model VehicleEngine {
   name            String              @db.VarChar(120)
   displacementCc  Int?                @map("displacement_cc")
   fuelType        FuelType?           @map("fuel_type")
+  sortOrder       Int                 @default(0) @map("sort_order")
   vehicles        Vehicle[]
   compatibilities PartCompatibility[]
 
@@ -853,6 +856,17 @@ model CatalogSeller {
   ratingAvg        Decimal       @default(0) @map("rating_avg") @db.Decimal(3, 2)
   logoUrl          String?       @map("logo_url")
   internalSellerId Int?          @map("internal_seller_id") // link to supply-side Seller, not exposed
+  // "MATOR Certified" storefront presentation (nullable — only curated dealer
+  // rows carry these; projected seller_<id> rows leave them null).
+  // `isCurated` is the AUTHORITATIVE marker of a curated dealer — GET /v1/dealers
+  // filters on it, NOT on whether these presentation fields happen to be set. A
+  // projected seller_<id> row that later acquires an `initial` must never leak
+  // into the dealer list, so identity is an explicit flag, not field presence.
+  isCurated        Boolean       @default(false) @map("is_curated")
+  initial          String?       @db.VarChar(4) // monogram letter for the logo tile
+  color            String?       @db.VarChar(9) // brand accent hex (#RRGGBB[AA])
+  orders           String?       @db.VarChar(20) // pre-formatted lifetime order count, e.g. "18k+"
+  years            Int?          // years in business
   parts            CatalogPart[]
 
   @@index([internalSellerId])

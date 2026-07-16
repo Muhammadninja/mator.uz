@@ -5,6 +5,7 @@ export const PART_INCLUDE = {
   category: true,
   seller: true,
   compatibilities: true,
+  fits: true,
 } satisfies Prisma.CatalogPartInclude;
 
 export type PartWithRelations = Prisma.CatalogPartGetPayload<{ include: typeof PART_INCLUDE }>;
@@ -94,6 +95,19 @@ export function presentPartItem(part: PartWithRelations, vehicle: VehicleCompatC
     delivery_eta_days_min: part.deliveryEtaDaysMin,
     delivery_eta_days_max: part.deliveryEtaDaysMax,
     compatibility: computeCompatibility(part.compatibilities, vehicle),
+    // Static make/model fitment for this part, projected from the supply-side
+    // PartModel links into catalog_part_fits. Purely additive surfacing of data
+    // that already exists — lets the buyer show "Fits: Chevrolet Cobalt, …"
+    // without a per-vehicle compatibility check. Sorted by model slug for a
+    // stable order. Empty for universal parts (they carry no fit rows).
+    fits: [...part.fits]
+      .sort((a, b) => a.modelSlug.localeCompare(b.modelSlug))
+      .map((f) => ({
+        make_slug: f.makeSlug,
+        make_name: f.makeName,
+        model_slug: f.modelSlug,
+        model_name: f.modelName,
+      })),
     images: part.images,
     seller: { id: part.seller.id, name: part.seller.name, rating_avg: Number(part.seller.ratingAvg) },
   };
