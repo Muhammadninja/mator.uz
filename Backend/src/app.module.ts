@@ -22,6 +22,10 @@ import { HealthModule } from './health/health.module';
 import { UserModule } from './user/user.module';
 import { AccountModule } from './account/account.module';
 import { ShippingModule } from './shipping/shipping.module';
+import { ReferenceModule } from './reference/reference.module';
+import { AddressesModule } from './addresses/addresses.module';
+import { TopFeaturedModule } from './top-featured/top-featured.module';
+import { DealersModule } from './dealers/dealers.module';
 
 @Module({
   imports: [
@@ -48,6 +52,10 @@ import { ShippingModule } from './shipping/shipping.module';
     UserModule,
     AccountModule,
     ShippingModule,
+    ReferenceModule,
+    AddressesModule,
+    TopFeaturedModule,
+    DealersModule,
   ],
 })
 export class AppModule {}

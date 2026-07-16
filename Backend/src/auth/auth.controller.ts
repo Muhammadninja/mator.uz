@@ -4,14 +4,12 @@ import {
   Get,
   Body,
   Query,
-  Res,
   UseGuards,
   Request,
   HttpCode,
   HttpStatus,
   BadRequestException,
 } from '@nestjs/common';
-import type { Response } from 'express';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
@@ -19,13 +17,7 @@ import { PhoneAuthService } from './phone/phone-auth.service';
 import { MyIdService } from './myid/myid.service';
 import { TokenService, ACCESS_TTL_SECONDS } from './tokens/token.service';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
-import { RegisterDto } from './dto/register.dto';
-import { LoginDto } from './dto/login.dto';
 import { RefreshDto } from './dto/refresh.dto';
-import { GoogleLoginDto } from './dto/google-login.dto';
-import { AppleLoginDto } from './dto/apple-login.dto';
-import { VerifyEmailDto } from './dto/verify-email.dto';
-import { ResendVerificationDto } from './dto/resend-verification.dto';
 import { SignInDto } from './dto/sign-in.dto';
 import { SignUpDto } from './dto/sign-up.dto';
 import { RequestOtpDto } from './phone/dto/request-otp.dto';
@@ -36,8 +28,12 @@ import { MyIdInitiateDto } from './myid/dto/myid-initiate.dto';
 import { MyIdCallbackDto } from './myid/dto/myid-callback.dto';
 
 /**
- * Single authentication controller under /v1/auth. Mator is phone-first, so the
- * OTP endpoints live here alongside the email, social, MyID, and token flows.
+ * Public v1 authentication controller under /v1/auth. Mator v1 is phone-only,
+ * so this controller exposes the phone OTP flow, MyID, and the session/token
+ * endpoints. Email, password, and social (Google/Apple) login are implemented
+ * but intentionally not exposed for v1 — their routes live on the unregistered
+ * LegacyAuthController (see legacy-auth.controller.ts). The camelCase sign-in /
+ * sign-up aliases are retained here as internal methods only (no HTTP route).
  * (Consolidated from the former V1AuthController and AuthCompatController.)
  */
 @ApiTags('Auth')
@@ -78,40 +74,10 @@ export class AuthController {
     return this.phoneAuth.resendOtp(dto.request_id);
   }
 
-  // ── Email register / login / verify ────────────────────────────────────────────
-  @Post('register')
-  @HttpCode(HttpStatus.CREATED)
-  register(@Body() dto: RegisterDto) {
-    return this.authService.register(dto);
-  }
-
-  @Post('login')
-  @Throttle({ default: { limit: 10, ttl: 60 * 1000 } })
-  @HttpCode(HttpStatus.OK)
-  login(@Body() dto: LoginDto) {
-    return this.authService.login(dto);
-  }
-
-  // Opened directly from the email client -> always 303-redirect to a
-  // Universal Link / App Link, never return JSON.
-  @Get('verify-email')
-  async verifyEmail(@Query() dto: VerifyEmailDto, @Res() res: Response) {
-    const url = await this.authService.resolveVerifyEmailRedirect(dto.token);
-    res.redirect(HttpStatus.SEE_OTHER, url);
-  }
-
-  // 3 requests / hour per IP on top of the per-user 60s cooldown.
-  @Post('resend-verification-email')
-  @Throttle({ default: { limit: 3, ttl: 60 * 60 * 1000 } })
-  @HttpCode(HttpStatus.ACCEPTED)
-  resendVerification(@Body() dto: ResendVerificationDto) {
-    return this.authService.resendVerification(dto.email);
-  }
-
   // ── Frontend compatibility aliases (camelCase contract) ─────────────────────────
-  @Post('sign-in')
-  @Throttle({ default: { limit: 10, ttl: 60 * 1000 } })
-  @HttpCode(HttpStatus.OK)
+  // NOTE: signIn/signUp are email/password flows and are NOT exposed as HTTP
+  // routes in v1 (no @Post decorator). The methods are retained so the internal
+  // camelCase contract and its tests keep working, ready to re-route later.
   async signIn(@Body() dto: SignInDto) {
     const res = await this.authService.login({ email: dto.email, password: dto.password });
     return {
@@ -122,9 +88,6 @@ export class AuthController {
     };
   }
 
-  @Post('sign-up')
-  @Throttle({ default: { limit: 5, ttl: 60 * 1000 } })
-  @HttpCode(HttpStatus.CREATED)
   signUp(@Body() dto: SignUpDto) {
     // Variant A: registration issues NO tokens — the user must verify their
     // email first; returns the same payload as /v1/auth/register.
@@ -142,19 +105,6 @@ export class AuthController {
   @HttpCode(HttpStatus.NO_CONTENT)
   async signOut(@Body() dto: RefreshDto) {
     await this.tokens.revoke(this.resolveRefresh(dto));
-  }
-
-  // ── Social ───────────────────────────────────────────────────────────────────
-  @Post('google')
-  @HttpCode(HttpStatus.OK)
-  google(@Body() dto: GoogleLoginDto) {
-    return this.authService.googleLogin(dto);
-  }
-
-  @Post('apple')
-  @HttpCode(HttpStatus.OK)
-  apple(@Body() dto: AppleLoginDto) {
-    return this.authService.appleLogin(dto);
   }
 
   // ── MyID (requires an authenticated session) ─────────────────────────────────
