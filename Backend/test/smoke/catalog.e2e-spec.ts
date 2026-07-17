@@ -11,6 +11,7 @@ function buildPart(over: Partial<any> = {}): any {
     category: { id: 'cat_belts', name: 'Timing belts' },
     seller: { id: 'seller_1', name: 'Avtomir', ratingAvg: 4.6 },
     compatibilities: [],
+    fits: [],
     oemNumbers: ['0816A6'],
     priceUzs: 185000,
     currency: 'UZS',

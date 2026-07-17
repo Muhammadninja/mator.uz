@@ -70,8 +70,10 @@ export interface RuleBasedResult extends ParsedPartMetadata {
   preserveTitle?: boolean;
 }
 
-/** How a final result was produced — useful for logging/metrics. */
-export type ParseSource = 'structured' | 'rule-based' | 'ai-fallback' | 'mock';
+/** How a final result was produced — useful for logging/metrics. 'wizard' means
+ *  the metadata was assembled from explicit step-by-step bot input (no parsing). */
+export type ParseSource =
+  'structured' | 'rule-based' | 'ai-fallback' | 'mock' | 'wizard';
 
 export interface ParseOutcome extends ParsedPartMetadata {
   source: ParseSource;
