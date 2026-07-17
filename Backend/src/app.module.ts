@@ -55,5 +55,11 @@ import { DealersModule } from './dealers/dealers.module';
     AddressesModule,
     DealersModule,
   ],
+  // Bind ThrottlerGuard globally. Without this APP_GUARD registration the
+  // ThrottlerModule config and every @Throttle/@SkipThrottle decorator across
+  // the app are inert (no rate limiting is enforced). Registering it here
+  // activates the global 100-req/min baseline and the per-route tightenings on
+  // the auth/OTP endpoints.
+  providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })
 export class AppModule {}

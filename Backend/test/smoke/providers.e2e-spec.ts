@@ -67,6 +67,8 @@ describe('Masters/Bookings smoke', () => {
   it('creates a 5-minute HOLD booking with the summed price', async () => {
     const { svc } = newBookings(prisma);
     prisma.serviceProvider.findUnique.mockResolvedValue({ id: 'master_1' });
+    // The referenced vehicle must belong to the caller (ownership check).
+    prisma.vehicle.findUnique.mockResolvedValue({ id: 'veh_1', userId: 'usr_1', deletedAt: null });
     prisma.providerServiceOffering.findMany.mockResolvedValue([
       { id: 'svc_oil', name: 'Oil change', priceUzs: 120000 },
     ]);
@@ -84,6 +86,20 @@ describe('Masters/Bookings smoke', () => {
     expect(prisma.booking.create).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ status: 'HOLD' }) }),
     );
+  });
+
+  it("rejects a booking referencing another user's vehicle (ownership)", async () => {
+    const { svc } = newBookings(prisma);
+    prisma.serviceProvider.findUnique.mockResolvedValue({ id: 'master_1' });
+    // Vehicle exists but belongs to a different user.
+    prisma.vehicle.findUnique.mockResolvedValue({ id: 'veh_other', userId: 'usr_2', deletedAt: null });
+    await expect(
+      svc.create('usr_1', 'master_1', {
+        service_ids: ['svc_oil'],
+        scheduled_at: '2026-07-01T10:00:00Z',
+        vehicle_id: 'veh_other',
+      } as any),
+    ).rejects.toThrow(/Vehicle not found/);
   });
 
   it('rejects a booking whose service_ids do not belong to the provider', async () => {

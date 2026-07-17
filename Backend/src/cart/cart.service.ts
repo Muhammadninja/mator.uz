@@ -1,7 +1,7 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { prefixedId, IdPrefix } from '../common/ulid.util';
-import { AddCartItemDto } from './dto/add-cart-item.dto';
+import { AddCartItemDto, MAX_CART_ITEM_QUANTITY } from './dto/add-cart-item.dto';
 import { resolvePromo } from './promo.util';
 import { CART_INCLUDE, CartWithItems, cartSubtotal, presentCart } from './cart.presenter';
 
@@ -26,6 +26,11 @@ export class CartService {
 
   async addItem(userId: string, dto: AddCartItemDto) {
     const cart = await this.getOrCreate(userId);
+
+    // Ownership: a caller may only attach their OWN vehicle to a cart line.
+    // (provider_id references the public provider directory, not a user-owned
+    // resource, so it is not ownership-scoped.)
+    await this.assertOwnedVehicle(userId, dto.vehicle_id);
 
     if (dto.service_id) {
       const svc = await this.prisma.providerServiceOffering.findUnique({
@@ -52,12 +57,14 @@ export class CartService {
       if (!part) throw new NotFoundException('Part not found');
       const qty = dto.quantity ?? 1;
 
-      // Merge: an existing part line increments its quantity.
+      // Merge: an existing part line increments its quantity. The merged total is
+      // capped server-side — DTO @Max(999) bounds a single request, but repeated
+      // adds could otherwise stack past the ceiling.
       const existing = cart.items.find((i) => i.partId === partId && !i.serviceId);
       if (existing) {
         await this.prisma.cartItem.update({
           where: { id: existing.id },
-          data: { quantity: existing.quantity + qty },
+          data: { quantity: Math.min(existing.quantity + qty, MAX_CART_ITEM_QUANTITY) },
         });
       } else {
         await this.prisma.cartItem.create({
@@ -125,6 +132,15 @@ export class CartService {
   }
 
   // ── helpers ────────────────────────────────────────────────────────────────
+  /** Ensure the referenced vehicle (if any) belongs to the caller. */
+  private async assertOwnedVehicle(userId: string, vehicleId?: string): Promise<void> {
+    if (!vehicleId) return;
+    const vehicle = await this.prisma.vehicle.findUnique({ where: { id: vehicleId } });
+    if (!vehicle || vehicle.userId !== userId || vehicle.deletedAt) {
+      throw new NotFoundException('Vehicle not found');
+    }
+  }
+
   private async assertItemOwned(userId: string, itemId: string) {
     const item = await this.prisma.cartItem.findUnique({
       where: { id: itemId },

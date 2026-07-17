@@ -1,5 +1,10 @@
-import { IsString, IsOptional, IsInt, Min } from 'class-validator';
+import { IsString, IsOptional, IsInt, Min, Max } from 'class-validator';
 import { Type } from 'class-transformer';
+
+// Upper bound on a single cart line's quantity. A realistic retail cart never
+// approaches this; the cap prevents absurd quantities from overflowing the
+// line-total arithmetic or producing nonsensical order amounts.
+export const MAX_CART_ITEM_QUANTITY = 999;
 
 export class AddCartItemDto {
   // Catalog id of the part. The contract sends `id`; `part_id` is also accepted.
@@ -31,6 +36,7 @@ export class AddCartItemDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(MAX_CART_ITEM_QUANTITY)
   quantity?: number;
 
   // Display fields the client may include — accepted (and ignored: price is

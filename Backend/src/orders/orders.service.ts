@@ -26,6 +26,12 @@ export class OrdersService {
       throw new BadRequestException('Cart is empty');
     }
 
+    // Ownership: a caller may only attach their OWN vehicle / delivery address to
+    // an order. Without these checks the ids are persisted verbatim, letting a
+    // user reference another user's vehicle or address (cross-tenant reference).
+    await this.assertOwnedVehicle(userId, dto.vehicle_id);
+    await this.assertOwnedAddress(userId, dto.cart_snapshot?.delivery_address_id);
+
     const subtotal = cart.items.reduce((s, i) => s + Number(i.priceUzsSnapshot) * i.quantity, 0);
     const snap = dto.cart_snapshot ?? {};
     const deliveryMethod =
@@ -128,5 +134,24 @@ export class OrdersService {
     });
     if (!order || order.userId !== userId) throw new NotFoundException('Order not found');
     return presentOrder(order);
+  }
+
+  // ── ownership helpers ────────────────────────────────────────────────────────
+  /** Ensure the referenced vehicle (if any) belongs to the caller. */
+  private async assertOwnedVehicle(userId: string, vehicleId?: string): Promise<void> {
+    if (!vehicleId) return;
+    const vehicle = await this.prisma.vehicle.findUnique({ where: { id: vehicleId } });
+    if (!vehicle || vehicle.userId !== userId || vehicle.deletedAt) {
+      throw new NotFoundException('Vehicle not found');
+    }
+  }
+
+  /** Ensure the referenced delivery address (if any) belongs to the caller. */
+  private async assertOwnedAddress(userId: string, addressId?: string): Promise<void> {
+    if (!addressId) return;
+    const address = await this.prisma.address.findUnique({ where: { id: addressId } });
+    if (!address || address.userId !== userId) {
+      throw new NotFoundException('Address not found');
+    }
   }
 }

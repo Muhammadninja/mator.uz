@@ -1,8 +1,9 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { AiMessageRole, type Vehicle } from '@prisma/client';
 import type Anthropic from '@anthropic-ai/sdk';
 import { PrismaService } from '../prisma/prisma.service';
 import { prefixedId, IdPrefix } from '../common/ulid.util';
+import { isAllowedAssetUrl } from '../common/asset-url.util';
 import { VehicleContext } from './claude.service';
 import { CreateAiSessionDto } from './dto/create-session.dto';
 import { SendMessageDto } from './dto/send-message.dto';
@@ -62,6 +63,10 @@ export class AiAdvisorService {
   }
 
   persistUserMessage(sessionId: string, dto: SendMessageDto) {
+    // Reject arbitrary external image URLs at ingestion: any image attachment
+    // must point at a trusted asset host over HTTPS (same allowlist as avatars),
+    // since these URLs are later forwarded to the model to fetch.
+    this.assertAttachmentsAllowed(dto.attachments);
     return this.prisma.aiMessage.create({
       data: {
         id: prefixedId(IdPrefix.AI_MESSAGE),
@@ -72,6 +77,23 @@ export class AiAdvisorService {
         attachments: dto.attachments ? (dto.attachments as object) : undefined,
       },
     });
+  }
+
+  /**
+   * Enforce the trusted-asset-host allowlist on inbound image attachments. A
+   * non-image attachment (or one without a url) carries no fetch, so it passes;
+   * an image attachment with a disallowed/non-HTTPS url is rejected with the
+   * standard validation error.
+   */
+  private assertAttachmentsAllowed(
+    attachments?: Array<{ type?: string; url?: string; mime?: string }>,
+  ): void {
+    if (!attachments?.length) return;
+    for (const a of attachments) {
+      if (a.type === 'image' && a.url && !isAllowedAssetUrl(a.url)) {
+        throw new BadRequestException('attachment url must be an HTTPS URL on an allowed asset host');
+      }
+    }
   }
 
   persistAssistantMessage(sessionId: string, content: string, structured: object) {
@@ -98,7 +120,10 @@ export class AiAdvisorService {
       const role = m.role === AiMessageRole.ASSISTANT ? 'assistant' : 'user';
       const attachments = (m.attachments as Array<{ type?: string; url?: string }> | null) ?? [];
       const images = attachments
-        .filter((a) => a.type === 'image' && a.url)
+        // Defense in depth: only forward image URLs that pass the trusted-host
+        // allowlist, so even a legacy/stored row can't smuggle an arbitrary URL
+        // to the model.
+        .filter((a) => a.type === 'image' && a.url && isAllowedAssetUrl(a.url))
         .map((a) => ({ type: 'image' as const, source: { type: 'url' as const, url: a.url as string } }));
 
       if (role === 'user' && images.length > 0) {

@@ -1,4 +1,4 @@
-import { IsString, IsOptional, IsNumber, IsInt } from 'class-validator';
+import { IsString, IsOptional, IsNumber, IsInt, Min, Max } from 'class-validator';
 import { Type } from 'class-transformer';
 
 export class NearbyQueryDto {
@@ -13,6 +13,8 @@ export class NearbyQueryDto {
   @IsOptional()
   @Type(() => Number)
   @IsInt()
+  @Min(1)
+  @Max(50000)
   radius_m?: number;
 
   @IsOptional() @Type(() => Number) @IsNumber() viewport_min_lat?: number;
@@ -45,6 +47,8 @@ export class NearbyQueryDto {
   @IsOptional()
   @Type(() => Number)
   @IsInt()
+  @Min(1)
+  @Max(100)
   limit?: number;
 
   @IsOptional()

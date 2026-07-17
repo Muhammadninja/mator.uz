@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, ProviderType, Specialization } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { clampLimit, clampRadius } from '../common/pagination.util';
 import { NearbyQueryDto } from './dto/nearby.query.dto';
 import { haversineMeters, bboxFromRadius } from './geo.util';
 import {
@@ -12,7 +13,9 @@ import {
 } from './provider.presenter';
 
 const DEFAULT_RADIUS_M = 5000;
+const MAX_RADIUS_M = 50_000;
 const DEFAULT_LIMIT = 50;
+const MAX_LIMIT = 100;
 const PREFILTER_CAP = 300;
 
 @Injectable()
@@ -22,7 +25,7 @@ export class ProvidersService {
   async nearby(type: ProviderType, query: NearbyQueryDto) {
     const start = Date.now();
     const now = new Date();
-    const radius = query.radius_m ?? DEFAULT_RADIUS_M;
+    const radius = clampRadius(query.radius_m, DEFAULT_RADIUS_M, MAX_RADIUS_M);
 
     const box =
       query.viewport_min_lat != null &&
@@ -64,7 +67,7 @@ export class ProvidersService {
       ranked = ranked.filter((x) => isOpenNow(x.p.workingHours, now));
     }
 
-    const limit = query.limit ?? DEFAULT_LIMIT;
+    const limit = clampLimit(query.limit, DEFAULT_LIMIT, MAX_LIMIT);
     return {
       results: ranked.slice(0, limit).map((x) => presentNearby(x.p, x.d, now)),
       cluster_hints: [],
