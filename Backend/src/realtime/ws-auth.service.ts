@@ -7,9 +7,10 @@ import { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 
 /**
  * Authenticates a WebSocket upgrade by verifying the access token the same way
- * the HTTP JwtStrategy does (RS256, issuer `mator`, audience). Browsers cannot
- * set headers on a WS handshake, so the token is taken from the `token` query
- * param first, falling back to an `Authorization: Bearer` header.
+ * the HTTP JwtStrategy does (RS256, issuer `mator`, audience). The token is
+ * taken from the `Authorization: Bearer` header first (preferred: query strings
+ * are logged by proxies/Nginx and end up in access logs), falling back to the
+ * `token` query param for clients that cannot set headers on the WS handshake.
  */
 @Injectable()
 export class WsAuthService {
@@ -42,11 +43,19 @@ export class WsAuthService {
   }
 
   private extractToken(request: IncomingMessage): string | null {
+    // Prefer the Authorization header — when both are present, it wins. The
+    // header keeps the token out of URLs (and therefore out of proxy/access
+    // logs), which the query param cannot avoid.
+    const header = request.headers['authorization'];
+    if (header?.startsWith('Bearer ')) return header.slice(7);
+
+    // TODO(api-v2): query-token support is a temporary fallback for clients
+    // that cannot set headers on the WS handshake. Remove it in a future API
+    // version once all clients send the Authorization header.
     const url = new URL(request.url ?? '', 'http://localhost');
     const queryToken = url.searchParams.get('token');
     if (queryToken) return queryToken;
-    const header = request.headers['authorization'];
-    if (header?.startsWith('Bearer ')) return header.slice(7);
+
     return null;
   }
 }

@@ -11,6 +11,34 @@ import { WsAuthService } from './ws-auth.service';
 
 const HEARTBEAT_MS = 30_000;
 
+// ── Tunable limits (change here) ──────────────────────────────────────────────
+/**
+ * Max WebSocket frame size accepted from a client. Our only inbound message is
+ * `{"type":"ping"}` (a few dozen bytes); 32 KB leaves generous headroom for any
+ * future small control frame while making the 100 MB `ws` default — a
+ * memory-DoS vector where one frame is buffered whole before parsing —
+ * impossible. Passed straight to the `ws.Server` constructor by `WsAdapter`.
+ */
+const MAX_PAYLOAD_BYTES = 32 * 1024; // 32 KB
+
+/**
+ * Max simultaneous sockets per authenticated user. Covers a handful of
+ * devices/tabs (phone, tablet, web) with room to spare; beyond this a single
+ * token is almost certainly leaking or abusive. Additional connections are
+ * rejected with {@link CLOSE_TOO_MANY_CONNECTIONS}; existing sockets are
+ * untouched.
+ */
+const MAX_CONNECTIONS_PER_USER = 15;
+
+/**
+ * Handshake rate limit per client IP: at most {@link HANDSHAKE_LIMIT} upgrade
+ * attempts per {@link HANDSHAKE_WINDOW_MS}. Counts *both* successful and failed
+ * attempts, so it also throttles credential-stuffing / churn from a single
+ * source. The sliding-window state is pruned automatically (see `sweep()`).
+ */
+const HANDSHAKE_LIMIT = 30;
+const HANDSHAKE_WINDOW_MS = 60_000; // 1 minute
+
 /** Per-socket bookkeeping attached to the raw `ws` instance. */
 interface TrackedSocket extends WebSocket {
   userId?: string;
@@ -28,6 +56,8 @@ export interface RealtimeEvent {
 const CLOSE_UNAUTHORIZED = 4401;
 const CLOSE_FORBIDDEN_CHANNEL = 4403;
 const CLOSE_BAD_REQUEST = 4400;
+const CLOSE_TOO_MANY_CONNECTIONS = 4408; // per-user simultaneous cap reached
+const CLOSE_RATE_LIMITED = 4429; // handshake rate limit (mirrors HTTP 429)
 
 /**
  * Native-`ws` realtime gateway. Clients connect to
@@ -36,13 +66,18 @@ const CLOSE_BAD_REQUEST = 4400;
  * server pings every 30s and terminates sockets that miss a pong. App-level
  * `{"type":"ping"}` messages are also answered with `{"type":"pong"}`.
  */
-@WebSocketGateway({ path: '/realtime' })
+// `maxPayload` (and any other option besides `path`/`server`/`namespace`) is
+// forwarded verbatim to the underlying `ws.Server` constructor by `WsAdapter`.
+@WebSocketGateway({ path: '/realtime', maxPayload: MAX_PAYLOAD_BYTES })
 export class RealtimeGateway
   implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect
 {
   private readonly logger = new Logger(RealtimeGateway.name);
   // userId -> live sockets (a user may have several devices/tabs connected).
   private readonly sockets = new Map<string, Set<TrackedSocket>>();
+  // clientIp -> recent handshake timestamps (ms), for sliding-window rate
+  // limiting. Pruned in `sweep()` so it can't grow unbounded.
+  private readonly handshakes = new Map<string, number[]>();
   private heartbeat?: ReturnType<typeof setInterval>;
 
   constructor(private readonly wsAuth: WsAuthService) {}
@@ -53,7 +88,16 @@ export class RealtimeGateway
     server.on('close', () => this.heartbeat && clearInterval(this.heartbeat));
   }
 
-  async handleConnection(client: TrackedSocket, request: IncomingMessage): Promise<void> {
+  async handleConnection(
+    client: TrackedSocket,
+    request: IncomingMessage,
+  ): Promise<void> {
+    // Rate-limit the handshake *before* authenticating so failed/abusive
+    // attempts are throttled too, not just successful ones.
+    if (this.isRateLimited(this.clientIp(request))) {
+      return this.reject(client, CLOSE_RATE_LIMITED, 'rate_limited');
+    }
+
     let userId: string;
     try {
       userId = await this.wsAuth.authenticate(request);
@@ -61,10 +105,25 @@ export class RealtimeGateway
       return this.reject(client, CLOSE_UNAUTHORIZED, 'unauthorized');
     }
 
-    const channel = new URL(request.url ?? '', 'http://localhost').searchParams.get('channel');
+    const channel = new URL(
+      request.url ?? '',
+      'http://localhost',
+    ).searchParams.get('channel');
     const match = channel ? /^garage:(.+)$/.exec(channel) : null;
-    if (!match) return this.reject(client, CLOSE_BAD_REQUEST, 'invalid_channel');
-    if (match[1] !== userId) return this.reject(client, CLOSE_FORBIDDEN_CHANNEL, 'forbidden_channel');
+    if (!match)
+      return this.reject(client, CLOSE_BAD_REQUEST, 'invalid_channel');
+    if (match[1] !== userId)
+      return this.reject(client, CLOSE_FORBIDDEN_CHANNEL, 'forbidden_channel');
+
+    // Cap simultaneous sockets per user. Existing connections are left intact;
+    // only the new one over the limit is rejected.
+    if ((this.sockets.get(userId)?.size ?? 0) >= MAX_CONNECTIONS_PER_USER) {
+      return this.reject(
+        client,
+        CLOSE_TOO_MANY_CONNECTIONS,
+        'too_many_connections',
+      );
+    }
 
     client.userId = userId;
     client.channel = channel!;
@@ -109,6 +168,33 @@ export class RealtimeGateway
     }
   }
 
+  /**
+   * Sliding-window handshake rate limit keyed by client IP. Records this
+   * attempt and returns true if the IP has exceeded {@link HANDSHAKE_LIMIT}
+   * within {@link HANDSHAKE_WINDOW_MS}. Stale timestamps are dropped on every
+   * call so the per-IP array stays bounded; empty IP entries are cleared here
+   * and by the periodic prune in `sweep()`.
+   */
+  private isRateLimited(ip: string): boolean {
+    const now = Date.now();
+    const cutoff = now - HANDSHAKE_WINDOW_MS;
+    const recent = (this.handshakes.get(ip) ?? []).filter((t) => t > cutoff);
+    recent.push(now);
+    this.handshakes.set(ip, recent);
+    return recent.length > HANDSHAKE_LIMIT;
+  }
+
+  /**
+   * Best-effort client IP. Behind Nginx (`trust proxy` is set for HTTP) the
+   * real client is the first entry of `X-Forwarded-For`; fall back to the
+   * socket's remote address for direct connections.
+   */
+  private clientIp(request: IncomingMessage): string {
+    const fwd = request.headers['x-forwarded-for'];
+    const first = Array.isArray(fwd) ? fwd[0] : fwd?.split(',')[0];
+    return first?.trim() || request.socket?.remoteAddress || 'unknown';
+  }
+
   private sweep(): void {
     for (const set of this.sockets.values()) {
       for (const client of set) {
@@ -123,6 +209,13 @@ export class RealtimeGateway
           client.terminate();
         }
       }
+    }
+    // Prune expired handshake windows so the map can't grow unbounded.
+    const cutoff = Date.now() - HANDSHAKE_WINDOW_MS;
+    for (const [ip, times] of this.handshakes) {
+      const live = times.filter((t) => t > cutoff);
+      if (live.length === 0) this.handshakes.delete(ip);
+      else this.handshakes.set(ip, live);
     }
   }
 

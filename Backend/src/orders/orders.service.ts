@@ -117,7 +117,7 @@ export class OrdersService {
     const items = hasMore ? rows.slice(0, limit) : rows;
     return {
       items: items.map(presentOrder),
-      nextCursor: hasMore ? items[items.length - 1].id : null,
+      next_cursor: hasMore ? items[items.length - 1].id : null,
     };
   }
 
