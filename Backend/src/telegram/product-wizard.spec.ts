@@ -19,6 +19,10 @@ import {
   inputPrice,
   beginProcessing,
   backToPhotos,
+  previousStep,
+  goBack,
+  changePhotos,
+  hasProcessedPhotos,
   stepPrompt,
   brandKeyboard,
   modelKeyboard,
@@ -123,8 +127,14 @@ describe('brand / model / category selection (buttons only)', () => {
     const s = freshSession();
     expect(selectBrand(s, CHEVROLET).status).toBe('ok');
     expect(s.brand).toBe('Chevrolet');
-    const kb = modelKeyboard('Chevrolet').reply_markup.inline_keyboard.flat();
-    expect(kb.map((b) => b.text)).toEqual(WIZARD_BRANDS[CHEVROLET].models);
+    // Drop the trailing "⬅️ Назад" row before comparing model labels.
+    const kb = modelKeyboard(
+      s,
+      'Chevrolet',
+    ).reply_markup.inline_keyboard.flat();
+    expect(kb.map((b) => b.text).filter((t) => t !== '⬅️ Назад')).toEqual(
+      WIZARD_BRANDS[CHEVROLET].models,
+    );
   });
 
   it('model index resolves against the SELECTED brand', () => {
@@ -153,13 +163,17 @@ describe('brand / model / category selection (buttons only)', () => {
   });
 
   it('category buttons carry every wizard category', () => {
-    const kb = categoryKeyboard().reply_markup.inline_keyboard.flat();
-    expect(kb.map((b) => b.text)).toEqual(
+    const s = freshSession();
+    selectBrand(s, CHEVROLET);
+    selectModel(s, COBALT); // now at CATEGORY
+    const kb = categoryKeyboard(s).reply_markup.inline_keyboard.flat();
+    expect(kb.map((b) => b.text).filter((t) => t !== '⬅️ Назад')).toEqual(
       WIZARD_CATEGORIES.map((c) => c.label),
     );
-    expect(brandKeyboard().reply_markup.inline_keyboard.flat()).toHaveLength(
-      13,
-    );
+    // BRAND is the first step → no "⬅️ Назад" button, so only the 13 brands.
+    expect(
+      brandKeyboard(freshSession()).reply_markup.inline_keyboard.flat(),
+    ).toHaveLength(13);
   });
 });
 
@@ -170,10 +184,14 @@ describe('versioned callback payloads (invalidate stale buttons)', () => {
 
   it('every keyboard payload carries the current CATALOG_VERSION', () => {
     const prefix = `wiz:${CATALOG_VERSION}:`;
+    // Use a session past the first step so the "⬅️ Назад" button is present too
+    // — its payload is versioned like every other and must carry the prefix.
+    const mid = freshSession();
+    selectBrand(mid, CHEVROLET);
     const all = [
-      ...brandKeyboard().reply_markup.inline_keyboard.flat(),
-      ...modelKeyboard('Chevrolet').reply_markup.inline_keyboard.flat(),
-      ...categoryKeyboard().reply_markup.inline_keyboard.flat(),
+      ...brandKeyboard(freshSession()).reply_markup.inline_keyboard.flat(),
+      ...modelKeyboard(mid, 'Chevrolet').reply_markup.inline_keyboard.flat(),
+      ...categoryKeyboard(mid).reply_markup.inline_keyboard.flat(),
     ];
     for (const btn of all) expect(data(btn)).toMatch(new RegExp(`^${prefix}`));
   });
@@ -341,28 +359,153 @@ describe('price input (shared parsePrice rules)', () => {
   );
 });
 
-describe('stepPrompt', () => {
-  it('button steps carry a keyboard, text steps do not', () => {
+describe('back navigation ("⬅️ Назад")', () => {
+  it('BRAND (first step) has no previous step — goBack is stale', () => {
     const s = freshSession();
-    expect(stepPrompt(s).keyboard).toBeDefined(); // BRAND
+    expect(previousStep(s)).toBeNull();
+    expect(goBack(s).status).toBe('stale');
+    expect(s.step).toBe(WizardStep.BRAND);
+  });
+
+  it('walks back through the linear steps in reverse order', () => {
+    const s = sessionAtTitle(); // at TITLE (BRAND→MODEL→CATEGORY done)
+    inputTitle(s, 'Фильтр масляный'); // → DESCRIPTION
+    inputDescription(s, 'Оригинал'); // → PART_NUMBER_TYPE
+
+    expect(goBack(s).status).toBe('ok');
+    expect(s.step).toBe(WizardStep.DESCRIPTION);
+    expect(goBack(s).status).toBe('ok');
+    expect(s.step).toBe(WizardStep.TITLE);
+    expect(goBack(s).status).toBe('ok');
+    expect(s.step).toBe(WizardStep.CATEGORY);
+    expect(goBack(s).status).toBe('ok');
+    expect(s.step).toBe(WizardStep.MODEL);
+    expect(goBack(s).status).toBe('ok');
+    expect(s.step).toBe(WizardStep.BRAND);
+    expect(goBack(s).status).toBe('stale'); // nowhere left to go
+  });
+
+  it('does NOT lose entered data when going back', () => {
+    const s = sessionAtTitle();
+    inputTitle(s, 'Передний амортизатор');
+    inputDescription(s, 'Новый, оригинал'); // at PART_NUMBER_TYPE
+    goBack(s); // → DESCRIPTION
+    goBack(s); // → TITLE
+    // Every earlier field survives the walk back.
+    expect(s).toMatchObject({
+      step: WizardStep.TITLE,
+      brand: 'Chevrolet',
+      model: 'Cobalt',
+      category: PartVehicleCategory.BRAKE_SYSTEM,
+      title: 'Передний амортизатор',
+      description: 'Новый, оригинал',
+    });
+  });
+
+  it('re-entering a value going forward overwrites the old one; others persist', () => {
+    const s = sessionAtTitle();
+    inputTitle(s, 'Старое название'); // → DESCRIPTION
+    goBack(s); // → TITLE
+    expect(inputTitle(s, 'Новое название').status).toBe('ok');
+    expect(s.title).toBe('Новое название');
+    expect(s.step).toBe(WizardStep.DESCRIPTION);
+    // The brand/model/category chosen earlier are untouched.
+    expect(s).toMatchObject({ brand: 'Chevrolet', model: 'Cobalt' });
+  });
+
+  it('PRICE → PART_NUMBER for an OEM/GM listing (number was asked)', () => {
+    const s = sessionAtTitle();
+    inputTitle(s, 'Фильтр');
+    skipDescription(s);
+    choosePartNumberType(s, 'GM');
+    inputPartNumber(s, '96535062'); // at PRICE, partNumberType = GM
+    expect(previousStep(s)).toBe(WizardStep.PART_NUMBER);
+    goBack(s);
+    expect(s.step).toBe(WizardStep.PART_NUMBER);
+    expect(s.partNumber).toBe('96535062'); // preserved
+  });
+
+  it('PRICE → PART_NUMBER_TYPE when the number was skipped', () => {
+    const s = sessionAtTitle();
+    inputTitle(s, 'Фильтр');
+    skipDescription(s);
+    choosePartNumberType(s, 'SKIP'); // straight to PRICE, type UNKNOWN
+    expect(previousStep(s)).toBe(WizardStep.PART_NUMBER_TYPE);
+    goBack(s);
+    expect(s.step).toBe(WizardStep.PART_NUMBER_TYPE);
+  });
+
+  it('PHOTOS → PRICE, and PROCESSING has no back', () => {
+    const s = sessionAtPhotos(); // at PHOTOS (OEM path)
+    expect(previousStep(s)).toBe(WizardStep.PRICE);
+    // From PROCESSING there is no going back (transient blocking state).
+    beginProcessing(s);
+    expect(previousStep(s)).toBeNull();
+    expect(goBack(s).status).toBe('stale');
+    expect(s.step).toBe(WizardStep.PROCESSING);
+  });
+});
+
+describe('photo reuse (return from preview)', () => {
+  it('a fresh session has no processed photos', () => {
+    expect(hasProcessedPhotos(freshSession())).toBe(false);
+  });
+
+  it('hasProcessedPhotos is true once assets are carried on the session', () => {
+    const s = freshSession();
+    s.processedUrls = ['https://cdn/a.webp'];
+    s.publicIds = ['mator/products/a'];
+    expect(hasProcessedPhotos(s)).toBe(true);
+  });
+
+  it('changePhotos clears the carried photos and lands on PHOTOS', () => {
+    const s = sessionAtPhotos();
+    s.step = WizardStep.PRICE; // as if reopened from the preview at PRICE
+    s.processedUrls = ['https://cdn/a.webp', 'https://cdn/b.webp'];
+    s.publicIds = ['mator/products/a', 'mator/products/b'];
+
+    expect(changePhotos(s).status).toBe('ok');
+    expect(s.step).toBe(WizardStep.PHOTOS);
+    expect(hasProcessedPhotos(s)).toBe(false);
+    expect(s.processedUrls).toEqual([]);
+    expect(s.publicIds).toEqual([]);
+    // Other collected data is untouched — only the photos were dropped.
+    expect(s).toMatchObject({ brand: 'Chevrolet', model: 'Cobalt' });
+  });
+});
+
+describe('stepPrompt', () => {
+  // The label text of a step prompt's keyboard buttons (flattened rows).
+  const labels = (s: WizardSession): string[] =>
+    (stepPrompt(s).keyboard?.reply_markup.inline_keyboard.flat() ?? []).map(
+      (b) => (b as { text: string }).text,
+    );
+
+  it('every step after the first carries a "⬅️ Назад" button', () => {
+    const s = freshSession();
+    // BRAND is the first step — a keyboard (brands), but NO Back button.
+    expect(stepPrompt(s).keyboard).toBeDefined();
+    expect(labels(s)).not.toContain('⬅️ Назад');
+
     selectBrand(s, CHEVROLET);
-    expect(stepPrompt(s).keyboard).toBeDefined(); // MODEL
+    expect(labels(s)).toContain('⬅️ Назад'); // MODEL
     expect(stepPrompt(s).text).toContain('Chevrolet');
     selectModel(s, COBALT);
-    expect(stepPrompt(s).keyboard).toBeDefined(); // CATEGORY
+    expect(labels(s)).toContain('⬅️ Назад'); // CATEGORY
     selectCategory(s, 0);
-    expect(stepPrompt(s).keyboard).toBeUndefined(); // TITLE
+    expect(labels(s)).toContain('⬅️ Назад'); // TITLE (was keyboard-less before)
     inputTitle(s, 'Фильтр масляный');
-    expect(stepPrompt(s).keyboard).toBeDefined(); // DESCRIPTION (Skip)
+    expect(labels(s)).toContain('⬅️ Назад'); // DESCRIPTION (Skip + Back)
+    expect(labels(s)).toContain('⏭ Пропустить');
     skipDescription(s);
-    expect(stepPrompt(s).keyboard).toBeDefined(); // PART_NUMBER_TYPE
+    expect(labels(s)).toContain('⬅️ Назад'); // PART_NUMBER_TYPE
     choosePartNumberType(s, 'OEM');
-    expect(stepPrompt(s).keyboard).toBeUndefined(); // PART_NUMBER
+    expect(labels(s)).toContain('⬅️ Назад'); // PART_NUMBER
     expect(stepPrompt(s).text).toContain('OEM');
     inputPartNumber(s, '96535062');
-    expect(stepPrompt(s).keyboard).toBeUndefined(); // PRICE
+    expect(labels(s)).toContain('⬅️ Назад'); // PRICE
     inputPrice(s, '250 000');
-    expect(stepPrompt(s).keyboard).toBeUndefined(); // PHOTOS
+    expect(labels(s)).toContain('⬅️ Назад'); // PHOTOS
     expect(stepPrompt(s).text).toContain('фото');
   });
 });

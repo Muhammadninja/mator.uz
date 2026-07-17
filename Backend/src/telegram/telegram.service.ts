@@ -33,6 +33,7 @@ import {
   WIZ_CATEGORY_ACTION,
   WIZ_DESCRIPTION_SKIP,
   WIZ_PART_NUMBER_TYPE_ACTION,
+  WIZ_BACK_ACTION,
   WIZ_ANY_ACTION,
   isStaleCatalogPayload,
   STALE_CATALOG_MESSAGE,
@@ -47,6 +48,9 @@ import {
   inputPrice,
   beginProcessing,
   backToPhotos,
+  goBack,
+  changePhotos,
+  hasProcessedPhotos,
   stepPrompt,
 } from './product-wizard';
 import { WIZARD_CATEGORIES } from './wizard-catalog';
@@ -94,6 +98,11 @@ export function resolveImageConcurrency(
 }
 // A pending confirmation expires automatically after this long (10 minutes).
 const CONFIRMATION_TTL_MS = 10 * 60 * 1000;
+// An idle wizard session expires after the same inactivity window. The timer is
+// SLIDING: every user action re-arms it, so only genuine inactivity triggers
+// cleanup. A session that carries processed photos deletes its Cloudinary assets
+// on expiry; a plain one is simply dropped.
+const WIZARD_SESSION_TTL_MS = CONFIRMATION_TTL_MS;
 
 // Within this window, repeated taps on stale (old-catalog) buttons by the same
 // user send the "catalog updated" text message only once. The per-tap alert
@@ -104,6 +113,12 @@ const STALE_NOTICE_DEDUP_MS = 5000;
 // Inline-button callback payloads for the confirmation step.
 const CONFIRM_ADD = 'product:add';
 const CONFIRM_CANCEL = 'product:cancel';
+// "⬅️ Назад" on the preview: rebuild the wizard session from the pending draft
+// and return to the PRICE step. Photos are REUSED (no re-processing).
+const CONFIRM_BACK = 'product:back';
+// "🖼 Изменить фото" on the preview: return to the PHOTOS step and force a fresh
+// upload (deletes the old assets → the pipeline re-runs on the new photos).
+const CONFIRM_CHANGE_PHOTOS = 'product:change_photos';
 
 // Nudge shown to anyone interacting outside an active wizard session.
 const START_HINT = '👋 Чтобы добавить товар, нажмите /start';
@@ -184,6 +199,37 @@ export function formatVehicleLine(metadata: ParseOutcome): string {
   return '—';
 }
 
+/**
+ * Rebuild a WizardSession from a pending draft so the seller can reopen the
+ * wizard from the preview ("⬅️ Назад" / "🖼 Изменить фото") without re-entering
+ * anything. Every field is restored from the draft that produced the preview —
+ * a wizard listing always has exactly one (brand, model) pair, so brand/model
+ * come from that pair. The processed photos are carried over too (reused on a
+ * text/price edit; cleared by the caller when the seller replaces them). The
+ * `step` is set by the caller (PRICE to edit text/price, PHOTOS to replace).
+ */
+export function buildSessionFromPending(
+  pending: PendingProduct,
+): WizardSession {
+  const { metadata } = pending;
+  const vehicle = metadata.vehicles[0];
+  return {
+    step: WizardStep.PRICE,
+    brand: vehicle?.brand ?? metadata.brand ?? null,
+    model: vehicle?.model ?? metadata.models[0] ?? null,
+    category: pending.vehicleCategory,
+    title: pending.title,
+    description: metadata.description,
+    partNumberType: metadata.part_number_type ?? 'UNKNOWN',
+    partNumber: metadata.gm_number,
+    // Decimal → number: the wizard collects price as an integer sum; the draft's
+    // Decimal has no fractional part (Stock priceUzs came straight from it).
+    price: pending.price.toNumber(),
+    processedUrls: [...pending.processedUrls],
+    publicIds: [...pending.publicIds],
+  };
+}
+
 @Injectable()
 export class TelegramService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(TelegramService.name);
@@ -203,6 +249,13 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   // One pending confirmation per Telegram user, keyed by tgUserId. Holds the
   // fully-processed listing until the seller presses "Добавить товар".
   private readonly pending = new Map<number, PendingProduct>();
+
+  // Sliding inactivity timers for EVERY wizard session, keyed by tgUserId (at
+  // most one per user). Armed when a session is created and re-armed on every
+  // user action (see touchSession); on expiry the session is removed — and, if
+  // it carries processed photos, its Cloudinary assets are deleted first. This
+  // is the single TTL mechanism for wizard sessions.
+  private readonly sessionExpiry = new Map<number, NodeJS.Timeout>();
 
   // Last time (ms epoch) each user was sent the "catalog updated, restart"
   // notice. Rapid repeat taps on stale buttons share one notice within
@@ -265,6 +318,8 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     this.staleNoticeSentAt.clear();
     for (const session of this.pending.values()) clearTimeout(session.expiry);
     this.pending.clear();
+    for (const timer of this.sessionExpiry.values()) clearTimeout(timer);
+    this.sessionExpiry.clear();
     this.bot?.stop('SIGTERM');
   }
 
@@ -284,6 +339,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         // New session: forget any prior stale-notice dedup marker so the first
         // stale tap after this restart is acknowledged in chat again.
         this.staleNoticeSentAt.delete(from.id);
+        // A restart abandons any in-progress session: drop it (and its inactivity
+        // timer), deleting any carried-over Cloudinary photos so they don't leak.
+        // The fresh session's own timer is armed by sendStepPrompt below.
+        await this.discardSessionPhotos(from.id);
         const session = this.wizard.start(from.id);
         await this.sendStepPrompt(ctx, session);
         return;
@@ -333,6 +392,15 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       );
     });
 
+    // "⬅️ Назад": return to the previous step. Reuses the shared button handler,
+    // so the tapped keyboard is stripped and the previous step's prompt is
+    // re-sent. goBack only moves the step pointer — entered fields are kept, so
+    // going forward again preserves everything. Registered before the catch-all
+    // so a live Back tap is handled here, not treated as stale.
+    this.bot.action(WIZ_BACK_ACTION, async (ctx) => {
+      await this.handleWizardAction(ctx, (session) => goBack(session));
+    });
+
     // Catch-all for wizard-shaped payloads the current-version handlers above
     // didn't consume — i.e. taps on buttons from an OUTDATED CATALOG_VERSION.
     // Registered last so it only fires after the specific matchers. Instead of
@@ -380,6 +448,18 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         await ctx.reply(result.message);
         return;
       }
+      // Reuse path: a text/price edit on a session returned from the preview
+      // (photos already processed) advances to PHOTOS — but those photos must
+      // NOT be re-uploaded. Rebuild the preview directly from the existing
+      // assets instead of asking for photos again (no AI/Cloudinary work).
+      if (
+        result.status === 'ok' &&
+        session.step === WizardStep.PHOTOS &&
+        hasProcessedPhotos(session)
+      ) {
+        await this.rebuildPreviewFromSession(ctx, from.id, session);
+        return;
+      }
       // 'ok' → prompt for the next step; 'stale' → re-prompt the current one.
       await this.sendStepPrompt(ctx, session);
     });
@@ -417,7 +497,9 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         await this.commitPending(ctx, from.id);
         // Terminal action: leave NO wizard state behind (the seller may have
         // started a new wizard between preview and this tap — clear it too so a
-        // fresh /start is always required to begin the next listing).
+        // fresh /start is always required to begin the next listing). Cancel any
+        // lingering inactivity timer so it can't fire after the flow ended.
+        this.clearSessionExpiry(from.id);
         this.wizard.delete(from.id);
       }
     });
@@ -431,12 +513,81 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         // Delete the uploaded preview assets before dropping the session, and
         // clear any wizard state so the flow ends fully (terminal action).
         await this.discardPending(from.id);
+        this.clearSessionExpiry(from.id);
         this.wizard.delete(from.id);
       }
       await ctx.reply(
         '❌ Добавление товара отменено.\nНажмите /start, чтобы начать заново.',
       );
     });
+
+    // "⬅️ Назад" on the preview: reopen the wizard at the PRICE step to edit
+    // text/price, REUSING the already-processed photos (no image re-processing).
+    this.bot.action(CONFIRM_BACK, async (ctx) => {
+      await ctx.answerCbQuery();
+      await this.removeInlineKeyboard(ctx);
+      const from = ctx.from;
+      if (from) await this.reopenFromPreview(ctx, from.id, WizardStep.PRICE);
+    });
+
+    // "🖼 Изменить фото" on the preview: reopen the wizard at the PHOTOS step and
+    // discard the old photos so the seller uploads new ones (which re-run the
+    // full pipeline). This is the ONLY preview path that deletes/regenerates
+    // images — text/price edits via "⬅️ Назад" never touch them.
+    this.bot.action(CONFIRM_CHANGE_PHOTOS, async (ctx) => {
+      await ctx.answerCbQuery();
+      await this.removeInlineKeyboard(ctx);
+      const from = ctx.from;
+      if (from) await this.reopenFromPreview(ctx, from.id, WizardStep.PHOTOS);
+    });
+  }
+
+  /**
+   * Reopen the wizard from the preview's "⬅️ Назад" / "🖼 Изменить фото" buttons.
+   * Consumes the pending draft (WITHOUT deleting its assets up front) and rebuilds
+   * a WizardSession from it, so no new listing is created — the existing draft's
+   * data is restored verbatim.
+   *
+   *  - `target === PRICE`  → edit text/price; the processed photos are carried
+   *    into the session and reused, so no AI/Cloudinary work re-runs.
+   *  - `target === PHOTOS` → replace photos; the old Cloudinary assets are
+   *    deleted and the session's photo references cleared, so the next upload
+   *    re-runs the pipeline.
+   *
+   * A missing/expired pending draft is reported and left alone (nothing to reopen).
+   */
+  private async reopenFromPreview(
+    ctx: Context,
+    tgUserId: number,
+    target: WizardStep.PRICE | WizardStep.PHOTOS,
+  ): Promise<void> {
+    // Take the draft but KEEP its assets (takePending does not delete them):
+    // going back to PRICE must preserve the processed photos for reuse.
+    const pending = this.takePending(tgUserId);
+    if (!pending) {
+      await ctx.reply(
+        '⌛ Нет товара для редактирования (возможно, время истекло). Нажмите /start, чтобы начать заново.',
+      );
+      return;
+    }
+
+    const session = buildSessionFromPending(pending);
+    if (target === WizardStep.PHOTOS) {
+      // Replacing photos: drop the carried-over assets from the session and
+      // delete them from Cloudinary, then land on PHOTOS to await a fresh upload.
+      changePhotos(session);
+      if (pending.publicIds.length > 0) {
+        await this.cloudinary.deleteAssets(pending.publicIds);
+      }
+    } else {
+      // Editing text/price: the processed photos stay on the session for reuse.
+      session.step = WizardStep.PRICE;
+    }
+
+    this.wizard.restore(tgUserId, session);
+    // sendStepPrompt arms the sliding inactivity TTL for the restored session,
+    // so abandoned edits (with or without photos) are cleaned up like any other.
+    await this.sendStepPrompt(ctx, session);
   }
 
   // ── Wizard plumbing ─────────────────────────────────────────────────────────
@@ -521,6 +672,12 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     ctx: Context,
     session: WizardSession,
   ): Promise<void> {
+    // Every prompt is the bot's reply to a user action inside the wizard, so
+    // this is the single place the sliding inactivity TTL is (re-)armed — one
+    // mechanism, extended on every step. `ctx.from` is present for message /
+    // callback updates (all wizard entry points); guard defensively regardless.
+    const tgUserId = ctx.from?.id;
+    if (tgUserId !== undefined) this.touchSession(tgUserId);
     const prompt = stepPrompt(session);
     await ctx.reply(prompt.text, prompt.keyboard);
   }
@@ -627,51 +784,11 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         return;
       }
 
-      // Assemble the listing metadata directly from the wizard's explicit
-      // inputs — no caption parsing. `vehicles` carries exactly the selected
-      // (brand, model) pair, so persistence/preview behave as before.
-      const metadata: ParseOutcome = {
-        title,
-        description: session.description,
-        brand,
-        models: [model],
-        vehicles: [{ brand, model }],
-        isUniversal: false,
-        gm_number: session.partNumber,
-        part_number_type: session.partNumberType,
-        price,
-        source: 'wizard',
-        confidence: 1,
-      };
-      this.logger.log(
-        `Wizard listing by ${tgUserId}: "${title}" (${brand} ${model}), images=${uploaded.length}`,
-      );
-
-      const processedUrls = uploaded.map((u) => u.url);
-      const priceDecimal = new Decimal(price);
-
-      this.setPending(ctx, {
-        sellerId: seller.id,
-        tgUserId,
-        metadata,
-        title,
-        vehicleCategory: category,
-        processedUrls,
-        publicIds: uploaded.map((u) => u.publicId),
-        price: priceDecimal,
-      });
-
-      // The wizard's job is done — the pending confirmation owns the flow now.
-      // deleteIf: if the seller restarted /start meanwhile, keep THAT session.
-      this.wizard.deleteIf(tgUserId, session);
-
-      await this.sendPreview(
-        ctx,
-        metadata,
-        category,
-        processedUrls,
-        priceDecimal,
-      );
+      // Freshly processed photos become the session's assets, then the shared
+      // finalize step builds the pending draft and sends the preview.
+      session.processedUrls = uploaded.map((u) => u.url);
+      session.publicIds = uploaded.map((u) => u.publicId);
+      await this.finalizeToPreview(ctx, tgUserId, session, seller.id);
     } catch (error: unknown) {
       const errMsg =
         error instanceof Error
@@ -689,6 +806,121 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         { parse_mode: 'Markdown' },
       );
     }
+  }
+
+  /**
+   * Rebuild the preview from a session returned to via "⬅️ Назад" after a
+   * text/price edit — the photos are ALREADY processed and stored on the session,
+   * so this runs NO image pipeline. Re-gates the seller (a cheap DB read; status
+   * may have changed), then hands off to the shared finalize step. On an empty
+   * photo set (defensive) it falls back to asking for photos again.
+   */
+  private async rebuildPreviewFromSession(
+    ctx: Context,
+    tgUserId: number,
+    session: WizardSession,
+  ): Promise<void> {
+    if (!hasProcessedPhotos(session)) {
+      // Nothing to reuse — behave like a normal PHOTOS step.
+      await this.sendStepPrompt(ctx, session);
+      return;
+    }
+    const seller = await this.sellers.findByTgId(BigInt(tgUserId));
+    if (!seller) {
+      await ctx.reply('👋 Сначала зарегистрируйтесь: введите /start');
+      return;
+    }
+    if (seller.status === SellerStatus.PENDING) {
+      await ctx.reply('⏳ Ваша заявка ещё не одобрена. Пожалуйста, подождите.');
+      return;
+    }
+    if (seller.status === SellerStatus.REJECTED) {
+      await ctx.reply('⛔ Ваш аккаунт отклонён администратором.');
+      return;
+    }
+    await this.finalizeToPreview(ctx, tgUserId, session, seller.id);
+  }
+
+  /**
+   * Shared tail of the two paths that reach the preview: assemble the listing
+   * metadata from the wizard's explicit inputs, store the pending confirmation
+   * (carrying the session's already-processed photos), consume the wizard
+   * session, and send the preview. Runs NO image processing — its inputs are the
+   * session's stored `processedUrls` / `publicIds`, whether freshly uploaded
+   * (handleWizardPhotos) or reused on a text/price edit (rebuildPreviewFromSession).
+   *
+   * The FSM guarantees every prior field is filled before PHOTOS; this asserts it
+   * defensively and restarts the wizard if not (matching handleWizardPhotos).
+   */
+  private async finalizeToPreview(
+    ctx: Context,
+    tgUserId: number,
+    session: WizardSession,
+    sellerId: number,
+  ): Promise<void> {
+    const { brand, model, category, title, price } = session;
+    if (
+      brand === null ||
+      model === null ||
+      category === null ||
+      title === null ||
+      price === null
+    ) {
+      this.logger.error(
+        `Wizard session for ${tgUserId} reached the preview with missing fields — restarting.`,
+      );
+      const fresh = this.wizard.start(tgUserId);
+      await this.sendStepPrompt(ctx, fresh);
+      return;
+    }
+
+    // `vehicles` carries exactly the selected (brand, model) pair, so
+    // persistence/preview behave as before — no caption parsing.
+    const metadata: ParseOutcome = {
+      title,
+      description: session.description,
+      brand,
+      models: [model],
+      vehicles: [{ brand, model }],
+      isUniversal: false,
+      gm_number: session.partNumber,
+      part_number_type: session.partNumberType,
+      price,
+      source: 'wizard',
+      confidence: 1,
+    };
+    this.logger.log(
+      `Wizard listing by ${tgUserId}: "${title}" (${brand} ${model}), images=${session.processedUrls.length}`,
+    );
+
+    const processedUrls = session.processedUrls;
+    const priceDecimal = new Decimal(price);
+
+    this.setPending(ctx, {
+      sellerId,
+      tgUserId,
+      metadata,
+      title,
+      vehicleCategory: category,
+      processedUrls,
+      publicIds: session.publicIds,
+      price: priceDecimal,
+    });
+
+    // The wizard's job is done — the pending confirmation owns the flow (and its
+    // own TTL) now, so cancel the session's inactivity timer to avoid a double
+    // lifetime that would delete the assets now held by the pending draft.
+    this.clearSessionExpiry(tgUserId);
+    // deleteIf: if the seller restarted /start meanwhile, keep THAT session.
+    this.wizard.deleteIf(tgUserId, session);
+
+    await this.sendPreview(
+      ctx,
+      metadata,
+      category,
+      processedUrls,
+      priceDecimal,
+    );
   }
 
   // ── Pending confirmation session ────────────────────────────────────────────
@@ -743,6 +975,55 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Delete any Cloudinary assets held by the user's WIZARD session (as opposed
+   * to a pending draft) and drop the session entirely. A session carries photos
+   * only after it was reopened from the preview via "⬅️ Назад"; if such a
+   * session is abandoned (e.g. the seller sends /start, or the TTL fires) its
+   * assets would otherwise leak. Best-effort and idempotent. Always cancels the
+   * inactivity timer so it can't fire again on the removed session.
+   */
+  private async discardSessionPhotos(tgUserId: number): Promise<void> {
+    this.clearSessionExpiry(tgUserId);
+    const session = this.wizard.get(tgUserId);
+    this.wizard.delete(tgUserId);
+    if (session && session.publicIds.length > 0) {
+      await this.cloudinary.deleteAssets(session.publicIds);
+    }
+  }
+
+  /**
+   * Start or re-arm the SLIDING inactivity timer for the user's wizard session.
+   * Called when a session is created and on every user action (via
+   * sendStepPrompt), so the TTL only elapses on genuine inactivity. On expiry
+   * the session is removed and — if it holds processed photos — its Cloudinary
+   * assets are deleted first (a photo-less session hits no Cloudinary at all).
+   * Any existing timer for the user is replaced.
+   */
+  private touchSession(tgUserId: number): void {
+    this.clearSessionExpiry(tgUserId);
+    const timer = setTimeout(() => {
+      this.sessionExpiry.delete(tgUserId);
+      const session = this.wizard.get(tgUserId);
+      this.wizard.delete(tgUserId);
+      // Only a session that actually carries photos touches Cloudinary.
+      if (session && session.publicIds.length > 0) {
+        void this.cloudinary.deleteAssets(session.publicIds);
+      }
+    }, WIZARD_SESSION_TTL_MS);
+    timer.unref?.(); // don't keep the process alive for an idle session
+    this.sessionExpiry.set(tgUserId, timer);
+  }
+
+  /** Cancel and forget the inactivity timer for a user's wizard session, if any. */
+  private clearSessionExpiry(tgUserId: number): void {
+    const timer = this.sessionExpiry.get(tgUserId);
+    if (timer) {
+      clearTimeout(timer);
+      this.sessionExpiry.delete(tgUserId);
+    }
+  }
+
+  /**
    * Preview shown before the DB write. Distinct from the success message: it
    * asks the seller to review and carries the Add / Cancel inline buttons.
    */
@@ -774,8 +1055,16 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       `💰 *Цена:* ${price.toFixed(0)} UZS`;
 
     const buttons = Markup.inlineKeyboard([
-      Markup.button.callback('✅ Добавить товар', CONFIRM_ADD),
-      Markup.button.callback('❌ Отменить', CONFIRM_CANCEL),
+      [
+        Markup.button.callback('✅ Добавить товар', CONFIRM_ADD),
+        Markup.button.callback('❌ Отменить', CONFIRM_CANCEL),
+      ],
+      // "⬅️ Назад" edits text/price reusing these photos (no re-processing);
+      // "🖼 Изменить фото" replaces the photos (re-runs the image pipeline).
+      [
+        Markup.button.callback('⬅️ Назад', CONFIRM_BACK),
+        Markup.button.callback('🖼 Изменить фото', CONFIRM_CHANGE_PHOTOS),
+      ],
     ]);
 
     // Single image → photo + caption + buttons; album → media group preview

@@ -8,7 +8,8 @@
 import { PartVehicleCategory } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
 import type { ParseOutcome } from '../ai/part-parser.types';
-import { TelegramService } from './telegram.service';
+import { buildSessionFromPending, TelegramService } from './telegram.service';
+import { WizardSessionStore, WizardStep } from './product-wizard';
 
 // Surface just the private members we drive in these tests. We build the
 // instance from the prototype and cast through `unknown`, so this stands alone
@@ -16,9 +17,24 @@ import { TelegramService } from './telegram.service';
 // otherwise collapse the intersection to `never`).
 interface AnyService {
   pending: Map<number, unknown>;
+  wizard: WizardSessionStore;
+  sessionExpiry: Map<number, NodeJS.Timeout>;
+  touchSession: (tgUserId: number) => void;
   setPending: (ctx: unknown, draft: unknown) => void;
   discardPending: (tgUserId: number) => Promise<void>;
+  discardSessionPhotos: (tgUserId: number) => Promise<void>;
   commitPending: (ctx: unknown, tgUserId: number) => Promise<void>;
+  reopenFromPreview: (
+    ctx: unknown,
+    tgUserId: number,
+    target: WizardStep,
+  ) => Promise<void>;
+  finalizeToPreview: (
+    ctx: unknown,
+    tgUserId: number,
+    session: unknown,
+    sellerId: number,
+  ) => Promise<void>;
   sendPreview: (
     ctx: unknown,
     metadata: unknown,
@@ -95,12 +111,15 @@ function makePrisma() {
   };
 }
 
-function makeCtx() {
+function makeCtx(tgUserId?: number) {
   // `replies` captures every user-visible string, including a single-photo
   // success caption (which the bot sends via replyWithPhoto's caption arg).
+  // `from.id` is set when provided so sendStepPrompt can re-arm the session TTL
+  // (it reads ctx.from?.id) — the reopen/edit flows depend on this.
   const replies: string[] = [];
   return {
     replies,
+    from: tgUserId === undefined ? undefined : { id: tgUserId },
     reply: async (text: string) => {
       replies.push(text);
       return {} as unknown;
@@ -139,6 +158,11 @@ function makeService(
     cloudinary,
     catalogProjection,
     pending: new Map<number, unknown>(),
+    // reopenFromPreview restores the rebuilt session here; the prototype-cast
+    // bypasses the field initializer, so provide a real store.
+    wizard: new WizardSessionStore(),
+    // Sliding inactivity timers for wizard sessions (touchSession).
+    sessionExpiry: new Map<number, NodeJS.Timeout>(),
     // answerStaleCallback dedupes the chat nudge per user via this map; the
     // prototype-cast bypasses the field initializer, so provide it here.
     staleNoticeSentAt: new Map<number, number>(),
@@ -434,6 +458,322 @@ describe('TelegramService — stale-catalog callback', () => {
 
     // The throw is swallowed; the seller still gets the restart nudge.
     expect(ctx.replies.some((r) => r.includes('нажмите /start'))).toBe(true);
+  });
+});
+
+describe('buildSessionFromPending', () => {
+  it('reconstructs every wizard field from a pending draft', () => {
+    const pending = { ...draft(1, ['id-a', 'id-b']), expiry: undefined };
+    const session = buildSessionFromPending(pending as never);
+    expect(session).toMatchObject({
+      step: WizardStep.PRICE,
+      brand: 'Chevrolet',
+      model: 'Nexia 3',
+      category: PartVehicleCategory.ELECTRICAL_AND_LIGHTING,
+      title: 'Магнитола для Nexia 3',
+      description: 'Производство Корея, новая',
+      partNumberType: 'UNKNOWN',
+      partNumber: '96234567',
+      price: 450000,
+    });
+    // The processed photos are carried over (copied, not shared) for reuse.
+    expect(session.processedUrls).toEqual([
+      'https://cdn/img0.webp',
+      'https://cdn/img1.webp',
+    ]);
+    expect(session.publicIds).toEqual(['id-a', 'id-b']);
+    expect(session.publicIds).not.toBe(pending.publicIds); // defensive copy
+  });
+});
+
+describe('TelegramService — reopen from preview', () => {
+  // reopenFromPreview drives the wizard via sendStepPrompt → ctx.reply; makeCtx
+  // captures those texts. No seller lookup happens on this path.
+  it('"⬅️ Назад" (→ PRICE) restores the session and REUSES photos (no deletion)', async () => {
+    const cloudinary = makeCloudinary();
+    const svc = makeService(makePrisma(), cloudinary);
+    const ctx = makeCtx();
+    svc.setPending(ctx, draft(1, ['keep-1', 'keep-2']));
+
+    await svc.reopenFromPreview(ctx, 1, WizardStep.PRICE);
+
+    // Pending consumed, wizard session restored at PRICE with the photos intact.
+    expect(svc.pending.has(1)).toBe(false);
+    const session = svc.wizard.get(1);
+    expect(session?.step).toBe(WizardStep.PRICE);
+    expect(session?.publicIds).toEqual(['keep-1', 'keep-2']);
+    expect(session?.processedUrls).toHaveLength(2);
+    // Critically: NO Cloudinary assets were deleted — the photos are reused.
+    expect(cloudinary.deleted).toEqual([]);
+    // The seller is prompted for the PRICE step.
+    expect(ctx.replies.some((r) => r.includes('цену'))).toBe(true);
+  });
+
+  it('"🖼 Изменить фото" (→ PHOTOS) deletes the old assets and clears them', async () => {
+    const cloudinary = makeCloudinary();
+    const svc = makeService(makePrisma(), cloudinary);
+    const ctx = makeCtx();
+    svc.setPending(ctx, draft(1, ['old-1', 'old-2']));
+
+    await svc.reopenFromPreview(ctx, 1, WizardStep.PHOTOS);
+
+    expect(svc.pending.has(1)).toBe(false);
+    const session = svc.wizard.get(1);
+    expect(session?.step).toBe(WizardStep.PHOTOS);
+    // Photos are dropped from the session AND deleted from Cloudinary — the next
+    // upload re-runs the pipeline.
+    expect(session?.publicIds).toEqual([]);
+    expect(session?.processedUrls).toEqual([]);
+    expect(cloudinary.deleted).toEqual(['old-1', 'old-2']);
+    // The seller is prompted to send photos.
+    expect(ctx.replies.some((r) => r.includes('фото'))).toBe(true);
+  });
+
+  it('reports and no-ops when there is no pending draft to reopen', async () => {
+    const cloudinary = makeCloudinary();
+    const svc = makeService(makePrisma(), cloudinary);
+    const ctx = makeCtx();
+
+    await svc.reopenFromPreview(ctx, 1, WizardStep.PRICE);
+
+    expect(svc.wizard.get(1)).toBeUndefined();
+    expect(cloudinary.deleted).toEqual([]);
+    expect(
+      ctx.replies.some((r) => r.includes('Нет товара для редактирования')),
+    ).toBe(true);
+  });
+});
+
+describe('TelegramService — edit-loop scenarios', () => {
+  beforeEach(() => jest.useFakeTimers());
+  afterEach(() => {
+    jest.clearAllTimers();
+    jest.useRealTimers();
+  });
+
+  // Scenario 1: Preview → Назад → Price → Preview → Назад → Description →
+  // Preview → Publish. Exactly ONE pending exists throughout, and commit writes
+  // one product (upsert) — no duplicates, no orphan PendingProducts.
+  it('multiple returns then publish → one pending at a time, one product written', async () => {
+    const prisma = makePrisma();
+    const svc = makeService(prisma, makeCloudinary());
+    const ctx = makeCtx();
+    svc.setPending(ctx, draft(1, ['keep-1'])); // first preview
+    expect(svc.pending.size).toBe(1);
+
+    // ── Round 1: ⬅️ Назад → edit → back to preview ──
+    await svc.reopenFromPreview(ctx, 1, WizardStep.PRICE);
+    expect(svc.pending.size).toBe(0); // pending consumed while editing
+    const s1 = svc.wizard.get(1)!;
+    await svc.finalizeToPreview(ctx, 1, s1, 7); // re-preview
+    expect(svc.pending.size).toBe(1); // exactly one again
+
+    // ── Round 2: ⬅️ Назад → edit → back to preview ──
+    await svc.reopenFromPreview(ctx, 1, WizardStep.PRICE);
+    expect(svc.pending.size).toBe(0);
+    const s2 = svc.wizard.get(1)!;
+    await svc.finalizeToPreview(ctx, 1, s2, 7);
+    expect(svc.pending.size).toBe(1);
+
+    // ── Publish ──
+    await svc.commitPending(ctx, 1);
+    expect(svc.pending.size).toBe(0);
+    // product.upsert ran exactly once — one listing, never duplicated.
+    expect(prisma.calls.filter((c) => c === 'product')).toHaveLength(1);
+    expect(ctx.replies.some((r) => r.includes('Товар успешно добавлен'))).toBe(
+      true,
+    );
+  });
+
+  // Scenario 2: Preview → Изменить фото → new → Preview → Изменить фото → new →
+  // Preview. After each replace, only the LATEST asset set survives in Cloudinary.
+  it('repeated photo replacement keeps only the latest asset set', async () => {
+    const cloudinary = makeCloudinary();
+    const svc = makeService(makePrisma(), cloudinary);
+    const ctx = makeCtx();
+
+    // Preview #1 with asset set A.
+    svc.setPending(ctx, draft(1, ['A']));
+
+    // 🖼 Изменить фото → old A deleted; session awaits new photos.
+    await svc.reopenFromPreview(ctx, 1, WizardStep.PHOTOS);
+    expect(cloudinary.deleted).toEqual(['A']);
+    // New photos B arrive → finalize builds a fresh preview from set B.
+    const sB = svc.wizard.get(1)!;
+    sB.processedUrls = ['https://cdn/B.webp'];
+    sB.publicIds = ['B'];
+    await svc.finalizeToPreview(ctx, 1, sB, 7);
+    expect(svc.pending.get(1)).toBeDefined();
+
+    // 🖼 Изменить фото again → old B deleted; new photos C.
+    await svc.reopenFromPreview(ctx, 1, WizardStep.PHOTOS);
+    expect(cloudinary.deleted).toEqual(['A', 'B']);
+    const sC = svc.wizard.get(1)!;
+    sC.processedUrls = ['https://cdn/C.webp'];
+    sC.publicIds = ['C'];
+    await svc.finalizeToPreview(ctx, 1, sC, 7);
+
+    // Only C remains: A and B were both deleted, C was never deleted.
+    expect(cloudinary.deleted).toEqual(['A', 'B']);
+    const pendingC = svc.pending.get(1) as { publicIds: string[] };
+    expect(pendingC.publicIds).toEqual(['C']);
+  });
+
+  // Scenario 3: Preview → ⬅️ Назад → Description → /start. The reopened session
+  // (carrying photos) must be fully cleared and its images deleted.
+  it('/start during an edit clears the session and deletes its photos', async () => {
+    const cloudinary = makeCloudinary();
+    const svc = makeService(makePrisma(), cloudinary);
+    const ctx = makeCtx(1);
+    svc.setPending(ctx, draft(1, ['img-1', 'img-2']));
+
+    await svc.reopenFromPreview(ctx, 1, WizardStep.PRICE); // ⬅️ Назад
+    // (seller walks in-wizard back to the DESCRIPTION step — photos stay on session)
+    svc.wizard.get(1)!.step = WizardStep.DESCRIPTION;
+    expect(svc.sessionExpiry.has(1)).toBe(true); // inactivity timer armed
+
+    // /start calls discardSessionPhotos before restarting the wizard.
+    await svc.discardSessionPhotos(1);
+
+    // Images deleted, session removed, and the inactivity timer cancelled.
+    expect(cloudinary.deleted).toEqual(['img-1', 'img-2']);
+    expect(svc.sessionExpiry.has(1)).toBe(false);
+    expect(svc.wizard.get(1)).toBeUndefined();
+  });
+
+  // Scenario 4: TTL. An abandoned edit session (carrying photos) must not live
+  // forever — after the TTL its session and Cloudinary assets are cleaned up, and
+  // a later reopen finds nothing to restore.
+  it('an abandoned edit session expires: photos deleted, nothing to reopen', async () => {
+    const cloudinary = makeCloudinary();
+    const svc = makeService(makePrisma(), cloudinary);
+    const ctx = makeCtx(1);
+    svc.setPending(ctx, draft(1, ['ttl-1']));
+
+    await svc.reopenFromPreview(ctx, 1, WizardStep.PRICE); // ⬅️ Назад, timer armed
+    expect(svc.sessionExpiry.has(1)).toBe(true);
+    expect(svc.wizard.get(1)).toBeDefined();
+
+    // Seller abandons the edit; the TTL fires.
+    jest.advanceTimersByTime(10 * 60 * 1000);
+    await Promise.resolve(); // let the async cleanup settle
+
+    // Session gone, its images deleted, timer forgotten.
+    expect(svc.wizard.get(1)).toBeUndefined();
+    expect(cloudinary.deleted).toEqual(['ttl-1']);
+    expect(svc.sessionExpiry.has(1)).toBe(false);
+
+    // A stale reopen (e.g. the seller taps ⬅️ Назад on the old preview) finds no
+    // pending draft and cannot restore a non-existent session.
+    const ctx2 = makeCtx(1);
+    await svc.reopenFromPreview(ctx2, 1, WizardStep.PRICE);
+    expect(svc.wizard.get(1)).toBeUndefined();
+    expect(
+      ctx2.replies.some((r) => r.includes('Нет товара для редактирования')),
+    ).toBe(true);
+  });
+
+  // The pending confirmation's own TTL still works: an expired preview cannot be
+  // published or reopened, and its assets are cleaned up.
+  it('an expired pending cannot be reopened and its assets are cleaned', async () => {
+    const cloudinary = makeCloudinary();
+    const svc = makeService(makePrisma(), cloudinary);
+    const ctx = makeCtx();
+    svc.setPending(ctx, draft(1, ['exp-1']));
+
+    jest.advanceTimersByTime(10 * 60 * 1000);
+    await Promise.resolve();
+
+    expect(svc.pending.has(1)).toBe(false);
+    expect(cloudinary.deleted).toEqual(['exp-1']);
+
+    // Reopen after expiry → nothing to restore.
+    await svc.reopenFromPreview(ctx, 1, WizardStep.PRICE);
+    expect(svc.wizard.get(1)).toBeUndefined();
+    expect(
+      ctx.replies.some((r) => r.includes('Нет товара для редактирования')),
+    ).toBe(true);
+  });
+});
+
+describe('TelegramService — wizard session inactivity TTL', () => {
+  beforeEach(() => jest.useFakeTimers());
+  afterEach(() => {
+    jest.clearAllTimers();
+    jest.useRealTimers();
+  });
+
+  const TTL = 10 * 60 * 1000;
+
+  // A plain wizard session (no photos) expires and is dropped WITHOUT touching
+  // Cloudinary.
+  it('expires a photo-less session and never calls Cloudinary', async () => {
+    const cloudinary = makeCloudinary();
+    const svc = makeService(makePrisma(), cloudinary);
+    const session = svc.wizard.start(1); // fresh session, no photos
+    svc.touchSession(1); // arm the sliding timer (as /start does via sendStepPrompt)
+    expect(session.publicIds).toEqual([]);
+
+    jest.advanceTimersByTime(TTL);
+    await Promise.resolve();
+
+    // Session removed; NO Cloudinary deletion for a photo-less session.
+    expect(svc.wizard.get(1)).toBeUndefined();
+    expect(svc.sessionExpiry.has(1)).toBe(false);
+    expect(cloudinary.deleted).toEqual([]);
+  });
+
+  // A session carrying processed photos deletes its Cloudinary assets on expiry.
+  it('expires a session with photos and deletes its Cloudinary assets', async () => {
+    const cloudinary = makeCloudinary();
+    const svc = makeService(makePrisma(), cloudinary);
+    const session = svc.wizard.start(1);
+    session.processedUrls = ['https://cdn/a.webp', 'https://cdn/b.webp'];
+    session.publicIds = ['pub-a', 'pub-b'];
+    svc.touchSession(1);
+
+    jest.advanceTimersByTime(TTL);
+    await Promise.resolve();
+
+    expect(svc.wizard.get(1)).toBeUndefined();
+    expect(cloudinary.deleted).toEqual(['pub-a', 'pub-b']);
+  });
+
+  // Every user action re-arms the sliding timer, so activity before the deadline
+  // keeps the session alive; only genuine inactivity past the window expires it.
+  it('renews the TTL on each action (sliding window)', async () => {
+    const cloudinary = makeCloudinary();
+    const svc = makeService(makePrisma(), cloudinary);
+    svc.wizard.start(1);
+    svc.touchSession(1);
+
+    // Just before expiry, the user acts → timer re-armed for another full window.
+    jest.advanceTimersByTime(TTL - 1000);
+    svc.touchSession(1); // an action (sendStepPrompt) renews it
+    jest.advanceTimersByTime(TTL - 1000);
+    // Total elapsed > TTL, but no single idle gap reached it → still alive.
+    expect(svc.wizard.get(1)).toBeDefined();
+
+    // Now go fully idle past the window → expires.
+    jest.advanceTimersByTime(TTL);
+    await Promise.resolve();
+    expect(svc.wizard.get(1)).toBeUndefined();
+  });
+
+  // sendStepPrompt is the single arming point — driving it re-arms the timer for
+  // the ctx's user, wiring the TTL to real wizard activity.
+  it('sendStepPrompt arms/renews the session timer for ctx.from.id', async () => {
+    const svc = makeService(makePrisma(), makeCloudinary());
+    const session = svc.wizard.start(7);
+    const ctx = makeCtx(7);
+
+    await (
+      svc as unknown as {
+        sendStepPrompt: (c: unknown, s: unknown) => Promise<void>;
+      }
+    ).sendStepPrompt(ctx, session);
+
+    expect(svc.sessionExpiry.has(7)).toBe(true);
   });
 });
 
