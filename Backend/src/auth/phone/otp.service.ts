@@ -13,6 +13,7 @@ import { OtpChannel } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { SmsService } from '../../sms/sms.service';
 import { prefixedId, IdPrefix } from '../../common/ulid.util';
+import { maskPhone } from '../../common/pii.util';
 
 const OTP_LENGTH = 6;
 const OTP_TTL_MS = 5 * 60 * 1000; // 5 min
@@ -111,7 +112,7 @@ export class OtpService {
     });
 
     const devOtpCode = await this.dispatch(phoneE164, code);
-    this.logger.log(`OTP issued ${record.id} for ${phoneE164}`);
+    this.logger.log(`OTP issued ${record.id} for ${maskPhone(phoneE164)}`);
     return {
       requestId: record.id,
       expiresAt,

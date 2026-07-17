@@ -1,5 +1,5 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsString, IsOptional, IsInt, IsObject } from 'class-validator';
+import { IsString, IsOptional, IsInt, IsObject, Min, Max } from 'class-validator';
 import { Type } from 'class-transformer';
 
 export class SearchDto {
@@ -10,6 +10,8 @@ export class SearchDto {
   @IsOptional()
   @Type(() => Number)
   @IsInt()
+  @Min(1)
+  @Max(50)
   limit?: number;
 
   // Opaque cursor from a previous response; `null` on the first page.

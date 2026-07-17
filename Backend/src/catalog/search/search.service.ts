@@ -1,8 +1,13 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { clampLimit } from '../../common/pagination.util';
 import { formatUzs } from '../parts/part.presenter';
 import { SearchDto } from './dto/search.dto';
+
+const MAX_SEARCH_LIMIT = 50;
+const MAX_TYPEAHEAD_LIMIT = 20;
+const MAX_QUICK_FILTERS = 20;
 
 @Injectable()
 export class SearchService {
@@ -12,7 +17,7 @@ export class SearchService {
   async search(dto: SearchDto) {
     const startedAt = Date.now();
     const q = dto.query?.trim() ?? '';
-    const limit = dto.limit ?? 20;
+    const limit = clampLimit(dto.limit, 20, MAX_SEARCH_LIMIT);
     const categories = (dto.filters?.categories as string[] | undefined) ?? [];
 
     const where: Prisma.CatalogPartWhereInput = {};
@@ -64,6 +69,7 @@ export class SearchService {
 
   /** Prefix suggestions (GET /v1/typeahead). */
   async typeahead(q: string, limit = 6) {
+    const safeLimit = clampLimit(limit, 6, MAX_TYPEAHEAD_LIMIT);
     const term = q.trim();
     const suggestions: Array<{ text: string; type: string; deeplink?: string }> = [];
     if (term) suggestions.push({ text: term, type: 'query' });
@@ -72,7 +78,7 @@ export class SearchService {
       const products = await this.prisma.catalogPart.findMany({
         where: { title: { contains: term, mode: 'insensitive' } },
         select: { id: true, title: true },
-        take: Math.max(0, limit - 1),
+        take: Math.max(0, safeLimit - 1),
       });
       for (const p of products) {
         suggestions.push({
@@ -87,12 +93,13 @@ export class SearchService {
 
   /** Brand quick-filter chips by in-stock inventory (GET /v1/search/quick-filters). */
   async quickFilters(limit = 8) {
+    const safeLimit = clampLimit(limit, 8, MAX_QUICK_FILTERS);
     const grouped = await this.prisma.catalogPart.groupBy({
       by: ['brandId'],
       where: { inStock: true, brandId: { not: null } },
       _count: { _all: true },
       orderBy: { _count: { brandId: 'desc' } },
-      take: limit,
+      take: safeLimit,
     });
 
     const ids = grouped.map((g) => g.brandId).filter((x): x is string => !!x);

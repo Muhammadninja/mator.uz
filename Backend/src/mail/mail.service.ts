@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
+import { maskEmail } from '../common/pii.util';
 
 const RESEND_ENDPOINT = 'https://api.resend.com/emails';
 
@@ -56,7 +57,7 @@ export class MailService {
       );
     } catch (err) {
       // Don't leak SMTP/provider errors to the client; log for ops and move on.
-      this.logger.error(`Failed to send "${subject}" to ${to}: ${(err as Error).message}`);
+      this.logger.error(`Failed to send "${subject}" to ${maskEmail(to)}: ${(err as Error).message}`);
       throw err;
     }
   }

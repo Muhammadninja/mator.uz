@@ -1,4 +1,5 @@
-import { IsOptional, IsString, IsIn, MaxLength, Matches } from 'class-validator';
+import { IsOptional, IsString, IsIn, MaxLength } from 'class-validator';
+import { IsAllowedAssetUrl } from '../../common/is-allowed-asset-url.validator';
 
 export const LANGUAGES = ['RU', 'UZ', 'EN'] as const;
 
@@ -22,7 +23,9 @@ export class UpdateMeDto {
 
   @IsOptional()
   @IsString()
-  @Matches(/^https?:\/\/.+/i, { message: 'avatar_url must be an http(s) URL' })
+  // Only HTTPS URLs on a configured trusted asset host (ASSET_URL_ALLOWED_HOSTS)
+  // are accepted, so a profile can't store an arbitrary external/attacker URL.
+  @IsAllowedAssetUrl({ message: 'avatar_url must be an HTTPS URL on an allowed asset host' })
   avatar_url?: string;
 
   @IsOptional()

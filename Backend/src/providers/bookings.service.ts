@@ -15,6 +15,9 @@ export class BookingsService {
   ) {}
 
   async create(userId: string, providerId: string, dto: CreateBookingDto) {
+    // Ownership: a caller may only attach their OWN vehicle to a booking.
+    await this.assertOwnedVehicle(userId, dto.vehicle_id);
+
     const provider = await this.prisma.serviceProvider.findUnique({ where: { id: providerId } });
     if (!provider) throw new NotFoundException('Provider not found');
 
@@ -108,5 +111,14 @@ export class BookingsService {
     const booking = await this.prisma.booking.findUnique({ where: { id: bookingId } });
     if (!booking || booking.userId !== userId) throw new NotFoundException('Booking not found');
     return booking;
+  }
+
+  /** Ensure the referenced vehicle (if any) belongs to the caller. */
+  private async assertOwnedVehicle(userId: string, vehicleId?: string): Promise<void> {
+    if (!vehicleId) return;
+    const vehicle = await this.prisma.vehicle.findUnique({ where: { id: vehicleId } });
+    if (!vehicle || vehicle.userId !== userId || vehicle.deletedAt) {
+      throw new NotFoundException('Vehicle not found');
+    }
   }
 }

@@ -7,6 +7,7 @@ import {
   PartOriginRegion,
 } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { clampLimit } from '../../common/pagination.util';
 import { ListPartsQueryDto } from './dto/list-parts.query.dto';
 import {
   PART_INCLUDE,
@@ -16,6 +17,7 @@ import {
 } from './part.presenter';
 
 const DEFAULT_PAGE_SIZE = 20;
+const MAX_PAGE_SIZE = 100;
 
 // Wire market names → PartOriginRegion enum.
 const REGION_BY_WIRE: Record<string, PartOriginRegion> = {
@@ -44,7 +46,7 @@ export class PartsService {
     const vehicle = await this.loadVehicle(query.vehicle_id);
     const where = this.buildWhere(query, vehicle);
     const page = query.page ?? 1;
-    const pageSize = query.page_size ?? DEFAULT_PAGE_SIZE;
+    const pageSize = clampLimit(query.page_size, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE);
 
     const [total, items, brandFacet, priceAgg] = await Promise.all([
       this.prisma.catalogPart.count({ where }),

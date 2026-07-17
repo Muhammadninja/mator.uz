@@ -25,13 +25,44 @@ const prisma = new PrismaClient();
  * verbatim from the frontend source of truth (see the seed-data/*.ts headers).
  */
 
+/**
+ * Optional, opt-in bootstrap admin. There are NO hardcoded credentials: an admin
+ * is created only when BOTH `SEED_ADMIN_EMAIL` and `SEED_ADMIN_PASSWORD` are
+ * provided via the environment. This makes it safe to run the seed against
+ * production for reference data without ever planting a default/known-credential
+ * admin account.
+ *
+ * Behavior:
+ *   • neither var set        → skip (no admin touched) — the common case.
+ *   • both vars set          → upsert an ADMIN with the given credentials.
+ *   • only one var set       → fail (incomplete configuration; do not guess).
+ *   • password too short     → fail (min 12 chars) so a weak bootstrap password
+ *                              cannot slip into production.
+ */
 async function seedAdmin() {
-  const passwordHash = await bcrypt.hash('Admin12345', 10);
+  const email = process.env.SEED_ADMIN_EMAIL?.trim();
+  const password = process.env.SEED_ADMIN_PASSWORD;
+
+  if (!email && !password) {
+    console.log('[seed] SEED_ADMIN_EMAIL/SEED_ADMIN_PASSWORD not set — skipping admin bootstrap.');
+    return;
+  }
+  if (!email || !password) {
+    throw new Error(
+      'Incomplete admin bootstrap: set BOTH SEED_ADMIN_EMAIL and SEED_ADMIN_PASSWORD, or neither.',
+    );
+  }
+  if (password.length < 12) {
+    throw new Error('SEED_ADMIN_PASSWORD must be at least 12 characters.');
+  }
+
+  const passwordHash = await bcrypt.hash(password, 10);
   await prisma.appUser.upsert({
-    where: { email: 'admin@test.com' },
+    where: { email },
     update: { passwordHash, role: Role.ADMIN },
-    create: { email: 'admin@test.com', passwordHash, role: Role.ADMIN },
+    create: { email, passwordHash, role: Role.ADMIN },
   });
+  console.log(`[seed] bootstrap admin ensured for ${email}`);
 }
 
 async function seedVehicleCatalog() {

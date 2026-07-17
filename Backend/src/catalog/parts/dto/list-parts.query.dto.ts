@@ -1,4 +1,4 @@
-import { IsString, IsOptional, IsInt, IsIn, Min } from 'class-validator';
+import { IsString, IsOptional, IsInt, IsIn, Min, Max } from 'class-validator';
 import { Transform, Type } from 'class-transformer';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 
@@ -93,10 +93,11 @@ export class ListPartsQueryDto {
   @Min(1)
   page?: number;
 
-  @ApiPropertyOptional({ minimum: 1 })
+  @ApiPropertyOptional({ minimum: 1, maximum: 100 })
   @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(100)
   page_size?: number;
 }
