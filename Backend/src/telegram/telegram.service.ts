@@ -1,23 +1,55 @@
-import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  OnModuleInit,
+  OnModuleDestroy,
+  Logger,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { SellerStatus } from '@prisma/client';
+import { PartVehicleCategory, SellerStatus } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
 import axios from 'axios';
 import { Context, Markup, Telegraf } from 'telegraf';
 import { message } from 'telegraf/filters';
 import type { ParseOutcome } from '../ai/part-parser.types';
-import { PartParserService } from '../ai/part-parser.service';
-import { lookupOemCompatibility } from '../ai/oem-compatibility.service';
 import { splitPartNumber } from '../ai/part-number';
 import { classifyPart } from '../ai/part-classifier';
-import { extractPriceFromText } from '../ai/rule-based-parser';
 import { ImageEnhanceService } from '../ai/image-enhance.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SellersService } from '../sellers/sellers.service';
-import { CloudinaryService, UploadedImage } from '../cloudinary/cloudinary.service';
+import {
+  CloudinaryService,
+  UploadedImage,
+} from '../cloudinary/cloudinary.service';
 import { CatalogProjectionService } from '../catalog/projection/catalog-projection.service';
 import { MediaGroupBuffer } from './media-group-buffer';
 import { persistVehicleLinks } from './vehicle-links';
+import {
+  WizardSessionStore,
+  WizardSession,
+  WizardStep,
+  WizardResult,
+  WIZ_BRAND_ACTION,
+  WIZ_MODEL_ACTION,
+  WIZ_CATEGORY_ACTION,
+  WIZ_DESCRIPTION_SKIP,
+  WIZ_PART_NUMBER_TYPE_ACTION,
+  WIZ_ANY_ACTION,
+  isStaleCatalogPayload,
+  STALE_CATALOG_MESSAGE,
+  selectBrand,
+  selectModel,
+  selectCategory,
+  inputTitle,
+  inputDescription,
+  skipDescription,
+  choosePartNumberType,
+  inputPartNumber,
+  inputPrice,
+  beginProcessing,
+  backToPhotos,
+  stepPrompt,
+} from './product-wizard';
+import { WIZARD_CATEGORIES } from './wizard-catalog';
 
 // Telegram delivers an album as N separate photo updates sharing a
 // media_group_id, arriving back-to-back; only one carries the caption. We
@@ -39,7 +71,10 @@ const IMAGE_CONCURRENCY_MAX = 10;
  * non-integer, or out of range falls back to IMAGE_CONCURRENCY_DEFAULT and logs
  * a warning (except when simply unset, which is the expected default case).
  */
-export function resolveImageConcurrency(raw: string | undefined, logger: Logger): number {
+export function resolveImageConcurrency(
+  raw: string | undefined,
+  logger: Logger,
+): number {
   if (raw === undefined || raw.trim() === '') return IMAGE_CONCURRENCY_DEFAULT;
 
   const value = Number(raw);
@@ -60,78 +95,64 @@ export function resolveImageConcurrency(raw: string | undefined, logger: Logger)
 // A pending confirmation expires automatically after this long (10 minutes).
 const CONFIRMATION_TTL_MS = 10 * 60 * 1000;
 
+// Within this window, repeated taps on stale (old-catalog) buttons by the same
+// user send the "catalog updated" text message only once. The per-tap alert
+// popup (answerCbQuery) still fires every time — Telegram shows it in place and
+// it does not accumulate; only the chat message is deduplicated.
+const STALE_NOTICE_DEDUP_MS = 5000;
+
 // Inline-button callback payloads for the confirmation step.
 const CONFIRM_ADD = 'product:add';
 const CONFIRM_CANCEL = 'product:cancel';
 
-// Label of the persistent reply-keyboard button that shows the "how to send
-// parts" guide. Also the text `bot.hears` matches to trigger the same guide.
-const HELP_BUTTON_LABEL = 'ℹ️ Как правильно отправлять детали';
+// Nudge shown to anyone interacting outside an active wizard session.
+const START_HINT = '👋 Чтобы добавить товар, нажмите /start';
 
-// Persistent reply keyboard shown after /start so the guide button is always
-// reachable. `resize` keeps it compact; `persistent` keeps it visible.
-const MAIN_KEYBOARD = Markup.keyboard([[HELP_BUTTON_LABEL]])
-  .resize()
-  .persistent();
+// Russian label for a stored PartVehicleCategory, from the wizard catalog (the
+// single source of truth for these labels). Used in the preview so the seller
+// sees the category they picked.
+const CATEGORY_LABELS = new Map(
+  WIZARD_CATEGORIES.map((c) => [c.value, c.label]),
+);
 
-// Purely informational guide on how to send parts so the bot recognizes them
-// accurately. Sent on the reply-keyboard button and the /help command; it does
-// NOT touch the listing pipeline.
+// Guide describing the new step-by-step wizard, reachable via /help. Purely
+// informational — it does NOT touch the wizard or listing pipeline.
 const HELP_MESSAGE =
-  '📦 Как правильно отправлять объявления\n\n' +
-  'Чтобы бот максимально точно распознал деталь, отправляйте фотографии вместе с описанием.\n\n' +
-  '✅ Лучше всего отправлять фотографии одним альбомом (Media Group).\n' +
-  'В подписи к альбому (Caption) укажите:\n\n' +
-  '• название детали;\n' +
-  '• описание (если есть);\n' +
-  '• OEM или GM номер (если известен);\n' +
-  '• цену.\n\n' +
-  'Например:\n\n' +
-  'Название: Передний амортизатор Chevrolet Cobalt\n' +
-  'Описание: Новый, оригинал GM.\n' +
-  'OEM/GM: 95917158\n' +
-  'Цена: 850 000 сум\n\n' +
-  '💡 Слова «Название», «Описание», и «Цена» писать необязательно.\n\n' +
-  '💡 Если у детали несколько фотографий, отправляйте их одним альбомом. ' +
-  'Тогда бот обработает все фотографии как одну деталь.\n\n' +
+  '📦 Как добавить товар\n\n' +
+  'Нажмите /start — бот проведёт вас по шагам:\n\n' +
+  '1️⃣ Марка автомобиля (кнопка)\n' +
+  '2️⃣ Модель (кнопка)\n' +
+  '3️⃣ Категория запчасти (кнопка)\n' +
+  '4️⃣ Название товара (текст)\n' +
+  '5️⃣ Описание — можно пропустить\n' +
+  '6️⃣ Тип номера: OEM, GM или пропустить\n' +
+  '7️⃣ Номер детали (если выбрали OEM/GM)\n' +
+  '8️⃣ Цена в сумах\n' +
+  '9️⃣ Фотографии — одно фото или альбом до 10 фото\n\n' +
+  '✅ После фото бот покажет предпросмотр — проверьте и нажмите «Добавить товар».\n\n' +
+  '💡 Марку и модель выбирайте только кнопками — вводить их вручную не нужно.\n' +
   '🔎 Если указать OEM или GM номер, покупателям будет намного проще найти вашу деталь через поиск.';
 
 /**
  * A fully-processed listing awaiting the seller's confirmation. Everything
- * expensive (parse, vehicle detection, image processing/upload, price) is
- * already done; only the final database write is deferred to confirmation.
+ * expensive (wizard input, image processing/upload) is already done; only the
+ * final database write is deferred to confirmation.
  */
 interface PendingProduct {
   sellerId: number;
   tgUserId: number;
   metadata: ParseOutcome;
-  /** Validated non-null title (guaranteed by the guard in handleListing). */
+  /** Validated non-null title (guaranteed by the wizard's TITLE step). */
   title: string;
+  /** The wizard's explicit category choice — written to Product.vehicleCategory
+   *  verbatim (never overridden by the keyword classifier). */
+  vehicleCategory: PartVehicleCategory;
   processedUrls: string[];
   /** Cloudinary public_ids of the uploaded preview assets, for cleanup on
    *  cancel/expiry/replacement (kept on successful confirmation). */
   publicIds: string[];
   price: Decimal;
   expiry: NodeJS.Timeout;
-}
-
-/**
- * Last-resort price extraction from the raw caption, used ONLY when the main
- * parser (PartParserService) returns a null price. It delegates to the SAME
- * shared parsePrice used everywhere else, so a thousands-grouped price like
- * "130.000" resolves to 130000 here too — this path previously used a private
- * regex that stopped at the dot ("130.000 сум" → 130) and lacked the currency
- * variants / unrelated-number guards, silently corrupting fallback prices.
- *
- * extractPriceFromText finds the number next to a currency word (or a safe bare
- * number), ignoring GM codes / phones / years / mileage, and applies the shared
- * parsePrice (thousands/decimal rules + currency stripping). Returns Decimal(0)
- * when no price can be found, preserving the previous "never throw, default to
- * 0" contract for the caller.
- */
-export function extractPriceFallback(text: string): Decimal {
-  const value = extractPriceFromText(text);
-  return value !== null ? new Decimal(value) : new Decimal(0);
 }
 
 /**
@@ -169,8 +190,9 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   private bot: Telegraf;
 
   private readonly imageEnhance = new ImageEnhanceService();
-  // Initialized in the constructor (needs `this.prisma` for the OEM lookup).
-  private readonly partParser: PartParserService;
+
+  // Step-by-step product-creation wizard sessions, one per Telegram user.
+  private readonly wizard = new WizardSessionStore();
 
   // Buffer for in-flight album uploads. `ctx` for the flush is captured per
   // group via the closure below (the latest ctx of the album is sufficient —
@@ -181,6 +203,11 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   // One pending confirmation per Telegram user, keyed by tgUserId. Holds the
   // fully-processed listing until the seller presses "Добавить товар".
   private readonly pending = new Map<number, PendingProduct>();
+
+  // Last time (ms epoch) each user was sent the "catalog updated, restart"
+  // notice. Rapid repeat taps on stale buttons share one notice within
+  // STALE_NOTICE_DEDUP_MS instead of piling up identical messages.
+  private readonly staleNoticeSentAt = new Map<number, number>();
 
   // Album image-processing concurrency, resolved once from IMAGE_CONCURRENCY.
   private readonly imageConcurrency: number;
@@ -196,12 +223,6 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       this.config.get<string>('IMAGE_CONCURRENCY'),
       this.logger,
     );
-    // Compatibility from an OEM number is resolved ONLY through the verified
-    // internal database; the parser is given a lookup bound to Prisma. No match
-    // → no compatibility (never inferred from the number or the LLM).
-    this.partParser = new PartParserService(undefined, (oem) =>
-      lookupOemCompatibility(this.prisma, oem),
-    );
   }
 
   onModuleInit() {
@@ -214,7 +235,8 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       (group) => {
         const ctx = this.groupCtx.get(String(group.tgUserId));
         this.groupCtx.delete(String(group.tgUserId));
-        if (ctx) void this.handleListing(ctx, group.tgUserId, group.fileIds, group.caption);
+        if (ctx)
+          void this.handleWizardPhotos(ctx, group.tgUserId, group.fileIds);
       },
     );
 
@@ -239,12 +261,16 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   onModuleDestroy() {
     this.mediaBuffer?.clear();
     this.groupCtx.clear();
+    this.wizard.clear();
+    this.staleNoticeSentAt.clear();
     for (const session of this.pending.values()) clearTimeout(session.expiry);
     this.pending.clear();
     this.bot?.stop('SIGTERM');
   }
 
   private registerHandlers() {
+    // /start: no instruction message — an ACTIVE seller goes straight into the
+    // product-creation wizard (restarting any wizard already in progress).
     this.bot.start(async (ctx) => {
       const from = ctx.from;
       if (!from) return;
@@ -255,10 +281,11 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       );
 
       if (seller.status === SellerStatus.ACTIVE) {
-        await ctx.reply(
-          '✅ Добро пожаловать! Ваш аккаунт активен. Отправьте фото детали с подписью (можно до 10 фото одним альбомом).',
-          MAIN_KEYBOARD,
-        );
+        // New session: forget any prior stale-notice dedup marker so the first
+        // stale tap after this restart is acknowledged in chat again.
+        this.staleNoticeSentAt.delete(from.id);
+        const session = this.wizard.start(from.id);
+        await this.sendStepPrompt(ctx, session);
         return;
       }
       if (seller.status === SellerStatus.REJECTED) {
@@ -267,20 +294,97 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       }
       await ctx.reply(
         '⏳ Ваша заявка на регистрацию принята и ожидает одобрения администратора.\n' +
-        'Как только аккаунт будет активирован, вы сможете добавлять товары.',
+          'Как только аккаунт будет активирован, вы сможете добавлять товары.',
       );
     });
 
-    // Informational guide, reachable two ways: the /help command and the
-    // persistent reply-keyboard button (matched by its exact label). Both send
-    // the same static text and touch nothing in the listing pipeline.
+    // Informational guide describing the wizard flow. Sends static text and
+    // touches nothing in the wizard/listing pipeline (does not start a session).
     this.bot.command('help', async (ctx) => {
       await ctx.reply(HELP_MESSAGE);
     });
-    this.bot.hears(HELP_BUTTON_LABEL, async (ctx) => {
-      await ctx.reply(HELP_MESSAGE);
+
+    // ── Wizard button steps ─────────────────────────────────────────────────
+    this.bot.action(WIZ_BRAND_ACTION, async (ctx) => {
+      await this.handleWizardAction(ctx, (session) =>
+        selectBrand(session, Number(ctx.match[1])),
+      );
     });
 
+    this.bot.action(WIZ_MODEL_ACTION, async (ctx) => {
+      await this.handleWizardAction(ctx, (session) =>
+        selectModel(session, Number(ctx.match[1])),
+      );
+    });
+
+    this.bot.action(WIZ_CATEGORY_ACTION, async (ctx) => {
+      await this.handleWizardAction(ctx, (session) =>
+        selectCategory(session, Number(ctx.match[1])),
+      );
+    });
+
+    this.bot.action(WIZ_DESCRIPTION_SKIP, async (ctx) => {
+      await this.handleWizardAction(ctx, (session) => skipDescription(session));
+    });
+
+    this.bot.action(WIZ_PART_NUMBER_TYPE_ACTION, async (ctx) => {
+      await this.handleWizardAction(ctx, (session) =>
+        choosePartNumberType(session, ctx.match[1] as 'OEM' | 'GM' | 'SKIP'),
+      );
+    });
+
+    // Catch-all for wizard-shaped payloads the current-version handlers above
+    // didn't consume — i.e. taps on buttons from an OUTDATED CATALOG_VERSION.
+    // Registered last so it only fires after the specific matchers. Instead of
+    // silently ignoring the tap, tell the seller the catalog changed and to
+    // restart. `ctx.match[0]` is the full payload string.
+    this.bot.action(WIZ_ANY_ACTION, async (ctx) => {
+      const payload = ctx.match[0];
+      if (!isStaleCatalogPayload(payload)) return; // a live payload — leave it
+      await this.answerStaleCallback(ctx);
+    });
+
+    // ── Wizard text steps (title / description / part number / price) ───────
+    this.bot.on(message('text'), async (ctx) => {
+      const msg = ctx.message;
+      const from = msg.from;
+      if (!from) return;
+
+      const session = this.wizard.get(from.id);
+      if (!session) {
+        await ctx.reply(START_HINT);
+        return;
+      }
+
+      let result: WizardResult;
+      switch (session.step) {
+        case WizardStep.TITLE:
+          result = inputTitle(session, msg.text);
+          break;
+        case WizardStep.DESCRIPTION:
+          result = inputDescription(session, msg.text);
+          break;
+        case WizardStep.PART_NUMBER:
+          result = inputPartNumber(session, msg.text);
+          break;
+        case WizardStep.PRICE:
+          result = inputPrice(session, msg.text);
+          break;
+        default:
+          // Button/photo steps don't take text — re-show what's expected.
+          result = { status: 'stale' };
+          break;
+      }
+
+      if (result.status === 'invalid') {
+        await ctx.reply(result.message);
+        return;
+      }
+      // 'ok' → prompt for the next step; 'stale' → re-prompt the current one.
+      await this.sendStepPrompt(ctx, session);
+    });
+
+    // ── Wizard photo step (last input before the preview) ───────────────────
     this.bot.on(message('photo'), async (ctx: Context) => {
       const msg = ctx.message;
       if (!msg || !('photo' in msg)) return;
@@ -289,67 +393,173 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
       // Highest-resolution rendition of this photo.
       const bestPhoto = msg.photo[msg.photo.length - 1];
-      const caption = 'caption' in msg ? (msg.caption ?? null) : null;
       const groupId = 'media_group_id' in msg ? msg.media_group_id : undefined;
 
       if (groupId) {
-        // Capture the latest ctx for this user's album; the buffer flushes it.
+        // Buffer ALL albums (even out-of-step ones) so the flush validates the
+        // wizard state exactly once per album instead of once per photo.
         this.groupCtx.set(String(from.id), ctx);
-        this.mediaBuffer.add(groupId, bestPhoto.file_id, caption, from.id);
+        this.mediaBuffer.add(groupId, bestPhoto.file_id, null, from.id);
         return;
       }
 
-      // Single photo — process immediately as a one-image listing.
-      await this.handleListing(ctx, from.id, [bestPhoto.file_id], caption);
+      // Single photo — hand over immediately.
+      await this.handleWizardPhotos(ctx, from.id, [bestPhoto.file_id]);
     });
 
-    // Confirmation buttons on the preview message.
+    // ── Confirmation buttons on the preview message ─────────────────────────
     this.bot.action(CONFIRM_ADD, async (ctx) => {
       await ctx.answerCbQuery();
       // Remove the keyboard first so a second tap can't re-trigger the action.
-      await this.removePreviewKeyboard(ctx);
+      await this.removeInlineKeyboard(ctx);
       const from = ctx.from;
-      if (from) await this.commitPending(ctx, from.id);
+      if (from) {
+        await this.commitPending(ctx, from.id);
+        // Terminal action: leave NO wizard state behind (the seller may have
+        // started a new wizard between preview and this tap — clear it too so a
+        // fresh /start is always required to begin the next listing).
+        this.wizard.delete(from.id);
+      }
     });
 
     this.bot.action(CONFIRM_CANCEL, async (ctx) => {
       await ctx.answerCbQuery();
       // Remove the keyboard first so a second tap can't re-trigger the action.
-      await this.removePreviewKeyboard(ctx);
+      await this.removeInlineKeyboard(ctx);
       const from = ctx.from;
-      // Delete the uploaded preview assets before dropping the session.
-      if (from) await this.discardPending(from.id);
+      if (from) {
+        // Delete the uploaded preview assets before dropping the session, and
+        // clear any wizard state so the flow ends fully (terminal action).
+        await this.discardPending(from.id);
+        this.wizard.delete(from.id);
+      }
       await ctx.reply(
-        '❌ Добавление товара отменено.\nОтправьте фото и подпись заново, чтобы добавить другой товар.',
-        MAIN_KEYBOARD,
+        '❌ Добавление товара отменено.\nНажмите /start, чтобы начать заново.',
       );
     });
   }
 
+  // ── Wizard plumbing ─────────────────────────────────────────────────────────
   /**
-   * Strip the inline keyboard from the preview message (the one that carried the
-   * pressed button) without deleting the message. Best-effort: if the edit fails
-   * — e.g. the keyboard was already removed by an earlier tap, or the message is
-   * too old — the error is logged and swallowed so the action still proceeds.
+   * Answer a tap on a button from an OUTDATED catalog version. The button's
+   * brand/model index can no longer be trusted, so instead of resolving it we
+   * show the seller an alert popup on the button, strip the now-dead keyboard,
+   * and nudge them to restart.
+   *
+   * The alert popup fires on EVERY tap (Telegram renders it in place — it never
+   * accumulates). The chat NUDGE, however, is deduplicated per user within
+   * STALE_NOTICE_DEDUP_MS: several old buttons may still be on screen, and
+   * tapping them in quick succession must not stack identical messages.
+   *
+   * Best-effort: an expired callback (Telegram's ~15 s answer window) is
+   * swallowed so the nudge still sends.
    */
-  private async removePreviewKeyboard(ctx: Context): Promise<void> {
+  private async answerStaleCallback(ctx: Context): Promise<void> {
+    try {
+      // show_alert renders the text as a modal popup rather than a transient
+      // toast, so the seller can't miss that the catalog changed.
+      await ctx.answerCbQuery(STALE_CATALOG_MESSAGE, { show_alert: true });
+    } catch {
+      // Expired callback — proceed to the follow-up nudge anyway.
+    }
+    await this.removeInlineKeyboard(ctx);
+
+    // Deduplicate the chat nudge: skip it if we already sent one to this user
+    // within the window (rapid repeat taps on stale buttons).
+    const tgUserId = ctx.from?.id;
+    if (tgUserId !== undefined && !this.shouldSendStaleNotice(tgUserId)) return;
+    await ctx.reply(STALE_CATALOG_MESSAGE);
+  }
+
+  /**
+   * Whether the "catalog updated" chat nudge should be sent to this user now.
+   * Returns true and records the send time on the first call (or after the
+   * dedup window elapses); returns false for repeat taps inside the window.
+   * When tgUserId is unknown we can't dedupe, so the caller sends anyway.
+   */
+  private shouldSendStaleNotice(tgUserId: number): boolean {
+    const now = Date.now();
+    const last = this.staleNoticeSentAt.get(tgUserId);
+    if (last !== undefined && now - last < STALE_NOTICE_DEDUP_MS) return false;
+    this.staleNoticeSentAt.set(tgUserId, now);
+    return true;
+  }
+
+  /**
+   * Shared handler for every wizard inline button: answer the callback, apply
+   * the transition, and on success strip the tapped keyboard and prompt for the
+   * next step. Stale taps (old messages, wrong step, no session) are ignored so
+   * a re-tapped historic button can never corrupt the current session.
+   */
+  private async handleWizardAction(
+    ctx: Context,
+    transition: (session: WizardSession) => WizardResult,
+  ): Promise<void> {
+    try {
+      await ctx.answerCbQuery();
+    } catch {
+      // Expired callback (Telegram answers must come within ~15 s) — proceed.
+    }
+    const from = ctx.from;
+    if (!from) return;
+
+    const session = this.wizard.get(from.id);
+    if (!session) {
+      await ctx.reply(START_HINT);
+      return;
+    }
+
+    const result = transition(session);
+    if (result.status !== 'ok') return; // stale button — ignore silently
+
+    await this.removeInlineKeyboard(ctx);
+    await this.sendStepPrompt(ctx, session);
+  }
+
+  /** Send the prompt (text + inline keyboard) asking for the session's current step. */
+  private async sendStepPrompt(
+    ctx: Context,
+    session: WizardSession,
+  ): Promise<void> {
+    const prompt = stepPrompt(session);
+    await ctx.reply(prompt.text, prompt.keyboard);
+  }
+
+  /**
+   * Strip the inline keyboard from the message that carried the pressed button
+   * without deleting the message. Best-effort: if the edit fails — e.g. the
+   * keyboard was already removed by an earlier tap, or the message is too old —
+   * the error is logged and swallowed so the action still proceeds.
+   */
+  private async removeInlineKeyboard(ctx: Context): Promise<void> {
     try {
       await ctx.editMessageReplyMarkup(undefined);
     } catch (err) {
       this.logger.debug(
-        `Could not remove preview keyboard: ${err instanceof Error ? err.message : String(err)}`,
+        `Could not remove inline keyboard: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }
 
-  // ── Listing pipeline (1..N images, one caption) ─────────────────────────────
-  private async handleListing(
+  // ── Photo hand-off: wizard PHOTOS step → image pipeline → preview ──────────
+  private async handleWizardPhotos(
     ctx: Context,
     tgUserId: number,
     fileIds: string[],
-    caption: string | null,
-  ) {
-    // Seller gate.
+  ): Promise<void> {
+    const session = this.wizard.get(tgUserId);
+    if (!session) {
+      await ctx.reply(START_HINT);
+      return;
+    }
+    if (session.step !== WizardStep.PHOTOS) {
+      // Photos sent too early (or while processing) — re-show what's expected.
+      await this.sendStepPrompt(ctx, session);
+      return;
+    }
+
+    // Seller gate at the same pipeline position as before: right before any
+    // expensive processing. Status may have changed since /start.
     const seller = await this.sellers.findByTgId(BigInt(tgUserId));
     if (!seller) {
       await ctx.reply('👋 Сначала зарегистрируйтесь: введите /start');
@@ -364,22 +574,42 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    if (!caption || caption.trim() === '') {
-      await ctx.reply(
-        '❌ Пожалуйста, добавьте подпись к фото с названием детали, номером и ценой.',
-        MAIN_KEYBOARD,
+    // FSM invariant: PHOTOS is only reachable once every prior step is filled.
+    const { brand, model, category, title, price } = session;
+    if (
+      brand === null ||
+      model === null ||
+      category === null ||
+      title === null ||
+      price === null
+    ) {
+      this.logger.error(
+        `Wizard session for ${tgUserId} reached PHOTOS with missing fields — restarting.`,
       );
+      const fresh = this.wizard.start(tgUserId);
+      await this.sendStepPrompt(ctx, fresh);
       return;
     }
 
+    // At least one photo is REQUIRED before publication. An empty hand-off
+    // (defensive — the single-photo and album paths always carry ≥1 file id)
+    // must not advance the flow: re-ask for photos and stay on the PHOTOS step.
     const images = fileIds.slice(0, MAX_IMAGES_PER_LISTING);
+    if (images.length === 0) {
+      await this.sendStepPrompt(ctx, session);
+      return;
+    }
 
-    // AI processing can take up to ~30 s, so tell the seller to wait
-    // BEFORE we start (the next step — the preview — only appears once processing
-    // finishes). Best-effort: a failed notice must not abort the upload, so it is
-    // logged and swallowed.
+    // Guard against a second album racing the first while images process.
+    if (beginProcessing(session).status !== 'ok') return;
+
+    // Image processing can take up to ~30 s, so tell the seller to wait BEFORE
+    // we start (the next step — the preview — only appears once processing
+    // finishes). Best-effort: a failed notice must not abort the upload.
     try {
-      await ctx.reply('⏳ Пожалуйста, подождите. Обработка загруженных фото может занять до 30 секунд.');
+      await ctx.reply(
+        '⏳ Пожалуйста, подождите. Обработка загруженных фото может занять до 30 секунд.',
+      );
     } catch (err) {
       this.logger.debug(
         `Could not send processing notice: ${err instanceof Error ? err.message : String(err)}`,
@@ -387,61 +617,61 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     }
 
     try {
-      // Parse the caption once and process every image (album order preserved)
-      // concurrently: caption parsing and image processing are independent, so
-      // running them together hides the parse latency (notably the AI fallback)
-      // behind the image pipeline instead of stacking it before.
-      const [metadata, uploaded] = await Promise.all([
-        this.partParser.parse(caption),
-        this.processImages(images),
-      ]);
+      const uploaded = await this.processImages(images);
+
+      if (uploaded.length === 0) {
+        backToPhotos(session);
+        await ctx.reply(
+          '⚠️ Не удалось обработать ни одно изображение. Попробуйте ещё раз.',
+        );
+        return;
+      }
+
+      // Assemble the listing metadata directly from the wizard's explicit
+      // inputs — no caption parsing. `vehicles` carries exactly the selected
+      // (brand, model) pair, so persistence/preview behave as before.
+      const metadata: ParseOutcome = {
+        title,
+        description: session.description,
+        brand,
+        models: [model],
+        vehicles: [{ brand, model }],
+        isUniversal: false,
+        gm_number: session.partNumber,
+        part_number_type: session.partNumberType,
+        price,
+        source: 'wizard',
+        confidence: 1,
+      };
       this.logger.log(
-        `Parsed via ${metadata.source} (confidence=${metadata.confidence}) — ` +
-        `title="${metadata.title ?? '∅'}", images=${images.length}`,
+        `Wizard listing by ${tgUserId}: "${title}" (${brand} ${model}), images=${uploaded.length}`,
       );
 
       const processedUrls = uploaded.map((u) => u.url);
-      const publicIds = uploaded.map((u) => u.publicId);
+      const priceDecimal = new Decimal(price);
 
-      // Title guard now runs after processing (parse no longer gates it), so any
-      // images already uploaded on a rejected title must be cleaned up to avoid
-      // orphaned Cloudinary assets.
-      if (!metadata.title || metadata.title.length < 3) {
-        if (publicIds.length > 0) await this.cloudinary.deleteAssets(publicIds);
-        await ctx.reply(
-          '❌ Не удалось распознать название детали. Опишите товар подробнее:\n' +
-          '_Пример: Фильтр масляный Cobalt Gentra 96535062 25000 сум_',
-          { parse_mode: 'Markdown', ...MAIN_KEYBOARD },
-        );
-        return;
-      }
-
-      if (uploaded.length === 0) {
-        await ctx.reply(
-          '⚠️ Не удалось обработать ни одно изображение. Попробуйте ещё раз.',
-          MAIN_KEYBOARD,
-        );
-        return;
-      }
-
-      const price =
-        metadata.price !== null ? new Decimal(metadata.price) : extractPriceFallback(caption);
-
-      // Everything is processed. Instead of writing to the DB now, stash the
-      // result as a pending confirmation and show the seller a preview with
-      // Add / Cancel buttons. The DB write happens in commitPending().
-      // `metadata.title` is non-null here (validated by the guard above).
       this.setPending(ctx, {
         sellerId: seller.id,
         tgUserId,
         metadata,
-        title: metadata.title,
+        title,
+        vehicleCategory: category,
         processedUrls,
-        publicIds,
-        price,
+        publicIds: uploaded.map((u) => u.publicId),
+        price: priceDecimal,
       });
 
-      await this.sendPreview(ctx, metadata, processedUrls, price);
+      // The wizard's job is done — the pending confirmation owns the flow now.
+      // deleteIf: if the seller restarted /start meanwhile, keep THAT session.
+      this.wizard.deleteIf(tgUserId, session);
+
+      await this.sendPreview(
+        ctx,
+        metadata,
+        category,
+        processedUrls,
+        priceDecimal,
+      );
     } catch (error: unknown) {
       const errMsg =
         error instanceof Error
@@ -449,10 +679,14 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
           : typeof error === 'object'
             ? JSON.stringify(error)
             : String(error);
-      this.logger.error(`Pipeline error: ${errMsg}`, error instanceof Error ? error.stack : undefined);
+      this.logger.error(
+        `Pipeline error: ${errMsg}`,
+        error instanceof Error ? error.stack : undefined,
+      );
+      backToPhotos(session); // stale-safe: no-op if the session moved on
       await ctx.reply(
         `⚠️ Произошла ошибка при обработке товара.\n\`${errMsg}\``,
-        { parse_mode: 'Markdown', ...MAIN_KEYBOARD },
+        { parse_mode: 'Markdown' },
       );
     }
   }
@@ -464,7 +698,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
    * deleted — and the user is told the previous draft was replaced. Sessions
    * expire automatically after CONFIRMATION_TTL_MS (also deleting their assets).
    */
-  private setPending(ctx: Context, draft: Omit<PendingProduct, 'expiry'>): void {
+  private setPending(
+    ctx: Context,
+    draft: Omit<PendingProduct, 'expiry'>,
+  ): void {
     if (this.pending.has(draft.tgUserId)) {
       void this.discardPending(draft.tgUserId); // deletes the replaced draft's assets
       void ctx.reply('♻️ Предыдущий неподтверждённый товар заменён новым.');
@@ -512,10 +749,12 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   private async sendPreview(
     ctx: Context,
     metadata: ParseOutcome,
+    vehicleCategory: PartVehicleCategory,
     processedUrls: string[],
     price: Decimal,
   ): Promise<void> {
     const vehicle = formatVehicleLine(metadata);
+    const categoryLabel = CATEGORY_LABELS.get(vehicleCategory) ?? '—';
     // Label the number by how the seller marked it — never guess. An unlabeled
     // number shows the neutral "OEM/GM №" so we don't claim a type we don't know.
     const numberLabel =
@@ -530,6 +769,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       `🔩 *Название:* ${metadata.title}\n` +
       `📝 *Описание:* ${metadata.description ?? '—'}\n` +
       `🚗 *Автомобиль:* ${vehicle}\n` +
+      `🗂 *Категория:* ${categoryLabel}\n` +
       `🔢 *${numberLabel}:* ${metadata.gm_number ?? '—'}\n` +
       `💰 *Цена:* ${price.toFixed(0)} UZS`;
 
@@ -550,10 +790,12 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         });
         return;
       }
-      const media = processedUrls.slice(0, MAX_IMAGES_PER_LISTING).map((url) => ({
-        type: 'photo' as const,
-        media: url,
-      }));
+      const media = processedUrls
+        .slice(0, MAX_IMAGES_PER_LISTING)
+        .map((url) => ({
+          type: 'photo' as const,
+          media: url,
+        }));
       await ctx.replyWithMediaGroup(media);
       await ctx.reply(caption, { parse_mode: 'Markdown', ...buttons });
     } catch (err) {
@@ -575,13 +817,13 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     const session = this.takePending(tgUserId);
     if (!session) {
       await ctx.reply(
-        '⌛ Нет товара для подтверждения (возможно, время истекло). Отправьте фото и подпись заново.',
-        MAIN_KEYBOARD,
+        '⌛ Нет товара для подтверждения (возможно, время истекло). Нажмите /start, чтобы начать заново.',
       );
       return;
     }
 
-    const { sellerId, metadata, title, processedUrls, price } = session;
+    const { sellerId, metadata, title, vehicleCategory, processedUrls, price } =
+      session;
 
     try {
       const primaryUrl = processedUrls[0];
@@ -595,15 +837,28 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       const partNumberType = metadata.part_number_type ?? 'UNKNOWN';
       const { oemNumber } = splitPartNumber(metadata.gm_number, partNumberType);
 
-      // Classify the listing (title + description, RU/UZ/EN) into the stored
-      // catalog attributes: main/vehicle category (always assigned) and region of
-      // origin. The OEM/GM flags come EXCLUSIVELY from `partNumberType` (the
-      // single label rule), passed in — not re-scanned from text. Persisted on
-      // the Product and later projected into the buyer catalog for filtering.
-      const classification = classifyPart(title, metadata.description, partNumberType);
+      // Keyword-classify the remaining stored attributes (main/home category,
+      // region of origin, make). The wizard's brand/model are appended to the
+      // classifier text so make-based region inference works exactly as it did
+      // when captions carried the vehicle name in free text. The category the
+      // seller chose explicitly is written verbatim below — never overridden by
+      // the classifier. The OEM/GM flags come EXCLUSIVELY from `partNumberType`
+      // (the single label rule) — not re-scanned from text.
+      const classifierText = [
+        metadata.description,
+        metadata.brand,
+        ...metadata.models,
+      ]
+        .filter((part): part is string => !!part)
+        .join(' ');
+      const classification = classifyPart(
+        title,
+        classifierText,
+        partNumberType,
+      );
       const classifiedFields = {
         mainCategory: classification.mainCategory,
-        vehicleCategory: classification.vehicleCategory,
+        vehicleCategory,
         partBrand: classification.make,
         originRegion: classification.originRegion,
         isOem: classification.isOem,
@@ -636,7 +891,9 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       await persistVehicleLinks(this.prisma, product.id, metadata);
 
       // Replace the product gallery with the new ordered set (first = primary).
-      await this.prisma.productImage.deleteMany({ where: { productId: product.id } });
+      await this.prisma.productImage.deleteMany({
+        where: { productId: product.id },
+      });
       await this.prisma.productImage.createMany({
         data: processedUrls.map((url, i) => ({
           productId: product.id,
@@ -662,8 +919,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       // The preview already served as the confirmation UI — the success message
       // only needs to confirm the write completed. Do not resend product details.
       await ctx.reply(
-        '✅ Товар успешно добавлен.\nОтправьте фото и подпись следующего товара, чтобы добавить ещё.',
-        MAIN_KEYBOARD,
+        '✅ Товар успешно добавлен.\nНажмите /start, чтобы добавить следующий товар.',
       );
     } catch (error: unknown) {
       const errMsg =
@@ -672,10 +928,13 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
           : typeof error === 'object'
             ? JSON.stringify(error)
             : String(error);
-      this.logger.error(`Commit error: ${errMsg}`, error instanceof Error ? error.stack : undefined);
+      this.logger.error(
+        `Commit error: ${errMsg}`,
+        error instanceof Error ? error.stack : undefined,
+      );
       await ctx.reply(
         `⚠️ Произошла ошибка при добавлении товара.\n\`${errMsg}\``,
-        { parse_mode: 'Markdown', ...MAIN_KEYBOARD },
+        { parse_mode: 'Markdown' },
       );
     }
   }
@@ -717,7 +976,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       }
     };
 
-    const workers = Array.from({ length: Math.min(this.imageConcurrency, fileIds.length) }, worker);
+    const workers = Array.from(
+      { length: Math.min(this.imageConcurrency, fileIds.length) },
+      worker,
+    );
     await Promise.all(workers);
 
     // Drop failed slots, keep album order.
@@ -734,7 +996,9 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       });
       // FLUX.2 Max (enhance → 1000×1000 product photo on a white background),
       // uploaded as-is on success. No local post-processing.
-      const cleaned = await this.imageEnhance.removeBackground(Buffer.from(response.data));
+      const cleaned = await this.imageEnhance.removeBackground(
+        Buffer.from(response.data),
+      );
       return await this.cloudinary.uploadBuffer(cleaned);
     } catch (err) {
       this.logger.warn(

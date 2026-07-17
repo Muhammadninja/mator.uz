@@ -52,6 +52,7 @@ export const VEHICLE_CATALOG: CatalogBrand[] = [
       { canonical: 'Cruze', aliases: ['cruze', 'круз', 'kruz', 'cruz'] },
       { canonical: 'Orlando', aliases: ['orlando', 'орландо', 'orland'] },
       { canonical: 'Onix', aliases: ['onix', 'оникс', 'oniks'] },
+      { canonical: 'Traverse', aliases: ['traverse', 'траверс', 'travers'] },
       { canonical: 'Tahoe', aliases: ['tahoe', 'тахо', 'taho'] },
       { canonical: 'Trailblazer', aliases: ['trailblazer', 'трейлблейзер', 'treylbleyzer'] },
     ],

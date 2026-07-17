@@ -5,28 +5,10 @@
 // The bot itself is never launched here; we construct the service with stub
 // dependencies and drive the private confirmation helpers directly.
 
+import { PartVehicleCategory } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
 import type { ParseOutcome } from '../ai/part-parser.types';
-import { TelegramService, extractPriceFallback } from './telegram.service';
-
-// Guards the PRODUCTION price fallback (used when the main parser returns a null
-// price) — it now delegates to the shared parser instead of a private regex that
-// stopped at the dot ("130.000 сум" → 130/0). This is on the real DB-insert path.
-describe('extractPriceFallback — production price fallback', () => {
-  it.each([
-    ['130.000 сум', '130000'],
-    ['1.250.000 сум', '1250000'],
-    ["130.000 so'm", '130000'],
-    ['350000 сум', '350000'],
-    ['Фильтр масла 96535062 25000 сум', '25000'], // ignores the GM code
-  ])('parses %s → %s UZS', (caption, expected) => {
-    expect(extractPriceFallback(caption).toString()).toBe(expected);
-  });
-
-  it('returns Decimal(0) when no price can be found', () => {
-    expect(extractPriceFallback('нет цены').toString()).toBe('0');
-  });
-});
+import { TelegramService } from './telegram.service';
 
 // Surface just the private members we drive in these tests. We build the
 // instance from the prototype and cast through `unknown`, so this stands alone
@@ -37,6 +19,14 @@ interface AnyService {
   setPending: (ctx: unknown, draft: unknown) => void;
   discardPending: (tgUserId: number) => Promise<void>;
   commitPending: (ctx: unknown, tgUserId: number) => Promise<void>;
+  sendPreview: (
+    ctx: unknown,
+    metadata: unknown,
+    vehicleCategory: unknown,
+    processedUrls: string[],
+    price: unknown,
+  ) => Promise<void>;
+  answerStaleCallback: (ctx: unknown) => Promise<void>;
 }
 
 // Records the stock ids the live catalog projection was asked to project. The
@@ -63,7 +53,7 @@ const metadata: ParseOutcome = {
   gm_number: '96234567',
   part_number_type: 'UNKNOWN',
   price: 450000,
-  source: 'structured',
+  source: 'wizard',
   confidence: 1,
 };
 
@@ -73,6 +63,8 @@ function draft(tgUserId: number, publicIds = ['mator/products/abc']) {
     tgUserId,
     metadata,
     title: metadata.title as string,
+    // The wizard's explicit category choice, written verbatim on commit.
+    vehicleCategory: PartVehicleCategory.ELECTRICAL_AND_LIGHTING,
     processedUrls: publicIds.map((_, i) => `https://cdn/img${i}.webp`),
     publicIds,
     price: new Decimal(450000),
@@ -142,11 +134,14 @@ function makeService(
   // `catalogProjection`, and `pending`.
   const svc = Object.create(TelegramService.prototype) as unknown as AnyService;
   Object.assign(svc, {
-    logger: { log() {}, warn() {}, error() {} },
+    logger: { log() {}, warn() {}, error() {}, debug() {} },
     prisma,
     cloudinary,
     catalogProjection,
     pending: new Map<number, unknown>(),
+    // answerStaleCallback dedupes the chat nudge per user via this map; the
+    // prototype-cast bypasses the field initializer, so provide it here.
+    staleNoticeSentAt: new Map<number, number>(),
   });
   return svc;
 }
@@ -208,7 +203,9 @@ describe('TelegramService — confirmation session', () => {
     // …and the session is consumed.
     expect(svc.pending.has(1)).toBe(false);
     // …and the success message is the simple confirmation (no product details).
-    expect(ctx.replies.some((r) => r.includes('Товар успешно добавлен'))).toBe(true);
+    expect(ctx.replies.some((r) => r.includes('Товар успешно добавлен'))).toBe(
+      true,
+    );
     expect(ctx.replies.some((r) => r.includes('Название'))).toBe(false);
     expect(ctx.replies.some((r) => r.includes('OEM'))).toBe(false);
     expect(ctx.replies.some((r) => r.includes('Product ID'))).toBe(false);
@@ -242,7 +239,9 @@ describe('TelegramService — confirmation session', () => {
     await svc.commitPending(ctx, 1);
 
     // Supply-side write already committed; the seller still sees success.
-    expect(ctx.replies.some((r) => r.includes('Товар успешно добавлен'))).toBe(true);
+    expect(ctx.replies.some((r) => r.includes('Товар успешно добавлен'))).toBe(
+      true,
+    );
     expect(svc.pending.has(1)).toBe(false);
   });
 
@@ -282,7 +281,9 @@ describe('TelegramService — confirmation session', () => {
     await svc.commitPending(ctx, 1);
 
     expect(prisma.calls).toEqual([]);
-    expect(ctx.replies.some((r) => r.includes('Нет товара для подтверждения'))).toBe(true);
+    expect(
+      ctx.replies.some((r) => r.includes('Нет товара для подтверждения')),
+    ).toBe(true);
   });
 
   it('a double commit writes only once (session consumed on first commit)', async () => {
@@ -345,5 +346,116 @@ describe('TelegramService — confirmation session', () => {
     await svc.commitPending(ctx, 1);
 
     expect(cloudinary.deleted).toEqual([]); // assets are NOT deleted on commit
+  });
+});
+
+describe('TelegramService — stale-catalog callback', () => {
+  // A ctx that records the answerCbQuery text/options and any reply, plus the
+  // keyboard-removal call answerStaleCallback makes. `from.id` is set so the
+  // per-user nudge deduplication has a key to work with.
+  function makeCallbackCtx(tgUserId = 1) {
+    const cbAnswers: { text?: string; extra?: unknown }[] = [];
+    const replies: string[] = [];
+    let keyboardRemoved = false;
+    return {
+      from: { id: tgUserId },
+      cbAnswers,
+      replies,
+      get keyboardRemoved() {
+        return keyboardRemoved;
+      },
+      answerCbQuery: async (text?: string, extra?: unknown) => {
+        cbAnswers.push({ text, extra });
+        return true;
+      },
+      editMessageReplyMarkup: async () => {
+        keyboardRemoved = true;
+        return {} as unknown;
+      },
+      reply: async (text: string) => {
+        replies.push(text);
+        return {} as unknown;
+      },
+    };
+  }
+
+  it('answers a stale tap with an alert popup, strips the keyboard, and nudges', async () => {
+    const svc = makeService(makePrisma(), makeCloudinary());
+    const ctx = makeCallbackCtx();
+
+    await svc.answerStaleCallback(ctx);
+
+    // Popup shown with the "catalog updated" text as an alert (not a toast).
+    expect(ctx.cbAnswers).toHaveLength(1);
+    expect(ctx.cbAnswers[0].text).toContain('Каталог был обновлён');
+    expect(ctx.cbAnswers[0].extra).toEqual({ show_alert: true });
+    // Dead keyboard removed, and a follow-up nudge (with the /start prompt) sent.
+    expect(ctx.keyboardRemoved).toBe(true);
+    expect(ctx.replies.some((r) => r.includes('нажмите /start'))).toBe(true);
+  });
+
+  it('sends the chat nudge only ONCE for rapid repeat taps by the same user', async () => {
+    const svc = makeService(makePrisma(), makeCloudinary());
+    const ctx = makeCallbackCtx(42);
+
+    // Three quick taps on (possibly different) stale buttons.
+    await svc.answerStaleCallback(ctx);
+    await svc.answerStaleCallback(ctx);
+    await svc.answerStaleCallback(ctx);
+
+    // The alert popup fires every time (Telegram renders it in place)…
+    expect(ctx.cbAnswers).toHaveLength(3);
+    // …but the chat message is deduplicated — no piled-up identical texts.
+    expect(ctx.replies).toHaveLength(1);
+  });
+
+  it('deduplicates per user, not globally', async () => {
+    const svc = makeService(makePrisma(), makeCloudinary());
+    const a = makeCallbackCtx(1);
+    const b = makeCallbackCtx(2);
+
+    await svc.answerStaleCallback(a);
+    await svc.answerStaleCallback(b); // different user — must still get a nudge
+
+    expect(a.replies).toHaveLength(1);
+    expect(b.replies).toHaveLength(1);
+  });
+
+  it('still nudges when answering the expired callback throws', async () => {
+    const svc = makeService(makePrisma(), makeCloudinary());
+    const ctx = {
+      ...makeCallbackCtx(),
+      answerCbQuery: async () => {
+        throw new Error('query is too old');
+      },
+    };
+
+    await svc.answerStaleCallback(ctx);
+
+    // The throw is swallowed; the seller still gets the restart nudge.
+    expect(ctx.replies.some((r) => r.includes('нажмите /start'))).toBe(true);
+  });
+});
+
+describe('TelegramService — preview caption', () => {
+  it('includes the seller-chosen category (Russian label, not the enum)', async () => {
+    const svc = makeService(makePrisma(), makeCloudinary());
+    const ctx = makeCtx();
+
+    await svc.sendPreview(
+      ctx,
+      metadata,
+      PartVehicleCategory.SUSPENSION_AND_STEERING,
+      ['https://cdn/img0.webp'], // single photo → caption captured by makeCtx
+      new Decimal(450000),
+    );
+
+    const caption = ctx.replies.find((r) => r.includes('Категория'));
+    expect(caption).toBeDefined();
+    expect(caption).toContain('Ходовая и Рулевое'); // label, not the enum value
+    expect(caption).not.toContain('SUSPENSION_AND_STEERING');
+    // The full listing detail lines are still present.
+    expect(caption).toContain('Название');
+    expect(caption).toContain('Цена');
   });
 });

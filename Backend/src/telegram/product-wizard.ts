@@ -1,0 +1,449 @@
+// src/telegram/product-wizard.ts
+//
+// Finite-state machine for the step-by-step product-creation wizard:
+//
+//   BRAND → MODEL → CATEGORY → TITLE → DESCRIPTION → PART_NUMBER_TYPE
+//     → [PART_NUMBER] → PRICE → PHOTOS → PROCESSING → (pending confirmation)
+//
+// Brand, model, category and part-number type come ONLY from inline buttons
+// (the seller never types them); title / part number / price are validated text
+// inputs; description is text or an explicit Skip. Photos are handled by the
+// existing image pipeline in TelegramService — once they arrive the session is
+// consumed and the flow hands over to the existing preview/confirm machinery.
+//
+// This module is pure state + validation + prompt/keyboard builders (no
+// Telegraf handlers, no I/O) so the whole FSM is unit-testable. Sessions are
+// in-memory, one per Telegram user, replaced by /start and deleted on hand-off
+// — they hold no uploaded assets, so no TTL/cleanup is required (unlike the
+// pending-confirmation sessions, which own Cloudinary uploads).
+
+import { PartVehicleCategory } from '@prisma/client';
+import { Markup } from 'telegraf';
+import type { PartNumberType } from '../ai/part-parser.types';
+import { parsePrice } from '../ai/price-parser';
+import { WIZARD_BRANDS, WIZARD_CATEGORIES } from './wizard-catalog';
+
+export enum WizardStep {
+  BRAND = 'BRAND',
+  MODEL = 'MODEL',
+  CATEGORY = 'CATEGORY',
+  TITLE = 'TITLE',
+  DESCRIPTION = 'DESCRIPTION',
+  PART_NUMBER_TYPE = 'PART_NUMBER_TYPE',
+  PART_NUMBER = 'PART_NUMBER',
+  PRICE = 'PRICE',
+  PHOTOS = 'PHOTOS',
+  /** Photos received; image pipeline running. Blocks further input until the
+   *  preview is sent (→ session deleted) or processing fails (→ PHOTOS). */
+  PROCESSING = 'PROCESSING',
+}
+
+/** Everything the wizard collects (the requirement's FSM fields). */
+export interface WizardSession {
+  step: WizardStep;
+  brand: string | null;
+  model: string | null;
+  category: PartVehicleCategory | null;
+  title: string | null;
+  description: string | null;
+  /** 'UNKNOWN' until the seller picks OEM/GM; Skip keeps it 'UNKNOWN'. */
+  partNumberType: PartNumberType;
+  partNumber: string | null;
+  price: number | null;
+}
+
+/**
+ * Outcome of applying one wizard event to a session:
+ *   ok      — accepted, session advanced;
+ *   stale   — event doesn't belong to the current step (old button tap, photo
+ *             too early, …) — ignore or send a gentle hint;
+ *   invalid — input rejected; `message` is the Russian re-ask text.
+ */
+export type WizardResult =
+  | { status: 'ok' }
+  | { status: 'stale' }
+  | { status: 'invalid'; message: string };
+
+const OK: WizardResult = { status: 'ok' };
+const STALE: WizardResult = { status: 'stale' };
+const invalid = (message: string): WizardResult => ({
+  status: 'invalid',
+  message,
+});
+
+// ── Inline-button callback payloads ─────────────────────────────────────────
+// Index-based so a forged/stale callback can never inject an arbitrary name:
+// every payload resolves through the static wizard catalog or is rejected.
+//
+// VERSIONED: every payload carries CATALOG_VERSION. Brand/model indexes are only
+// meaningful for the catalog revision that produced them — after WIZARD_BRANDS
+// is reordered or edited, an old message's "wiz:1:b:5" would resolve to a
+// DIFFERENT model. Bumping CATALOG_VERSION makes every pre-existing button stop
+// matching the current-version handlers; such taps are then caught by
+// WIZ_STALE_ACTION and answered with a "catalog updated, start again" notice
+// instead of resolving to the wrong item. Bump it whenever WIZARD_BRANDS
+// order/content changes; wizard-catalog.spec.ts reminds you to.
+export const CATALOG_VERSION = 1;
+
+/** Build a versioned callback payload, e.g. buildAction('b', 5) → "wiz:1:b:5". */
+export function buildAction(kind: string, arg: string | number): string {
+  return `wiz:${CATALOG_VERSION}:${kind}:${arg}`;
+}
+
+// Each regex pins the CURRENT version, so a button minted under an older catalog
+// version does not match these — it is handled by WIZ_STALE_ACTION instead.
+const V = CATALOG_VERSION;
+export const WIZ_BRAND_ACTION = new RegExp(`^wiz:${V}:b:(\\d{1,2})$`);
+export const WIZ_MODEL_ACTION = new RegExp(`^wiz:${V}:m:(\\d{1,2})$`);
+export const WIZ_CATEGORY_ACTION = new RegExp(`^wiz:${V}:c:(\\d{1,2})$`);
+export const WIZ_DESCRIPTION_SKIP = buildAction('d', 'skip');
+export const WIZ_PART_NUMBER_TYPE_ACTION = new RegExp(
+  `^wiz:${V}:t:(OEM|GM|SKIP)$`,
+);
+
+// Any wizard-shaped payload (`wiz:<version>:…`) — matches EVERY version. Register
+// this AFTER the current-version handlers so it only catches taps they didn't:
+// i.e. buttons from a DIFFERENT (older) CATALOG_VERSION. Used to answer a stale
+// tap explicitly rather than leaving it silently inert.
+export const WIZ_ANY_ACTION = /^wiz:/;
+
+/**
+ * True when a wizard callback payload belongs to a catalog version OTHER than
+ * the current one (or is malformed / unversioned). Such a payload's brand/model
+ * index is no longer trustworthy, so the tap must be rejected with a notice.
+ */
+export function isStaleCatalogPayload(payload: string): boolean {
+  const m = /^wiz:(\d+):/.exec(payload);
+  // No parseable version → treat as stale (e.g. a legacy "wiz:b:0" button).
+  if (!m) return true;
+  return Number(m[1]) !== CATALOG_VERSION;
+}
+
+/** User-facing notice for a tap on a button from an outdated catalog version. */
+export const STALE_CATALOG_MESSAGE =
+  'Каталог был обновлён.\n' +
+  'Чтобы продолжить создание объявления, пожалуйста, нажмите /start.';
+
+// ── Input bounds ────────────────────────────────────────────────────────────
+// Title mirrors the historical guard (≥3 chars) plus the DB column cap.
+const TITLE_MIN = 3;
+const TITLE_MAX = 255; // Product.title VarChar(255)
+// Part number: real OEM/GM catalog numbers use letters, digits, spaces, and the
+// separators "-", "/", ".". Must start alphanumeric, carry at least one digit,
+// and fit the DB column (Product.gmNumber / oemNumber are VarChar(50)). Internal
+// single spaces are allowed ("58 09 111" / "GM 96 953 062"); they're collapsed
+// on input so the stored value stays tidy.
+const PART_NUMBER_RE = /^[A-Za-z0-9][A-Za-z0-9\-./ ]{1,48}[A-Za-z0-9]$/;
+const PART_NUMBER_MAX = 50;
+// Stock.priceUzs is Decimal(14,2) → the integer part fits 12 digits.
+const MAX_PRICE_UZS = 999_999_999_999;
+
+// ── Session store ───────────────────────────────────────────────────────────
+export class WizardSessionStore {
+  private readonly sessions = new Map<number, WizardSession>();
+
+  /** Start (or restart) the wizard for a user with a fresh session. */
+  start(tgUserId: number): WizardSession {
+    const session: WizardSession = {
+      step: WizardStep.BRAND,
+      brand: null,
+      model: null,
+      category: null,
+      title: null,
+      description: null,
+      partNumberType: 'UNKNOWN',
+      partNumber: null,
+      price: null,
+    };
+    this.sessions.set(tgUserId, session);
+    return session;
+  }
+
+  get(tgUserId: number): WizardSession | undefined {
+    return this.sessions.get(tgUserId);
+  }
+
+  delete(tgUserId: number): void {
+    this.sessions.delete(tgUserId);
+  }
+
+  /**
+   * Delete only if the stored session IS `expected` (identity check). Protects
+   * an async hand-off: if the seller restarted the wizard while photos were
+   * processing, the fresh session must survive the old flow's cleanup.
+   */
+  deleteIf(tgUserId: number, expected: WizardSession): void {
+    if (this.sessions.get(tgUserId) === expected)
+      this.sessions.delete(tgUserId);
+  }
+
+  clear(): void {
+    this.sessions.clear();
+  }
+}
+
+// ── Transitions ─────────────────────────────────────────────────────────────
+export function selectBrand(
+  session: WizardSession,
+  brandIndex: number,
+): WizardResult {
+  if (session.step !== WizardStep.BRAND) return STALE;
+  const brand = WIZARD_BRANDS[brandIndex];
+  if (!brand) return STALE;
+  session.brand = brand.name;
+  session.step = WizardStep.MODEL;
+  return OK;
+}
+
+export function selectModel(
+  session: WizardSession,
+  modelIndex: number,
+): WizardResult {
+  if (session.step !== WizardStep.MODEL || session.brand === null) return STALE;
+  const models =
+    WIZARD_BRANDS.find((b) => b.name === session.brand)?.models ?? [];
+  const model = models[modelIndex];
+  if (!model) return STALE;
+  session.model = model;
+  session.step = WizardStep.CATEGORY;
+  return OK;
+}
+
+export function selectCategory(
+  session: WizardSession,
+  categoryIndex: number,
+): WizardResult {
+  if (session.step !== WizardStep.CATEGORY) return STALE;
+  const category = WIZARD_CATEGORIES[categoryIndex];
+  if (!category) return STALE;
+  session.category = category.value;
+  session.step = WizardStep.TITLE;
+  return OK;
+}
+
+export function inputTitle(session: WizardSession, raw: string): WizardResult {
+  if (session.step !== WizardStep.TITLE) return STALE;
+  // Titles are single-line (preview caption + VarChar column): collapse any
+  // internal whitespace/newlines the seller typed.
+  const title = raw.replace(/\s+/g, ' ').trim();
+  if (title.startsWith('/')) {
+    return invalid(
+      '❌ Это похоже на команду. Введите название товара текстом.',
+    );
+  }
+  if (title.length < TITLE_MIN) {
+    return invalid(
+      `❌ Название слишком короткое — минимум ${TITLE_MIN} символа. Введите название ещё раз.`,
+    );
+  }
+  if (title.length > TITLE_MAX) {
+    return invalid(
+      `❌ Название слишком длинное — максимум ${TITLE_MAX} символов. Введите короче.`,
+    );
+  }
+  session.title = title;
+  session.step = WizardStep.DESCRIPTION;
+  return OK;
+}
+
+export function inputDescription(
+  session: WizardSession,
+  raw: string,
+): WizardResult {
+  if (session.step !== WizardStep.DESCRIPTION) return STALE;
+  const description = raw.trim();
+  if (description.startsWith('/')) {
+    return invalid(
+      '❌ Это похоже на команду. Введите описание текстом или нажмите «Пропустить».',
+    );
+  }
+  if (description.length === 0) {
+    return invalid(
+      '❌ Описание не может быть пустым. Введите текст или нажмите «Пропустить».',
+    );
+  }
+  session.description = description;
+  session.step = WizardStep.PART_NUMBER_TYPE;
+  return OK;
+}
+
+export function skipDescription(session: WizardSession): WizardResult {
+  if (session.step !== WizardStep.DESCRIPTION) return STALE;
+  session.description = null;
+  session.step = WizardStep.PART_NUMBER_TYPE;
+  return OK;
+}
+
+export function choosePartNumberType(
+  session: WizardSession,
+  choice: 'OEM' | 'GM' | 'SKIP',
+): WizardResult {
+  if (session.step !== WizardStep.PART_NUMBER_TYPE) return STALE;
+  if (choice === 'SKIP') {
+    // No number at all: type stays UNKNOWN and the number step is skipped.
+    session.partNumberType = 'UNKNOWN';
+    session.partNumber = null;
+    session.step = WizardStep.PRICE;
+    return OK;
+  }
+  session.partNumberType = choice;
+  session.step = WizardStep.PART_NUMBER;
+  return OK;
+}
+
+export function inputPartNumber(
+  session: WizardSession,
+  raw: string,
+): WizardResult {
+  if (session.step !== WizardStep.PART_NUMBER) return STALE;
+  // Collapse internal whitespace runs to single spaces so "58 09  111" stores as
+  // "58 09 111", then validate the tidy value.
+  const number = raw.replace(/\s+/g, ' ').trim();
+  if (
+    number.length < 3 ||
+    number.length > PART_NUMBER_MAX ||
+    !PART_NUMBER_RE.test(number) ||
+    !/\d/.test(number)
+  ) {
+    return invalid(
+      '❌ Неверный формат номера. Введите 3–50 символов: буквы, цифры, пробел, «-», «.», «/». Например: 96535062 или 58101-2VA00',
+    );
+  }
+  session.partNumber = number;
+  session.step = WizardStep.PRICE;
+  return OK;
+}
+
+export function inputPrice(session: WizardSession, raw: string): WizardResult {
+  if (session.step !== WizardStep.PRICE) return STALE;
+  // Same shared parser the whole backend uses ("250 000", "250.000 сум", …).
+  const price = parsePrice(raw);
+  if (price === null) {
+    return invalid(
+      '❌ Не удалось распознать цену. Введите число в сумах, например: 250 000',
+    );
+  }
+  if (price > MAX_PRICE_UZS) {
+    return invalid(
+      '❌ Слишком большая цена. Проверьте значение и введите ещё раз.',
+    );
+  }
+  session.price = price;
+  session.step = WizardStep.PHOTOS;
+  return OK;
+}
+
+/** PHOTOS → PROCESSING; blocks a second album from racing the first. */
+export function beginProcessing(session: WizardSession): WizardResult {
+  if (session.step !== WizardStep.PHOTOS) return STALE;
+  session.step = WizardStep.PROCESSING;
+  return OK;
+}
+
+/** PROCESSING → PHOTOS after a failed image run, so the seller can retry. */
+export function backToPhotos(session: WizardSession): WizardResult {
+  if (session.step !== WizardStep.PROCESSING) return STALE;
+  session.step = WizardStep.PHOTOS;
+  return OK;
+}
+
+// ── Keyboards & prompts ─────────────────────────────────────────────────────
+type InlineKeyboard = ReturnType<typeof Markup.inlineKeyboard>;
+
+/** Lay buttons out in rows of `perRow` (Telegram renders them as a grid). */
+function grid<T>(items: T[], perRow: number): T[][] {
+  const rows: T[][] = [];
+  for (let i = 0; i < items.length; i += perRow)
+    rows.push(items.slice(i, i + perRow));
+  return rows;
+}
+
+export function brandKeyboard(): InlineKeyboard {
+  const buttons = WIZARD_BRANDS.map((b, i) =>
+    Markup.button.callback(b.name, buildAction('b', i)),
+  );
+  return Markup.inlineKeyboard(grid(buttons, 2));
+}
+
+export function modelKeyboard(brandName: string): InlineKeyboard {
+  const models = WIZARD_BRANDS.find((b) => b.name === brandName)?.models ?? [];
+  const buttons = models.map((m, i) =>
+    Markup.button.callback(m, buildAction('m', i)),
+  );
+  return Markup.inlineKeyboard(grid(buttons, 2));
+}
+
+export function categoryKeyboard(): InlineKeyboard {
+  const buttons = WIZARD_CATEGORIES.map((c, i) =>
+    Markup.button.callback(c.label, buildAction('c', i)),
+  );
+  return Markup.inlineKeyboard(grid(buttons, 2));
+}
+
+export function descriptionKeyboard(): InlineKeyboard {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('⏭ Пропустить', WIZ_DESCRIPTION_SKIP)],
+  ]);
+}
+
+export function partNumberTypeKeyboard(): InlineKeyboard {
+  return Markup.inlineKeyboard([
+    [
+      Markup.button.callback('OEM', buildAction('t', 'OEM')),
+      Markup.button.callback('GM', buildAction('t', 'GM')),
+    ],
+    [Markup.button.callback('⏭ Пропустить', buildAction('t', 'SKIP'))],
+  ]);
+}
+
+export interface StepPrompt {
+  text: string;
+  keyboard?: InlineKeyboard;
+}
+
+/** The message (and inline keyboard, if any) that asks for the current step. */
+export function stepPrompt(session: WizardSession): StepPrompt {
+  switch (session.step) {
+    case WizardStep.BRAND:
+      return {
+        text: '🚗 Выберите марку автомобиля:',
+        keyboard: brandKeyboard(),
+      };
+    case WizardStep.MODEL:
+      return {
+        text: `🚗 Марка: ${session.brand}.\nТеперь выберите модель:`,
+        keyboard: modelKeyboard(session.brand ?? ''),
+      };
+    case WizardStep.CATEGORY:
+      return {
+        text: '🗂 Выберите категорию запчасти:',
+        keyboard: categoryKeyboard(),
+      };
+    case WizardStep.TITLE:
+      return {
+        text: '✏️ Введите название товара.\nПример: Передний амортизатор',
+      };
+    case WizardStep.DESCRIPTION:
+      return {
+        text: '📝 Введите описание товара или нажмите «Пропустить».',
+        keyboard: descriptionKeyboard(),
+      };
+    case WizardStep.PART_NUMBER_TYPE:
+      return {
+        text: '🔢 Укажите тип номера детали или нажмите «Пропустить».',
+        keyboard: partNumberTypeKeyboard(),
+      };
+    case WizardStep.PART_NUMBER:
+      return {
+        text: `🔢 Введите ${session.partNumberType} номер детали.\nПример: 96535062`,
+      };
+    case WizardStep.PRICE:
+      return { text: '💰 Введите цену в сумах.\nПример: 250 000' };
+    case WizardStep.PHOTOS:
+      return {
+        text: '📸 Отправьте фотографии товара — одно фото или альбом до 10 фото.',
+      };
+    case WizardStep.PROCESSING:
+      return { text: '⏳ Пожалуйста, подождите — идёт обработка фото.' };
+  }
+}
