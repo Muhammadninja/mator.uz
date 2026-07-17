@@ -3,7 +3,6 @@ import {
   Post,
   Get,
   Body,
-  Query,
   UseGuards,
   Request,
   HttpCode,
@@ -14,7 +13,6 @@ import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
 import { PhoneAuthService } from './phone/phone-auth.service';
-import { MyIdService } from './myid/myid.service';
 import { TokenService, ACCESS_TTL_SECONDS } from './tokens/token.service';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { RefreshDto } from './dto/refresh.dto';
@@ -24,16 +22,15 @@ import { RequestOtpDto } from './phone/dto/request-otp.dto';
 import { CheckAvailabilityDto } from './phone/dto/check-availability.dto';
 import { VerifyOtpDto } from './phone/dto/verify-otp.dto';
 import { ResendOtpDto } from './phone/dto/resend-otp.dto';
-import { MyIdInitiateDto } from './myid/dto/myid-initiate.dto';
-import { MyIdCallbackDto } from './myid/dto/myid-callback.dto';
 
 /**
  * Public v1 authentication controller under /v1/auth. Mator v1 is phone-only,
- * so this controller exposes the phone OTP flow, MyID, and the session/token
- * endpoints. Email, password, and social (Google/Apple) login are implemented
- * but intentionally not exposed for v1 — their routes live on the unregistered
- * LegacyAuthController (see legacy-auth.controller.ts). The camelCase sign-in /
- * sign-up aliases are retained here as internal methods only (no HTTP route).
+ * so this controller exposes the phone OTP flow and the session/token
+ * endpoints. Email, password, social (Google/Apple) login, and MyID
+ * verification are implemented but intentionally not exposed for v1 — their
+ * routes live on the unregistered LegacyAuthController (see
+ * legacy-auth.controller.ts). The camelCase sign-in / sign-up aliases are
+ * retained here as internal methods only (no HTTP route).
  * (Consolidated from the former V1AuthController and AuthCompatController.)
  */
 @ApiTags('Auth')
@@ -42,7 +39,6 @@ export class AuthController {
   constructor(
     private readonly authService: AuthService,
     private readonly phoneAuth: PhoneAuthService,
-    private readonly myId: MyIdService,
     private readonly tokens: TokenService,
   ) {}
 
@@ -105,34 +101,6 @@ export class AuthController {
   @HttpCode(HttpStatus.NO_CONTENT)
   async signOut(@Body() dto: RefreshDto) {
     await this.tokens.revoke(this.resolveRefresh(dto));
-  }
-
-  // ── MyID (requires an authenticated session) ─────────────────────────────────
-  @Post('myid/initiate')
-  @UseGuards(JwtAuthGuard)
-  @ApiBearerAuth('jwt')
-  @HttpCode(HttpStatus.CREATED)
-  myIdInitiate(@Request() req: { user: { id: string } }, @Body() dto: MyIdInitiateDto) {
-    return this.myId.initiate(req.user.id, dto);
-  }
-
-  @Post('myid/callback')
-  @UseGuards(JwtAuthGuard)
-  @ApiBearerAuth('jwt')
-  @HttpCode(HttpStatus.OK)
-  myIdCallback(@Request() req: { user: { id: string } }, @Body() dto: MyIdCallbackDto) {
-    return this.myId.callback(req.user.id, dto);
-  }
-
-  @Get('myid/status')
-  @UseGuards(JwtAuthGuard)
-  @ApiBearerAuth('jwt')
-  @HttpCode(HttpStatus.OK)
-  myIdStatus(
-    @Request() req: { user: { id: string } },
-    @Query('session_id') sessionId: string,
-  ) {
-    return this.myId.status(req.user.id, sessionId);
   }
 
   // ── Session / token ───────────────────────────────────────────────────────────

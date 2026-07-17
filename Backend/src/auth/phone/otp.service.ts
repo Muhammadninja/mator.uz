@@ -7,6 +7,7 @@ import {
   HttpException,
   HttpStatus,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { createHash, randomInt } from 'crypto';
 import { OtpChannel } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -25,16 +26,29 @@ export interface OtpIssued {
   resendAfterSeconds: number;
   otpLength: number;
   channel: OtpChannel;
+  /**
+   * Only populated when AUTH_DEV_MODE is enabled: the plaintext OTP so the
+   * frontend can complete phone auth without an SMS provider. Never set in
+   * production.
+   */
+  devOtpCode?: string;
 }
 
 @Injectable()
 export class OtpService {
   private readonly logger = new Logger(OtpService.name);
+  private readonly devMode: boolean;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly sms: SmsService,
-  ) {}
+    private readonly config: ConfigService,
+  ) {
+    this.devMode = this.config.get<string>('AUTH_DEV_MODE') === 'true';
+    if (this.devMode) {
+      this.logger.warn('AUTH_DEV_MODE is ON — OTPs are logged and returned in the API, SMS is skipped. Do NOT enable in production.');
+    }
+  }
 
   private hash(code: string): string {
     return createHash('sha256').update(code).digest('hex');
@@ -64,6 +78,22 @@ export class OtpService {
     );
   }
 
+  /**
+   * Route a freshly generated OTP to the user. In dev mode the SMS provider is
+   * skipped entirely — the code is logged and returned to the caller so the
+   * frontend can complete auth without a provider. In every other case this is
+   * a straight pass-through to {@link deliver}, so production is unchanged.
+   * Returns the plaintext code only in dev mode; `undefined` otherwise.
+   */
+  private async dispatch(phoneE164: string, code: string): Promise<string | undefined> {
+    if (this.devMode) {
+      this.logger.warn(`[AUTH_DEV_MODE] OTP for ${phoneE164}: ${code} (SMS skipped)`);
+      return code;
+    }
+    await this.deliver(phoneE164, code);
+    return undefined;
+  }
+
   /** Create + send a new OTP for a phone number (AuthPhoneEntryScreen). */
   async request(phoneE164: string, channel: OtpChannel = OtpChannel.SMS): Promise<OtpIssued> {
     await this.enforceHourlyCeiling(phoneE164);
@@ -80,7 +110,7 @@ export class OtpService {
       },
     });
 
-    await this.deliver(phoneE164, code);
+    const devOtpCode = await this.dispatch(phoneE164, code);
     this.logger.log(`OTP issued ${record.id} for ${phoneE164}`);
     return {
       requestId: record.id,
@@ -88,6 +118,7 @@ export class OtpService {
       resendAfterSeconds: RESEND_COOLDOWN_S,
       otpLength: OTP_LENGTH,
       channel,
+      devOtpCode,
     };
   }
 
@@ -120,13 +151,14 @@ export class OtpService {
       },
     });
 
-    await this.deliver(record.phoneE164, code);
+    const devOtpCode = await this.dispatch(record.phoneE164, code);
     return {
       requestId: record.id,
       expiresAt,
       resendAfterSeconds: RESEND_COOLDOWN_S,
       otpLength: OTP_LENGTH,
       channel: record.channel,
+      devOtpCode,
     };
   }
 

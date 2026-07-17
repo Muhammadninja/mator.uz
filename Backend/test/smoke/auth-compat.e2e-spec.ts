@@ -7,13 +7,11 @@ import { ACCESS_TTL_SECONDS } from '../../src/auth/tokens/token.service';
 function makeController(over: {
   auth?: any;
   phoneAuth?: any;
-  myId?: any;
   tokens?: any;
 } = {}) {
   return new AuthController(
     over.auth ?? ({} as any),
     over.phoneAuth ?? ({} as any),
-    over.myId ?? ({} as any),
     over.tokens ?? ({} as any),
   );
 }
