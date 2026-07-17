@@ -35,6 +35,9 @@ export class PhoneAuthService {
       delivery_channel: issued.channel.toLowerCase(),
       is_existing_user: !!existing,
       next_screen: 'AuthOtpVerifyScreen',
+      // AUTH_DEV_MODE only: present so the frontend can auto-fill the OTP
+      // without an SMS provider. Never set in production.
+      ...(issued.devOtpCode ? { dev_otp_code: issued.devOtpCode } : {}),
     };
   }
 
@@ -45,6 +48,8 @@ export class PhoneAuthService {
       expires_at: issued.expiresAt.toISOString(),
       resend_after_seconds: issued.resendAfterSeconds,
       otp_length: issued.otpLength,
+      // AUTH_DEV_MODE only — see requestOtp. Never set in production.
+      ...(issued.devOtpCode ? { dev_otp_code: issued.devOtpCode } : {}),
     };
   }
 
@@ -59,7 +64,9 @@ export class PhoneAuthService {
       { deviceId: device?.id ?? null },
     );
 
-    const requiresMyId = user.myIdStatus !== 'VERIFIED';
+    // Mator v1 is phone-OTP only: MyID is no longer part of onboarding, so
+    // login always lands on the garage. The MyID endpoints remain available for
+    // optional verification later (see auth.controller.ts).
     return {
       user: this.presentUser(user),
       tokens: {
@@ -73,8 +80,7 @@ export class PhoneAuthService {
         device_id: device?.id ?? null,
         expo_push_token_registered: !!device?.expoPushToken,
       },
-      requires_myid_verification: requiresMyId,
-      next_screen: requiresMyId ? 'AuthMyIdConsentScreen' : 'GarageListScreen',
+      next_screen: 'GarageListScreen',
     };
   }
 

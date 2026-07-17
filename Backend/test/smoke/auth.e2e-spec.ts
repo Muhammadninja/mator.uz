@@ -25,7 +25,8 @@ describe('Auth smoke', () => {
   describe('Phone OTP', () => {
     it('issues, then verifies the exact code that was sent', async () => {
       const sms = { sendSms: jest.fn().mockResolvedValue(undefined) };
-      const otp = new OtpService(prisma, sms as any);
+      // No AUTH_DEV_MODE → production path: SMS is sent, no dev code returned.
+      const otp = new OtpService(prisma, sms as any, fakeConfig());
       const phone = '+998901112233';
 
       let created: any;
@@ -51,7 +52,7 @@ describe('Auth smoke', () => {
 
     it('rejects an incorrect code and counts the attempt', async () => {
       const sms = { sendSms: jest.fn().mockResolvedValue(undefined) };
-      const otp = new OtpService(prisma, sms as any);
+      const otp = new OtpService(prisma, sms as any, fakeConfig());
       const phone = '+998901112233';
       let created: any;
       prisma.phoneOtpRequest.count.mockResolvedValue(0);
@@ -96,8 +97,10 @@ describe('Auth smoke', () => {
       expect(otp.verify).toHaveBeenCalled();
       expect(prisma.appUser.create).toHaveBeenCalled();
       expect(res.tokens.access_token).toBe('a.b.c');
-      expect(res.requires_myid_verification).toBe(true);
-      expect(res.next_screen).toBe('AuthMyIdConsentScreen');
+      // MyID is no longer part of onboarding: phone login always lands on the
+      // garage and never exposes requires_myid_verification.
+      expect(res).not.toHaveProperty('requires_myid_verification');
+      expect(res.next_screen).toBe('GarageListScreen');
     });
   });
 
