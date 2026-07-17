@@ -50,6 +50,17 @@ export interface WizardSession {
   partNumberType: PartNumberType;
   partNumber: string | null;
   price: number | null;
+  /**
+   * Already-processed photos carried back when the seller returns from the
+   * preview ("⬅️ Назад"). Their presence means the PHOTOS step is ALREADY
+   * satisfied by these Cloudinary assets — editing text/price must NOT re-run
+   * the image pipeline, so the wizard reuses them and jumps straight to a new
+   * preview. Empty for a first-time listing (photos not uploaded yet) and after
+   * "🖼 Изменить фото" clears them to force a fresh upload. `processedUrls` and
+   * `publicIds` are index-aligned (URL ↔ its Cloudinary public_id).
+   */
+  processedUrls: string[];
+  publicIds: string[];
 }
 
 /**
@@ -100,6 +111,10 @@ export const WIZ_DESCRIPTION_SKIP = buildAction('d', 'skip');
 export const WIZ_PART_NUMBER_TYPE_ACTION = new RegExp(
   `^wiz:${V}:t:(OEM|GM|SKIP)$`,
 );
+// "⬅️ Назад" — return to the previous wizard step. Versioned like every other
+// payload so a Back tap on a message from an outdated catalog is treated as
+// stale (caught by WIZ_ANY_ACTION) rather than acted on.
+export const WIZ_BACK_ACTION = buildAction('back', '');
 
 // Any wizard-shaped payload (`wiz:<version>:…`) — matches EVERY version. Register
 // this AFTER the current-version handlers so it only catches taps they didn't:
@@ -154,9 +169,22 @@ export class WizardSessionStore {
       partNumberType: 'UNKNOWN',
       partNumber: null,
       price: null,
+      processedUrls: [],
+      publicIds: [],
     };
     this.sessions.set(tgUserId, session);
     return session;
+  }
+
+  /**
+   * Re-insert an existing session object (used when the seller taps "⬅️ Назад"
+   * on the preview: the service rebuilds a WizardSession from the pending draft
+   * and restores it here so the wizard continues from where it left off — same
+   * data, already-processed photos preserved). Replaces any current session for
+   * the user, mirroring `start`'s single-session-per-user contract.
+   */
+  restore(tgUserId: number, session: WizardSession): void {
+    this.sessions.set(tgUserId, session);
   }
 
   get(tgUserId: number): WizardSession | undefined {
@@ -347,8 +375,102 @@ export function backToPhotos(session: WizardSession): WizardResult {
   return OK;
 }
 
+/**
+ * The step the "⬅️ Назад" button returns to from the CURRENT step, or `null`
+ * when there is nowhere to go back (the first step BRAND, and the transient
+ * PROCESSING state which blocks input while photos upload).
+ *
+ * Derived from session STATE, not just the step, so the OEM/GM branch resolves
+ * correctly: PRICE goes back to PART_NUMBER only when a number was actually
+ * asked for (partNumberType is OEM/GM); when the seller skipped the number,
+ * PRICE goes back to PART_NUMBER_TYPE, mirroring the forward path exactly.
+ */
+export function previousStep(session: WizardSession): WizardStep | null {
+  switch (session.step) {
+    case WizardStep.MODEL:
+      return WizardStep.BRAND;
+    case WizardStep.CATEGORY:
+      return WizardStep.MODEL;
+    case WizardStep.TITLE:
+      return WizardStep.CATEGORY;
+    case WizardStep.DESCRIPTION:
+      return WizardStep.TITLE;
+    case WizardStep.PART_NUMBER_TYPE:
+      return WizardStep.DESCRIPTION;
+    case WizardStep.PART_NUMBER:
+      return WizardStep.PART_NUMBER_TYPE;
+    case WizardStep.PRICE:
+      // Only OEM/GM listings passed through the PART_NUMBER step; a skipped
+      // number came straight from PART_NUMBER_TYPE.
+      return session.partNumberType === 'UNKNOWN'
+        ? WizardStep.PART_NUMBER_TYPE
+        : WizardStep.PART_NUMBER;
+    case WizardStep.PHOTOS:
+      return WizardStep.PRICE;
+    case WizardStep.BRAND:
+    case WizardStep.PROCESSING:
+      return null;
+  }
+}
+
+/**
+ * Move one step back. Only the `step` pointer moves — already-entered fields are
+ * PRESERVED (the requirement: going back must not lose data, and going forward
+ * again keeps everything). A value is simply overwritten if the seller re-enters
+ * it. Returns `stale` when there is no previous step (first step / processing),
+ * so a stray Back tap is ignored rather than corrupting the session.
+ */
+export function goBack(session: WizardSession): WizardResult {
+  const target = previousStep(session);
+  if (target === null) return STALE;
+  session.step = target;
+  return OK;
+}
+
+/**
+ * True when the session already carries processed, uploaded photos (the seller
+ * returned from the preview via "⬅️ Назад"). In that case editing text/price
+ * must NOT re-run the image pipeline: the PHOTOS step is already satisfied, so
+ * the flow reuses these assets and rebuilds the preview directly.
+ */
+export function hasProcessedPhotos(session: WizardSession): boolean {
+  return session.processedUrls.length > 0;
+}
+
+/**
+ * "🖼 Изменить фото": drop the carried-over photos so the PHOTOS step demands a
+ * fresh upload (which re-runs the full pipeline). Only the in-session references
+ * are cleared here — the caller deletes the old Cloudinary assets separately,
+ * since this pure module performs no I/O. Positions the session on PHOTOS.
+ */
+export function changePhotos(session: WizardSession): WizardResult {
+  session.processedUrls = [];
+  session.publicIds = [];
+  session.step = WizardStep.PHOTOS;
+  return OK;
+}
+
 // ── Keyboards & prompts ─────────────────────────────────────────────────────
+type InlineButton = ReturnType<typeof Markup.button.callback>;
 type InlineKeyboard = ReturnType<typeof Markup.inlineKeyboard>;
+
+/** The "⬅️ Назад" button, shown on every step that has a previous one. */
+const backButton = (): InlineButton =>
+  Markup.button.callback('⬅️ Назад', WIZ_BACK_ACTION);
+
+/**
+ * Assemble an inline keyboard from `rows`, appending a "⬅️ Назад" row iff the
+ * current step has a previous one (i.e. it is not the first step). This is the
+ * single place the Back button is attached, so every wizard keyboard — including
+ * the text steps that otherwise show no buttons — gets it consistently.
+ */
+function withBack(
+  session: WizardSession,
+  rows: InlineButton[][],
+): InlineKeyboard {
+  const all = previousStep(session) !== null ? [...rows, [backButton()]] : rows;
+  return Markup.inlineKeyboard(all);
+}
 
 /** Lay buttons out in rows of `perRow` (Telegram renders them as a grid). */
 function grid<T>(items: T[], perRow: number): T[][] {
@@ -358,42 +480,55 @@ function grid<T>(items: T[], perRow: number): T[][] {
   return rows;
 }
 
-export function brandKeyboard(): InlineKeyboard {
+export function brandKeyboard(session: WizardSession): InlineKeyboard {
   const buttons = WIZARD_BRANDS.map((b, i) =>
     Markup.button.callback(b.name, buildAction('b', i)),
   );
-  return Markup.inlineKeyboard(grid(buttons, 2));
+  return withBack(session, grid(buttons, 2));
 }
 
-export function modelKeyboard(brandName: string): InlineKeyboard {
+export function modelKeyboard(
+  session: WizardSession,
+  brandName: string,
+): InlineKeyboard {
   const models = WIZARD_BRANDS.find((b) => b.name === brandName)?.models ?? [];
   const buttons = models.map((m, i) =>
     Markup.button.callback(m, buildAction('m', i)),
   );
-  return Markup.inlineKeyboard(grid(buttons, 2));
+  return withBack(session, grid(buttons, 2));
 }
 
-export function categoryKeyboard(): InlineKeyboard {
+export function categoryKeyboard(session: WizardSession): InlineKeyboard {
   const buttons = WIZARD_CATEGORIES.map((c, i) =>
     Markup.button.callback(c.label, buildAction('c', i)),
   );
-  return Markup.inlineKeyboard(grid(buttons, 2));
+  return withBack(session, grid(buttons, 2));
 }
 
-export function descriptionKeyboard(): InlineKeyboard {
-  return Markup.inlineKeyboard([
+export function descriptionKeyboard(session: WizardSession): InlineKeyboard {
+  return withBack(session, [
     [Markup.button.callback('⏭ Пропустить', WIZ_DESCRIPTION_SKIP)],
   ]);
 }
 
-export function partNumberTypeKeyboard(): InlineKeyboard {
-  return Markup.inlineKeyboard([
+export function partNumberTypeKeyboard(session: WizardSession): InlineKeyboard {
+  return withBack(session, [
     [
       Markup.button.callback('OEM', buildAction('t', 'OEM')),
       Markup.button.callback('GM', buildAction('t', 'GM')),
     ],
     [Markup.button.callback('⏭ Пропустить', buildAction('t', 'SKIP'))],
   ]);
+}
+
+/**
+ * Keyboard for a step whose only control is "⬅️ Назад" — the text-input steps
+ * (title, part number, price) and the photo step, which previously had no
+ * keyboard at all. `withBack` omits the button on a first-with-no-previous step,
+ * yielding an empty keyboard (never rendered — see stepPrompt).
+ */
+export function backOnlyKeyboard(session: WizardSession): InlineKeyboard {
+  return withBack(session, []);
 }
 
 export interface StepPrompt {
@@ -405,45 +540,53 @@ export interface StepPrompt {
 export function stepPrompt(session: WizardSession): StepPrompt {
   switch (session.step) {
     case WizardStep.BRAND:
+      // First step — brandKeyboard() carries no Back button (nothing to go back to).
       return {
         text: '🚗 Выберите марку автомобиля:',
-        keyboard: brandKeyboard(),
+        keyboard: brandKeyboard(session),
       };
     case WizardStep.MODEL:
       return {
         text: `🚗 Марка: ${session.brand}.\nТеперь выберите модель:`,
-        keyboard: modelKeyboard(session.brand ?? ''),
+        keyboard: modelKeyboard(session, session.brand ?? ''),
       };
     case WizardStep.CATEGORY:
       return {
         text: '🗂 Выберите категорию запчасти:',
-        keyboard: categoryKeyboard(),
+        keyboard: categoryKeyboard(session),
       };
     case WizardStep.TITLE:
       return {
         text: '✏️ Введите название товара.\nПример: Передний амортизатор',
+        keyboard: backOnlyKeyboard(session),
       };
     case WizardStep.DESCRIPTION:
       return {
         text: '📝 Введите описание товара или нажмите «Пропустить».',
-        keyboard: descriptionKeyboard(),
+        keyboard: descriptionKeyboard(session),
       };
     case WizardStep.PART_NUMBER_TYPE:
       return {
         text: '🔢 Укажите тип номера детали или нажмите «Пропустить».',
-        keyboard: partNumberTypeKeyboard(),
+        keyboard: partNumberTypeKeyboard(session),
       };
     case WizardStep.PART_NUMBER:
       return {
         text: `🔢 Введите ${session.partNumberType} номер детали.\nПример: 96535062`,
+        keyboard: backOnlyKeyboard(session),
       };
     case WizardStep.PRICE:
-      return { text: '💰 Введите цену в сумах.\nПример: 250 000' };
+      return {
+        text: '💰 Введите цену в сумах.\nПример: 250 000',
+        keyboard: backOnlyKeyboard(session),
+      };
     case WizardStep.PHOTOS:
       return {
         text: '📸 Отправьте фотографии товара — одно фото или альбом до 10 фото.',
+        keyboard: backOnlyKeyboard(session),
       };
     case WizardStep.PROCESSING:
+      // Transient blocking state — no Back button (previousStep returns null).
       return { text: '⏳ Пожалуйста, подождите — идёт обработка фото.' };
   }
 }
