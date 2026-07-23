@@ -159,4 +159,54 @@ describe('AddressesService', () => {
       );
     });
   });
+
+  describe('getDefault', () => {
+    it('returns the default address (snake_case) when one exists', async () => {
+      prisma.address.findFirst.mockResolvedValue(row({ isDefault: true }));
+      const res = await service.getDefault('user_1');
+      expect(prisma.address.findFirst).toHaveBeenCalledWith({
+        where: { userId: 'user_1', isDefault: true },
+        orderBy: { createdAt: 'desc' },
+      });
+      expect(res).toEqual(expect.objectContaining({ id: 'addr_1', is_default: true }));
+    });
+
+    it('returns null when the user has no default address', async () => {
+      prisma.address.findFirst.mockResolvedValue(null);
+      expect(await service.getDefault('user_1')).toBeNull();
+    });
+  });
+
+  describe('upsertDefault (PATCH /v1/me address)', () => {
+    it('UPDATES the existing default in place — never creates a duplicate', async () => {
+      prisma.address.findFirst.mockResolvedValue(row({ isDefault: true }));
+      prisma.address.update.mockResolvedValue(row({ isDefault: true, fullText: 'New 5' }));
+
+      const res = await service.upsertDefault('user_1', { full_text: 'New 5', label: 'Home' });
+
+      expect(prisma.address.create).not.toHaveBeenCalled();
+      expect(prisma.address.update).toHaveBeenCalledWith({
+        where: { id: 'addr_1' },
+        data: expect.objectContaining({ fullText: 'New 5', label: 'Home' }),
+      });
+      expect(res.full_text).toBe('New 5');
+      expect(res.is_default).toBe(true);
+    });
+
+    it('CREATES a default (demoting strays) when the user has none', async () => {
+      prisma.address.findFirst.mockResolvedValue(null);
+      prisma.address.create.mockResolvedValue(row({ isDefault: true, fullText: 'First' }));
+
+      const res = await service.upsertDefault('user_1', { full_text: 'First' });
+
+      expect(prisma.address.updateMany).toHaveBeenCalledWith({
+        where: { userId: 'user_1', isDefault: true },
+        data: { isDefault: false },
+      });
+      expect(prisma.address.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ userId: 'user_1', isDefault: true, fullText: 'First' }) }),
+      );
+      expect(res.is_default).toBe(true);
+    });
+  });
 });

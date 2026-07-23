@@ -39,6 +39,9 @@ import { SmsModule } from '../sms/sms.module';
     MyIdService,
   ],
   controllers: [AuthController],
-  exports: [RolesGuard, JwtKeyService, JwtModule],
+  // OtpService + TokenService are exported so the profile module can reuse the
+  // same OTP issuance/verification and session-revocation logic for the
+  // change-phone flow (no duplicated auth logic).
+  exports: [RolesGuard, JwtKeyService, JwtModule, OtpService, TokenService],
 })
 export class AuthModule {}

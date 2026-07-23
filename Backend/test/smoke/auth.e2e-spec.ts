@@ -43,10 +43,15 @@ describe('Auth smoke', () => {
       const code = /(\d{6})/.exec(sms.sendSms.mock.calls[0][1])![1];
       prisma.phoneOtpRequest.findUnique.mockResolvedValue(created);
       prisma.phoneOtpRequest.update.mockResolvedValue({});
+      // Consume is an atomic guarded updateMany (single-use race protection).
+      prisma.phoneOtpRequest.updateMany.mockResolvedValue({ count: 1 });
 
       await expect(otp.verify(issued.requestId, phone, code)).resolves.toBeUndefined();
-      expect(prisma.phoneOtpRequest.update).toHaveBeenCalledWith(
-        expect.objectContaining({ data: expect.objectContaining({ consumedAt: expect.any(Date) }) }),
+      expect(prisma.phoneOtpRequest.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ consumedAt: null }),
+          data: expect.objectContaining({ consumedAt: expect.any(Date) }),
+        }),
       );
     });
 

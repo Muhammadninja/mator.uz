@@ -21,6 +21,18 @@ const RESEND_COOLDOWN_S = 60;
 const MAX_PER_HOUR = 5; // per MSISDN
 const MAX_ATTEMPTS = 5; // verify attempts per request
 
+/**
+ * OTP purposes. `login` is the default (phone sign-in/registration) and matches
+ * the schema default, so existing rows and callers are unchanged. `phone_change`
+ * isolates the "change my number" flow: a code minted for one purpose can never
+ * be consumed by the other (see {@link OtpService.verify}).
+ */
+export const OtpPurpose = {
+  LOGIN: 'login',
+  PHONE_CHANGE: 'phone_change',
+} as const;
+export type OtpPurpose = (typeof OtpPurpose)[keyof typeof OtpPurpose];
+
 export interface OtpIssued {
   requestId: string;
   expiresAt: Date;
@@ -95,8 +107,19 @@ export class OtpService {
     return undefined;
   }
 
-  /** Create + send a new OTP for a phone number (AuthPhoneEntryScreen). */
-  async request(phoneE164: string, channel: OtpChannel = OtpChannel.SMS): Promise<OtpIssued> {
+  /**
+   * Create + send a new OTP for a phone number (AuthPhoneEntryScreen).
+   *
+   * `purpose` defaults to `login` (the schema default), so the phone sign-in
+   * flow is unchanged. Other flows (e.g. changing the account phone number) pass
+   * a distinct purpose so their codes are namespaced and can only be verified by
+   * the matching flow.
+   */
+  async request(
+    phoneE164: string,
+    channel: OtpChannel = OtpChannel.SMS,
+    purpose: OtpPurpose = OtpPurpose.LOGIN,
+  ): Promise<OtpIssued> {
     await this.enforceHourlyCeiling(phoneE164);
 
     const code = this.generateCode();
@@ -107,6 +130,7 @@ export class OtpService {
         phoneE164,
         codeHash: this.hash(code),
         channel,
+        purpose,
         expiresAt,
       },
     });
@@ -166,10 +190,25 @@ export class OtpService {
   /**
    * Validate a code for a request. On success the request is consumed (single
    * use). Throws on every failure path with a specific status.
+   *
+   * When `purpose` is provided the stored request must have been minted for the
+   * same purpose, so a code issued for one flow (e.g. login) can never be
+   * redeemed by another (e.g. phone change). Omitting it preserves the original
+   * behaviour for existing callers.
    */
-  async verify(requestId: string, phoneE164: string, code: string): Promise<void> {
+  async verify(
+    requestId: string,
+    phoneE164: string,
+    code: string,
+    purpose?: OtpPurpose,
+  ): Promise<void> {
     const record = await this.prisma.phoneOtpRequest.findUnique({ where: { id: requestId } });
-    if (!record || record.phoneE164 !== phoneE164 || record.consumedAt) {
+    if (
+      !record ||
+      record.phoneE164 !== phoneE164 ||
+      record.consumedAt ||
+      (purpose !== undefined && record.purpose !== purpose)
+    ) {
       throw new BadRequestException('Invalid or already-used verification request');
     }
     if (record.expiresAt < new Date()) {
@@ -190,9 +229,40 @@ export class OtpService {
       throw new UnauthorizedException('Incorrect verification code');
     }
 
-    await this.prisma.phoneOtpRequest.update({
-      where: { id: record.id },
+    // Atomic single-use consume: the `consumedAt: null` guard means only the
+    // FIRST of two concurrent verifications of the same code wins (updates 1
+    // row); the loser updates 0 rows and is rejected. Closes the read-then-write
+    // race where a code could otherwise be redeemed twice (double-submit).
+    const consumed = await this.prisma.phoneOtpRequest.updateMany({
+      where: { id: record.id, consumedAt: null },
       data: { consumedAt: new Date() },
     });
+    if (consumed.count === 0) {
+      throw new BadRequestException('Invalid or already-used verification request');
+    }
+  }
+
+  /**
+   * Verify the most recent still-active OTP for a `(phone, purpose)` pair,
+   * without the caller having to carry a request_id. Used by flows whose
+   * confirm step only knows the phone + code (e.g. changing the account phone
+   * number). Resolves the newest unconsumed, unexpired request, then delegates
+   * to {@link verify} so every security rule (purpose isolation, attempt
+   * ceiling, single-use consume) is applied exactly once.
+   */
+  async verifyLatestForPhone(phoneE164: string, code: string, purpose: OtpPurpose): Promise<void> {
+    const record = await this.prisma.phoneOtpRequest.findFirst({
+      where: {
+        phoneE164,
+        purpose,
+        consumedAt: null,
+        expiresAt: { gt: new Date() },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!record) {
+      throw new BadRequestException('No active verification request for this phone. Please request a new code.');
+    }
+    await this.verify(record.id, phoneE164, code, purpose);
   }
 }
