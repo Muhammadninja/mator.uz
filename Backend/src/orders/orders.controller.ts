@@ -2,6 +2,7 @@ import {
   Controller,
   Post,
   Get,
+  Patch,
   Body,
   Param,
   Query,
@@ -12,9 +13,12 @@ import {
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { RolesGuard } from '../auth/guards/roles.guard';
+import { Roles } from '../auth/decorators/roles.decorator';
 import { OrdersService } from './orders.service';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { ListOrdersQueryDto } from './dto/list-orders.query.dto';
+import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 
 @ApiTags('Orders')
 @ApiBearerAuth('jwt')
@@ -41,5 +45,17 @@ export class OrdersController {
   @HttpCode(HttpStatus.OK)
   get(@Request() req: { user: { id: string } }, @Param('id') id: string) {
     return this.orders.getOrder(req.user.id, id);
+  }
+
+  // Operator status write. Server-authoritative state machine lives in the
+  // service; gated on the ADMIN (operator) role — a customer can't self-advance
+  // their own order. The class-level JwtAuthGuard authenticates; RolesGuard here
+  // enforces the role (403 otherwise).
+  @Patch(':id/status')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN')
+  @HttpCode(HttpStatus.OK)
+  updateStatus(@Param('id') id: string, @Body() dto: UpdateOrderStatusDto) {
+    return this.orders.updateStatus(id, dto);
   }
 }
