@@ -9,7 +9,7 @@ import {
   HttpStatus,
   BadRequestException,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
 import { PhoneAuthService } from './phone/phone-auth.service';
@@ -145,6 +145,22 @@ export class AuthController {
   async logout(@Body() dto: RefreshDto) {
     await this.tokens.revoke(this.resolveRefresh(dto));
     return { message: 'Logged out successfully' };
+  }
+
+  @Post('logout-all')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth('jwt')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Sign out of every device. Drops all refresh tokens and bumps the session version, so every access token already in flight — including the one used for this call — is rejected from the next request on.',
+  })
+  @ApiOkResponse({
+    schema: { example: { message: 'All sessions revoked', token_version: 3 } },
+  })
+  async logoutAll(@Request() req: { user: { id: string } }) {
+    const tokenVersion = await this.tokens.revokeAllSessions(req.user.id);
+    return { message: 'All sessions revoked', token_version: tokenVersion };
   }
 
   /** Resolve the refresh token from either camelCase or snake_case body key. */

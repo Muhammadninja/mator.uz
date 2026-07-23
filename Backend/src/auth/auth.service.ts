@@ -35,8 +35,13 @@ export class AuthService {
   // Existing email/Google/Apple endpoints keep their {accessToken, refreshToken}
   // shape, but tokens are now issued by the unified TokenService (RS256 access +
   // opaque rotating refresh).
-  private async generateTokens(userId: string, email: string | null, role: string) {
-    const session = await this.tokens.issueSession({ id: userId, email, role });
+  private async generateTokens(
+    userId: string,
+    email: string | null,
+    role: string,
+    tokenVersion: number,
+  ) {
+    const session = await this.tokens.issueSession({ id: userId, email, role, tokenVersion });
     return { accessToken: session.accessToken, refreshToken: session.refreshToken };
   }
 
@@ -48,7 +53,7 @@ export class AuthService {
   async googleLogin(dto: GoogleLoginDto) {
     const profile = await this.googleVerifier.verify(dto.idToken);
     const user = await this.socialIdentity.resolveUser(profile);
-    const tokens = await this.generateTokens(user.id, user.email, user.role);
+    const tokens = await this.generateTokens(user.id, user.email, user.role, user.tokenVersion);
     return { user: this.strip(user), ...tokens };
   }
 
@@ -58,7 +63,7 @@ export class AuthService {
       lastName: dto.lastName,
     });
     const user = await this.socialIdentity.resolveUser(profile);
-    const tokens = await this.generateTokens(user.id, user.email, user.role);
+    const tokens = await this.generateTokens(user.id, user.email, user.role, user.tokenVersion);
     return { user: this.strip(user), ...tokens };
   }
 
@@ -118,7 +123,7 @@ export class AuthService {
       });
     }
 
-    const tokens = await this.generateTokens(user.id, user.email, user.role);
+    const tokens = await this.generateTokens(user.id, user.email, user.role, user.tokenVersion);
     return { user: this.strip(user), ...tokens };
   }
 

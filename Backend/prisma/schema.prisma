@@ -397,6 +397,9 @@ model AppUser {
   language            Language   @default(UZ)
   myIdStatus          MyIdStatus @default(NOT_VERIFIED) @map("myid_status")
   transactionLimitUzs Decimal    @default(0) @map("transaction_limit_uzs") @db.Decimal(14, 2)
+  // Session version: every access token carries the value it was signed with;
+  // bumping it invalidates all outstanding access tokens on the next request.
+  tokenVersion        Int        @default(0) @map("token_version")
   createdAt           DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt           DateTime   @updatedAt @map("updated_at") @db.Timestamptz(3)
 
@@ -438,6 +441,10 @@ model RefreshToken {
   tokenHash  String    @unique @map("token_hash") @db.VarChar(64)
   userId     String    @map("user_id") @db.Uuid
   deviceId   String?   @map("device_id") @db.VarChar(64) // session<->device binding; null for web/email logins
+  // Session version this token was minted under. Rotation refuses a row whose
+  // version no longer matches the account, so a refresh token created in the
+  // race window of a revocation cannot revive the session it belonged to.
+  tokenVersion Int     @default(0) @map("token_version")
   expiresAt  DateTime  @map("expires_at") @db.Timestamptz(3)
   consumedAt DateTime? @map("consumed_at") @db.Timestamptz(3) // soft-rotation marker for reuse detection
   createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)

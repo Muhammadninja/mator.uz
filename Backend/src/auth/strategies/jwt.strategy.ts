@@ -27,7 +27,17 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   async validate(payload: JwtPayload) {
     const user = await this.prisma.appUser.findUnique({ where: { id: payload.sub } });
     if (!user) throw new UnauthorizedException();
-    const { passwordHash: _, ...safe } = user;
+    // Session versioning — runs on EVERY authenticated request, not just login:
+    // a bumped AppUser.tokenVersion (logout-all, and any future security event)
+    // invalidates every access token signed with an older version, instantly.
+    // Legacy tokens minted before this claim existed carry no version and are
+    // therefore rejected too; clients recover silently via /v1/auth/refresh.
+    if (payload.tokenVersion !== user.tokenVersion) {
+      throw new UnauthorizedException('Token revoked');
+    }
+    // tokenVersion is internal bookkeeping — drop it with the hash so `req.user`
+    // (and therefore GET /v1/auth/me) keeps exactly the shape it had before.
+    const { passwordHash: _, tokenVersion: __, ...safe } = user;
     return safe;
   }
 }

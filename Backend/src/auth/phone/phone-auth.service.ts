@@ -60,7 +60,7 @@ export class PhoneAuthService {
     const user = await this.findOrCreateByPhone(phoneE164);
     const device = await this.bindDevice(user.id, dto.device);
     const session = await this.tokens.issueSession(
-      { id: user.id, email: user.email, role: user.role },
+      { id: user.id, email: user.email, role: user.role, tokenVersion: user.tokenVersion },
       { deviceId: device?.id ?? null },
     );
 

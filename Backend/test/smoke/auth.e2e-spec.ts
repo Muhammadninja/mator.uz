@@ -1,6 +1,10 @@
 import { ForbiddenException, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
+import { AuthController } from '../../src/auth/auth.controller';
+import { JwtStrategy } from '../../src/auth/strategies/jwt.strategy';
+import { JwtPayload } from '../../src/auth/interfaces/jwt-payload.interface';
 import { OtpService } from '../../src/auth/phone/otp.service';
+import { PhoneChangeService } from '../../src/user/phone-change.service';
 import { PhoneAuthService } from '../../src/auth/phone/phone-auth.service';
 import { MyIdService } from '../../src/auth/myid/myid.service';
 import { AuthService } from '../../src/auth/auth.service';
@@ -277,6 +281,333 @@ describe('Auth smoke', () => {
 
       expect(resolved.id).toBe('usr_known');
       expect(prisma.appUser.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Token revocation (session versioning)', () => {
+    /** Sign a real RS256 access token, then verify it back into its payload. */
+    async function issueAndDecode(user: { id: string; tokenVersion: number }) {
+      const { tokens, keys } = realTokens(prisma);
+      const jwt = new JwtService({});
+      const { accessToken } = await tokens.issueSession({
+        id: user.id,
+        email: null,
+        role: 'USER',
+        tokenVersion: user.tokenVersion,
+      });
+      const payload = await jwt.verifyAsync<JwtPayload>(accessToken, {
+        algorithms: ['RS256'],
+        publicKey: keys.publicKey,
+        issuer: 'mator',
+        audience: 'mator-app',
+      });
+      return { tokens, keys, payload };
+    }
+
+    it('stamps the account session version into every issued access token', async () => {
+      const { payload } = await issueAndDecode({ id: 'usr_v', tokenVersion: 7 });
+      expect(payload.sub).toBe('usr_v');
+      expect(payload.tokenVersion).toBe(7);
+    });
+
+    it('accepts a token whose version still matches the account', async () => {
+      const { keys, payload } = await issueAndDecode({ id: 'usr_v', tokenVersion: 3 });
+      prisma.appUser.findUnique.mockResolvedValue(
+        buildAppUser({ id: 'usr_v', tokenVersion: 3, passwordHash: 'secret' }),
+      );
+
+      const strategy = new JwtStrategy(fakeConfig(), prisma, keys);
+      const authed: any = await strategy.validate(payload);
+      expect(authed.id).toBe('usr_v');
+      expect(authed.passwordHash).toBeUndefined();
+    });
+
+    it('rejects a token issued before the version was bumped', async () => {
+      const { keys, payload } = await issueAndDecode({ id: 'usr_v', tokenVersion: 3 });
+      // The account has since been bumped (logout-all / security event).
+      prisma.appUser.findUnique.mockResolvedValue(
+        buildAppUser({ id: 'usr_v', tokenVersion: 4 }),
+      );
+
+      const strategy = new JwtStrategy(fakeConfig(), prisma, keys);
+      await expect(strategy.validate(payload)).rejects.toBeInstanceOf(UnauthorizedException);
+      await expect(strategy.validate(payload)).rejects.toThrow('Token revoked');
+    });
+
+    // ── Refresh-token version binding ───────────────────────────────────────
+    // Rotation reads the account outside a transaction, so a revocation can
+    // land between that read and the new refresh row being written. Binding the
+    // row to the version it was minted under makes such a row provably stale.
+    it('stamps the session version onto the refresh row it creates', async () => {
+      const { tokens } = realTokens(prisma);
+      await tokens.issueSession({ id: 'usr_v', email: null, role: 'USER', tokenVersion: 4 });
+
+      expect(prisma.refreshToken.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ userId: 'usr_v', tokenVersion: 4 }),
+      });
+    });
+
+    it('rotates normally while the refresh row and the account agree', async () => {
+      const { tokens } = realTokens(prisma);
+      prisma.refreshToken.findUnique.mockResolvedValue({
+        id: 1,
+        userId: 'usr_v',
+        deviceId: 'dev_1',
+        tokenVersion: 2,
+        consumedAt: null,
+        expiresAt: new Date(Date.now() + 60_000),
+        user: buildAppUser({ id: 'usr_v', tokenVersion: 2 }),
+      });
+      prisma.refreshToken.update.mockResolvedValue({});
+
+      const rotated = await tokens.rotate('rt_valid');
+      expect(rotated.accessToken.split('.')).toHaveLength(3);
+      expect(rotated.refreshToken).toMatch(/^rt_/);
+      // Consumed (not deleted), so a later replay is still detectable as reuse.
+      expect(prisma.refreshToken.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: { consumedAt: expect.any(Date) } }),
+      );
+      // The replacement row carries the account's current version.
+      expect(prisma.refreshToken.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ tokenVersion: 2 }),
+      });
+    });
+
+    it('rejects a refresh token minted before logout-all bumped the account', async () => {
+      const { tokens } = realTokens(prisma);
+      prisma.refreshToken.findUnique.mockResolvedValue({
+        id: 1,
+        userId: 'usr_v',
+        tokenVersion: 0, // minted pre-revocation
+        consumedAt: null,
+        expiresAt: new Date(Date.now() + 60_000),
+        user: buildAppUser({ id: 'usr_v', tokenVersion: 1 }), // logout-all ran
+      });
+      prisma.refreshToken.delete.mockResolvedValue({});
+
+      await expect(tokens.rotate('rt_stale')).rejects.toThrow('Refresh token revoked');
+      // No replacement session is minted, and the dead row is swept.
+      expect(prisma.refreshToken.create).not.toHaveBeenCalled();
+      expect(prisma.refreshToken.delete).toHaveBeenCalledWith({ where: { id: 1 } });
+    });
+
+    it('a refresh row created in the revocation race cannot revive the session', async () => {
+      const { tokens } = realTokens(prisma);
+      // Replay the race: rotate() read the account at version 0, logout-all then
+      // swept + bumped to 1, and only afterwards did rotate() write its row —
+      // so the row survived the sweep, carrying the pre-bump version.
+      let raceRow: any;
+      prisma.refreshToken.create.mockImplementation(({ data }: any) => {
+        raceRow = { id: 9, ...data, consumedAt: null };
+        return Promise.resolve(raceRow);
+      });
+      await tokens.issueSession({ id: 'usr_v', email: null, role: 'USER', tokenVersion: 0 });
+      expect(raceRow.tokenVersion).toBe(0);
+
+      // The attacker now presents that surviving refresh token.
+      prisma.refreshToken.findUnique.mockResolvedValue({
+        ...raceRow,
+        user: buildAppUser({ id: 'usr_v', tokenVersion: 1 }),
+      });
+      prisma.refreshToken.delete.mockResolvedValue({});
+      prisma.refreshToken.create.mockClear();
+
+      await expect(tokens.rotate('rt_race')).rejects.toThrow('Refresh token revoked');
+      expect(prisma.refreshToken.create).not.toHaveBeenCalled();
+    });
+
+    // ── Reuse detection = full compromise ───────────────────────────────────
+    // A replayed refresh token means the credential leaked, so it escalates to
+    // the same revocation logout-all performs — not just a refresh-family wipe,
+    // which would leave the attacker's access token alive for its whole TTL.
+    it('refresh reuse revokes every session, not just the refresh family', async () => {
+      const { tokens, keys } = realTokens(prisma);
+      const jwt = new JwtService({});
+      // The token the attacker (or victim) is already holding.
+      const { accessToken } = await tokens.issueSession({
+        id: 'usr_v',
+        email: null,
+        role: 'USER',
+        tokenVersion: 0,
+      });
+      const disconnected: string[] = [];
+      tokens.onSessionsRevoked((userId) => disconnected.push(userId));
+
+      prisma.refreshToken.findUnique.mockResolvedValue({
+        id: 1,
+        userId: 'usr_v',
+        tokenVersion: 0,
+        consumedAt: new Date(), // already rotated once -> replay
+        expiresAt: new Date(Date.now() + 60_000),
+        user: buildAppUser({ id: 'usr_v', tokenVersion: 0 }),
+      });
+      prisma.refreshToken.deleteMany.mockResolvedValue({ count: 2 });
+      prisma.appUser.update.mockResolvedValue({ tokenVersion: 1 });
+      prisma.refreshToken.create.mockClear();
+
+      await expect(tokens.rotate('rt_replayed')).rejects.toThrow(
+        'Refresh token reuse detected',
+      );
+
+      // 1. refresh family dropped
+      expect(prisma.refreshToken.deleteMany).toHaveBeenCalledWith({
+        where: { userId: 'usr_v' },
+      });
+      // 2. access tokens killed via the version bump
+      expect(prisma.appUser.update).toHaveBeenCalledWith({
+        where: { id: 'usr_v' },
+        data: { tokenVersion: { increment: 1 } },
+        select: { tokenVersion: true },
+      });
+      // 3. realtime sessions revoked
+      expect(disconnected).toEqual(['usr_v']);
+      // …and no replacement session is handed out.
+      expect(prisma.refreshToken.create).not.toHaveBeenCalled();
+
+      // The access token minted before the replay no longer authenticates.
+      const payload = await jwt.verifyAsync<JwtPayload>(accessToken, {
+        algorithms: ['RS256'],
+        publicKey: keys.publicKey,
+        issuer: 'mator',
+        audience: 'mator-app',
+      });
+      prisma.appUser.findUnique.mockResolvedValue(
+        buildAppUser({ id: 'usr_v', tokenVersion: 1 }), // post-revocation state
+      );
+      const strategy = new JwtStrategy(fakeConfig(), prisma, keys);
+      await expect(strategy.validate(payload)).rejects.toThrow('Token revoked');
+    });
+
+    it('incrementTokenVersion bumps atomically and returns the new version', async () => {
+      const { tokens } = realTokens(prisma);
+      prisma.appUser.update.mockResolvedValue({ tokenVersion: 5 });
+
+      await expect(tokens.incrementTokenVersion('usr_v')).resolves.toBe(5);
+      expect(prisma.appUser.update).toHaveBeenCalledWith({
+        where: { id: 'usr_v' },
+        data: { tokenVersion: { increment: 1 } },
+        select: { tokenVersion: true },
+      });
+    });
+
+    it('revokeAllSessions drops the refresh family BEFORE bumping the version', async () => {
+      const { tokens } = realTokens(prisma);
+      prisma.refreshToken.deleteMany.mockResolvedValue({ count: 2 });
+      prisma.appUser.update.mockResolvedValue({ tokenVersion: 1 });
+
+      await expect(tokens.revokeAllSessions('usr_v')).resolves.toBe(1);
+      expect(prisma.refreshToken.deleteMany).toHaveBeenCalledWith({ where: { userId: 'usr_v' } });
+      // Order matters: a refresh racing in between would only mint a token
+      // carrying the stale version, which the next request rejects.
+      const deleteOrder = prisma.refreshToken.deleteMany.mock.invocationCallOrder[0];
+      const bumpOrder = prisma.appUser.update.mock.invocationCallOrder[0];
+      expect(deleteOrder).toBeLessThan(bumpOrder);
+    });
+
+    it('revokeAllSessions notifies transports once the writes are committed', async () => {
+      const { tokens } = realTokens(prisma);
+      prisma.refreshToken.deleteMany.mockResolvedValue({ count: 1 });
+      prisma.appUser.update.mockResolvedValue({ tokenVersion: 1 });
+      const disconnected: string[] = [];
+      tokens.onSessionsRevoked((userId) => disconnected.push(userId));
+
+      await tokens.revokeAllSessions('usr_v');
+      expect(disconnected).toEqual(['usr_v']);
+    });
+
+    it('revokeAllSessions enlists in a caller transaction and defers the notify', async () => {
+      const { tokens } = realTokens(prisma);
+      const tx = { refreshToken: { deleteMany: jest.fn() }, appUser: { update: jest.fn() } };
+      tx.appUser.update.mockResolvedValue({ tokenVersion: 3 });
+      const disconnected: string[] = [];
+      tokens.onSessionsRevoked((userId) => disconnected.push(userId));
+
+      await expect(tokens.revokeAllSessions('usr_v', tx as any)).resolves.toBe(3);
+      // Both writes go through the caller's transaction, not the base client.
+      expect(tx.refreshToken.deleteMany).toHaveBeenCalledWith({ where: { userId: 'usr_v' } });
+      expect(tx.appUser.update).toHaveBeenCalled();
+      expect(prisma.refreshToken.deleteMany).not.toHaveBeenCalled();
+      expect(prisma.appUser.update).not.toHaveBeenCalled();
+      // Deferred: firing pre-commit would let a client reconnect against state
+      // that still says its token is good. The caller fires it after commit.
+      expect(disconnected).toEqual([]);
+      tokens.notifySessionsRevoked('usr_v');
+      expect(disconnected).toEqual(['usr_v']);
+    });
+
+    it('a failing revocation listener never breaks the revocation', async () => {
+      const { tokens } = realTokens(prisma);
+      prisma.refreshToken.deleteMany.mockResolvedValue({ count: 1 });
+      prisma.appUser.update.mockResolvedValue({ tokenVersion: 1 });
+      tokens.onSessionsRevoked(() => {
+        throw new Error('socket layer exploded');
+      });
+      const reached: string[] = [];
+      tokens.onSessionsRevoked((userId) => reached.push(userId));
+
+      await expect(tokens.revokeAllSessions('usr_v')).resolves.toBe(1);
+      expect(reached).toEqual(['usr_v']); // later listeners still run
+    });
+
+    it('a confirmed phone change kills the access tokens issued before it', async () => {
+      const { tokens, keys } = realTokens(prisma);
+      const jwt = new JwtService({});
+      const verify = (token: string) =>
+        jwt.verifyAsync<JwtPayload>(token, {
+          algorithms: ['RS256'],
+          publicKey: keys.publicKey,
+          issuer: 'mator',
+          audience: 'mator-app',
+        });
+
+      // The session the user is holding while they change their number.
+      const old = await tokens.issueSession({
+        id: 'usr_v',
+        email: null,
+        role: 'USER',
+        tokenVersion: 0,
+      });
+
+      const otp = { verifyLatestForPhone: jest.fn().mockResolvedValue(undefined) };
+      const phoneChange = new PhoneChangeService(prisma, otp as any, tokens);
+      const before = buildAppUser({ id: 'usr_v', phoneE164: '+998901112233' });
+      prisma.appUser.findUnique
+        .mockResolvedValueOnce(before) // caller, before the transaction
+        .mockResolvedValueOnce(before) // re-read under the row lock
+        .mockResolvedValueOnce(null); // new number is free
+      prisma.appUser.update
+        .mockResolvedValueOnce(
+          buildAppUser({ id: 'usr_v', phoneE164: '+998907778899', tokenVersion: 0 }),
+        ) // the phone update still reads the PRE-bump version
+        .mockResolvedValueOnce({ tokenVersion: 1 }); // incrementTokenVersion
+      prisma.refreshToken.deleteMany.mockResolvedValue({ count: 1 });
+
+      const res = await phoneChange.confirm('usr_v', '+998907778899', '123456');
+
+      // The account is now at version 1 — that is what every later request reads.
+      prisma.appUser.findUnique.mockResolvedValue(
+        buildAppUser({ id: 'usr_v', tokenVersion: 1 }),
+      );
+      const strategy = new JwtStrategy(fakeConfig(), prisma, keys);
+
+      // Old token: signature and expiry are still fine, the version is not.
+      await expect(strategy.validate(await verify(old.accessToken))).rejects.toThrow(
+        'Token revoked',
+      );
+      // The pair handed back by the flow carries the bumped version and works,
+      // so the client swaps tokens and never sees a forced re-login.
+      const fresh = await verify(res.tokens.access_token);
+      expect(fresh.tokenVersion).toBe(1);
+      await expect(strategy.validate(fresh)).resolves.toMatchObject({ id: 'usr_v' });
+    });
+
+    it('POST /v1/auth/logout-all revokes every session for the caller', async () => {
+      const tokens = { revokeAllSessions: jest.fn().mockResolvedValue(2) };
+      const controller = new AuthController({} as any, {} as any, tokens as any);
+
+      const res = await controller.logoutAll({ user: { id: 'usr_v' } });
+      expect(tokens.revokeAllSessions).toHaveBeenCalledWith('usr_v');
+      expect(res).toEqual({ message: 'All sessions revoked', token_version: 2 });
     });
   });
 });

@@ -2,15 +2,17 @@ import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import type { IncomingMessage } from 'http';
+import { PrismaService } from '../prisma/prisma.service';
 import { JwtKeyService } from '../auth/tokens/jwt-key.service';
 import { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 
 /**
  * Authenticates a WebSocket upgrade by verifying the access token the same way
- * the HTTP JwtStrategy does (RS256, issuer `mator`, audience). The token is
- * taken from the `Authorization: Bearer` header first (preferred: query strings
- * are logged by proxies/Nginx and end up in access logs), falling back to the
- * `token` query param for clients that cannot set headers on the WS handshake.
+ * the HTTP JwtStrategy does (RS256, issuer `mator`, audience, session version).
+ * The token is taken from the `Authorization: Bearer` header first (preferred:
+ * query strings are logged by proxies/Nginx and end up in access logs), falling
+ * back to the `token` query param for clients that cannot set headers on the WS
+ * handshake.
  */
 @Injectable()
 export class WsAuthService {
@@ -19,6 +21,7 @@ export class WsAuthService {
   constructor(
     private readonly jwt: JwtService,
     private readonly keys: JwtKeyService,
+    private readonly prisma: PrismaService,
     config: ConfigService,
   ) {
     this.audience = config.get<string>('JWT_AUDIENCE') ?? 'mator-app';
@@ -28,18 +31,29 @@ export class WsAuthService {
   async authenticate(request: IncomingMessage): Promise<string> {
     const token = this.extractToken(request);
     if (!token) throw new UnauthorizedException('Missing token');
+    let payload: JwtPayload;
     try {
-      const payload = await this.jwt.verifyAsync<JwtPayload>(token, {
+      payload = await this.jwt.verifyAsync<JwtPayload>(token, {
         algorithms: ['RS256'],
         publicKey: this.keys.publicKey,
         issuer: 'mator',
         audience: this.audience,
       });
       if (!payload.sub) throw new UnauthorizedException();
-      return payload.sub;
     } catch {
       throw new UnauthorizedException('Invalid token');
     }
+
+    // Same revocation check the HTTP JwtStrategy runs: a revoked access token
+    // must not be able to open a (long-lived) realtime channel either.
+    const user = await this.prisma.appUser.findUnique({
+      where: { id: payload.sub },
+      select: { tokenVersion: true },
+    });
+    if (!user || payload.tokenVersion !== user.tokenVersion) {
+      throw new UnauthorizedException('Token revoked');
+    }
+    return payload.sub;
   }
 
   private extractToken(request: IncomingMessage): string | null {

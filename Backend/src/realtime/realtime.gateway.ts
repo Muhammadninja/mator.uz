@@ -4,9 +4,10 @@ import {
   OnGatewayInit,
   WebSocketGateway,
 } from '@nestjs/websockets';
-import { Logger } from '@nestjs/common';
+import { Logger, OnModuleInit } from '@nestjs/common';
 import type { IncomingMessage } from 'http';
 import { WebSocket, WebSocketServer, RawData } from 'ws';
+import { TokenService } from '../auth/tokens/token.service';
 import { WsAuthService } from './ws-auth.service';
 
 const HEARTBEAT_MS = 30_000;
@@ -58,6 +59,7 @@ const CLOSE_FORBIDDEN_CHANNEL = 4403;
 const CLOSE_BAD_REQUEST = 4400;
 const CLOSE_TOO_MANY_CONNECTIONS = 4408; // per-user simultaneous cap reached
 const CLOSE_RATE_LIMITED = 4429; // handshake rate limit (mirrors HTTP 429)
+const CLOSE_SESSION_REVOKED = 4401; // sessions revoked while the socket was open
 
 /**
  * Native-`ws` realtime gateway. Clients connect to
@@ -70,7 +72,11 @@ const CLOSE_RATE_LIMITED = 4429; // handshake rate limit (mirrors HTTP 429)
 // forwarded verbatim to the underlying `ws.Server` constructor by `WsAdapter`.
 @WebSocketGateway({ path: '/realtime', maxPayload: MAX_PAYLOAD_BYTES })
 export class RealtimeGateway
-  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect
+  implements
+    OnGatewayInit,
+    OnGatewayConnection,
+    OnGatewayDisconnect,
+    OnModuleInit
 {
   private readonly logger = new Logger(RealtimeGateway.name);
   // userId -> live sockets (a user may have several devices/tabs connected).
@@ -80,7 +86,21 @@ export class RealtimeGateway
   private readonly handshakes = new Map<string, number[]>();
   private heartbeat?: ReturnType<typeof setInterval>;
 
-  constructor(private readonly wsAuth: WsAuthService) {}
+  constructor(
+    private readonly wsAuth: WsAuthService,
+    private readonly tokens: TokenService,
+  ) {}
+
+  /**
+   * The token check in {@link WsAuthService} only runs at handshake, so an
+   * already-open socket would otherwise keep streaming after its session was
+   * revoked. Subscribing here closes that gap without AuthModule needing to
+   * know the realtime transport exists (the dependency stays one-way:
+   * RealtimeModule -> AuthModule).
+   */
+  onModuleInit(): void {
+    this.tokens.onSessionsRevoked((userId) => this.disconnectUser(userId));
+  }
 
   afterInit(server: WebSocketServer): void {
     this.heartbeat = setInterval(() => this.sweep(), HEARTBEAT_MS);
@@ -141,6 +161,25 @@ export class RealtimeGateway
     const set = this.sockets.get(client.userId);
     set?.delete(client);
     if (set && set.size === 0) this.sockets.delete(client.userId);
+  }
+
+  /**
+   * Close every live socket of a user whose sessions were revoked, and forget
+   * them. Their access token is already dead for HTTP; this stops the realtime
+   * channel it opened before the revocation. Returns how many were closed.
+   */
+  disconnectUser(userId: string): number {
+    const set = this.sockets.get(userId);
+    if (!set) return 0;
+    for (const client of set) {
+      this.reject(client, CLOSE_SESSION_REVOKED, 'session_revoked');
+    }
+    // Drop the bookkeeping now rather than waiting for each close event.
+    this.sockets.delete(userId);
+    this.logger.log(
+      `WS disconnected ${set.size} socket(s) for user=${userId} (session revoked)`,
+    );
+    return set.size;
   }
 
   /** Push a garage event to every live socket of the given user. */
