@@ -11,5 +11,8 @@ import { AddressesController } from './addresses.controller';
   imports: [AuthModule],
   providers: [AddressesService],
   controllers: [AddressesController],
+  // Exported so the profile module (PATCH /v1/me) can reuse the same
+  // address persistence/validation logic instead of duplicating it.
+  exports: [AddressesService],
 })
 export class AddressesModule {}

@@ -7,6 +7,22 @@ import { UpdateAddressDto } from './dto/update-address.dto';
 import { presentAddress } from './address.presenter';
 
 /**
+ * Structural shape accepted by {@link AddressesService.upsertDefault}. Matches
+ * the snake_case address contract (and CreateAddressDto minus `is_default`),
+ * declared here so callers in other modules (e.g. the profile PATCH /v1/me) can
+ * reuse this method without a cross-module DTO import / circular dependency.
+ */
+export interface AddressInput {
+  full_text: string;
+  label?: string;
+  region_code?: string;
+  district?: string;
+  street?: string;
+  lat?: number;
+  lng?: number;
+}
+
+/**
  * User address CRUD. Every operation is scoped to the authenticated user — a
  * user can only read/update/delete their own addresses. Default-address changes
  * are atomic (a single transaction demotes the others and promotes the target),
@@ -26,6 +42,69 @@ export class AddressesService {
       orderBy: [{ isDefault: 'desc' }, { createdAt: 'desc' }],
     });
     return { items: addresses.map(presentAddress) };
+  }
+
+  /** The user's default address, or null when they have none. */
+  async getDefault(userId: string) {
+    const address = await this.prisma.address.findFirst({
+      where: { userId, isDefault: true },
+      orderBy: { createdAt: 'desc' },
+    });
+    return address ? presentAddress(address) : null;
+  }
+
+  /**
+   * Upsert the caller's single DEFAULT address (used by PATCH /v1/me). If a
+   * default already exists it is updated in place; otherwise a new default is
+   * created. This guarantees at most one default and never spawns duplicates for
+   * the profile's "one address" surface, while still storing into the same
+   * Address table the checkout/address endpoints use (single source of truth).
+   */
+  async upsertDefault(userId: string, dto: AddressInput) {
+    const existing = await this.prisma.address.findFirst({
+      where: { userId, isDefault: true },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (existing) {
+      const updated = await this.prisma.address.update({
+        where: { id: existing.id },
+        data: {
+          fullText: dto.full_text,
+          label: dto.label,
+          regionCode: dto.region_code,
+          district: dto.district,
+          street: dto.street,
+          lat: dto.lat,
+          lng: dto.lng,
+        },
+      });
+      return presentAddress(updated);
+    }
+
+    // No default yet: create one (demoting any stray defaults defensively so the
+    // single-default invariant always holds).
+    const created = await this.prisma.$transaction(async (tx) => {
+      await tx.address.updateMany({
+        where: { userId, isDefault: true },
+        data: { isDefault: false },
+      });
+      return tx.address.create({
+        data: {
+          id: prefixedId(IdPrefix.ADDRESS),
+          userId,
+          fullText: dto.full_text,
+          label: dto.label,
+          regionCode: dto.region_code,
+          district: dto.district,
+          street: dto.street,
+          lat: dto.lat,
+          lng: dto.lng,
+          isDefault: true,
+        },
+      });
+    });
+    return presentAddress(created);
   }
 
   /** Create an address. First address for a user always becomes the default. */

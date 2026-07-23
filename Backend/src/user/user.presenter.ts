@@ -1,7 +1,18 @@
 import type { AppUser } from '@prisma/client';
+import type { presentAddress } from '../addresses/address.presenter';
 
-/** Map an AppUser row to the buyer-app profile shape (snake_case, no secrets). */
-export function presentMe(user: AppUser) {
+type PresentedAddress = ReturnType<typeof presentAddress>;
+
+/**
+ * Map an AppUser row to the buyer-app profile shape (snake_case, no secrets).
+ * `address` is the user's default address (or null when they have none); it is
+ * sourced from the shared Address table via AddressesService, not stored on the
+ * user, so there is a single source of truth for addresses.
+ */
+export function presentMe(
+  user: AppUser,
+  address: PresentedAddress | null = null,
+) {
   return {
     id: user.id,
     email: user.email,
@@ -17,6 +28,7 @@ export function presentMe(user: AppUser) {
     language: user.language,
     myid_status: user.myIdStatus.toLowerCase(),
     transaction_limit_uzs: Number(user.transactionLimitUzs),
+    address,
     created_at: user.createdAt.toISOString(),
     updated_at: user.updatedAt.toISOString(),
   };

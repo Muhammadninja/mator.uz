@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { v2 as cloudinary, UploadApiResponse } from 'cloudinary';
+import { CloudinaryFolder } from '../common/image.constants';
 
 /** A successfully uploaded asset: its public URL and the id used to delete it. */
 export interface UploadedImage {
@@ -22,7 +23,7 @@ export class CloudinaryService implements OnModuleInit {
     });
   }
 
-  async uploadBuffer(buffer: Buffer, folder = 'mator/products'): Promise<UploadedImage> {
+  async uploadBuffer(buffer: Buffer, folder: string = CloudinaryFolder.PRODUCTS): Promise<UploadedImage> {
     return new Promise((resolve, reject) => {
       cloudinary.uploader
         .upload_stream({ folder, resource_type: 'image', format: 'png' }, (err, result: UploadApiResponse) => {

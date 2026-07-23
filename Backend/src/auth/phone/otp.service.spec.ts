@@ -5,7 +5,7 @@
 // stored hash to prove the security path is untouched by the dev-mode work.
 
 import { OtpChannel } from '@prisma/client';
-import { OtpService } from './otp.service';
+import { OtpService, OtpPurpose } from './otp.service';
 
 function makePrismaMock() {
   return {
@@ -13,7 +13,10 @@ function makePrismaMock() {
       count: jest.fn().mockResolvedValue(0),
       create: jest.fn(),
       findUnique: jest.fn(),
+      findFirst: jest.fn(),
       update: jest.fn().mockResolvedValue({}),
+      // Atomic single-use consume returns the number of rows updated (1 = won).
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     },
   };
 }
@@ -137,9 +140,30 @@ describe('OtpService — AUTH_DEV_MODE', () => {
         service.verify('otp_test', '+998901234567', issued.devOtpCode!),
       ).resolves.toBeUndefined();
 
-      // Request marked consumed exactly as before.
-      const last = prisma.phoneOtpRequest.update.mock.calls.at(-1)![0];
-      expect(last.data.consumedAt).toEqual(expect.any(Date));
+      // Request atomically consumed: updateMany guarded on consumedAt: null.
+      const consume = prisma.phoneOtpRequest.updateMany.mock.calls.at(-1)![0];
+      expect(consume.where).toEqual({ id: 'otp_test', consumedAt: null });
+      expect(consume.data.consumedAt).toEqual(expect.any(Date));
+    });
+
+    it('rejects a concurrent double-submit (consume updates 0 rows)', async () => {
+      const { service, prisma } = build(true);
+      const issued = await service.request('+998901234567');
+      const persisted = prisma.phoneOtpRequest.create.mock.calls[0][0].data;
+      prisma.phoneOtpRequest.findUnique.mockResolvedValue({
+        id: 'otp_test',
+        phoneE164: '+998901234567',
+        codeHash: persisted.codeHash,
+        consumedAt: null,
+        attempts: 0,
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000),
+      });
+      // Simulate the losing racer: the row was already consumed concurrently.
+      prisma.phoneOtpRequest.updateMany.mockResolvedValue({ count: 0 });
+
+      await expect(
+        service.verify('otp_test', '+998901234567', issued.devOtpCode!),
+      ).rejects.toThrow();
     });
 
     it('rejects an incorrect code and increments attempts', async () => {
@@ -156,6 +180,75 @@ describe('OtpService — AUTH_DEV_MODE', () => {
       await expect(service.verify('otp_test', '+998901234567', '000000')).rejects.toThrow();
       const last = prisma.phoneOtpRequest.update.mock.calls.at(-1)![0];
       expect(last.data.attempts).toEqual({ increment: 1 });
+    });
+  });
+
+  describe('purpose isolation (phone change vs login)', () => {
+    it('request() persists the given purpose (defaulting is handled by the schema)', async () => {
+      const { service, prisma } = build(false);
+      await service.request('+998901234567', OtpChannel.SMS, OtpPurpose.PHONE_CHANGE);
+      const persisted = prisma.phoneOtpRequest.create.mock.calls[0][0].data;
+      expect(persisted.purpose).toBe('phone_change');
+    });
+
+    it('verify() rejects a code whose stored purpose does not match', async () => {
+      const { service, prisma } = build(false);
+      // A login-purpose record cannot be redeemed by the phone-change flow.
+      prisma.phoneOtpRequest.findUnique.mockResolvedValue({
+        id: 'otp_test',
+        phoneE164: '+998901234567',
+        purpose: 'login',
+        codeHash: 'a'.repeat(64),
+        consumedAt: null,
+        attempts: 0,
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000),
+      });
+      await expect(
+        service.verify('otp_test', '+998901234567', '123456', OtpPurpose.PHONE_CHANGE),
+      ).rejects.toThrow();
+    });
+
+    it('verifyLatestForPhone() resolves the newest matching request and consumes it', async () => {
+      // Issue a phone-change code, capture its hash, then verify by phone only.
+      const { service, prisma } = build(true);
+      const issued = await service.request('+998901234567', OtpChannel.SMS, OtpPurpose.PHONE_CHANGE);
+      const persisted = prisma.phoneOtpRequest.create.mock.calls[0][0].data;
+
+      prisma.phoneOtpRequest.findFirst.mockResolvedValue({
+        id: 'otp_test',
+        phoneE164: '+998901234567',
+        purpose: 'phone_change',
+        codeHash: persisted.codeHash,
+        consumedAt: null,
+        attempts: 0,
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000),
+      });
+      // verify() re-reads by id via findUnique.
+      prisma.phoneOtpRequest.findUnique.mockResolvedValue({
+        id: 'otp_test',
+        phoneE164: '+998901234567',
+        purpose: 'phone_change',
+        codeHash: persisted.codeHash,
+        consumedAt: null,
+        attempts: 0,
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000),
+      });
+
+      await expect(
+        service.verifyLatestForPhone('+998901234567', issued.devOtpCode!, OtpPurpose.PHONE_CHANGE),
+      ).resolves.toBeUndefined();
+
+      const consume = prisma.phoneOtpRequest.updateMany.mock.calls.at(-1)![0];
+      expect(consume.where).toEqual({ id: 'otp_test', consumedAt: null });
+      expect(consume.data.consumedAt).toEqual(expect.any(Date));
+    });
+
+    it('verifyLatestForPhone() throws when no active request exists', async () => {
+      const { service, prisma } = build(false);
+      prisma.phoneOtpRequest.findFirst.mockResolvedValue(null);
+      await expect(
+        service.verifyLatestForPhone('+998901234567', '123456', OtpPurpose.PHONE_CHANGE),
+      ).rejects.toThrow();
     });
   });
 });
