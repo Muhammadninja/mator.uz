@@ -4,11 +4,12 @@ import { SmsProvider } from './sms-provider.interface';
 import { LogSmsProvider } from './providers/log.provider';
 import { EskizSmsProvider } from './providers/eskiz.provider';
 import { PlaymobileSmsProvider } from './providers/playmobile.provider';
+import { SayqalSmsProvider } from './providers/sayqal.provider';
 
 /**
- * Selects the active SMS provider from SMS_PROVIDER (eskiz | playmobile | log)
- * and exposes a single send() to the rest of the app. Falls back to the log
- * provider when the chosen aggregator is missing credentials, so OTP flows
+ * Selects the active SMS provider from SMS_PROVIDER (eskiz | playmobile | sayqal
+ * | log) and exposes a single send() to the rest of the app. Falls back to the
+ * log provider when the chosen aggregator is missing credentials, so OTP flows
  * never hard-fail in dev.
  */
 @Injectable()
@@ -51,6 +52,24 @@ export class SmsService {
         });
       }
       this.logger.warn('SMS_PROVIDER=playmobile but credentials missing — falling back to log');
+    }
+
+    if (choice === 'sayqal') {
+      const username = this.config.get<string>('SAYQAL_USERNAME');
+      const secretKey = this.config.get<string>('SAYQAL_SECRET_KEY');
+      const serviceId = Number(this.config.get<string>('SAYQAL_SERVICE_ID'));
+      if (username && secretKey && Number.isInteger(serviceId)) {
+        return new SayqalSmsProvider({
+          baseUrl: this.config.get<string>('SAYQAL_BASE_URL') ?? 'https://routee.sayqal.uz',
+          username,
+          secretKey,
+          serviceId,
+          nickname: this.config.get<string>('SAYQAL_NICKNAME'),
+        });
+      }
+      this.logger.warn(
+        'SMS_PROVIDER=sayqal but SAYQAL_USERNAME/SAYQAL_SECRET_KEY/SAYQAL_SERVICE_ID missing or invalid — falling back to log',
+      );
     }
 
     return new LogSmsProvider();
