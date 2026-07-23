@@ -90,6 +90,7 @@ export function buildAppUser(over: Partial<any> = {}): any {
     language: 'UZ',
     myIdStatus: 'NOT_STARTED',
     transactionLimitUzs: 1000000,
+    tokenVersion: 0,
     thumbnailUrl: null,
     createdAt: new Date('2026-01-01T00:00:00Z'),
     updatedAt: new Date('2026-01-01T00:00:00Z'),
