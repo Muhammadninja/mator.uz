@@ -62,6 +62,14 @@ export function fakeConfig(map: Record<string, string | undefined> = {}): any {
   return { get: (key: string) => map[key] };
 }
 
+// Minimal stand-ins for the side-effect collaborators OrdersService now takes.
+export function fakeNotifications(): any {
+  return { emit: jest.fn().mockResolvedValue(undefined) };
+}
+export function fakeRealtime(): any {
+  return { emit: jest.fn() };
+}
+
 let seq = 0;
 const uid = (p: string) => `${p}_${(seq++).toString(36).padStart(6, '0')}`;
 
