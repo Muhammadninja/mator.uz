@@ -76,3 +76,37 @@ export const DEFAULT_JOB_OPTIONS: JobsOptions = {
     count: 5_000,
   },
 };
+
+// ── Image worker concurrency ────────────────────────────────────────────────
+// How many image-processing jobs the worker runs at once. This is what actually
+// makes an album's photos process in PARALLEL (the enqueue is per-job, but a
+// concurrency=1 worker would drain them one at a time). Bounded so we don't hammer
+// FLUX/Cloudinary or spike memory with many large image buffers simultaneously.
+export const IMAGE_WORKER_CONCURRENCY_DEFAULT = 5;
+const IMAGE_WORKER_CONCURRENCY_MIN = 1;
+const IMAGE_WORKER_CONCURRENCY_MAX = 10;
+
+/**
+ * Resolve the image worker's concurrency from a raw env value (IMAGE_CONCURRENCY).
+ * Accepts an integer in [MIN, MAX]; anything missing / non-integer / out of range
+ * falls back to the default. Read from `process.env` directly (not ConfigService)
+ * because the `@Processor` decorator's worker options are evaluated at class-load
+ * time, before Nest DI is available. Same bounds/semantics as the legacy album
+ * pool's resolver, so switching flows keeps identical throughput.
+ */
+export function resolveImageWorkerConcurrency(
+  raw: string | undefined = process.env.IMAGE_CONCURRENCY,
+): number {
+  if (raw === undefined || raw.trim() === '') {
+    return IMAGE_WORKER_CONCURRENCY_DEFAULT;
+  }
+  const value = Number(raw);
+  if (
+    !Number.isInteger(value) ||
+    value < IMAGE_WORKER_CONCURRENCY_MIN ||
+    value > IMAGE_WORKER_CONCURRENCY_MAX
+  ) {
+    return IMAGE_WORKER_CONCURRENCY_DEFAULT;
+  }
+  return value;
+}

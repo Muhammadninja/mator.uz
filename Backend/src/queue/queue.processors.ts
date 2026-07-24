@@ -3,7 +3,10 @@ import { OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq';
 import type { Job } from 'bullmq';
 import axios from 'axios';
 import { ImageProcessingStage } from '@prisma/client';
-import { QUEUE_NAMES } from './queue.constants';
+import {
+  QUEUE_NAMES,
+  resolveImageWorkerConcurrency,
+} from './queue.constants';
 import type {
   ImageJobData,
   NotificationJobData,
@@ -51,7 +54,20 @@ const DOWNLOAD_TIMEOUT_MS = 20_000;
  * `stage` is advanced as the worker moves (observability only); it never gates the
  * rendezvous (that reads `status`) nor controls retry (that keys off originalUrl).
  */
-@Processor(QUEUE_NAMES.IMAGE_PROCESSING)
+// concurrency (from IMAGE_CONCURRENCY) is what makes an album's photos process in
+// PARALLEL — without it BullMQ defaults to 1 and the worker drains jobs one by one.
+//
+// Why process.env and not ConfigService here: in @nestjs/bullmq@11 the worker's
+// concurrency can ONLY be supplied through @Processor's worker-options argument.
+// BullExplorer builds the Worker from `getWorkerOptionsMetadata(@Processor class)`
+// and, from the queue options set via registerQueue/forRoot, reads ONLY the
+// connection-related fields (connection/prefix/telemetry) — concurrency there is
+// ignored. @Processor is a class decorator, evaluated at class-load time, before
+// the Nest DI container (and thus ConfigService) exists — so the value must come
+// from the environment directly. This is a framework constraint, not a shortcut.
+@Processor(QUEUE_NAMES.IMAGE_PROCESSING, {
+  concurrency: resolveImageWorkerConcurrency(),
+})
 export class ImageProcessingProcessor extends WorkerHost {
   private readonly logger = new Logger(ImageProcessingProcessor.name);
 

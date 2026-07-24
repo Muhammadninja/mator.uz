@@ -7,8 +7,14 @@
 //   • the workers' process()/event handlers are callable and log
 //   • QueueModule references every queue it registers (no orphan queue/worker)
 
+import 'reflect-metadata';
 import { QueueService } from './queue.service';
-import { QUEUE_NAMES, DEFAULT_JOB_OPTIONS } from './queue.constants';
+import {
+  QUEUE_NAMES,
+  DEFAULT_JOB_OPTIONS,
+  IMAGE_WORKER_CONCURRENCY_DEFAULT,
+  resolveImageWorkerConcurrency,
+} from './queue.constants';
 import { buildQueueConnection } from './queue.config';
 import {
   ImageProcessingProcessor,
@@ -52,6 +58,45 @@ describe('Queue infrastructure', () => {
         NOTIFICATIONS: 'notifications',
         MAINTENANCE: 'maintenance',
       });
+    });
+  });
+
+  describe('image worker concurrency', () => {
+    it('resolveImageWorkerConcurrency: default when unset/blank/invalid/out-of-range', () => {
+      expect(resolveImageWorkerConcurrency(undefined)).toBe(
+        IMAGE_WORKER_CONCURRENCY_DEFAULT,
+      );
+      expect(resolveImageWorkerConcurrency('')).toBe(
+        IMAGE_WORKER_CONCURRENCY_DEFAULT,
+      );
+      expect(resolveImageWorkerConcurrency('abc')).toBe(
+        IMAGE_WORKER_CONCURRENCY_DEFAULT,
+      );
+      expect(resolveImageWorkerConcurrency('0')).toBe(
+        IMAGE_WORKER_CONCURRENCY_DEFAULT,
+      ); // below min
+      expect(resolveImageWorkerConcurrency('11')).toBe(
+        IMAGE_WORKER_CONCURRENCY_DEFAULT,
+      ); // above max
+      expect(resolveImageWorkerConcurrency('2.5')).toBe(
+        IMAGE_WORKER_CONCURRENCY_DEFAULT,
+      ); // non-integer
+    });
+
+    it('resolveImageWorkerConcurrency: accepts a valid in-range integer', () => {
+      expect(resolveImageWorkerConcurrency('1')).toBe(1);
+      expect(resolveImageWorkerConcurrency('7')).toBe(7);
+      expect(resolveImageWorkerConcurrency('10')).toBe(10);
+    });
+
+    it('the image processor registers worker concurrency > 1 (album photos run in parallel, not one-by-one)', () => {
+      // @nestjs/bullmq stores the @Processor worker options under this metadata key.
+      const workerOpts = Reflect.getMetadata(
+        'bullmq:worker_metadata',
+        ImageProcessingProcessor,
+      ) as { concurrency?: number } | undefined;
+      expect(workerOpts?.concurrency).toBe(IMAGE_WORKER_CONCURRENCY_DEFAULT);
+      expect(workerOpts?.concurrency).toBeGreaterThan(1);
     });
   });
 
