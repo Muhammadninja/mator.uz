@@ -1,7 +1,7 @@
 import { Logger } from '@nestjs/common';
 import axios from 'axios';
 import { randomUUID } from 'crypto';
-import { SmsProvider } from '../sms-provider.interface';
+import { SmsProvider, SmsSendResult, EMPTY_SMS_RESULT } from '../sms-provider.interface';
 
 interface PlaymobileConfig {
   baseUrl: string; // https://send.smsxabar.uz/broker-api
@@ -19,7 +19,7 @@ export class PlaymobileSmsProvider implements SmsProvider {
 
   constructor(private readonly cfg: PlaymobileConfig) {}
 
-  async send(toE164: string, text: string): Promise<void> {
+  async send(toE164: string, text: string): Promise<SmsSendResult> {
     const recipient = toE164.replace(/\D/g, '');
     const body = {
       messages: [
@@ -40,5 +40,7 @@ export class PlaymobileSmsProvider implements SmsProvider {
       this.logger.error(`Playmobile send failed: ${(err as Error).message}`);
       throw err;
     }
+    // Accounting metadata is not mapped for this provider — return nulls.
+    return EMPTY_SMS_RESULT;
   }
 }

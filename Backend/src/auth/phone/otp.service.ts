@@ -85,9 +85,13 @@ export class OtpService {
   }
 
   private async deliver(phoneE164: string, code: string): Promise<void> {
+    // The 'otp' argument is an accounting-only template label (persisted by
+    // SmsService); the rendered text — and therefore the code — is never stored.
+    // Delivery behaviour is unchanged.
     await this.sms.sendSms(
       phoneE164,
       `Mator: tasdiqlash kodingiz ${code}. Hech kimga bermang. Amal qilish muddati 5 daqiqa.`,
+      'otp',
     );
   }
 
