@@ -62,6 +62,11 @@ function makeEvents() {
   return { emit: jest.fn() };
 }
 
+/** No-op DraftTelemetry double (observability is not asserted here). */
+function makeTelemetry() {
+  return { event: jest.fn(), metric: jest.fn() };
+}
+
 describe('DraftCoordinator rendezvous', () => {
   const READY = DraftImageStatus.READY;
   const PROCESSING = DraftImageStatus.PROCESSING;
@@ -76,7 +81,11 @@ describe('DraftCoordinator rendezvous', () => {
     });
     const drafts = makeDraftsMock(draft);
     const events = makeEvents();
-    const coord = new DraftCoordinator(drafts as never, events as never);
+    const coord = new DraftCoordinator(
+      drafts as never,
+      events as never,
+      makeTelemetry() as never,
+    );
 
     await coord.onFormStep('draft_1'); // form was the last track
 
@@ -97,7 +106,11 @@ describe('DraftCoordinator rendezvous', () => {
     });
     const drafts = makeDraftsMock(draft);
     const events = makeEvents();
-    const coord = new DraftCoordinator(drafts as never, events as never);
+    const coord = new DraftCoordinator(
+      drafts as never,
+      events as never,
+      makeTelemetry() as never,
+    );
 
     await coord.onImageSettled('draft_1'); // images were the last track
 
@@ -117,7 +130,11 @@ describe('DraftCoordinator rendezvous', () => {
     });
     const drafts = makeDraftsMock(draft);
     const events = makeEvents();
-    const coord = new DraftCoordinator(drafts as never, events as never);
+    const coord = new DraftCoordinator(
+      drafts as never,
+      events as never,
+      makeTelemetry() as never,
+    );
 
     await coord.onImageSettled('draft_1');
 
@@ -132,7 +149,11 @@ describe('DraftCoordinator rendezvous', () => {
     });
     const drafts = makeDraftsMock(draft);
     const events = makeEvents();
-    const coord = new DraftCoordinator(drafts as never, events as never);
+    const coord = new DraftCoordinator(
+      drafts as never,
+      events as never,
+      makeTelemetry() as never,
+    );
 
     await coord.onImageSettled('draft_1');
 
@@ -149,7 +170,11 @@ describe('DraftCoordinator rendezvous', () => {
     });
     const drafts = makeDraftsMock(draft);
     const events = makeEvents();
-    const coord = new DraftCoordinator(drafts as never, events as never);
+    const coord = new DraftCoordinator(
+      drafts as never,
+      events as never,
+      makeTelemetry() as never,
+    );
 
     await coord.onImageSettled('draft_1');
 
@@ -169,7 +194,11 @@ describe('DraftCoordinator rendezvous', () => {
     });
     const drafts = makeDraftsMock(draft);
     const events = makeEvents();
-    const coord = new DraftCoordinator(drafts as never, events as never);
+    const coord = new DraftCoordinator(
+      drafts as never,
+      events as never,
+      makeTelemetry() as never,
+    );
 
     await coord.onFormStep('draft_1');
 
@@ -183,7 +212,11 @@ describe('DraftCoordinator rendezvous', () => {
       findWithImages: jest.fn(async () => null),
       tryTransition: jest.fn(),
     };
-    const coord = new DraftCoordinator(drafts as never, events as never);
+    const coord = new DraftCoordinator(
+      drafts as never,
+      events as never,
+      makeTelemetry() as never,
+    );
 
     await coord.onImageSettled('missing');
 
@@ -199,7 +232,11 @@ describe('DraftCoordinator rendezvous', () => {
     });
     const drafts = makeDraftsMock(draft);
     const events = makeEvents();
-    const coord = new DraftCoordinator(drafts as never, events as never);
+    const coord = new DraftCoordinator(
+      drafts as never,
+      events as never,
+      makeTelemetry() as never,
+    );
 
     // Both tracks reach the rendezvous "at once".
     await Promise.all([

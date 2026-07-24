@@ -60,12 +60,34 @@ export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
  *
  * These are defaults: a specific producer may override per-enqueue (e.g. a
  * deterministic jobId, a different attempt count) via QueueService.
+ *
+ * The retry count and backoff base are env-configurable (IMAGE_QUEUE_RETRIES /
+ * IMAGE_QUEUE_BACKOFF_MS) so ops can tune them without a code change; the built-in
+ * values below are the defaults. Read from process.env because this object is
+ * consumed at module registration time (BullModule.forRootAsync's factory runs
+ * later, but this constant is imported directly), before DI is available.
  */
+const DEFAULT_QUEUE_RETRIES = 3;
+const DEFAULT_QUEUE_BACKOFF_MS = 2_000;
+
+/** Parse a positive-integer env var, falling back to `fallback` when unset/invalid. */
+function positiveIntEnv(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const value = Number(raw);
+  return Number.isInteger(value) && value > 0 ? value : fallback;
+}
+
 export const DEFAULT_JOB_OPTIONS: JobsOptions = {
-  attempts: 3,
+  attempts: positiveIntEnv(
+    process.env.IMAGE_QUEUE_RETRIES,
+    DEFAULT_QUEUE_RETRIES,
+  ),
   backoff: {
     type: 'exponential',
-    delay: 2_000,
+    delay: positiveIntEnv(
+      process.env.IMAGE_QUEUE_BACKOFF_MS,
+      DEFAULT_QUEUE_BACKOFF_MS,
+    ),
   },
   removeOnComplete: {
     age: 24 * 60 * 60, // 24h

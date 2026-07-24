@@ -22,7 +22,7 @@ import {
   NotificationsProcessor,
 } from './queue.processors';
 
-/** Minimal BullMQ Queue double — records add() calls, returns a fake job. */
+/** Minimal BullMQ Queue double — records add()/remove() calls, returns a fake job. */
 function makeQueueMock() {
   return {
     add: jest.fn(async (name: string, data: unknown, opts?: unknown) => ({
@@ -31,6 +31,7 @@ function makeQueueMock() {
       data,
       opts,
     })),
+    remove: jest.fn(async () => undefined),
   };
 }
 
@@ -152,7 +153,10 @@ describe('Queue infrastructure', () => {
   describe('QueueService (producer)', () => {
     it('injects and delegates enqueueImage to the image queue with a deterministic jobId', async () => {
       const { service, imageQueue } = buildService();
-      const job = await service.enqueueImage({ draftId: 'draft_1', imageId: 'dimg_9' });
+      const job = await service.enqueueImage({
+        draftId: 'draft_1',
+        imageId: 'dimg_9',
+      });
       expect(imageQueue.add).toHaveBeenCalledWith(
         'process',
         { draftId: 'draft_1', imageId: 'dimg_9' },
@@ -160,6 +164,31 @@ describe('Queue infrastructure', () => {
       );
       // Same draft image enqueued twice → same jobId → BullMQ collapses to one job.
       expect(job.id).toBe('image:draft_1:dimg_9');
+    });
+
+    it('reenqueueImage removes the stale job by id BEFORE adding (retry must not collapse into a retained failed job)', async () => {
+      const { service, imageQueue } = buildService();
+      const order: string[] = [];
+      imageQueue.remove.mockImplementation(async () => {
+        order.push('remove');
+      });
+      imageQueue.add.mockImplementation(async (_n, _d, opts?: unknown) => {
+        order.push('add');
+        return { id: (opts as any)?.jobId };
+      });
+
+      await service.reenqueueImage({ draftId: 'draft_1', imageId: 'dimg_9' });
+
+      expect(imageQueue.remove).toHaveBeenCalledWith('image:draft_1:dimg_9');
+      expect(imageQueue.add).toHaveBeenCalled();
+      expect(order).toEqual(['remove', 'add']); // remove strictly precedes add
+    });
+
+    it('imageJobId builds the deterministic id', () => {
+      const { service } = buildService();
+      expect(service.imageJobId({ draftId: 'd', imageId: 'i' })).toBe(
+        'image:d:i',
+      );
     });
 
     it('enqueueSms delegates without a deterministic jobId (distinct sends must not collapse)', async () => {

@@ -173,4 +173,63 @@ describe('ProductDraftService', () => {
       });
     });
   });
+
+  describe('recovery/orphan helpers (Phase 2)', () => {
+    it('findAwaitingPreview queries the latest READY_FOR_PREVIEW draft within TTL', async () => {
+      prisma.productDraft.findFirst.mockResolvedValue(null);
+      const now = new Date('2026-07-25T12:00:00Z');
+
+      await service.findAwaitingPreview(7, now);
+
+      expect(prisma.productDraft.findFirst).toHaveBeenCalledWith({
+        where: {
+          sellerId: 7,
+          status: DraftStatus.READY_FOR_PREVIEW,
+          expiresAt: { gt: now },
+        },
+        orderBy: { createdAt: 'desc' },
+        include: { images: { orderBy: { sortOrder: 'asc' } } },
+      });
+    });
+
+    it('findExpired sweeps BOTH CREATING and READY_FOR_PREVIEW past TTL', async () => {
+      prisma.productDraft.findMany.mockResolvedValue([]);
+      const now = new Date('2026-07-25T12:00:00Z');
+
+      await service.findExpired(now);
+
+      const arg = prisma.productDraft.findMany.mock.calls[0][0];
+      expect(arg.where.status).toEqual({
+        in: [DraftStatus.CREATING, DraftStatus.READY_FOR_PREVIEW],
+      });
+      expect(arg.where.expiresAt).toEqual({ lte: now });
+    });
+
+    it('publishDraft transitions only a READY_FOR_PREVIEW draft (idempotent) and reports whether it moved', async () => {
+      prisma.productDraft.updateMany.mockResolvedValueOnce({ count: 1 });
+      expect(await service.publishDraft('draft_1')).toBe(true);
+      expect(prisma.productDraft.updateMany).toHaveBeenCalledWith({
+        where: { id: 'draft_1', status: DraftStatus.READY_FOR_PREVIEW },
+        data: { status: DraftStatus.PUBLISHED },
+      });
+
+      prisma.productDraft.updateMany.mockResolvedValueOnce({ count: 0 });
+      expect(await service.publishDraft('draft_1')).toBe(false); // already published/gone
+    });
+
+    it('collectOriginalPublicIds returns only the stored-original ids (processed kept on publish)', async () => {
+      prisma.productDraftImage.findMany.mockResolvedValue([
+        { originalPublicId: 'orig_0' },
+        { originalPublicId: 'orig_1' },
+      ]);
+
+      const ids = await service.collectOriginalPublicIds('draft_1');
+
+      expect(prisma.productDraftImage.findMany).toHaveBeenCalledWith({
+        where: { draftId: 'draft_1', originalPublicId: { not: null } },
+        select: { originalPublicId: true },
+      });
+      expect(ids).toEqual(['orig_0', 'orig_1']);
+    });
+  });
 });

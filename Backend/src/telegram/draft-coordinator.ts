@@ -10,6 +10,7 @@ import {
   ProductDraftService,
   type DraftWithImages,
 } from './product-draft.service';
+import { DraftTelemetry, DraftMetric } from './draft-telemetry';
 
 /**
  * DraftCoordinator — the ORCHESTRATION layer for the two-track product-creation
@@ -40,6 +41,7 @@ export class DraftCoordinator {
   constructor(
     private readonly drafts: ProductDraftService,
     private readonly events: EventEmitter2,
+    private readonly telemetry: DraftTelemetry,
   ) {}
 
   /** The seller advanced the questionnaire; re-check the rendezvous. */
@@ -129,7 +131,14 @@ export class DraftCoordinator {
       draftId: draft.id,
       tgId: draft.tgId,
     };
-    this.logger.log(`Draft ${draft.id} ready for preview`);
+    this.telemetry.event('draft.preview_ready', {
+      draftId: draft.id,
+      sellerId: draft.sellerId,
+    });
+    this.telemetry.metric(DraftMetric.DRAFT_PREVIEW_EMITTED, {
+      draftId: draft.id,
+      sellerId: draft.sellerId,
+    });
     this.events.emit(DraftEvent.READY_FOR_PREVIEW, payload);
   }
 

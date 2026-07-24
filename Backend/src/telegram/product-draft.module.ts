@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ProductDraftService } from './product-draft.service';
 import { DraftCoordinator } from './draft-coordinator';
 import { TelegramFileService } from './telegram-file.service';
+import { DraftTelemetry } from './draft-telemetry';
 import { ImageEnhanceService } from '../ai/image-enhance.service';
 
 /**
@@ -25,12 +26,14 @@ import { ImageEnhanceService } from '../ai/image-enhance.service';
     ProductDraftService,
     DraftCoordinator,
     TelegramFileService,
+    DraftTelemetry,
     ImageEnhanceService,
   ],
   exports: [
     ProductDraftService,
     DraftCoordinator,
     TelegramFileService,
+    DraftTelemetry,
     ImageEnhanceService,
   ],
 })

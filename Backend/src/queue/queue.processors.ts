@@ -3,10 +3,7 @@ import { OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq';
 import type { Job } from 'bullmq';
 import axios from 'axios';
 import { ImageProcessingStage } from '@prisma/client';
-import {
-  QUEUE_NAMES,
-  resolveImageWorkerConcurrency,
-} from './queue.constants';
+import { QUEUE_NAMES, resolveImageWorkerConcurrency } from './queue.constants';
 import type {
   ImageJobData,
   NotificationJobData,
@@ -17,6 +14,7 @@ import { ImageEnhanceService } from '../ai/image-enhance.service';
 import { ProductDraftService } from '../telegram/product-draft.service';
 import { DraftCoordinator } from '../telegram/draft-coordinator';
 import { TelegramFileService } from '../telegram/telegram-file.service';
+import { DraftTelemetry, DraftMetric } from '../telegram/draft-telemetry';
 
 /**
  * Workers (consumers), one per registered queue.
@@ -79,13 +77,16 @@ export class ImageProcessingProcessor extends WorkerHost {
     // The FLUX pipeline (prompt/model/params unchanged — only the call site moved
     // here). Injected so it is mockable and shares one instance app-wide.
     private readonly imageEnhance: ImageEnhanceService,
+    private readonly telemetry: DraftTelemetry,
   ) {
     super();
   }
 
   async process(job: Job<ImageJobData>): Promise<void> {
     const { draftId, imageId } = job.data;
+    const ids = { draftId, imageId, jobId: job.id };
     const row = await this.drafts.markImageProcessing(imageId);
+    this.telemetry.metric(DraftMetric.IMAGE_STARTED, ids);
 
     // ── Phase A: INGEST original (idempotent — skipped once originalUrl is set) ──
     let originalUrl = row.originalUrl;
@@ -103,25 +104,31 @@ export class ImageProcessingProcessor extends WorkerHost {
         original.publicId,
       );
       originalUrl = original.url;
+      this.telemetry.event('image.original_stored', ids);
     }
 
     // ── Phase B: ENHANCE from the stored original ──
     await this.drafts.setImageStage(imageId, ImageProcessingStage.ENHANCING);
     const originalBuf = await this.download(originalUrl);
+    this.telemetry.event('image.flux_started', ids);
     const cleaned = await this.imageEnhance.removeBackground(
       Buffer.from(originalBuf),
     );
+    this.telemetry.event('image.flux_finished', ids);
     await this.drafts.setImageStage(
       imageId,
       ImageProcessingStage.UPLOADING_RESULT,
     );
     const processed = await this.cloudinary.uploadBuffer(cleaned);
+    this.telemetry.event('image.processed_uploaded', ids);
 
     await this.drafts.markImageReady(
       imageId,
       processed.url,
       processed.publicId,
     );
+    this.telemetry.event('image.ready', ids);
+    this.telemetry.metric(DraftMetric.IMAGE_COMPLETED, ids);
     await this.coordinator.onImageSettled(draftId);
   }
 
@@ -159,6 +166,11 @@ export class ImageProcessingProcessor extends WorkerHost {
     if (job.attemptsMade < maxAttempts) return; // more retries to come
 
     const { draftId, imageId } = job.data;
+    this.telemetry.metric(DraftMetric.IMAGE_FAILED, {
+      draftId,
+      imageId,
+      jobId: job.id,
+    });
     try {
       await this.drafts.markImageFailed(imageId, err.message);
       await this.coordinator.onImageSettled(draftId);
