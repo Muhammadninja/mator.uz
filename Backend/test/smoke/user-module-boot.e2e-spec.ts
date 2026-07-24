@@ -3,8 +3,10 @@ import { ConfigModule } from '@nestjs/config';
 import { UserModule } from '../../src/user/user.module';
 import { PrismaService } from '../../src/prisma/prisma.service';
 import { CloudinaryService } from '../../src/cloudinary/cloudinary.service';
+import { RedisModule } from '../../src/redis/redis.module';
+import { RedisService } from '../../src/redis/redis.service';
 import { UserController } from '../../src/user/user.controller';
-import { createPrismaMock } from '../utils/harness';
+import { fakeRedis, createPrismaMock } from '../utils/harness';
 
 /**
  * DI-graph boot check for UserModule. Proves the full injection graph resolves
@@ -19,12 +21,21 @@ describe('UserModule boot (e2e)', () => {
 
   beforeAll(async () => {
     mod = await Test.createTestingModule({
-      imports: [ConfigModule.forRoot({ isGlobal: true }), UserModule],
+      imports: [
+        ConfigModule.forRoot({ isGlobal: true }),
+        RedisModule,
+        UserModule,
+      ],
     })
       .overrideProvider(PrismaService)
       .useValue(createPrismaMock())
       .overrideProvider(CloudinaryService)
       .useValue({ uploadBuffer: jest.fn() })
+      // RedisModule is @Global; a standalone testing module must put it in the
+      // graph itself (like PrismaModule elsewhere), with RedisService swapped for
+      // the in-memory double since there is no live Redis here.
+      .overrideProvider(RedisService)
+      .useValue(fakeRedis())
       .compile();
   });
 

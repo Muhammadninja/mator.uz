@@ -1,23 +1,51 @@
-// Unit tests for OtpService's AUTH_DEV_MODE behaviour. Prisma, SmsService and
-// ConfigService are mocked — no DB, no real SMS. The focus is the dev-mode
-// switch: generation/persistence must be identical to production, only the
-// delivery + returned code change. verify() is exercised end-to-end against the
-// stored hash to prove the security path is untouched by the dev-mode work.
+// Unit tests for OtpService. The persistence layer is now Redis: RedisService,
+// SmsService and ConfigService are mocked — no DB, no real SMS, no live Redis.
+// The RedisService double is backed by an in-memory map (with TTL bookkeeping)
+// so the full issue -> resend -> verify lifecycle can be exercised end-to-end.
+// Focus: AUTH_DEV_MODE behaviour, single-use consume, attempt counting, purpose
+// isolation and the phone-keyed lookups — all identical to the previous DB path.
 
 import { OtpChannel } from '@prisma/client';
 import { OtpService, OtpPurpose } from './otp.service';
+import { FixedWindowRateLimiter } from '../../redis/rate-limiter.service';
+import { RedisKeys } from '../../redis/redis.keys';
 
-function makePrismaMock() {
+/**
+ * Minimal in-memory RedisService stand-in. Values are stored JSON-parsed (as the
+ * real `get` returns), TTLs are tracked but not auto-expired — tests drive
+ * expiry explicitly where needed.
+ */
+function makeRedisMock() {
+  const store = new Map<string, unknown>();
+  const ttls = new Map<string, number>();
   return {
-    phoneOtpRequest: {
-      count: jest.fn().mockResolvedValue(0),
-      create: jest.fn(),
-      findUnique: jest.fn(),
-      findFirst: jest.fn(),
-      update: jest.fn().mockResolvedValue({}),
-      // Atomic single-use consume returns the number of rows updated (1 = won).
-      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
-    },
+    store,
+    ttls,
+    get: jest.fn(async (key: string) =>
+      store.has(key) ? store.get(key) : null,
+    ),
+    setEx: jest.fn(async (key: string, ttl: number, value: unknown) => {
+      // Emulate the real service: JSON round-trip so callers get a plain object.
+      store.set(key, JSON.parse(JSON.stringify(value)));
+      ttls.set(key, ttl);
+      return 'OK' as const;
+    }),
+    del: jest.fn(async (key: string) => {
+      const existed = store.delete(key) ? 1 : 0;
+      ttls.delete(key);
+      return existed;
+    }),
+    incr: jest.fn(async (key: string) => {
+      const next = ((store.get(key) as number) ?? 0) + 1;
+      store.set(key, next);
+      return next;
+    }),
+    expire: jest.fn(async (key: string, ttl: number) => {
+      if (!store.has(key)) return false;
+      ttls.set(key, ttl);
+      return true;
+    }),
+    ttl: jest.fn(async (key: string) => ttls.get(key) ?? -2),
   };
 }
 
@@ -32,29 +60,40 @@ function makeConfig(devMode: boolean) {
 }
 
 function build(devMode: boolean) {
-  const prisma = makePrismaMock();
+  const redis = makeRedisMock();
   const sms = makeSmsMock();
   const config = makeConfig(devMode);
-  // create() echoes back the row it was given plus a fixed id.
-  prisma.phoneOtpRequest.create.mockImplementation(({ data }: { data: Record<string, unknown> }) =>
-    Promise.resolve({ id: 'otp_test', ...data }),
-  );
-  const service = new OtpService(prisma as never, sms as never, config as never);
-  return { service, prisma, sms, config };
+  // Real FixedWindowRateLimiter backed by the same in-memory Redis double, so the
+  // hourly ceiling is exercised through the shared infrastructure end-to-end.
+  const rateLimiter = new FixedWindowRateLimiter(redis as never);
+  const service = new OtpService(redis as never, sms as never, config as never, rateLimiter);
+  return { service, redis, sms, config, rateLimiter };
+}
+
+/** The record stored under RedisKeys.otp(phone) after an issue. */
+function storedRecord(redis: ReturnType<typeof makeRedisMock>, phone: string) {
+  return redis.store.get(RedisKeys.otp(phone)) as {
+    requestId: string;
+    codeHash: string;
+    attempts: number;
+    createdAt: number;
+    expiresAt: number;
+    purpose: string;
+  };
 }
 
 describe('OtpService — AUTH_DEV_MODE', () => {
   describe('request()', () => {
     it('development mode skips SMS sending and returns dev_otp_code', async () => {
-      const { service, prisma, sms } = build(true);
+      const { service, redis, sms } = build(true);
 
       const issued = await service.request('+998901234567');
 
-      // OTP still generated + persisted exactly as in production.
-      expect(prisma.phoneOtpRequest.create).toHaveBeenCalledTimes(1);
-      const persisted = prisma.phoneOtpRequest.create.mock.calls[0][0].data;
+      // OTP still generated + persisted (now to Redis) exactly as before.
+      const persisted = storedRecord(redis, '+998901234567');
       expect(persisted.codeHash).toEqual(expect.any(String));
-      expect(persisted.phoneE164).toBe('+998901234567');
+      expect(persisted.createdAt).toEqual(expect.any(Number));
+      expect(persisted.attempts).toBe(0);
 
       // SMS provider is NOT called.
       expect(sms.sendSms).not.toHaveBeenCalled();
@@ -66,189 +105,190 @@ describe('OtpService — AUTH_DEV_MODE', () => {
     });
 
     it('production mode still calls SmsService and never returns dev_otp_code', async () => {
-      const { service, prisma, sms } = build(false);
+      const { service, sms } = build(false);
 
       const issued = await service.request('+998901234567');
 
-      expect(prisma.phoneOtpRequest.create).toHaveBeenCalledTimes(1);
       expect(sms.sendSms).toHaveBeenCalledTimes(1);
       // Message carries the plaintext code but it is never exposed on the result.
       expect(sms.sendSms.mock.calls[0][0]).toBe('+998901234567');
       expect(issued.devOtpCode).toBeUndefined();
     });
+
+    it('enforces the per-hour ceiling (6th request in the window is rejected)', async () => {
+      const { service } = build(false);
+      for (let i = 0; i < 5; i++) {
+        await service.request(`+99890000000${i}`.slice(0, 13));
+      }
+      // Same MSISDN, 6 issues -> the 6th trips MAX_PER_HOUR.
+      const phone = '+998905555555';
+      for (let i = 0; i < 5; i++) await service.request(phone);
+      await expect(service.request(phone)).rejects.toThrow(
+        'Too many OTP requests. Please try again later.',
+      );
+    });
   });
 
   describe('resend()', () => {
-    const existing = {
-      id: 'otp_test',
-      phoneE164: '+998901234567',
-      channel: OtpChannel.SMS,
-      consumedAt: null,
-      // Cooldown already elapsed so resend is allowed.
-      lastSentAt: new Date(Date.now() - 10 * 60 * 1000),
-    };
+    it('development mode regenerates, updates Redis, skips SMS, returns dev_otp_code', async () => {
+      const { service, redis, sms } = build(true);
+      const first = await service.request('+998901234567');
+      const beforeHash = storedRecord(redis, '+998901234567').codeHash;
+      sms.sendSms.mockClear();
 
-    it('development mode regenerates, updates DB, skips SMS, returns dev_otp_code', async () => {
-      const { service, prisma, sms } = build(true);
-      prisma.phoneOtpRequest.findUnique.mockResolvedValue({ ...existing });
+      // Elapse the cooldown by rewriting lastSentAt into the past.
+      const rec = storedRecord(redis, '+998901234567') as Record<string, unknown>;
+      rec.lastSentAt = Date.now() - 10 * 60 * 1000;
+      redis.store.set(RedisKeys.otp('+998901234567'), rec);
 
-      const issued = await service.resend('otp_test');
+      const issued = await service.resend(first.requestId);
 
-      // DB updated with a fresh hash (persistence path unchanged).
-      expect(prisma.phoneOtpRequest.update).toHaveBeenCalledTimes(1);
-      const updated = prisma.phoneOtpRequest.update.mock.calls[0][0].data;
-      expect(updated.codeHash).toEqual(expect.any(String));
+      // Fresh hash written back (persistence path unchanged), same request_id.
+      const afterHash = storedRecord(redis, '+998901234567').codeHash;
+      expect(afterHash).toEqual(expect.any(String));
+      expect(afterHash).not.toBe(beforeHash);
+      expect(issued.requestId).toBe(first.requestId);
 
       // SMS skipped, plaintext returned and consistent with the stored hash.
       expect(sms.sendSms).not.toHaveBeenCalled();
       expect(issued.devOtpCode).toMatch(/^\d{6}$/);
       const { createHash } = require('crypto') as typeof import('crypto');
-      expect(createHash('sha256').update(issued.devOtpCode!).digest('hex')).toBe(updated.codeHash);
+      expect(createHash('sha256').update(issued.devOtpCode!).digest('hex')).toBe(afterHash);
+    });
+
+    it('enforces the resend cooldown', async () => {
+      const { service } = build(false);
+      const first = await service.request('+998901234567');
+      // Immediately resending (cooldown not elapsed) is rejected.
+      await expect(service.resend(first.requestId)).rejects.toThrow(/before requesting a new code/);
+    });
+
+    it('rejects an unknown/consumed request_id', async () => {
+      const { service } = build(false);
+      await expect(service.resend('otp_nope')).rejects.toThrow(
+        'Invalid or already-used OTP request',
+      );
     });
 
     it('production mode still calls SmsService and never returns dev_otp_code', async () => {
-      const { service, prisma, sms } = build(false);
-      prisma.phoneOtpRequest.findUnique.mockResolvedValue({ ...existing });
+      const { service, redis, sms } = build(false);
+      const first = await service.request('+998901234567');
+      sms.sendSms.mockClear();
+      const rec = storedRecord(redis, '+998901234567') as Record<string, unknown>;
+      rec.lastSentAt = Date.now() - 10 * 60 * 1000;
+      redis.store.set(RedisKeys.otp('+998901234567'), rec);
 
-      const issued = await service.resend('otp_test');
+      const issued = await service.resend(first.requestId);
 
-      expect(prisma.phoneOtpRequest.update).toHaveBeenCalledTimes(1);
       expect(sms.sendSms).toHaveBeenCalledTimes(1);
       expect(issued.devOtpCode).toBeUndefined();
     });
   });
 
-  describe('verify() — unchanged by dev mode', () => {
-    it('accepts the stored OTP and consumes the request', async () => {
-      // Issue in dev mode to get the plaintext, capture the persisted hash, then
-      // verify against it — proves the stored OTP is still the source of truth.
-      const { service, prisma } = build(true);
-
+  describe('verify()', () => {
+    it('accepts the stored OTP and consumes the request (deletes the key)', async () => {
+      const { service, redis } = build(true);
       const issued = await service.request('+998901234567');
-      const persisted = prisma.phoneOtpRequest.create.mock.calls[0][0].data;
-
-      prisma.phoneOtpRequest.findUnique.mockResolvedValue({
-        id: 'otp_test',
-        phoneE164: '+998901234567',
-        codeHash: persisted.codeHash,
-        consumedAt: null,
-        attempts: 0,
-        expiresAt: new Date(Date.now() + 5 * 60 * 1000),
-      });
 
       await expect(
-        service.verify('otp_test', '+998901234567', issued.devOtpCode!),
+        service.verify(issued.requestId, '+998901234567', issued.devOtpCode!),
       ).resolves.toBeUndefined();
 
-      // Request atomically consumed: updateMany guarded on consumedAt: null.
-      const consume = prisma.phoneOtpRequest.updateMany.mock.calls.at(-1)![0];
-      expect(consume.where).toEqual({ id: 'otp_test', consumedAt: null });
-      expect(consume.data.consumedAt).toEqual(expect.any(Date));
+      // Single-use: both the phone key and the request pointer are gone.
+      expect(redis.store.has(RedisKeys.otp('+998901234567'))).toBe(false);
+      expect(redis.store.has(RedisKeys.otpRequest(issued.requestId))).toBe(false);
     });
 
-    it('rejects a concurrent double-submit (consume updates 0 rows)', async () => {
-      const { service, prisma } = build(true);
+    it('rejects a concurrent double-submit (second consume deletes 0 keys)', async () => {
+      const { service } = build(true);
       const issued = await service.request('+998901234567');
-      const persisted = prisma.phoneOtpRequest.create.mock.calls[0][0].data;
-      prisma.phoneOtpRequest.findUnique.mockResolvedValue({
-        id: 'otp_test',
-        phoneE164: '+998901234567',
-        codeHash: persisted.codeHash,
-        consumedAt: null,
-        attempts: 0,
-        expiresAt: new Date(Date.now() + 5 * 60 * 1000),
-      });
-      // Simulate the losing racer: the row was already consumed concurrently.
-      prisma.phoneOtpRequest.updateMany.mockResolvedValue({ count: 0 });
 
-      await expect(
-        service.verify('otp_test', '+998901234567', issued.devOtpCode!),
-      ).rejects.toThrow();
+      const [a, b] = await Promise.allSettled([
+        service.verify(issued.requestId, '+998901234567', issued.devOtpCode!),
+        service.verify(issued.requestId, '+998901234567', issued.devOtpCode!),
+      ]);
+      const outcomes = [a.status, b.status].sort();
+      // Exactly one wins; the other is rejected.
+      expect(outcomes).toEqual(['fulfilled', 'rejected']);
     });
 
     it('rejects an incorrect code and increments attempts', async () => {
-      const { service, prisma } = build(true);
-      prisma.phoneOtpRequest.findUnique.mockResolvedValue({
-        id: 'otp_test',
-        phoneE164: '+998901234567',
-        codeHash: 'a'.repeat(64), // hash of nothing the caller will supply
-        consumedAt: null,
-        attempts: 0,
-        expiresAt: new Date(Date.now() + 5 * 60 * 1000),
-      });
+      const { service, redis } = build(true);
+      const issued = await service.request('+998901234567');
 
-      await expect(service.verify('otp_test', '+998901234567', '000000')).rejects.toThrow();
-      const last = prisma.phoneOtpRequest.update.mock.calls.at(-1)![0];
-      expect(last.data.attempts).toEqual({ increment: 1 });
+      await expect(
+        service.verify(issued.requestId, '+998901234567', '000000'),
+      ).rejects.toThrow('Incorrect verification code');
+
+      expect(storedRecord(redis, '+998901234567').attempts).toBe(1);
+    });
+
+    it('rejects after MAX_ATTEMPTS incorrect guesses', async () => {
+      const { service, redis } = build(true);
+      const issued = await service.request('+998901234567');
+      // Force the attempt counter to the ceiling.
+      const rec = storedRecord(redis, '+998901234567') as Record<string, unknown>;
+      rec.attempts = 5;
+      redis.store.set(RedisKeys.otp('+998901234567'), rec);
+
+      await expect(
+        service.verify(issued.requestId, '+998901234567', issued.devOtpCode!),
+      ).rejects.toThrow('Too many incorrect attempts. Please request a new code.');
+    });
+
+    it('rejects an expired code with the expiry message (before TTL reaps it)', async () => {
+      const { service, redis } = build(true);
+      const issued = await service.request('+998901234567');
+      const rec = storedRecord(redis, '+998901234567') as Record<string, unknown>;
+      rec.expiresAt = Date.now() - 1000; // logically expired, key still present
+      redis.store.set(RedisKeys.otp('+998901234567'), rec);
+
+      await expect(
+        service.verify(issued.requestId, '+998901234567', issued.devOtpCode!),
+      ).rejects.toThrow('Verification code has expired. Please request a new one.');
     });
   });
 
   describe('purpose isolation (phone change vs login)', () => {
-    it('request() persists the given purpose (defaulting is handled by the schema)', async () => {
-      const { service, prisma } = build(false);
+    it('request() persists the given purpose', async () => {
+      const { service, redis } = build(false);
       await service.request('+998901234567', OtpChannel.SMS, OtpPurpose.PHONE_CHANGE);
-      const persisted = prisma.phoneOtpRequest.create.mock.calls[0][0].data;
-      expect(persisted.purpose).toBe('phone_change');
+      expect(storedRecord(redis, '+998901234567').purpose).toBe('phone_change');
     });
 
     it('verify() rejects a code whose stored purpose does not match', async () => {
-      const { service, prisma } = build(false);
-      // A login-purpose record cannot be redeemed by the phone-change flow.
-      prisma.phoneOtpRequest.findUnique.mockResolvedValue({
-        id: 'otp_test',
-        phoneE164: '+998901234567',
-        purpose: 'login',
-        codeHash: 'a'.repeat(64),
-        consumedAt: null,
-        attempts: 0,
-        expiresAt: new Date(Date.now() + 5 * 60 * 1000),
-      });
+      const { service } = build(true);
+      // Minted for login; a phone-change verify must not redeem it.
+      const issued = await service.request('+998901234567', OtpChannel.SMS, OtpPurpose.LOGIN);
       await expect(
-        service.verify('otp_test', '+998901234567', '123456', OtpPurpose.PHONE_CHANGE),
-      ).rejects.toThrow();
+        service.verify(issued.requestId, '+998901234567', issued.devOtpCode!, OtpPurpose.PHONE_CHANGE),
+      ).rejects.toThrow('Invalid or already-used verification request');
     });
 
-    it('verifyLatestForPhone() resolves the newest matching request and consumes it', async () => {
-      // Issue a phone-change code, capture its hash, then verify by phone only.
-      const { service, prisma } = build(true);
+    it('verifyLatestForPhone() resolves the record and consumes it', async () => {
+      const { service, redis } = build(true);
       const issued = await service.request('+998901234567', OtpChannel.SMS, OtpPurpose.PHONE_CHANGE);
-      const persisted = prisma.phoneOtpRequest.create.mock.calls[0][0].data;
-
-      prisma.phoneOtpRequest.findFirst.mockResolvedValue({
-        id: 'otp_test',
-        phoneE164: '+998901234567',
-        purpose: 'phone_change',
-        codeHash: persisted.codeHash,
-        consumedAt: null,
-        attempts: 0,
-        expiresAt: new Date(Date.now() + 5 * 60 * 1000),
-      });
-      // verify() re-reads by id via findUnique.
-      prisma.phoneOtpRequest.findUnique.mockResolvedValue({
-        id: 'otp_test',
-        phoneE164: '+998901234567',
-        purpose: 'phone_change',
-        codeHash: persisted.codeHash,
-        consumedAt: null,
-        attempts: 0,
-        expiresAt: new Date(Date.now() + 5 * 60 * 1000),
-      });
 
       await expect(
         service.verifyLatestForPhone('+998901234567', issued.devOtpCode!, OtpPurpose.PHONE_CHANGE),
       ).resolves.toBeUndefined();
 
-      const consume = prisma.phoneOtpRequest.updateMany.mock.calls.at(-1)![0];
-      expect(consume.where).toEqual({ id: 'otp_test', consumedAt: null });
-      expect(consume.data.consumedAt).toEqual(expect.any(Date));
+      expect(redis.store.has(RedisKeys.otp('+998901234567'))).toBe(false);
     });
 
     it('verifyLatestForPhone() throws when no active request exists', async () => {
-      const { service, prisma } = build(false);
-      prisma.phoneOtpRequest.findFirst.mockResolvedValue(null);
+      const { service } = build(false);
       await expect(
         service.verifyLatestForPhone('+998901234567', '123456', OtpPurpose.PHONE_CHANGE),
-      ).rejects.toThrow();
+      ).rejects.toThrow('No active verification request for this phone. Please request a new code.');
+    });
+
+    it('verifyLatestForPhone() throws when the active request has a different purpose', async () => {
+      const { service } = build(true);
+      await service.request('+998901234567', OtpChannel.SMS, OtpPurpose.LOGIN);
+      await expect(
+        service.verifyLatestForPhone('+998901234567', '123456', OtpPurpose.PHONE_CHANGE),
+      ).rejects.toThrow('No active verification request for this phone. Please request a new code.');
     });
   });
 });

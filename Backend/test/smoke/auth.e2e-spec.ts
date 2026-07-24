@@ -4,6 +4,7 @@ import { AuthController } from '../../src/auth/auth.controller';
 import { JwtStrategy } from '../../src/auth/strategies/jwt.strategy';
 import { JwtPayload } from '../../src/auth/interfaces/jwt-payload.interface';
 import { OtpService } from '../../src/auth/phone/otp.service';
+import { FixedWindowRateLimiter } from '../../src/redis/rate-limiter.service';
 import { PhoneChangeService } from '../../src/user/phone-change.service';
 import { PhoneAuthService } from '../../src/auth/phone/phone-auth.service';
 import { MyIdService } from '../../src/auth/myid/myid.service';
@@ -12,14 +13,15 @@ import { SocialIdentityService } from '../../src/auth/social/social-identity.ser
 import { TokenService } from '../../src/auth/tokens/token.service';
 import { JwtKeyService } from '../../src/auth/tokens/jwt-key.service';
 import { hashPassword } from '../../src/auth/password.util';
-import { createPrismaMock, fakeConfig, buildAppUser, PrismaMock } from '../utils/harness';
+import { RedisKeys } from '../../src/redis/redis.keys';
+import { createPrismaMock, fakeConfig, fakeRedis, buildAppUser, PrismaMock } from '../utils/harness';
 
 /** Real token service (ephemeral RS256 keypair) for end-to-end token integration. */
-function realTokens(prisma: PrismaMock) {
+function realTokens(prisma: PrismaMock, redis: any = fakeRedis()) {
   const keys = new JwtKeyService(fakeConfig());
-  const tokens = new TokenService(prisma, new JwtService({}), keys, fakeConfig());
+  const tokens = new TokenService(prisma, new JwtService({}), keys, fakeConfig(), redis);
   prisma.refreshToken.create.mockResolvedValue({ id: 'rt_row' });
-  return { tokens, keys };
+  return { tokens, keys, redis };
 }
 
 describe('Auth smoke', () => {
@@ -30,54 +32,44 @@ describe('Auth smoke', () => {
     it('issues, then verifies the exact code that was sent', async () => {
       const sms = { sendSms: jest.fn().mockResolvedValue(undefined) };
       // No AUTH_DEV_MODE → production path: SMS is sent, no dev code returned.
-      const otp = new OtpService(prisma, sms as any, fakeConfig());
+      // OTP now lives in Redis; the hourly ceiling runs through FixedWindowRateLimiter.
+      const redis = fakeRedis();
+      const otp = new OtpService(
+        redis as any,
+        sms as any,
+        fakeConfig(),
+        new FixedWindowRateLimiter(redis as any),
+      );
       const phone = '+998901112233';
-
-      let created: any;
-      prisma.phoneOtpRequest.count.mockResolvedValue(0);
-      prisma.phoneOtpRequest.create.mockImplementation(({ data }: any) => {
-        created = { ...data, consumedAt: null, attempts: 0, lastSentAt: new Date() };
-        return Promise.resolve(created);
-      });
 
       const issued = await otp.request(phone);
       expect(issued.otpLength).toBe(6);
       expect(sms.sendSms).toHaveBeenCalledTimes(1);
 
       const code = /(\d{6})/.exec(sms.sendSms.mock.calls[0][1])![1];
-      prisma.phoneOtpRequest.findUnique.mockResolvedValue(created);
-      prisma.phoneOtpRequest.update.mockResolvedValue({});
-      // Consume is an atomic guarded updateMany (single-use race protection).
-      prisma.phoneOtpRequest.updateMany.mockResolvedValue({ count: 1 });
-
+      // The exact code verifies and consumes the record (key removed from Redis).
       await expect(otp.verify(issued.requestId, phone, code)).resolves.toBeUndefined();
-      expect(prisma.phoneOtpRequest.updateMany).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: expect.objectContaining({ consumedAt: null }),
-          data: expect.objectContaining({ consumedAt: expect.any(Date) }),
-        }),
-      );
+      expect(redis.store.has(RedisKeys.otp(phone))).toBe(false);
     });
 
     it('rejects an incorrect code and counts the attempt', async () => {
       const sms = { sendSms: jest.fn().mockResolvedValue(undefined) };
-      const otp = new OtpService(prisma, sms as any, fakeConfig());
-      const phone = '+998901112233';
-      let created: any;
-      prisma.phoneOtpRequest.count.mockResolvedValue(0);
-      prisma.phoneOtpRequest.create.mockImplementation(({ data }: any) =>
-        Promise.resolve((created = { ...data, consumedAt: null, attempts: 0 })),
+      const redis = fakeRedis();
+      const otp = new OtpService(
+        redis as any,
+        sms as any,
+        fakeConfig(),
+        new FixedWindowRateLimiter(redis as any),
       );
-      const issued = await otp.request(phone);
-      prisma.phoneOtpRequest.findUnique.mockResolvedValue(created);
-      prisma.phoneOtpRequest.update.mockResolvedValue({});
+      const phone = '+998901112233';
 
+      const issued = await otp.request(phone);
       await expect(otp.verify(issued.requestId, phone, '000000')).rejects.toBeInstanceOf(
         UnauthorizedException,
       );
-      expect(prisma.phoneOtpRequest.update).toHaveBeenCalledWith(
-        expect.objectContaining({ data: { attempts: { increment: 1 } } }),
-      );
+      // A wrong guess bumps the stored attempt counter in place (record survives).
+      const rec = redis.store.get(RedisKeys.otp(phone)) as { attempts: number };
+      expect(rec.attempts).toBe(1);
     });
 
     it('verifyOtp creates a new phone account and issues a session', async () => {
@@ -316,8 +308,8 @@ describe('Auth smoke', () => {
         buildAppUser({ id: 'usr_v', tokenVersion: 3, passwordHash: 'secret' }),
       );
 
-      const strategy = new JwtStrategy(fakeConfig(), prisma, keys);
-      const authed: any = await strategy.validate(payload);
+      const strategy = new JwtStrategy(fakeConfig(), prisma, realTokens(prisma).tokens, keys);
+      const authed: any = await strategy.validate({} as any, payload);
       expect(authed.id).toBe('usr_v');
       expect(authed.passwordHash).toBeUndefined();
     });
@@ -329,9 +321,9 @@ describe('Auth smoke', () => {
         buildAppUser({ id: 'usr_v', tokenVersion: 4 }),
       );
 
-      const strategy = new JwtStrategy(fakeConfig(), prisma, keys);
-      await expect(strategy.validate(payload)).rejects.toBeInstanceOf(UnauthorizedException);
-      await expect(strategy.validate(payload)).rejects.toThrow('Token revoked');
+      const strategy = new JwtStrategy(fakeConfig(), prisma, realTokens(prisma).tokens, keys);
+      await expect(strategy.validate({} as any, payload)).rejects.toBeInstanceOf(UnauthorizedException);
+      await expect(strategy.validate({} as any, payload)).rejects.toThrow('Token revoked');
     });
 
     // ── Refresh-token version binding ───────────────────────────────────────
@@ -474,8 +466,8 @@ describe('Auth smoke', () => {
       prisma.appUser.findUnique.mockResolvedValue(
         buildAppUser({ id: 'usr_v', tokenVersion: 1 }), // post-revocation state
       );
-      const strategy = new JwtStrategy(fakeConfig(), prisma, keys);
-      await expect(strategy.validate(payload)).rejects.toThrow('Token revoked');
+      const strategy = new JwtStrategy(fakeConfig(), prisma, realTokens(prisma).tokens, keys);
+      await expect(strategy.validate({} as any, payload)).rejects.toThrow('Token revoked');
     });
 
     it('incrementTokenVersion bumps atomically and returns the new version', async () => {
@@ -588,17 +580,17 @@ describe('Auth smoke', () => {
       prisma.appUser.findUnique.mockResolvedValue(
         buildAppUser({ id: 'usr_v', tokenVersion: 1 }),
       );
-      const strategy = new JwtStrategy(fakeConfig(), prisma, keys);
+      const strategy = new JwtStrategy(fakeConfig(), prisma, tokens, keys);
 
       // Old token: signature and expiry are still fine, the version is not.
-      await expect(strategy.validate(await verify(old.accessToken))).rejects.toThrow(
+      await expect(strategy.validate({} as any, await verify(old.accessToken))).rejects.toThrow(
         'Token revoked',
       );
       // The pair handed back by the flow carries the bumped version and works,
       // so the client swaps tokens and never sees a forced re-login.
       const fresh = await verify(res.tokens.access_token);
       expect(fresh.tokenVersion).toBe(1);
-      await expect(strategy.validate(fresh)).resolves.toMatchObject({ id: 'usr_v' });
+      await expect(strategy.validate({} as any, fresh)).resolves.toMatchObject({ id: 'usr_v' });
     });
 
     it('POST /v1/auth/logout-all revokes every session for the caller', async () => {
@@ -608,6 +600,131 @@ describe('Auth smoke', () => {
       const res = await controller.logoutAll({ user: { id: 'usr_v' } });
       expect(tokens.revokeAllSessions).toHaveBeenCalledWith('usr_v');
       expect(res).toEqual({ message: 'All sessions revoked', token_version: 2 });
+    });
+  });
+
+  // Single-token logout via Redis blacklist. Complements session versioning
+  // above: logout-all bumps the version (kills every token); logout blacklists
+  // just this token's jti, so every *other* token keeps working.
+  describe('JWT access-token blacklist (single-token logout)', () => {
+    const NOW = Math.floor(Date.now() / 1000);
+
+    /** Sign a real access token and decode it back, sharing one Redis + keys. */
+    async function issue(user: { id: string; tokenVersion: number }) {
+      const redis = fakeRedis();
+      const { tokens, keys } = realTokens(prisma, redis);
+      const jwt = new JwtService({});
+      const { accessToken } = await tokens.issueSession({
+        id: user.id,
+        email: null,
+        role: 'USER',
+        tokenVersion: user.tokenVersion,
+      });
+      const payload = await jwt.verifyAsync<JwtPayload>(accessToken, {
+        algorithms: ['RS256'],
+        publicKey: keys.publicKey,
+        issuer: 'mator',
+        audience: 'mator-app',
+      });
+      return { tokens, keys, redis, payload };
+    }
+
+    it('every issued access token carries a unique jti', async () => {
+      const a = await issue({ id: 'usr_b', tokenVersion: 0 });
+      const b = await issue({ id: 'usr_b', tokenVersion: 0 });
+      expect(a.payload.jti).toBeDefined();
+      expect(b.payload.jti).toBeDefined();
+      expect(a.payload.jti).not.toBe(b.payload.jti);
+    });
+
+    it('logout blacklists the token under RedisKeys.jwtBlacklist(jti) with the token TTL', async () => {
+      const { tokens, redis, payload } = await issue({ id: 'usr_b', tokenVersion: 0 });
+
+      await tokens.blacklistAccessToken(payload.jti, payload.exp);
+
+      const key = RedisKeys.jwtBlacklist(payload.jti!);
+      expect(redis.store.has(key)).toBe(true);
+      // TTL is the token's own remaining lifetime (~1h), never negative.
+      const ttl = redis.ttls.get(key)!;
+      expect(ttl).toBeGreaterThan(0);
+      expect(ttl).toBeLessThanOrEqual(payload.exp! - NOW + 1);
+    });
+
+    it('a blacklisted token is rejected exactly like an invalid JWT', async () => {
+      const { tokens, keys, payload } = await issue({ id: 'usr_b', tokenVersion: 0 });
+      prisma.appUser.findUnique.mockResolvedValue(
+        buildAppUser({ id: 'usr_b', tokenVersion: 0 }),
+      );
+      await tokens.blacklistAccessToken(payload.jti, payload.exp);
+
+      const strategy = new JwtStrategy(fakeConfig(), prisma, tokens, keys);
+      await expect(strategy.validate({} as any, payload)).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
+      await expect(strategy.validate({} as any, payload)).rejects.toThrow('Token revoked');
+    });
+
+    it('a non-blacklisted token still authenticates (only that one jti dies)', async () => {
+      const { tokens, keys, payload } = await issue({ id: 'usr_b', tokenVersion: 0 });
+      const other = await issue({ id: 'usr_b', tokenVersion: 0 }); // different jti
+      prisma.appUser.findUnique.mockResolvedValue(
+        buildAppUser({ id: 'usr_b', tokenVersion: 0, passwordHash: 'secret' }),
+      );
+      // Blacklist only the first token, on ITS redis.
+      await tokens.blacklistAccessToken(payload.jti, payload.exp);
+
+      // The other token, checked against the same shared appUser mock, still works.
+      const strategy = new JwtStrategy(
+        fakeConfig(),
+        prisma,
+        other.tokens,
+        other.keys,
+      );
+      const authed: any = await strategy.validate({} as any, other.payload);
+      expect(authed.id).toBe('usr_b');
+      expect(authed.passwordHash).toBeUndefined();
+    });
+
+    it('an already-expired token is never written to Redis (no client timestamps trusted)', async () => {
+      const { tokens, redis, payload } = await issue({ id: 'usr_b', tokenVersion: 0 });
+      // exp in the past → nothing to blacklist (it is already rejected by exp).
+      await tokens.blacklistAccessToken(payload.jti, NOW - 10);
+      expect(redis.store.size).toBe(0);
+      expect(redis.setEx).not.toHaveBeenCalled();
+    });
+
+    it('a missing jti/exp is a no-op (legacy tokens rely on the version check)', async () => {
+      const { tokens, redis } = await issue({ id: 'usr_b', tokenVersion: 0 });
+      await tokens.blacklistAccessToken(undefined, NOW + 3600);
+      await tokens.blacklistAccessToken('jti_x', undefined);
+      expect(redis.setEx).not.toHaveBeenCalled();
+    });
+
+    it('the blacklist entry disappears once Redis expires it (TTL is the only cleanup)', async () => {
+      const { tokens, keys, redis, payload } = await issue({ id: 'usr_b', tokenVersion: 0 });
+      prisma.appUser.findUnique.mockResolvedValue(
+        buildAppUser({ id: 'usr_b', tokenVersion: 0 }),
+      );
+      await tokens.blacklistAccessToken(payload.jti, payload.exp);
+      const key = RedisKeys.jwtBlacklist(payload.jti!);
+
+      // Simulate Redis evicting the key at TTL expiry (no cron, no code path).
+      redis.store.delete(key);
+      redis.ttls.delete(key);
+
+      const strategy = new JwtStrategy(fakeConfig(), prisma, tokens, keys);
+      // With the entry gone, the (still unexpired-by-signature) token is accepted.
+      await expect(strategy.validate({} as any, payload)).resolves.toMatchObject({
+        id: 'usr_b',
+      });
+    });
+
+    it('lookup is a single Redis EXISTS call — no SCAN/KEYS', async () => {
+      const { tokens, redis, payload } = await issue({ id: 'usr_b', tokenVersion: 0 });
+      await tokens.isAccessTokenBlacklisted(payload.jti);
+      expect(redis.exists).toHaveBeenCalledTimes(1);
+      expect(redis.exists).toHaveBeenCalledWith(RedisKeys.jwtBlacklist(payload.jti!));
+      expect(redis.scan).toBeUndefined(); // fakeRedis has no scan; prod never calls it
     });
   });
 });

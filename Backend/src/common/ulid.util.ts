@@ -28,6 +28,8 @@ export const IdPrefix = {
   PROVIDER: 'prov',
   SERVICE: 'svc',
   CATALOG_PART: 'part',
+  DRAFT: 'draft',
+  DRAFT_IMAGE: 'dimg',
 } as const;
 
 export type IdPrefix = (typeof IdPrefix)[keyof typeof IdPrefix];

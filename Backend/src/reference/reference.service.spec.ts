@@ -19,13 +19,32 @@ function makePrismaMock() {
   };
 }
 
+/**
+ * Pass-through CacheService double: always a miss, so the loader always runs and
+ * the existing assertions on Prisma calls / response shapes hold unchanged. The
+ * caching-specific behaviour (hit, miss, TTL, fail-open) is covered separately
+ * in cache.service.spec.ts and in the dedicated block below with a stateful mock.
+ */
+function makeCacheMock() {
+  return {
+    get: jest.fn().mockResolvedValue(null),
+    set: jest.fn().mockResolvedValue(undefined),
+    delete: jest.fn().mockResolvedValue(undefined),
+    remember: jest.fn(async (_key: string, _ttl: number, loader: () => Promise<unknown>) =>
+      loader(),
+    ),
+  };
+}
+
 describe('ReferenceService', () => {
   let prisma: ReturnType<typeof makePrismaMock>;
+  let cache: ReturnType<typeof makeCacheMock>;
   let service: ReferenceService;
 
   beforeEach(() => {
     prisma = makePrismaMock();
-    service = new ReferenceService(prisma as never);
+    cache = makeCacheMock();
+    service = new ReferenceService(prisma as never, cache as never);
   });
 
   describe('listMakes', () => {
@@ -140,6 +159,68 @@ describe('ReferenceService', () => {
       expect(prisma.vehicleTrim.findUnique).toHaveBeenCalledWith({ where: { id: 'cobalt-p2-premier' } });
       // The full list is returned — trimId does not filter.
       expect(res.total).toBe(2);
+    });
+  });
+
+  // The list reads go through CacheService.remember; validation stays uncached.
+  describe('caching', () => {
+    it('list reads go through remember() with the right key and 24h TTL', async () => {
+      prisma.vehicleMake.findMany.mockResolvedValue([]);
+      await service.listMakes();
+      expect(cache.remember).toHaveBeenCalledWith(
+        'cache:reference:makes',
+        24 * 60 * 60,
+        expect.any(Function),
+      );
+
+      prisma.vehicleMake.findUnique.mockResolvedValue({ id: 'chevrolet' });
+      prisma.vehicleModelRef.findMany.mockResolvedValue([]);
+      await service.listModels('chevrolet');
+      expect(cache.remember).toHaveBeenCalledWith(
+        'cache:reference:models:chevrolet',
+        24 * 60 * 60,
+        expect.any(Function),
+      );
+    });
+
+    it('a cache HIT returns the cached payload and never touches Prisma', async () => {
+      const cached = { items: [{ id: 'x', name: 'X', logo_url: null }], total: 1 };
+      cache.remember.mockResolvedValueOnce(cached); // simulate a hit (loader skipped)
+
+      const res = await service.listMakes();
+
+      expect(res).toBe(cached);
+      expect(prisma.vehicleMake.findMany).not.toHaveBeenCalled();
+    });
+
+    it('a cache MISS runs the loader once and returns the loaded value', async () => {
+      prisma.vehicleMake.findMany.mockResolvedValue([
+        { id: 'chevrolet', name: 'Chevrolet', logoUrl: null },
+      ]);
+      // Default mock = pass-through miss → loader runs.
+      const res = await service.listMakes();
+      expect(prisma.vehicleMake.findMany).toHaveBeenCalledTimes(1);
+      expect(res).toEqual({
+        items: [{ id: 'chevrolet', name: 'Chevrolet', logo_url: null }],
+        total: 1,
+      });
+    });
+
+    it('validation (404) runs BEFORE the cache — unknown ids never reach remember()', async () => {
+      prisma.vehicleMake.findUnique.mockResolvedValue(null);
+      await expect(service.listModels('nope')).rejects.toBeInstanceOf(NotFoundException);
+      expect(cache.remember).not.toHaveBeenCalled();
+    });
+
+    it('engines use a single trim-independent cache key', async () => {
+      prisma.vehicleTrim.findUnique.mockResolvedValue({ id: 't' });
+      prisma.vehicleEngine.findMany.mockResolvedValue([]);
+      await service.listEngines('t');
+      expect(cache.remember).toHaveBeenCalledWith(
+        'cache:reference:engines',
+        24 * 60 * 60,
+        expect.any(Function),
+      );
     });
   });
 });

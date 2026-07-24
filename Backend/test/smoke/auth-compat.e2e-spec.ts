@@ -110,23 +110,33 @@ describe('Auth compatibility aliases (consolidated AuthController)', () => {
     });
   });
 
-  it('sign-out revokes the refresh token (204, no body)', async () => {
-    const tokens = { revoke: jest.fn().mockResolvedValue(undefined) };
+  it('sign-out revokes the refresh token and blacklists the access token (204, no body)', async () => {
+    const tokens = {
+      revoke: jest.fn().mockResolvedValue(undefined),
+      blacklistAccessToken: jest.fn().mockResolvedValue(undefined),
+    };
     const ctrl = makeController({ tokens });
+    const req = { user: { id: 'usr_x' }, tokenMeta: { jti: 'jti_x', exp: 9999999999 } };
 
-    const res = await ctrl.signOut({ refresh_token: 'rt_x' } as any);
+    const res = await ctrl.signOut(req as any, { refresh_token: 'rt_x' } as any);
 
     expect(tokens.revoke).toHaveBeenCalledWith('rt_x');
+    expect(tokens.blacklistAccessToken).toHaveBeenCalledWith('jti_x', 9999999999);
     expect(res).toBeUndefined();
   });
 
-  it('logout revokes and returns a message', async () => {
-    const tokens = { revoke: jest.fn().mockResolvedValue(undefined) };
+  it('logout revokes, blacklists the access token, and returns a message', async () => {
+    const tokens = {
+      revoke: jest.fn().mockResolvedValue(undefined),
+      blacklistAccessToken: jest.fn().mockResolvedValue(undefined),
+    };
     const ctrl = makeController({ tokens });
+    const req = { user: { id: 'usr_x' }, tokenMeta: { jti: 'jti_x', exp: 9999999999 } };
 
-    const res: any = await ctrl.logout({ refreshToken: 'rt_x' } as any);
+    const res: any = await ctrl.logout(req as any, { refreshToken: 'rt_x' } as any);
 
     expect(tokens.revoke).toHaveBeenCalledWith('rt_x');
+    expect(tokens.blacklistAccessToken).toHaveBeenCalledWith('jti_x', 9999999999);
     expect(res).toEqual({ message: 'Logged out successfully' });
   });
 });

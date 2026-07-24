@@ -5,6 +5,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { OnEvent } from '@nestjs/event-emitter';
 import { PartVehicleCategory, SellerStatus } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
 import axios from 'axios';
@@ -21,8 +22,19 @@ import {
   UploadedImage,
 } from '../cloudinary/cloudinary.service';
 import { CatalogProjectionService } from '../catalog/projection/catalog-projection.service';
+import { QueueService } from '../queue/queue.service';
 import { MediaGroupBuffer } from './media-group-buffer';
 import { persistVehicleLinks } from './vehicle-links';
+import {
+  ProductDraftService,
+  type DraftWithImages,
+} from './product-draft.service';
+import { DraftCoordinator } from './draft-coordinator';
+import {
+  DraftEvent,
+  type DraftImagesFailedEvent,
+  type DraftReadyForPreviewEvent,
+} from './draft-events';
 import {
   WizardSessionStore,
   WizardSession,
@@ -47,6 +59,7 @@ import {
   inputPartNumber,
   inputPrice,
   beginProcessing,
+  beginQuestionnaire,
   backToPhotos,
   goBack,
   changePhotos,
@@ -103,6 +116,11 @@ const CONFIRMATION_TTL_MS = 10 * 60 * 1000;
 // cleanup. A session that carries processed photos deletes its Cloudinary assets
 // on expiry; a plain one is simply dropped.
 const WIZARD_SESSION_TTL_MS = CONFIRMATION_TTL_MS;
+// PARALLEL flow: how long a DB-backed draft lives before the cleanup sweep expires
+// it — and, equivalently, the window in which /start offers to resume it. Chosen at
+// 24h (within the plan's 24–48h band): long enough that a seller returning the same
+// day continues where they left off, short enough that abandoned drafts don't linger.
+const DRAFT_TTL_MS = 24 * 60 * 60 * 1000;
 
 // Within this window, repeated taps on stale (old-catalog) buttons by the same
 // user send the "catalog updated" text message only once. The per-tap alert
@@ -119,6 +137,16 @@ const CONFIRM_BACK = 'product:back';
 // "🖼 Изменить фото" on the preview: return to the PHOTOS step and force a fresh
 // upload (deletes the old assets → the pipeline re-runs on the new photos).
 const CONFIRM_CHANGE_PHOTOS = 'product:change_photos';
+
+// ── PARALLEL flow inline-button payloads ────────────────────────────────────
+// /start resume prompt: continue the existing draft, or discard it and start over.
+const DRAFT_RESUME = 'draft:resume';
+const DRAFT_RESTART = 'draft:restart';
+// Shown when image processing failed (draft.images_failed): retry only the failed
+// photos, or cancel the whole draft. (Replacing photos re-uses the wizard's
+// existing "start over" path, so no separate button is needed here.)
+const DRAFT_RETRY_IMAGES = 'draft:retry_images';
+const DRAFT_CANCEL = 'draft:cancel';
 
 // Nudge shown to anyone interacting outside an active wizard session.
 const START_HINT = '👋 Чтобы добавить товар, нажмите /start';
@@ -215,6 +243,11 @@ export function buildSessionFromPending(
   const vehicle = metadata.vehicles[0];
   return {
     step: WizardStep.PRICE,
+    // Reopening from the preview is a LEGACY-style edit: the photos are already
+    // processed and reused verbatim, so the synchronous PRICE→PHOTOS path applies
+    // regardless of which flow originally created the listing. No draft is involved.
+    flow: 'legacy',
+    draftId: null,
     brand: vehicle?.brand ?? metadata.brand ?? null,
     model: vehicle?.model ?? metadata.models[0] ?? null,
     category: pending.vehicleCategory,
@@ -235,7 +268,11 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(TelegramService.name);
   private bot: Telegraf;
 
-  private readonly imageEnhance = new ImageEnhanceService();
+  // When true, /start uses the PHOTOS-FIRST parallel flow (images process via
+  // BullMQ while the seller answers the questionnaire). When false, the original
+  // synchronous photos-LAST flow runs unchanged. Flag-gated for staged rollout /
+  // instant rollback (PARALLEL_DRAFT_FLOW).
+  private readonly parallelFlow: boolean;
 
   // Step-by-step product-creation wizard sessions, one per Telegram user.
   private readonly wizard = new WizardSessionStore();
@@ -271,11 +308,17 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     private readonly sellers: SellersService,
     private readonly cloudinary: CloudinaryService,
     private readonly catalogProjection: CatalogProjectionService,
+    private readonly imageEnhance: ImageEnhanceService,
+    private readonly drafts: ProductDraftService,
+    private readonly draftCoordinator: DraftCoordinator,
+    private readonly queue: QueueService,
   ) {
     this.imageConcurrency = resolveImageConcurrency(
       this.config.get<string>('IMAGE_CONCURRENCY'),
       this.logger,
     );
+    this.parallelFlow =
+      this.config.get<string>('PARALLEL_DRAFT_FLOW') === 'true';
   }
 
   onModuleInit() {
@@ -343,8 +386,12 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         // timer), deleting any carried-over Cloudinary photos so they don't leak.
         // The fresh session's own timer is armed by sendStepPrompt below.
         await this.discardSessionPhotos(from.id);
-        const session = this.wizard.start(from.id);
-        await this.sendStepPrompt(ctx, session);
+        if (this.parallelFlow) {
+          await this.startParallelProductCreation(ctx, from.id, seller.id);
+        } else {
+          const session = this.wizard.start(from.id);
+          await this.sendStepPrompt(ctx, session);
+        }
         return;
       }
       if (seller.status === SellerStatus.REJECTED) {
@@ -448,6 +495,12 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         await ctx.reply(result.message);
         return;
       }
+      // PARALLEL flow: persist the answered field to the draft and, when the
+      // questionnaire is finished, hand off to the coordinator (rendezvous).
+      if (result.status === 'ok' && session.flow === 'parallel') {
+        await this.handleParallelFormAdvance(ctx, from.id, session);
+        return;
+      }
       // Reuse path: a text/price edit on a session returned from the preview
       // (photos already processed) advances to PHOTOS — but those photos must
       // NOT be re-uploaded. Rebuild the preview directly from the existing
@@ -540,6 +593,494 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       const from = ctx.from;
       if (from) await this.reopenFromPreview(ctx, from.id, WizardStep.PHOTOS);
     });
+
+    // ── PARALLEL flow: /start resume prompt ─────────────────────────────────
+    this.bot.action(DRAFT_RESUME, async (ctx) => {
+      await ctx.answerCbQuery();
+      await this.removeInlineKeyboard(ctx);
+      const from = ctx.from;
+      if (from) await this.resumeDraft(ctx, from.id);
+    });
+    this.bot.action(DRAFT_RESTART, async (ctx) => {
+      await ctx.answerCbQuery();
+      await this.removeInlineKeyboard(ctx);
+      const from = ctx.from;
+      if (!from) return;
+      const seller = await this.sellers.findByTgId(BigInt(from.id));
+      if (!seller || seller.status !== SellerStatus.ACTIVE) {
+        await ctx.reply(START_HINT);
+        return;
+      }
+      // Discard the old draft (assets + jobs) and begin a brand-new parallel flow.
+      await this.cancelActiveDraft(from.id);
+      await this.startParallelProductCreation(ctx, from.id, seller.id);
+    });
+
+    // ── PARALLEL flow: image-failure recovery ───────────────────────────────
+    this.bot.action(DRAFT_RETRY_IMAGES, async (ctx) => {
+      await ctx.answerCbQuery();
+      await this.removeInlineKeyboard(ctx);
+      const from = ctx.from;
+      if (from) await this.retryFailedImages(ctx, from.id);
+    });
+    this.bot.action(DRAFT_CANCEL, async (ctx) => {
+      await ctx.answerCbQuery();
+      await this.removeInlineKeyboard(ctx);
+      const from = ctx.from;
+      if (!from) return;
+      await this.cancelActiveDraft(from.id);
+      await ctx.reply(
+        '❌ Создание товара отменено.\nНажмите /start, чтобы начать заново.',
+      );
+    });
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PARALLEL flow (photos-first, images processed in the background via BullMQ).
+  // Only reachable when PARALLEL_DRAFT_FLOW is on. The legacy synchronous flow
+  // above is untouched.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Entry point for the parallel flow's /start. If a resumable draft exists (a
+   * CREATING draft within its TTL), offer to continue or start over; otherwise
+   * begin a fresh session at PHOTOS_FIRST and ask for photos first.
+   */
+  private async startParallelProductCreation(
+    ctx: Context,
+    tgUserId: number,
+    sellerId: number,
+  ): Promise<void> {
+    const resumable = await this.drafts.findResumable(sellerId);
+    if (resumable) {
+      await ctx.reply(
+        'У вас есть незавершённое объявление.\nПродолжить или начать заново?',
+        Markup.inlineKeyboard([
+          [
+            Markup.button.callback('▶️ Продолжить', DRAFT_RESUME),
+            Markup.button.callback('🆕 Начать заново', DRAFT_RESTART),
+          ],
+        ]),
+      );
+      return;
+    }
+    const session = this.wizard.startParallel(tgUserId);
+    await this.sendStepPrompt(ctx, session);
+    this.touchSession(tgUserId);
+  }
+
+  /**
+   * PARALLEL flow — photos arrived first. Create the DB draft with one PROCESSING
+   * image row per photo, enqueue a job per row (the worker fetches + processes each
+   * in the background), advance the wizard to BRAND, and start the questionnaire.
+   * NO network happens here: only the tgFileId is stored — the worker fetches the
+   * original itself (phase A). So the first question appears with zero upload wait.
+   */
+  private async handleParallelPhotos(
+    ctx: Context,
+    tgUserId: number,
+    session: WizardSession,
+    fileIds: string[],
+  ): Promise<void> {
+    // Re-gate the seller (status may have changed since /start).
+    const seller = await this.sellers.findByTgId(BigInt(tgUserId));
+    if (!seller) {
+      await ctx.reply('👋 Сначала зарегистрируйтесь: введите /start');
+      return;
+    }
+    if (seller.status === SellerStatus.PENDING) {
+      await ctx.reply('⏳ Ваша заявка ещё не одобрена. Пожалуйста, подождите.');
+      return;
+    }
+    if (seller.status === SellerStatus.REJECTED) {
+      await ctx.reply('⛔ Ваш аккаунт отклонён администратором.');
+      return;
+    }
+
+    const images = fileIds.slice(0, MAX_IMAGES_PER_LISTING);
+    if (images.length === 0) {
+      await this.sendStepPrompt(ctx, session);
+      return;
+    }
+
+    // Advance the FSM first so a second album racing the first is a stale no-op.
+    if (beginQuestionnaire(session).status !== 'ok') return;
+
+    let draft: DraftWithImages;
+    try {
+      draft = await this.drafts.createWithImages({
+        sellerId: seller.id,
+        tgId: BigInt(tgUserId),
+        formStep: session.step, // BRAND
+        expiresAt: new Date(Date.now() + DRAFT_TTL_MS),
+        images: images.map((fileId, i) => ({ sortOrder: i, tgFileId: fileId })),
+      });
+    } catch (err) {
+      this.logger.error(
+        `Failed to create draft for ${tgUserId}: ${err instanceof Error ? err.message : String(err)}`,
+        err instanceof Error ? err.stack : undefined,
+      );
+      // Roll the FSM back so the seller can retry the upload.
+      session.step = WizardStep.PHOTOS_FIRST;
+      await ctx.reply('⚠️ Не удалось принять фото. Попробуйте ещё раз.');
+      return;
+    }
+
+    session.draftId = draft.id;
+
+    // Enqueue one job per image row (deterministic jobId → idempotent).
+    for (const img of draft.images) {
+      try {
+        const job = await this.queue.enqueueImage({
+          draftId: draft.id,
+          imageId: img.id,
+        });
+        if (job.id) await this.drafts.setImageJobId(img.id, job.id);
+      } catch (err) {
+        this.logger.error(
+          `Failed to enqueue image ${img.id}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
+    await ctx.reply(
+      `✅ Фото получены (${images.length} шт.). Пока мы их обрабатываем, заполните информацию о товаре.`,
+    );
+    // Start the questionnaire immediately (images process in parallel).
+    await this.sendStepPrompt(ctx, session);
+  }
+
+  /**
+   * PARALLEL flow — a questionnaire step was answered. Persist the answered fields
+   * to the draft (so nothing is lost on restart/expiry), then either continue the
+   * questionnaire or, once it is finished (QUESTIONNAIRE_DONE), hand off to the
+   * coordinator. If the images are already done the coordinator sends the preview
+   * immediately (its ready_for_preview event); otherwise the seller sees a short
+   * holding message and the preview follows automatically when the last image lands.
+   */
+  private async handleParallelFormAdvance(
+    ctx: Context,
+    tgUserId: number,
+    session: WizardSession,
+  ): Promise<void> {
+    if (!session.draftId) {
+      // Defensive: a parallel session must have a draft by the time the
+      // questionnaire runs. If not, restart cleanly.
+      this.logger.error(
+        `Parallel session for ${tgUserId} has no draftId — restarting.`,
+      );
+      await this.discardSessionPhotos(tgUserId);
+      await ctx.reply(START_HINT);
+      return;
+    }
+
+    // Persist the current field snapshot (idempotent; cheap). Re-arm the TTL.
+    this.touchSession(tgUserId);
+    await this.drafts.updateForm(session.draftId, {
+      formStep: session.step,
+      brand: session.brand,
+      model: session.model,
+      category: session.category,
+      title: session.title,
+      description: session.description,
+      partNumberType: session.partNumberType,
+      partNumber: session.partNumber,
+      priceUzs: session.price ?? undefined,
+    });
+
+    if (session.step !== WizardStep.QUESTIONNAIRE_DONE) {
+      // More questions to go.
+      await this.sendStepPrompt(ctx, session);
+      return;
+    }
+
+    // Questionnaire finished. The form's inactivity timer no longer applies (the
+    // draft's own TTL governs from here); the wizard session is consumed — the
+    // coordinator/pending machinery owns the flow now.
+    this.clearSessionExpiry(tgUserId);
+    this.wizard.deleteIf(tgUserId, session);
+
+    // Ask the coordinator to evaluate the rendezvous. If images are all READY it
+    // emits ready_for_preview (→ our @OnEvent sends the preview). If not, tell the
+    // seller we're finishing the photos; the worker's completion will trigger it.
+    const draftId = session.draftId;
+    await this.draftCoordinator.onFormStep(draftId);
+    const draft = await this.drafts.findWithImages(draftId);
+    if (draft && draft.status === 'CREATING') {
+      // Still waiting on images (or one failed — the images_failed event handles
+      // that case with its own message). Only show the holding text if nothing has
+      // failed yet, to avoid contradicting the failure notice.
+      const anyFailed = draft.images.some((img) => img.status === 'FAILED');
+      if (!anyFailed) {
+        await ctx.reply('⏳ Завершаем обработку фото…');
+      }
+    }
+  }
+
+  // ── PARALLEL flow: domain-event listeners (the worker↔bot seam) ─────────────
+  /**
+   * Both tracks finished (form complete + all images READY): the coordinator flipped
+   * the draft to READY_FOR_PREVIEW and emitted this. Build the pending confirmation
+   * from the draft and send the preview to the seller's chat (there may be no live
+   * ctx — the images may have finished after the form). The confirm/cancel/back
+   * buttons then reuse the EXISTING pending machinery unchanged.
+   */
+  @OnEvent(DraftEvent.READY_FOR_PREVIEW)
+  async onDraftReadyForPreview(
+    event: DraftReadyForPreviewEvent,
+  ): Promise<void> {
+    try {
+      await this.presentDraftPreview(event.draftId, Number(event.tgId));
+    } catch (err) {
+      this.logger.error(
+        `Failed to present preview for draft ${event.draftId}: ${err instanceof Error ? err.message : String(err)}`,
+        err instanceof Error ? err.stack : undefined,
+      );
+    }
+  }
+
+  /**
+   * At least one image failed after retries (draft stays CREATING, form data kept).
+   * Offer the seller retry (re-enqueue only the failed photos) or cancel. Replacing
+   * photos is done by starting over (/start), so no separate button is needed.
+   */
+  @OnEvent(DraftEvent.IMAGES_FAILED)
+  async onDraftImagesFailed(event: DraftImagesFailedEvent): Promise<void> {
+    try {
+      await this.bot.telegram.sendMessage(
+        Number(event.tgId),
+        `⚠️ Не удалось обработать ${event.failedCount} фото. ` +
+          'Ваши данные сохранены — можно повторить обработку.',
+        Markup.inlineKeyboard([
+          [Markup.button.callback('🔁 Повторить', DRAFT_RETRY_IMAGES)],
+          [Markup.button.callback('❌ Отмена', DRAFT_CANCEL)],
+        ]),
+      );
+    } catch (err) {
+      this.logger.error(
+        `Failed to notify image failure for draft ${event.draftId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * Build the pending confirmation from a READY_FOR_PREVIEW draft and send the
+   * preview. Idempotent: a draft not in READY_FOR_PREVIEW (already presented,
+   * cancelled, published, expired) is skipped.
+   */
+  private async presentDraftPreview(
+    draftId: string,
+    chatId: number,
+  ): Promise<void> {
+    const draft = await this.drafts.findWithImages(draftId);
+    if (!draft || draft.status !== 'READY_FOR_PREVIEW') return;
+
+    const processedUrls = draft.images
+      .filter((img) => img.status === 'READY' && img.processedUrl)
+      .sort((a, b) => a.sortOrder - b.sortOrder)
+      .map((img) => img.processedUrl as string);
+    const publicIds = draft.images
+      .filter((img) => img.processedPublicId)
+      .map((img) => img.processedPublicId as string);
+
+    if (
+      processedUrls.length === 0 ||
+      draft.title === null ||
+      draft.brand === null ||
+      draft.model === null ||
+      draft.category === null ||
+      draft.priceUzs === null
+    ) {
+      this.logger.error(
+        `Draft ${draftId} reached preview with incomplete data — skipping.`,
+      );
+      return;
+    }
+
+    const metadata = this.buildMetadataFromDraft(draft);
+    const price = new Decimal(draft.priceUzs);
+
+    this.storePending({
+      sellerId: draft.sellerId,
+      tgUserId: chatId,
+      metadata,
+      title: draft.title,
+      vehicleCategory: draft.category,
+      processedUrls,
+      publicIds,
+      price,
+    });
+
+    await this.sendPreviewToChat(
+      chatId,
+      metadata,
+      draft.category,
+      processedUrls,
+      price,
+    );
+  }
+
+  /** Map a draft's collected fields into the ParseOutcome the preview/commit use. */
+  private buildMetadataFromDraft(draft: {
+    brand: string | null;
+    model: string | null;
+    title: string | null;
+    description: string | null;
+    partNumber: string | null;
+    partNumberType: ParseOutcome['part_number_type'];
+    priceUzs: Decimal | null;
+  }): ParseOutcome {
+    const brand = draft.brand ?? '';
+    const model = draft.model ?? '';
+    return {
+      title: draft.title ?? '',
+      description: draft.description,
+      brand,
+      models: [model],
+      vehicles: [{ brand, model }],
+      isUniversal: false,
+      gm_number: draft.partNumber,
+      part_number_type: draft.partNumberType,
+      price: draft.priceUzs ? draft.priceUzs.toNumber() : 0,
+      source: 'wizard',
+      confidence: 1,
+    };
+  }
+
+  /**
+   * PARALLEL flow — resume the seller's in-progress draft on /start. Restore a
+   * wizard session at the draft's saved formStep, then re-prompt. Images keep
+   * processing in the background (their jobs are still queued), so the rendezvous
+   * will fire normally. If the form was already finished, nudge to wait / re-check.
+   */
+  private async resumeDraft(ctx: Context, tgUserId: number): Promise<void> {
+    const seller = await this.sellers.findByTgId(BigInt(tgUserId));
+    if (!seller || seller.status !== SellerStatus.ACTIVE) {
+      await ctx.reply(START_HINT);
+      return;
+    }
+    const draft = await this.drafts.findResumable(seller.id);
+    if (!draft) {
+      await ctx.reply(
+        '⌛ Незавершённое объявление больше недоступно. Нажмите /start, чтобы начать заново.',
+      );
+      return;
+    }
+
+    // Rebuild the wizard session from the draft's saved state.
+    const session = this.wizard.startParallel(tgUserId);
+    session.draftId = draft.id;
+    session.step = (draft.formStep as WizardStep) ?? WizardStep.BRAND;
+    session.brand = draft.brand;
+    session.model = draft.model;
+    session.category = draft.category;
+    session.title = draft.title;
+    session.description = draft.description;
+    session.partNumberType = draft.partNumberType;
+    session.partNumber = draft.partNumber;
+    session.price = draft.priceUzs ? draft.priceUzs.toNumber() : null;
+    this.wizard.restore(tgUserId, session);
+    this.touchSession(tgUserId);
+
+    const anyFailed = draft.images.some((img) => img.status === 'FAILED');
+    if (anyFailed) {
+      await this.bot.telegram.sendMessage(
+        tgUserId,
+        '⚠️ Часть фото не обработалась. Можно повторить обработку.',
+        Markup.inlineKeyboard([
+          [Markup.button.callback('🔁 Повторить', DRAFT_RETRY_IMAGES)],
+          [Markup.button.callback('❌ Отмена', DRAFT_CANCEL)],
+        ]),
+      );
+      return;
+    }
+    if (session.step === WizardStep.QUESTIONNAIRE_DONE) {
+      // Form already complete — either images are still going or just finished.
+      await this.draftCoordinator.onFormStep(draft.id);
+      await ctx.reply('⏳ Завершаем обработку фото…');
+      return;
+    }
+    await ctx.reply('▶️ Продолжаем. Заполните оставшиеся поля.');
+    await this.sendStepPrompt(ctx, session);
+  }
+
+  /**
+   * PARALLEL flow — retry the failed images of the seller's draft: reset the FAILED
+   * rows to PROCESSING and re-enqueue only those. Keeps all form data. If nothing is
+   * failed (e.g. a stale tap), report gently.
+   */
+  private async retryFailedImages(
+    ctx: Context,
+    tgUserId: number,
+  ): Promise<void> {
+    const seller = await this.sellers.findByTgId(BigInt(tgUserId));
+    if (!seller) {
+      await ctx.reply(START_HINT);
+      return;
+    }
+    const draft = await this.drafts.findResumable(seller.id);
+    if (!draft) {
+      await ctx.reply(
+        '⌛ Незавершённое объявление больше недоступно. Нажмите /start, чтобы начать заново.',
+      );
+      return;
+    }
+    const reset = await this.drafts.resetFailedImages(draft.id);
+    const toReenqueue = reset.filter(
+      (img) => img.status === 'PROCESSING' && !img.processedUrl,
+    );
+    if (toReenqueue.length === 0) {
+      await ctx.reply('Нет фото для повторной обработки.');
+      return;
+    }
+    for (const img of toReenqueue) {
+      try {
+        const job = await this.queue.enqueueImage({
+          draftId: draft.id,
+          imageId: img.id,
+        });
+        if (job.id) await this.drafts.setImageJobId(img.id, job.id);
+      } catch (err) {
+        this.logger.error(
+          `Failed to re-enqueue image ${img.id}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    await ctx.reply(
+      '🔁 Повторяем обработку фото. Мы сообщим, когда будет готово.',
+    );
+  }
+
+  /**
+   * PARALLEL flow — cancel the seller's in-progress draft: delete its Cloudinary
+   * assets, remove any unfinished image jobs, and mark it CANCELLED (versioned, so
+   * a concurrent transition is respected). Also clears any wizard session/timer.
+   */
+  private async cancelActiveDraft(tgUserId: number): Promise<void> {
+    this.clearSessionExpiry(tgUserId);
+    this.wizard.delete(tgUserId);
+    const seller = await this.sellers.findByTgId(BigInt(tgUserId));
+    if (!seller) return;
+    const draft = await this.drafts.findResumable(seller.id);
+    if (!draft) return;
+
+    const publicIds = await this.drafts.collectPublicIds(draft.id);
+    if (publicIds.length > 0) await this.cloudinary.deleteAssets(publicIds);
+    for (const img of draft.images) {
+      if (img.jobId) {
+        try {
+          await this.queue.removeImageJob(img.jobId);
+        } catch {
+          // already gone / active — ignore.
+        }
+      }
+    }
+    await this.drafts.tryTransition(
+      draft.id,
+      'CREATING',
+      'CANCELLED',
+      draft.version,
+    );
   }
 
   /**
@@ -664,6 +1205,12 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     if (result.status !== 'ok') return; // stale button — ignore silently
 
     await this.removeInlineKeyboard(ctx);
+    // PARALLEL flow: persist the answered field to the draft and, when the
+    // questionnaire finishes, hand off to the coordinator (rendezvous).
+    if (session.flow === 'parallel') {
+      await this.handleParallelFormAdvance(ctx, from.id, session);
+      return;
+    }
     await this.sendStepPrompt(ctx, session);
   }
 
@@ -707,6 +1254,15 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     const session = this.wizard.get(tgUserId);
     if (!session) {
       await ctx.reply(START_HINT);
+      return;
+    }
+    // PARALLEL flow: photos arrive FIRST (the PHOTOS_FIRST step). Accept them, kick
+    // off background processing, and start the questionnaire — handled separately.
+    if (
+      session.flow === 'parallel' &&
+      session.step === WizardStep.PHOTOS_FIRST
+    ) {
+      await this.handleParallelPhotos(ctx, tgUserId, session, fileIds);
       return;
     }
     if (session.step !== WizardStep.PHOTOS) {
@@ -934,19 +1490,33 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     ctx: Context,
     draft: Omit<PendingProduct, 'expiry'>,
   ): void {
-    if (this.pending.has(draft.tgUserId)) {
-      void this.discardPending(draft.tgUserId); // deletes the replaced draft's assets
+    const replaced = this.pending.has(draft.tgUserId);
+    this.storePending(draft);
+    if (replaced) {
       void ctx.reply('♻️ Предыдущий неподтверждённый товар заменён новым.');
     }
+  }
 
+  /**
+   * ctx-free core of setPending: discard any existing pending (deleting its
+   * assets), arm the expiry, and store the new one. Used by both the legacy path
+   * (via setPending, which adds the "replaced" chat notice) and the parallel path
+   * (which is driven by a domain event and has no ctx). Returns whether a previous
+   * pending was replaced, so an out-of-band caller can notify if it wants to.
+   */
+  private storePending(draft: Omit<PendingProduct, 'expiry'>): boolean {
+    const replaced = this.pending.has(draft.tgUserId);
+    if (replaced) {
+      void this.discardPending(draft.tgUserId); // deletes the replaced draft's assets
+    }
     const expiry = setTimeout(() => {
       // Auto-expiry: drop the session and clean up its uploaded assets.
       void this.discardPending(draft.tgUserId);
     }, CONFIRMATION_TTL_MS);
     // Don't keep the process alive just for a pending confirmation.
     expiry.unref?.();
-
     this.pending.set(draft.tgUserId, { ...draft, expiry });
+    return replaced;
   }
 
   /**
@@ -1034,6 +1604,90 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     processedUrls: string[],
     price: Decimal,
   ): Promise<void> {
+    const { caption, buttons } = this.buildPreview(
+      metadata,
+      vehicleCategory,
+      price,
+    );
+    // Single image → photo + caption + buttons; album → media group preview
+    // followed by the caption+buttons as a separate message (media groups can't
+    // carry an inline keyboard).
+    try {
+      if (processedUrls.length === 1) {
+        await ctx.replyWithPhoto(processedUrls[0], {
+          caption,
+          parse_mode: 'Markdown',
+          ...buttons,
+        });
+        return;
+      }
+      const media = processedUrls
+        .slice(0, MAX_IMAGES_PER_LISTING)
+        .map((url) => ({
+          type: 'photo' as const,
+          media: url,
+        }));
+      await ctx.replyWithMediaGroup(media);
+      await ctx.reply(caption, { parse_mode: 'Markdown', ...buttons });
+    } catch (err) {
+      this.logger.warn(
+        `Failed to send preview media, falling back to text: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      await ctx.reply(caption, { parse_mode: 'Markdown', ...buttons });
+    }
+  }
+
+  /**
+   * ctx-free preview send used by the PARALLEL flow's ready_for_preview event (the
+   * form may have finished before the images, so there is no live ctx — we send to
+   * the seller's chat id). Mirrors sendPreview exactly but via bot.telegram.
+   */
+  private async sendPreviewToChat(
+    chatId: number,
+    metadata: ParseOutcome,
+    vehicleCategory: PartVehicleCategory,
+    processedUrls: string[],
+    price: Decimal,
+  ): Promise<void> {
+    const { caption, buttons } = this.buildPreview(
+      metadata,
+      vehicleCategory,
+      price,
+    );
+    try {
+      if (processedUrls.length === 1) {
+        await this.bot.telegram.sendPhoto(chatId, processedUrls[0], {
+          caption,
+          parse_mode: 'Markdown',
+          ...buttons,
+        });
+        return;
+      }
+      const media = processedUrls
+        .slice(0, MAX_IMAGES_PER_LISTING)
+        .map((url) => ({ type: 'photo' as const, media: url }));
+      await this.bot.telegram.sendMediaGroup(chatId, media);
+      await this.bot.telegram.sendMessage(chatId, caption, {
+        parse_mode: 'Markdown',
+        ...buttons,
+      });
+    } catch (err) {
+      this.logger.warn(
+        `Failed to send preview media to chat ${chatId}, falling back to text: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      await this.bot.telegram.sendMessage(chatId, caption, {
+        parse_mode: 'Markdown',
+        ...buttons,
+      });
+    }
+  }
+
+  /** Build the preview caption + confirmation keyboard (shared by both senders). */
+  private buildPreview(
+    metadata: ParseOutcome,
+    vehicleCategory: PartVehicleCategory,
+    price: Decimal,
+  ): { caption: string; buttons: ReturnType<typeof Markup.inlineKeyboard> } {
     const vehicle = formatVehicleLine(metadata);
     const categoryLabel = CATEGORY_LABELS.get(vehicleCategory) ?? '—';
     // Label the number by how the seller marked it — never guess. An unlabeled
@@ -1066,33 +1720,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         Markup.button.callback('🖼 Изменить фото', CONFIRM_CHANGE_PHOTOS),
       ],
     ]);
-
-    // Single image → photo + caption + buttons; album → media group preview
-    // followed by the caption+buttons as a separate message (media groups can't
-    // carry an inline keyboard).
-    try {
-      if (processedUrls.length === 1) {
-        await ctx.replyWithPhoto(processedUrls[0], {
-          caption,
-          parse_mode: 'Markdown',
-          ...buttons,
-        });
-        return;
-      }
-      const media = processedUrls
-        .slice(0, MAX_IMAGES_PER_LISTING)
-        .map((url) => ({
-          type: 'photo' as const,
-          media: url,
-        }));
-      await ctx.replyWithMediaGroup(media);
-      await ctx.reply(caption, { parse_mode: 'Markdown', ...buttons });
-    } catch (err) {
-      this.logger.warn(
-        `Failed to send preview media, falling back to text: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      await ctx.reply(caption, { parse_mode: 'Markdown', ...buttons });
-    }
+    return { caption, buttons };
   }
 
   /**

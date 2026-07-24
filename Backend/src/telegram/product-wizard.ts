@@ -24,6 +24,11 @@ import { parsePrice } from '../ai/price-parser';
 import { WIZARD_BRANDS, WIZARD_CATEGORIES } from './wizard-catalog';
 
 export enum WizardStep {
+  /** Photos-first entry (PARALLEL flow only): the very first thing the seller does
+   *  is upload photos. Once they arrive, image processing is kicked off in the
+   *  background (BullMQ) and the FSM jumps straight to BRAND so the questionnaire
+   *  runs while the images process. Not used by the legacy (photos-last) flow. */
+  PHOTOS_FIRST = 'PHOTOS_FIRST',
   BRAND = 'BRAND',
   MODEL = 'MODEL',
   CATEGORY = 'CATEGORY',
@@ -34,13 +39,34 @@ export enum WizardStep {
   PRICE = 'PRICE',
   PHOTOS = 'PHOTOS',
   /** Photos received; image pipeline running. Blocks further input until the
-   *  preview is sent (→ session deleted) or processing fails (→ PHOTOS). */
+   *  preview is sent (→ session deleted) or processing fails (→ PHOTOS).
+   *  LEGACY flow only. */
   PROCESSING = 'PROCESSING',
+  /** Questionnaire finished (PARALLEL flow only): every form field is collected.
+   *  The wizard's work is done; the draft coordinator now owns the rendezvous with
+   *  image processing and decides when to show the preview. Terminal for the FSM. */
+  QUESTIONNAIRE_DONE = 'QUESTIONNAIRE_DONE',
 }
+
+/**
+ * Which product-creation flow a session belongs to:
+ *   • 'legacy'   — the original synchronous, photos-LAST flow (BRAND→…→PRICE→PHOTOS
+ *                  →PROCESSING). Kept behind the PARALLEL_DRAFT_FLOW flag for rollback.
+ *   • 'parallel' — the photos-FIRST flow (PHOTOS_FIRST→BRAND→…→PRICE→QUESTIONNAIRE_DONE)
+ *                  where images process in the background via the DB draft.
+ * The questionnaire steps (BRAND→…→PRICE) are IDENTICAL in both; the flow only
+ * changes the entry point and what happens after PRICE.
+ */
+export type WizardFlow = 'legacy' | 'parallel';
 
 /** Everything the wizard collects (the requirement's FSM fields). */
 export interface WizardSession {
   step: WizardStep;
+  /** Which flow this session runs (default 'legacy' for back-compat). */
+  flow: WizardFlow;
+  /** PARALLEL flow only: the DB draft id backing this session (created once photos
+   *  are accepted). null for legacy sessions and before photos arrive. */
+  draftId: string | null;
   brand: string | null;
   model: string | null;
   category: PartVehicleCategory | null;
@@ -157,10 +183,12 @@ const MAX_PRICE_UZS = 999_999_999_999;
 export class WizardSessionStore {
   private readonly sessions = new Map<number, WizardSession>();
 
-  /** Start (or restart) the wizard for a user with a fresh session. */
-  start(tgUserId: number): WizardSession {
-    const session: WizardSession = {
-      step: WizardStep.BRAND,
+  /** Build a fresh session with the given flow + starting step (all fields empty). */
+  private fresh(flow: WizardFlow, step: WizardStep): WizardSession {
+    return {
+      step,
+      flow,
+      draftId: null,
       brand: null,
       model: null,
       category: null,
@@ -172,6 +200,22 @@ export class WizardSessionStore {
       processedUrls: [],
       publicIds: [],
     };
+  }
+
+  /** Start (or restart) the LEGACY (photos-last) wizard: begins at BRAND. */
+  start(tgUserId: number): WizardSession {
+    const session = this.fresh('legacy', WizardStep.BRAND);
+    this.sessions.set(tgUserId, session);
+    return session;
+  }
+
+  /**
+   * Start (or restart) the PARALLEL (photos-first) wizard: begins at PHOTOS_FIRST
+   * so the seller uploads photos before any question. Once photos arrive the
+   * service creates the draft (setting `draftId`) and advances to BRAND.
+   */
+  startParallel(tgUserId: number): WizardSession {
+    const session = this.fresh('parallel', WizardStep.PHOTOS_FIRST);
     this.sessions.set(tgUserId, session);
     return session;
   }
@@ -357,11 +401,29 @@ export function inputPrice(session: WizardSession, raw: string): WizardResult {
     );
   }
   session.price = price;
-  session.step = WizardStep.PHOTOS;
+  // PRICE is the last QUESTION in both flows. What comes AFTER it differs:
+  //   • legacy   → PHOTOS (the seller now uploads photos, processed synchronously).
+  //   • parallel → QUESTIONNAIRE_DONE (form complete; photos were uploaded first and
+  //     are already processing — the coordinator handles the rendezvous/preview).
+  session.step =
+    session.flow === 'parallel'
+      ? WizardStep.QUESTIONNAIRE_DONE
+      : WizardStep.PHOTOS;
   return OK;
 }
 
-/** PHOTOS → PROCESSING; blocks a second album from racing the first. */
+/**
+ * PHOTOS_FIRST → BRAND (PARALLEL flow): called once the uploaded photos have been
+ * accepted and the backing draft created, so the questionnaire begins while the
+ * images process in the background. Stale outside the PHOTOS_FIRST step.
+ */
+export function beginQuestionnaire(session: WizardSession): WizardResult {
+  if (session.step !== WizardStep.PHOTOS_FIRST) return STALE;
+  session.step = WizardStep.BRAND;
+  return OK;
+}
+
+/** PHOTOS → PROCESSING; blocks a second album from racing the first. (LEGACY.) */
 export function beginProcessing(session: WizardSession): WizardResult {
   if (session.step !== WizardStep.PHOTOS) return STALE;
   session.step = WizardStep.PROCESSING;
@@ -407,8 +469,13 @@ export function previousStep(session: WizardSession): WizardStep | null {
         : WizardStep.PART_NUMBER;
     case WizardStep.PHOTOS:
       return WizardStep.PRICE;
+    // No previous step: BRAND (first question) and the transient PROCESSING state,
+    // plus the parallel-flow endpoints — PHOTOS_FIRST (very first step) and
+    // QUESTIONNAIRE_DONE (terminal; the coordinator owns the flow now).
     case WizardStep.BRAND:
     case WizardStep.PROCESSING:
+    case WizardStep.PHOTOS_FIRST:
+    case WizardStep.QUESTIONNAIRE_DONE:
       return null;
   }
 }
@@ -588,5 +655,16 @@ export function stepPrompt(session: WizardSession): StepPrompt {
     case WizardStep.PROCESSING:
       // Transient blocking state — no Back button (previousStep returns null).
       return { text: '⏳ Пожалуйста, подождите — идёт обработка фото.' };
+    case WizardStep.PHOTOS_FIRST:
+      // Parallel-flow entry: photos before any question. No Back button.
+      return {
+        text:
+          '📸 Сначала отправьте фотографии товара — одно фото или альбом до 10 фото.\n' +
+          'Пока мы их обрабатываем, вы заполните информацию о товаре.',
+      };
+    case WizardStep.QUESTIONNAIRE_DONE:
+      // Form finished; the coordinator shows the preview as soon as the photos are
+      // ready. This holding message only appears if processing is still running.
+      return { text: '⏳ Завершаем обработку фото…' };
   }
 }

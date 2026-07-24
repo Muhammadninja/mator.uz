@@ -2,9 +2,11 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { ScheduleModule } from '@nestjs/schedule';
+import { EventEmitterModule } from '@nestjs/event-emitter';
 import { APP_GUARD } from '@nestjs/core';
 import { PrismaModule } from './prisma/prisma.module';
 import { RedisModule } from './redis/redis.module';
+import { QueueModule } from './queue/queue.module';
 import { AuthModule } from './auth/auth.module';
 import { SellersModule } from './sellers/sellers.module';
 import { AdminModule } from './admin/admin.module';
@@ -33,8 +35,12 @@ import { DealersModule } from './dealers/dealers.module';
     // Global baseline rate limit; sensitive auth routes tighten this further.
     ThrottlerModule.forRoot([{ ttl: 60 * 1000, limit: 100 }]),
     ScheduleModule.forRoot(),
+    // In-process domain events. Used to decouple the image worker from Telegram:
+    // DraftCoordinator emits draft.* events; TelegramService reacts (@OnEvent).
+    EventEmitterModule.forRoot(),
     PrismaModule,
     RedisModule,
+    QueueModule,
     AuthModule,
     SellersModule,
     AdminModule,
