@@ -14,6 +14,7 @@ import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
 import { PhoneAuthService } from './phone/phone-auth.service';
 import { TokenService, ACCESS_TTL_SECONDS } from './tokens/token.service';
+import { AuthenticatedTokenMeta } from './strategies/jwt.strategy';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { RefreshDto } from './dto/refresh.dto';
 import { SignInDto } from './dto/sign-in.dto';
@@ -22,6 +23,16 @@ import { RequestOtpDto } from './phone/dto/request-otp.dto';
 import { CheckAvailabilityDto } from './phone/dto/check-availability.dto';
 import { VerifyOtpDto } from './phone/dto/verify-otp.dto';
 import { ResendOtpDto } from './phone/dto/resend-otp.dto';
+
+/**
+ * Request shape on JWT-guarded routes: carries the authenticated user plus the
+ * current access token's identity (jti/exp), which JwtStrategy stashes so
+ * logout can blacklist exactly this token.
+ */
+interface AuthenticatedRequest {
+  user: { id: string };
+  tokenMeta?: AuthenticatedTokenMeta;
+}
 
 /**
  * Public v1 authentication controller under /v1/auth. Mator v1 is phone-only,
@@ -99,8 +110,9 @@ export class AuthController {
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth('jwt')
   @HttpCode(HttpStatus.NO_CONTENT)
-  async signOut(@Body() dto: RefreshDto) {
+  async signOut(@Request() req: AuthenticatedRequest, @Body() dto: RefreshDto) {
     await this.tokens.revoke(this.resolveRefresh(dto));
+    await this.tokens.blacklistAccessToken(req.tokenMeta?.jti, req.tokenMeta?.exp);
   }
 
   // ── Session / token ───────────────────────────────────────────────────────────
@@ -142,8 +154,12 @@ export class AuthController {
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth('jwt')
   @HttpCode(HttpStatus.OK)
-  async logout(@Body() dto: RefreshDto) {
+  async logout(@Request() req: AuthenticatedRequest, @Body() dto: RefreshDto) {
     await this.tokens.revoke(this.resolveRefresh(dto));
+    // Immediately kill the access token that made this call, so it can't be used
+    // again for the remainder of its lifetime (the refresh revoke above only
+    // stops minting new sessions). Every other access token is untouched.
+    await this.tokens.blacklistAccessToken(req.tokenMeta?.jti, req.tokenMeta?.exp);
     return { message: 'Logged out successfully' };
   }
 

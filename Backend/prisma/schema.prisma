@@ -182,6 +182,35 @@ enum PartNumberType {
   UNKNOWN
 }
 
+// Product-creation draft lifecycle (Telegram wizard). Two independent axes:
+//   • DraftStatus         — the FORM axis (coarse, user-facing / rendezvous gate).
+//   • DraftImageStatus    — the per-image USER axis (coarse; gates the rendezvous).
+//   • ImageProcessingStage — the per-image TECHNICAL axis (fine; observability only,
+//                            never gates business logic). New pipeline steps
+//                            (moderation, thumbnails, …) slot in here as new stages.
+enum DraftStatus {
+  CREATING
+  READY_FOR_PREVIEW
+  PUBLISHED
+  CANCELLED
+  EXPIRED
+}
+
+enum DraftImageStatus {
+  PROCESSING
+  READY
+  FAILED
+}
+
+enum ImageProcessingStage {
+  QUEUED
+  INGESTING_ORIGINAL
+  ENHANCING
+  UPLOADING_RESULT
+  DONE
+  FAILED
+}
+
 enum BookingStatus {
   HOLD
   CONFIRMED
@@ -390,6 +419,71 @@ model Stock {
   @@map("stocks")
 }
 
+// Intermediate draft for the Telegram product-creation wizard. Lets image
+// processing (BullMQ) run in PARALLEL with the seller filling the questionnaire,
+// so the seller never idles waiting for FLUX. The published Product/Stock/
+// ProductImage rows are still written exactly as before on confirmation — this
+// table only holds the in-progress state.
+//
+// sellerId is a plain column (supply-side Int PK, like Stock.sellerId) — a draft
+// is ephemeral, so no FK cascade is modeled here. `status`+`version` implement an
+// optimistic lock for safe coordination between the Telegram thread, the N image
+// workers, and the TTL sweep. `expiresAt` is the single (DB-visible) TTL.
+model ProductDraft {
+  id             String               @id // prefixedId(IdPrefix.DRAFT)
+  sellerId       Int                  @map("seller_id")
+  tgId           BigInt               @map("tg_id") // == Telegram chat id (out-of-band notify)
+  status         DraftStatus          @default(CREATING)
+  version        Int                  @default(0) // optimistic lock: bumped on every status transition
+  formStep       String               @map("form_step") // WizardStep name → resumable FSM
+  brand          String?
+  model          String?
+  category       PartVehicleCategory?
+  title          String?              @db.VarChar(255)
+  description    String?              @db.Text
+  partNumberType PartNumberType       @default(UNKNOWN) @map("part_number_type")
+  partNumber     String?              @map("part_number") @db.VarChar(50)
+  priceUzs       Decimal?             @map("price_uzs") @db.Decimal(14, 2)
+  createdAt      DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
+  expiresAt      DateTime             @map("expires_at") @db.Timestamptz(3) // TTL sweep
+  images         ProductDraftImage[]
+
+  @@index([sellerId, status]) // "resumable draft for this seller"
+  @@index([expiresAt]) // cleanup sweep
+  @@map("product_drafts")
+}
+
+// One row per uploaded photo of a draft. Two state axes:
+//   • status — USER-facing (PROCESSING/READY/FAILED); the rendezvous reads ONLY this.
+//   • stage  — TECHNICAL (QUEUED…DONE/FAILED); written as the worker advances, for
+//              logging/monitoring. Derived invariant kept by the worker:
+//              DONE⇔READY, FAILED⇔FAILED, any intermediate stage ⇒ PROCESSING.
+// The worker is two-phase & phase-idempotent: phase A (ingest) fetches the Telegram
+// file and stores the ORIGINAL in Cloudinary (originalUrl); phase B (enhance) runs
+// FLUX and stores the PROCESSED result. Retry keys off originalUrl (data), so a
+// re-run skips phase A and never re-touches Telegram. Each row has a single writer
+// (its own worker job), so it needs no version column.
+model ProductDraftImage {
+  id                String               @id // prefixedId(IdPrefix.DRAFT_IMAGE)
+  draftId           String               @map("draft_id")
+  sortOrder         Int                  @map("sort_order") // album order, independent of completion order
+  status            DraftImageStatus     @default(PROCESSING) // USER axis (gates rendezvous)
+  stage             ImageProcessingStage @default(QUEUED) // TECH axis (observability only)
+  tgFileId          String               @map("tg_file_id") // stored on upload; worker phase A source
+  originalUrl       String?              @map("original_url") // filled by phase A; reused on retries
+  originalPublicId  String?              @map("original_public_id")
+  processedUrl      String?              @map("processed_url") // filled by phase B
+  processedPublicId String?              @map("processed_public_id")
+  jobId             String?              @map("job_id") // BullMQ job id (image:<draftId>:<imageId>)
+  attempts          Int                  @default(0)
+  lastError         String?              @map("last_error") @db.Text
+  draft             ProductDraft         @relation(fields: [draftId], references: [id], onDelete: Cascade)
+
+  @@index([draftId, sortOrder])
+  @@map("product_draft_images")
+}
+
 // ── Buyer identity (UUID) ─────────────────────────────────────────────────────
 model AppUser {
   id                  String     @id @default(uuid()) @db.Uuid
@@ -447,19 +541,19 @@ model AuthIdentity {
 }
 
 model RefreshToken {
-  id         Int       @id @default(autoincrement())
-  tokenHash  String    @unique @map("token_hash") @db.VarChar(64)
-  userId     String    @map("user_id") @db.Uuid
-  deviceId   String?   @map("device_id") @db.VarChar(64) // session<->device binding; null for web/email logins
+  id           Int       @id @default(autoincrement())
+  tokenHash    String    @unique @map("token_hash") @db.VarChar(64)
+  userId       String    @map("user_id") @db.Uuid
+  deviceId     String?   @map("device_id") @db.VarChar(64) // session<->device binding; null for web/email logins
   // Session version this token was minted under. Rotation refuses a row whose
   // version no longer matches the account, so a refresh token created in the
   // race window of a revocation cannot revive the session it belonged to.
-  tokenVersion Int     @default(0) @map("token_version")
-  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(3)
-  consumedAt DateTime? @map("consumed_at") @db.Timestamptz(3) // soft-rotation marker for reuse detection
-  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
-  user       AppUser   @relation(fields: [userId], references: [id], onDelete: Cascade)
-  device     Device?   @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+  tokenVersion Int       @default(0) @map("token_version")
+  expiresAt    DateTime  @map("expires_at") @db.Timestamptz(3)
+  consumedAt   DateTime? @map("consumed_at") @db.Timestamptz(3) // soft-rotation marker for reuse detection
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  user         AppUser   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  device       Device?   @relation(fields: [deviceId], references: [id], onDelete: SetNull)
 
   @@index([userId])
   @@index([expiresAt])
@@ -883,7 +977,7 @@ model CatalogSeller {
   initial          String?       @db.VarChar(4) // monogram letter for the logo tile
   color            String?       @db.VarChar(9) // brand accent hex (#RRGGBB[AA])
   orders           String?       @db.VarChar(20) // pre-formatted lifetime order count, e.g. "18k+"
-  years            Int?          // years in business
+  years            Int? // years in business
   parts            CatalogPart[]
 
   @@index([internalSellerId])
@@ -1014,27 +1108,27 @@ model CartItem {
 
 // ── Orders & payments ─────────────────────────────────────────────────────────
 model Order {
-  id                String          @id @db.VarChar(64)
-  userId            String          @map("user_id") @db.Uuid
-  status            OrderStatus     @default(PENDING_PAYMENT)
-  subtotalUzs       Decimal         @map("subtotal_uzs") @db.Decimal(14, 2)
-  deliveryUzs       Decimal         @default(0) @map("delivery_uzs") @db.Decimal(14, 2)
-  serviceFeeUzs     Decimal         @default(0) @map("service_fee_uzs") @db.Decimal(14, 2)
-  discountUzs       Decimal         @default(0) @map("discount_uzs") @db.Decimal(14, 2)
-  totalUzs          Decimal         @map("total_uzs") @db.Decimal(14, 2)
-  currency          String          @default("UZS") @db.VarChar(3)
-  vehicleId         String?         @map("vehicle_id") @db.VarChar(64)
-  deliveryAddressId String?         @map("delivery_address_id") @db.VarChar(64)
-  deliveryMethod    DeliveryMethod? @map("delivery_method")
-  contactPhoneE164  String?         @map("contact_phone_e164") @db.VarChar(20)
-  promoCode         String?         @map("promo_code") @db.VarChar(60)
-  yandexClaimId     String?         @map("yandex_claim_id") @db.VarChar(100)
-  expiresAt         DateTime?       @map("expires_at") @db.Timestamptz(3)
-  createdAt         DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt         DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
-  user              AppUser         @relation(fields: [userId], references: [id], onDelete: Restrict)
-  vehicle           Vehicle?        @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
-  deliveryAddress   Address?        @relation(fields: [deliveryAddressId], references: [id], onDelete: SetNull)
+  id                String               @id @db.VarChar(64)
+  userId            String               @map("user_id") @db.Uuid
+  status            OrderStatus          @default(PENDING_PAYMENT)
+  subtotalUzs       Decimal              @map("subtotal_uzs") @db.Decimal(14, 2)
+  deliveryUzs       Decimal              @default(0) @map("delivery_uzs") @db.Decimal(14, 2)
+  serviceFeeUzs     Decimal              @default(0) @map("service_fee_uzs") @db.Decimal(14, 2)
+  discountUzs       Decimal              @default(0) @map("discount_uzs") @db.Decimal(14, 2)
+  totalUzs          Decimal              @map("total_uzs") @db.Decimal(14, 2)
+  currency          String               @default("UZS") @db.VarChar(3)
+  vehicleId         String?              @map("vehicle_id") @db.VarChar(64)
+  deliveryAddressId String?              @map("delivery_address_id") @db.VarChar(64)
+  deliveryMethod    DeliveryMethod?      @map("delivery_method")
+  contactPhoneE164  String?              @map("contact_phone_e164") @db.VarChar(20)
+  promoCode         String?              @map("promo_code") @db.VarChar(60)
+  yandexClaimId     String?              @map("yandex_claim_id") @db.VarChar(100)
+  expiresAt         DateTime?            @map("expires_at") @db.Timestamptz(3)
+  createdAt         DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
+  user              AppUser              @relation(fields: [userId], references: [id], onDelete: Restrict)
+  vehicle           Vehicle?             @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
+  deliveryAddress   Address?             @relation(fields: [deliveryAddressId], references: [id], onDelete: SetNull)
   items             OrderItem[]
   payments          Payment[]
   statusHistory     OrderStatusHistory[]

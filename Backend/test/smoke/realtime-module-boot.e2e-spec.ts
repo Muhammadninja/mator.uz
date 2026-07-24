@@ -5,7 +5,9 @@ import { RealtimeGateway } from '../../src/realtime/realtime.gateway';
 import { TokenService } from '../../src/auth/tokens/token.service';
 import { PrismaModule } from '../../src/prisma/prisma.module';
 import { PrismaService } from '../../src/prisma/prisma.service';
-import { createPrismaMock } from '../utils/harness';
+import { RedisModule } from '../../src/redis/redis.module';
+import { RedisService } from '../../src/redis/redis.service';
+import { fakeRedis, createPrismaMock } from '../utils/harness';
 
 /**
  * DI-graph boot check for RealtimeModule. The gateway now injects TokenService
@@ -26,11 +28,17 @@ describe('RealtimeModule boot (e2e)', () => {
       imports: [
         ConfigModule.forRoot({ isGlobal: true }),
         PrismaModule,
+        RedisModule,
         RealtimeModule,
       ],
     })
       .overrideProvider(PrismaService)
       .useValue(createPrismaMock())
+      // RedisModule is @Global and its graph needs the real Redis client; a
+      // standalone testing module has no live Redis, so swap RedisService for the
+      // in-memory double (same pattern as PrismaService above).
+      .overrideProvider(RedisService)
+      .useValue(fakeRedis())
       .compile();
     await mod.init(); // fires onModuleInit
   });
@@ -46,9 +54,7 @@ describe('RealtimeModule boot (e2e)', () => {
   it('registers the gateway as a session-revocation listener', () => {
     const tokens = mod.get(TokenService);
     const gateway = mod.get(RealtimeGateway);
-    const disconnect = jest
-      .spyOn(gateway, 'disconnectUser')
-      .mockReturnValue(0);
+    const disconnect = jest.spyOn(gateway, 'disconnectUser').mockReturnValue(0);
 
     tokens.notifySessionsRevoked('usr_1');
     expect(disconnect).toHaveBeenCalledWith('usr_1');

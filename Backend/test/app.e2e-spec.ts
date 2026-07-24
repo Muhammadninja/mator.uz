@@ -6,7 +6,9 @@ import request from 'supertest';
 import { CartModule } from './../src/cart/cart.module';
 import { RealtimeModule } from './../src/realtime/realtime.module';
 import { PrismaService } from './../src/prisma/prisma.service';
-import { createPrismaMock } from './utils/harness';
+import { RedisModule } from './../src/redis/redis.module';
+import { RedisService } from './../src/redis/redis.service';
+import { fakeRedis, createPrismaMock } from './utils/harness';
 
 /**
  * HTTP integration boot: stands up real contract controllers + the JWT guard
@@ -20,15 +22,30 @@ describe('App integration boot (e2e)', () => {
 
   beforeAll(async () => {
     const moduleFixture: TestingModule = await Test.createTestingModule({
-      imports: [ConfigModule.forRoot({ isGlobal: true }), CartModule, RealtimeModule],
+      imports: [
+        ConfigModule.forRoot({ isGlobal: true }),
+        RedisModule,
+        CartModule,
+        RealtimeModule,
+      ],
     })
       .overrideProvider(PrismaService)
       .useValue(createPrismaMock())
+      // RedisModule is @Global; stand it up explicitly here (no cross-suite
+      // leakage) with RedisService swapped for the in-memory double.
+      .overrideProvider(RedisService)
+      .useValue(fakeRedis())
       .compile();
 
     app = moduleFixture.createNestApplication();
     app.useWebSocketAdapter(new WsAdapter(app));
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app.useGlobalPipes(
+      new ValidationPipe({
+        whitelist: true,
+        forbidNonWhitelisted: true,
+        transform: true,
+      }),
+    );
     await app.init();
   });
 

@@ -1,3 +1,4 @@
+import { Injectable } from '@nestjs/common';
 import axios from 'axios';
 
 // Black Forest Labs FLUX.2 Max — the highest-quality model in the FLUX.2 family.
@@ -164,6 +165,7 @@ interface PollResponse {
  *
  * The caller uploads the returned buffer to Cloudinary unchanged.
  */
+@Injectable()
 export class ImageEnhanceService {
   private readonly apiKey: string;
 
@@ -189,7 +191,9 @@ export class ImageEnhanceService {
       const imageUrl = await this.pollForResult(pollingUrl);
       return await this.download(imageUrl);
     } catch (error) {
-      throw new Error(`ImageEnhanceService: FLUX.2 Max edit failed — ${this.errorDetail(error)}`);
+      throw new Error(
+        `ImageEnhanceService: FLUX.2 Max edit failed — ${this.errorDetail(error)}`,
+      );
     }
   }
 
@@ -216,7 +220,9 @@ export class ImageEnhanceService {
 
     const pollingUrl = response.data?.polling_url;
     if (!pollingUrl) {
-      throw new Error(`no polling_url in submit response: ${JSON.stringify(response.data)}`);
+      throw new Error(
+        `no polling_url in submit response: ${JSON.stringify(response.data)}`,
+      );
     }
     return pollingUrl;
   }
@@ -239,19 +245,27 @@ export class ImageEnhanceService {
       if (status === 'Ready') {
         const sample = response.data?.result?.sample;
         if (!sample) {
-          throw new Error(`Ready status without result.sample: ${JSON.stringify(response.data)}`);
+          throw new Error(
+            `Ready status without result.sample: ${JSON.stringify(response.data)}`,
+          );
         }
         return sample;
       }
 
       // Terminal failure states — anything that is not a known "still working"
       // status is treated as a hard error rather than polled forever.
-      if (status !== 'Pending' && status !== 'Reasoning' && status !== 'Generating') {
+      if (
+        status !== 'Pending' &&
+        status !== 'Reasoning' &&
+        status !== 'Generating'
+      ) {
         throw new Error(`job did not succeed (status=${status ?? 'unknown'})`);
       }
 
       if (Date.now() >= deadline) {
-        throw new Error(`job not Ready within ${MAX_POLL_WAIT_MS}ms (last status=${status})`);
+        throw new Error(
+          `job not Ready within ${MAX_POLL_WAIT_MS}ms (last status=${status})`,
+        );
       }
       await delay(POLL_INTERVAL_MS);
     }

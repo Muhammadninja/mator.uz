@@ -62,6 +62,48 @@ export function fakeConfig(map: Record<string, string | undefined> = {}): any {
   return { get: (key: string) => map[key] };
 }
 
+/**
+ * In-memory RedisService double: a Map with TTL bookkeeping. TTLs are recorded
+ * (readable via `ttls`) but not auto-expired — tests drive expiry explicitly by
+ * clearing the key. `exists` is a single lookup, mirroring the real one-EXISTS
+ * blacklist check. `store`/`ttls` are exposed for assertions.
+ */
+export function fakeRedis(): any {
+  const store = new Map<string, unknown>();
+  const ttls = new Map<string, number>();
+  return {
+    store,
+    ttls,
+    get: jest.fn(async (key: string) => (store.has(key) ? store.get(key) : null)),
+    set: jest.fn(async (key: string, value: unknown) => {
+      store.set(key, value);
+      return 'OK' as const;
+    }),
+    setEx: jest.fn(async (key: string, ttl: number, value: unknown) => {
+      store.set(key, JSON.parse(JSON.stringify(value)));
+      ttls.set(key, ttl);
+      return 'OK' as const;
+    }),
+    del: jest.fn(async (key: string) => {
+      const existed = store.delete(key) ? 1 : 0;
+      ttls.delete(key);
+      return existed;
+    }),
+    exists: jest.fn(async (key: string) => store.has(key)),
+    expire: jest.fn(async (key: string, ttl: number) => {
+      if (!store.has(key)) return false;
+      ttls.set(key, ttl);
+      return true;
+    }),
+    ttl: jest.fn(async (key: string) => ttls.get(key) ?? -2),
+    incr: jest.fn(async (key: string) => {
+      const next = ((store.get(key) as number) ?? 0) + 1;
+      store.set(key, next);
+      return next;
+    }),
+  };
+}
+
 // Minimal stand-ins for the side-effect collaborators OrdersService now takes.
 export function fakeNotifications(): any {
   return { emit: jest.fn().mockResolvedValue(undefined) };

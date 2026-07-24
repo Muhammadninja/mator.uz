@@ -1,9 +1,11 @@
 import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
-import { createHash, randomBytes } from 'crypto';
+import { createHash, randomBytes, randomUUID } from 'crypto';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { RedisService } from '../../redis/redis.service';
+import { RedisKeys } from '../../redis/redis.keys';
 import { JwtKeyService } from './jwt-key.service';
 import { JwtPayload } from '../interfaces/jwt-payload.interface';
 
@@ -58,6 +60,7 @@ export class TokenService {
     private readonly jwt: JwtService,
     private readonly keys: JwtKeyService,
     private readonly config: ConfigService,
+    private readonly redis: RedisService,
   ) {}
 
   private hash(token: string): string {
@@ -78,6 +81,9 @@ export class TokenService {
       email: user.email,
       role: user.role,
       tokenVersion: user.tokenVersion,
+      // Per-token id, so an individual access token can be blacklisted on logout
+      // (see blacklistAccessToken). `exp` is added by the signer via expiresIn.
+      jti: randomUUID(),
     };
     return this.jwt.signAsync(payload, {
       algorithm: 'RS256',
@@ -190,6 +196,44 @@ export class TokenService {
   /** Revoke every session bound to a device (per-device sign-out). */
   async revokeForDevice(deviceId: string): Promise<void> {
     await this.prisma.refreshToken.deleteMany({ where: { deviceId } });
+  }
+
+  /**
+   * Immediate single-token logout: blacklist one access token so it stops
+   * validating from the next request on, while every other token keeps working.
+   *
+   * Stateless access tokens can't be "deleted", so we record the token's `jti`
+   * in Redis under {@link RedisKeys.jwtBlacklist} and check it on every
+   * authenticated request (see JwtStrategy.validate). The entry's TTL is the
+   * token's own remaining lifetime, derived from the signed `exp` claim — never
+   * a client-supplied timestamp — so Redis evicts it exactly when the token
+   * would have expired anyway. No cron, no DB, no manual cleanup.
+   *
+   * If the token has already expired we do nothing: it is already rejected by
+   * signature/`exp` verification, and writing a zero/negative TTL to Redis is
+   * either a no-op or an error. Both `jti` and `exp` come from the verified
+   * payload the JWT strategy produced, so they are trustworthy here.
+   *
+   * @param jti the access token's unique id (JwtPayload.jti)
+   * @param exp the access token's expiry, seconds since epoch (JwtPayload.exp)
+   */
+  async blacklistAccessToken(jti: string | undefined, exp: number | undefined): Promise<void> {
+    // Legacy tokens minted before `jti` existed carry nothing to blacklist;
+    // they are already rejected by the tokenVersion check in JwtStrategy.
+    if (!jti || !exp) return;
+    const remainingSeconds = exp - Math.floor(Date.now() / 1000);
+    if (remainingSeconds <= 0) return; // already expired — never store.
+    await this.redis.setEx(RedisKeys.jwtBlacklist(jti), remainingSeconds, true);
+  }
+
+  /**
+   * True if this access token's `jti` has been blacklisted (logout). Exactly one
+   * Redis EXISTS lookup — no SCAN/KEYS, no DB. Called on every authenticated
+   * request by JwtStrategy.
+   */
+  async isAccessTokenBlacklisted(jti: string | undefined): Promise<boolean> {
+    if (!jti) return false;
+    return this.redis.exists(RedisKeys.jwtBlacklist(jti));
   }
 
   /**

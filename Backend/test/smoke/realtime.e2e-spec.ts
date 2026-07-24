@@ -4,7 +4,7 @@ import { WsAuthService } from '../../src/realtime/ws-auth.service';
 import { RealtimeGateway } from '../../src/realtime/realtime.gateway';
 import { TokenService } from '../../src/auth/tokens/token.service';
 import { JwtKeyService } from '../../src/auth/tokens/jwt-key.service';
-import { createPrismaMock, fakeConfig, PrismaMock } from '../utils/harness';
+import { createPrismaMock, fakeConfig, fakeRedis, PrismaMock } from '../utils/harness';
 
 function fakeSocket() {
   const handlers: Record<string, (...a: any[]) => void> = {};
@@ -35,7 +35,7 @@ describe('Realtime smoke', () => {
       prisma.refreshToken.create.mockResolvedValue({ id: 'rt' });
       // Session versioning: the handshake re-reads the account's current version.
       prisma.appUser.findUnique.mockResolvedValue({ tokenVersion: 0 });
-      const tokens = new TokenService(prisma, jwt, keys, fakeConfig());
+      const tokens = new TokenService(prisma, jwt, keys, fakeConfig(), fakeRedis());
       accessToken = (
         await tokens.issueSession({
           id: 'usr_1',
