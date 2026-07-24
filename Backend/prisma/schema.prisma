@@ -206,6 +206,16 @@ enum DeliveryMethod {
   PICKUP
 }
 
+// Who performed an order status change, recorded on each OrderStatusHistory row.
+// SYSTEM covers automated transitions (order creation, payment webhooks); the
+// remaining values map to the acting AppUser's role at write time.
+enum OrderActorType {
+  SYSTEM
+  CUSTOMER
+  OPERATOR
+  ADMIN
+}
+
 enum PaymentProvider {
   PAYME
   CLICK
@@ -1027,6 +1037,7 @@ model Order {
   deliveryAddress   Address?        @relation(fields: [deliveryAddressId], references: [id], onDelete: SetNull)
   items             OrderItem[]
   payments          Payment[]
+  statusHistory     OrderStatusHistory[]
 
   @@index([userId])
   @@index([status])
@@ -1050,6 +1061,26 @@ model OrderItem {
 
   @@index([orderId])
   @@map("order_items")
+}
+
+// Append-only audit trail of order status transitions. Each row snapshots the
+// actor (id + display name at write time, like the SMS accounting snapshot) so
+// history stays immutable against later profile edits / user deletion. No FK to
+// app_users for the actor — the snapshot is the record of truth. actorType/
+// actorId/actorName are null for SYSTEM transitions.
+model OrderStatusHistory {
+  id        String         @id @db.VarChar(64)
+  orderId   String         @map("order_id") @db.VarChar(64)
+  status    OrderStatus
+  note      String?        @db.VarChar(500)
+  actorType OrderActorType @default(SYSTEM) @map("actor_type")
+  actorId   String?        @map("actor_id") @db.Uuid
+  actorName String?        @map("actor_name") @db.VarChar(120)
+  createdAt DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  order     Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@map("order_status_history")
 }
 
 model Payment {

@@ -9,6 +9,7 @@ export const IdPrefix = {
   VEHICLE: 'veh',
   ORDER: 'ord',
   ORDER_ITEM: 'oi',
+  ORDER_STATUS_HISTORY: 'osh',
   PAYMENT: 'pay',
   BOOKING: 'bk',
   BOOKING_SERVICE: 'bks',

@@ -3,6 +3,7 @@ import { ExpoPushProvider } from '../../src/notifications/push/providers/expo.pr
 import { PushDispatchService } from '../../src/notifications/push/push-dispatch.service';
 import { NotificationsService } from '../../src/notifications/notifications.service';
 import { SettlementService } from '../../src/orders/webhooks/settlement.service';
+import { OrderStatusService } from '../../src/orders/order-status.service';
 import { createPrismaMock, fakeConfig, PrismaMock } from '../utils/harness';
 
 describe('Push delivery smoke', () => {
@@ -106,7 +107,7 @@ describe('Push delivery smoke', () => {
   describe('order_paid wiring', () => {
     it('SettlementService.markPaid emits an ORDER_PAID notification after commit', async () => {
       const notifications = { emit: jest.fn().mockResolvedValue(undefined) };
-      const settlement = new SettlementService(prisma, notifications as any, { emit: jest.fn() } as any);
+      const settlement = new SettlementService(prisma, notifications as any, { emit: jest.fn() } as any, new OrderStatusService(prisma));
       prisma.payment.findUnique.mockResolvedValue({
         id: 'pay_1',
         status: 'PENDING',
@@ -126,7 +127,7 @@ describe('Push delivery smoke', () => {
 
     it('is idempotent — an already-paid payment does not re-notify', async () => {
       const notifications = { emit: jest.fn() };
-      const settlement = new SettlementService(prisma, notifications as any, { emit: jest.fn() } as any);
+      const settlement = new SettlementService(prisma, notifications as any, { emit: jest.fn() } as any, new OrderStatusService(prisma));
       prisma.payment.findUnique.mockResolvedValue({ id: 'pay_1', status: 'PAID', orderId: 'ord_1', order: { userId: 'usr_1' } });
       await settlement.markPaid('pay_1');
       expect(notifications.emit).not.toHaveBeenCalled();

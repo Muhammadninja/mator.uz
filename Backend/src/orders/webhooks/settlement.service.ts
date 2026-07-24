@@ -3,10 +3,12 @@ import { NotificationType, OrderStatus, PaymentStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { NotificationsService } from '../../notifications/notifications.service';
 import { RealtimeGateway } from '../../realtime/realtime.gateway';
+import { OrderStatusService } from '../order-status.service';
 
 /**
  * Final state transitions shared by the Payme and Click webhooks. Idempotent:
- * marking an already-paid payment is a no-op.
+ * marking an already-settled payment is a no-op. Order status changes go through
+ * {@link OrderStatusService} so each writes a history row in the same tx.
  */
 @Injectable()
 export class SettlementService {
@@ -16,6 +18,7 @@ export class SettlementService {
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
     private readonly realtime: RealtimeGateway,
+    private readonly orderStatus: OrderStatusService,
   ) {}
 
   async markPaid(paymentId: string, performTimeMs?: number): Promise<void> {
@@ -26,9 +29,9 @@ export class SettlementService {
     if (!payment) return;
     if (payment.status === PaymentStatus.PAID) return; // idempotent
 
-    // Flip payment + order atomically; notify (inbox + push) after the commit.
-    await this.prisma.$transaction([
-      this.prisma.payment.update({
+    // Flip payment + order (and its history row) atomically; notify after commit.
+    await this.prisma.$transaction(async (tx) => {
+      await tx.payment.update({
         where: { id: paymentId },
         data: {
           status: PaymentStatus.PAID,
@@ -36,12 +39,12 @@ export class SettlementService {
           providerState: 2,
           providerPerformTime: BigInt(performTimeMs ?? Date.now()),
         },
-      }),
-      this.prisma.order.update({
-        where: { id: payment.orderId },
-        data: { status: OrderStatus.PAID },
-      }),
-    ]);
+      });
+      await this.orderStatus.transition(payment.orderId, OrderStatus.PAID, {
+        tx,
+        note: 'Payment received',
+      });
+    });
 
     // Realtime push to the user's live sockets (frontend `order_paid` event).
     this.realtime.emit(payment.order.userId, {
@@ -62,8 +65,13 @@ export class SettlementService {
   async markCancelled(paymentId: string, reason?: number, performedBefore = false): Promise<void> {
     const payment = await this.prisma.payment.findUnique({ where: { id: paymentId } });
     if (!payment) return;
-    await this.prisma.$transaction([
-      this.prisma.payment.update({
+    // Idempotent: a repeated cancel/refund webhook must not write a second
+    // CANCELLED history row.
+    if (payment.status === PaymentStatus.CANCELLED || payment.status === PaymentStatus.REFUNDED) {
+      return;
+    }
+    await this.prisma.$transaction(async (tx) => {
+      await tx.payment.update({
         where: { id: paymentId },
         data: {
           status: performedBefore ? PaymentStatus.REFUNDED : PaymentStatus.CANCELLED,
@@ -71,11 +79,11 @@ export class SettlementService {
           providerCancelTime: BigInt(Date.now()),
           cancelReason: reason,
         },
-      }),
-      this.prisma.order.update({
-        where: { id: payment.orderId },
-        data: { status: OrderStatus.CANCELLED },
-      }),
-    ]);
+      });
+      await this.orderStatus.transition(payment.orderId, OrderStatus.CANCELLED, {
+        tx,
+        note: performedBefore ? 'Cancelled after refund' : 'Cancelled via payment provider',
+      });
+    });
   }
 }
