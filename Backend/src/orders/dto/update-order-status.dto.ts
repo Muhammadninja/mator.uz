@@ -8,8 +8,9 @@ import { ORDER_STATUSES } from './list-orders.query.dto';
  * `GET /v1/orders` status filter, {@link ORDER_STATUSES}); the service maps it to
  * the Prisma `OrderStatus` enum and enforces the server-side state machine.
  * `reason` is required by convention when cancelling; `note` is a free-text
- * operator note. Both are accepted but not yet persisted (no history column) —
- * see order-status-write.md.
+ * operator note. Both are persisted onto the resulting `OrderStatusHistory` row
+ * (note preferred, reason as fallback) and surfaced by the admin order details
+ * endpoint — see order-status-write.md.
  */
 export class UpdateOrderStatusDto {
   @IsString()

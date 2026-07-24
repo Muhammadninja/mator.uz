@@ -7,11 +7,15 @@ import { RealtimeGateway } from '../realtime/realtime.gateway';
 import { prefixedId, IdPrefix } from '../common/ulid.util';
 import { resolvePromo } from '../cart/promo.util';
 import { ORDER_INCLUDE, presentOrder } from './order.presenter';
+import { OrderStatusService, TransitionActor } from './order-status.service';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { ListOrdersQueryDto } from './dto/list-orders.query.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 
 const DEFAULT_ORDER_LIMIT = 20;
+
+/** Re-exported for the controller: the acting user shape for an operator write. */
+export type StatusActor = TransitionActor;
 
 /**
  * Server-authoritative order state machine for operator status writes.
@@ -40,6 +44,7 @@ export class OrdersService {
     private readonly config: ConfigService,
     private readonly notifications: NotificationsService,
     private readonly realtime: RealtimeGateway,
+    private readonly orderStatus: OrderStatusService,
   ) {}
 
   async createFromCart(userId: string, dto: CreateOrderDto) {
@@ -112,6 +117,10 @@ export class OrdersService {
         include: ORDER_INCLUDE,
       });
 
+      // First history entry: the order's creation. Written in the same tx so an
+      // order can never exist without its opening audit row.
+      await this.orderStatus.recordCreation(tx, created.id, OrderStatus.PENDING_PAYMENT);
+
       // The cart is consumed by the order.
       await tx.cartItem.deleteMany({ where: { cartId: cart.id } });
       await tx.cart.update({
@@ -168,7 +177,7 @@ export class OrdersService {
    * the payment webhook already uses (realtime socket + inbox/push notification)
    * so the app reflects the change without waiting for the next poll.
    */
-  async updateStatus(orderId: string, dto: UpdateOrderStatusDto) {
+  async updateStatus(orderId: string, dto: UpdateOrderStatusDto, actor?: StatusActor) {
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
       include: ORDER_INCLUDE,
@@ -186,9 +195,14 @@ export class OrdersService {
     // Idempotent: re-sending the current status is a no-op (no re-broadcast).
     if (from === to) return presentOrder(order);
 
-    const updated = await this.prisma.order.update({
+    // Persist the transition + its audit row atomically through the single
+    // status chokepoint, then re-read for the broadcast/response.
+    await this.orderStatus.transition(orderId, to, {
+      actor,
+      note: dto.note ?? dto.reason ?? null,
+    });
+    const updated = await this.prisma.order.findUniqueOrThrow({
       where: { id: orderId },
-      data: { status: to },
       include: ORDER_INCLUDE,
     });
 
