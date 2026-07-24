@@ -4,6 +4,7 @@ import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { ScheduleModule } from '@nestjs/schedule';
 import { APP_GUARD } from '@nestjs/core';
 import { PrismaModule } from './prisma/prisma.module';
+import { RedisModule } from './redis/redis.module';
 import { AuthModule } from './auth/auth.module';
 import { SellersModule } from './sellers/sellers.module';
 import { AdminModule } from './admin/admin.module';
@@ -33,6 +34,7 @@ import { DealersModule } from './dealers/dealers.module';
     ThrottlerModule.forRoot([{ ttl: 60 * 1000, limit: 100 }]),
     ScheduleModule.forRoot(),
     PrismaModule,
+    RedisModule,
     AuthModule,
     SellersModule,
     AdminModule,
