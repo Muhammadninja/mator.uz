@@ -28,12 +28,14 @@ function build() {
   const cloudinary = { uploadBuffer: jest.fn() };
   const telegramFiles = { getFileUrl: jest.fn() };
   const imageEnhance = { removeBackground: jest.fn() };
+  const telemetry = { event: jest.fn(), metric: jest.fn() };
   const proc = new ImageProcessingProcessor(
     drafts as never,
     coordinator as never,
     cloudinary as never,
     telegramFiles as never,
     imageEnhance as never,
+    telemetry as never,
   );
   jest
     .spyOn((proc as never as { logger: { error: unknown } }).logger, 'error')
@@ -41,7 +43,15 @@ function build() {
   jest
     .spyOn((proc as never as { logger: { log: unknown } }).logger, 'log')
     .mockImplementation(() => undefined);
-  return { proc, drafts, coordinator, cloudinary, telegramFiles, imageEnhance };
+  return {
+    proc,
+    drafts,
+    coordinator,
+    cloudinary,
+    telegramFiles,
+    imageEnhance,
+    telemetry,
+  };
 }
 
 describe('ImageProcessingProcessor (two-phase)', () => {

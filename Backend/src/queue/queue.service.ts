@@ -63,23 +63,46 @@ export class QueueService {
    * Deterministic jobId (`image:<draftId>:<imageId>`): the same draft image
    * enqueued twice — e.g. a retry that re-adds the row — collapses to a single
    * job. BullMQ ignores an add() whose jobId already exists, so this is idempotent
-   * by construction and avoids double-processing the same asset. (On an explicit
-   * retry after a job has completed/been removed, the id is free again, so the
-   * re-enqueue proceeds normally.)
+   * by construction and avoids double-processing the same asset.
+   *
+   * IMPORTANT: a FAILED job is retained (removeOnFail keeps it for days), so its
+   * jobId still EXISTS in Redis — a plain add() with that id is treated as a
+   * duplicate by BullMQ and does NOT re-run the work. Use `reenqueueImage` for the
+   * explicit retry/recovery paths, which removes the stale job first.
    */
   async enqueueImage(
     data: ImageJobData,
     opts?: JobsOptions,
   ): Promise<Job<ImageJobData>> {
-    const jobId = `image:${data.draftId}:${data.imageId}`;
+    const jobId = this.imageJobId(data);
     this.logger.debug(`Enqueue image job ${jobId}`);
     return this.imageQueue.add('process', data, { jobId, ...opts });
   }
 
   /**
+   * Re-enqueue an image for retry/recovery. Because the deterministic jobId of a
+   * previous FAILED (or leftover) attempt still EXISTS in Redis, a plain add()
+   * would collapse into that existing job and silently do nothing. So this removes
+   * the old job by id first, then enqueues a fresh one. Idempotent and safe when
+   * there is no old job (remove is a no-op for a missing id).
+   */
+  async reenqueueImage(
+    data: ImageJobData,
+    opts?: JobsOptions,
+  ): Promise<Job<ImageJobData>> {
+    await this.removeImageJob(this.imageJobId(data));
+    return this.enqueueImage(data, opts);
+  }
+
+  /** The deterministic image jobId: `image:<draftId>:<imageId>`. */
+  imageJobId(data: ImageJobData): string {
+    return `image:${data.draftId}:${data.imageId}`;
+  }
+
+  /**
    * Remove an image job by id (used when cancelling/expiring a draft so a not-yet-
-   * run job doesn't process an asset we're about to delete). A missing or already-
-   * active job is a harmless no-op for BullMQ's remove.
+   * run job doesn't process an asset we're about to delete, and by reenqueueImage
+   * before a retry). A missing or already-active job is a harmless no-op.
    */
   async removeImageJob(jobId: string): Promise<void> {
     await this.imageQueue.remove(jobId);

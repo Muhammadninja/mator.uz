@@ -30,6 +30,7 @@ import {
   type DraftWithImages,
 } from './product-draft.service';
 import { DraftCoordinator } from './draft-coordinator';
+import { DraftTelemetry, DraftMetric } from './draft-telemetry';
 import {
   DraftEvent,
   type DraftImagesFailedEvent,
@@ -117,10 +118,43 @@ const CONFIRMATION_TTL_MS = 10 * 60 * 1000;
 // on expiry; a plain one is simply dropped.
 const WIZARD_SESSION_TTL_MS = CONFIRMATION_TTL_MS;
 // PARALLEL flow: how long a DB-backed draft lives before the cleanup sweep expires
-// it — and, equivalently, the window in which /start offers to resume it. Chosen at
+// it — and, equivalently, the window in which /start offers to resume it. Default
 // 24h (within the plan's 24–48h band): long enough that a seller returning the same
 // day continues where they left off, short enough that abandoned drafts don't linger.
-const DRAFT_TTL_MS = 24 * 60 * 60 * 1000;
+// Configurable via DRAFT_TTL_HOURS (see resolveDraftTtlMs); resolved once at
+// construction into TelegramService.draftTtlMs.
+const DRAFT_TTL_HOURS_DEFAULT = 24;
+const DRAFT_TTL_HOURS_MIN = 1;
+const DRAFT_TTL_HOURS_MAX = 168; // 7 days
+
+/**
+ * Resolve the draft TTL (in ms) from DRAFT_TTL_HOURS. Accepts an integer in
+ * [MIN, MAX] hours; anything missing / non-integer / out of range falls back to
+ * the default (logged as a warning, except when simply unset).
+ */
+export function resolveDraftTtlMs(
+  raw: string | undefined,
+  logger: Logger,
+): number {
+  const hourMs = 60 * 60 * 1000;
+  if (raw === undefined || raw.trim() === '') {
+    return DRAFT_TTL_HOURS_DEFAULT * hourMs;
+  }
+  const value = Number(raw);
+  if (
+    !Number.isInteger(value) ||
+    value < DRAFT_TTL_HOURS_MIN ||
+    value > DRAFT_TTL_HOURS_MAX
+  ) {
+    logger.warn(
+      `Invalid DRAFT_TTL_HOURS="${raw}" (expected an integer ` +
+        `${DRAFT_TTL_HOURS_MIN}–${DRAFT_TTL_HOURS_MAX}); ` +
+        `falling back to ${DRAFT_TTL_HOURS_DEFAULT}h.`,
+    );
+    return DRAFT_TTL_HOURS_DEFAULT * hourMs;
+  }
+  return value * hourMs;
+}
 
 // Within this window, repeated taps on stale (old-catalog) buttons by the same
 // user send the "catalog updated" text message only once. The per-tap alert
@@ -195,6 +229,10 @@ interface PendingProduct {
    *  cancel/expiry/replacement (kept on successful confirmation). */
   publicIds: string[];
   price: Decimal;
+  /** PARALLEL flow only: the backing draft. On confirm the draft is marked
+   *  PUBLISHED and its STORED-ORIGINAL assets are cleaned up (the processed URLs
+   *  become the product's, so they are kept). undefined for the legacy flow. */
+  draftId?: string;
   expiry: NodeJS.Timeout;
 }
 
@@ -274,6 +312,9 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   // instant rollback (PARALLEL_DRAFT_FLOW).
   private readonly parallelFlow: boolean;
 
+  // PARALLEL flow draft TTL (ms), resolved once from DRAFT_TTL_HOURS.
+  private readonly draftTtlMs: number;
+
   // Step-by-step product-creation wizard sessions, one per Telegram user.
   private readonly wizard = new WizardSessionStore();
 
@@ -312,6 +353,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     private readonly drafts: ProductDraftService,
     private readonly draftCoordinator: DraftCoordinator,
     private readonly queue: QueueService,
+    private readonly telemetry: DraftTelemetry,
   ) {
     this.imageConcurrency = resolveImageConcurrency(
       this.config.get<string>('IMAGE_CONCURRENCY'),
@@ -319,6 +361,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     );
     this.parallelFlow =
       this.config.get<string>('PARALLEL_DRAFT_FLOW') === 'true';
+    this.draftTtlMs = resolveDraftTtlMs(
+      this.config.get<string>('DRAFT_TTL_HOURS'),
+      this.logger,
+    );
   }
 
   onModuleInit() {
@@ -651,6 +697,16 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     tgUserId: number,
     sellerId: number,
   ): Promise<void> {
+    // Recovery: a draft that is READY_FOR_PREVIEW but whose preview delivery was
+    // lost (crash after the coordinator flipped it, before the message was sent) is
+    // invisible to the resume prompt below. Re-present it here — idempotent, and it
+    // rescues the seller's fully-processed draft instead of forcing a restart.
+    const awaitingPreview = await this.drafts.findAwaitingPreview(sellerId);
+    if (awaitingPreview) {
+      await this.presentDraftPreview(awaitingPreview.id, tgUserId);
+      return;
+    }
+
     const resumable = await this.drafts.findResumable(sellerId);
     if (resumable) {
       await ctx.reply(
@@ -712,7 +768,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         sellerId: seller.id,
         tgId: BigInt(tgUserId),
         formStep: session.step, // BRAND
-        expiresAt: new Date(Date.now() + DRAFT_TTL_MS),
+        expiresAt: new Date(Date.now() + this.draftTtlMs),
         images: images.map((fileId, i) => ({ sortOrder: i, tgFileId: fileId })),
       });
     } catch (err) {
@@ -727,6 +783,14 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     }
 
     session.draftId = draft.id;
+    this.telemetry.event('draft.created', {
+      draftId: draft.id,
+      sellerId: seller.id,
+    });
+    this.telemetry.metric(DraftMetric.DRAFT_CREATED, {
+      draftId: draft.id,
+      sellerId: seller.id,
+    });
 
     // Enqueue one job per image row (deterministic jobId → idempotent).
     for (const img of draft.images) {
@@ -736,6 +800,17 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
           imageId: img.id,
         });
         if (job.id) await this.drafts.setImageJobId(img.id, job.id);
+        this.telemetry.event('image.queued', {
+          draftId: draft.id,
+          imageId: img.id,
+          sellerId: seller.id,
+          jobId: job.id,
+        });
+        this.telemetry.metric(DraftMetric.IMAGE_QUEUED, {
+          draftId: draft.id,
+          imageId: img.id,
+          jobId: job.id,
+        });
       } catch (err) {
         this.logger.error(
           `Failed to enqueue image ${img.id}: ${err instanceof Error ? err.message : String(err)}`,
@@ -909,6 +984,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       processedUrls,
       publicIds,
       price,
+      draftId: draft.id,
     });
 
     await this.sendPreviewToChat(
@@ -918,6 +994,36 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       processedUrls,
       price,
     );
+  }
+
+  /**
+   * PARALLEL flow — finalize a draft after its product was committed: mark it
+   * PUBLISHED and delete the intermediate ORIGINAL Cloudinary assets (processed
+   * assets are the product's now and are kept). All best-effort — the product is
+   * already saved, so nothing here is allowed to surface as an error.
+   */
+  private async finalizePublishedDraft(
+    draftId: string,
+    sellerId: number,
+  ): Promise<void> {
+    try {
+      const published = await this.drafts.publishDraft(draftId);
+      const originalIds = await this.drafts.collectOriginalPublicIds(draftId);
+      if (originalIds.length > 0) {
+        await this.cloudinary.deleteAssets(originalIds);
+      }
+      if (published) {
+        this.telemetry.event('draft.published', { draftId, sellerId });
+        this.telemetry.metric(DraftMetric.DRAFT_PUBLISHED, {
+          draftId,
+          sellerId,
+        });
+      }
+    } catch (err) {
+      this.logger.error(
+        `Failed to finalize published draft ${draftId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /** Map a draft's collected fields into the ParseOutcome the preview/commit use. */
@@ -982,6 +1088,14 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     this.wizard.restore(tgUserId, session);
     this.touchSession(tgUserId);
 
+    // Recovery: re-enqueue any image still PROCESSING without a result. This heals
+    // rows that were created but whose job never made it into the queue (a crash in
+    // the original enqueue loop) or was lost — otherwise they would sit PROCESSING
+    // forever and the rendezvous would never fire. reenqueueImage is idempotent: a
+    // still-running/queued job is left effectively as-is; a genuinely stuck row gets
+    // a fresh job. Rows that already succeeded (processedUrl set) are untouched.
+    await this.reenqueueStuckImages(draft);
+
     const anyFailed = draft.images.some((img) => img.status === 'FAILED');
     if (anyFailed) {
       await this.bot.telegram.sendMessage(
@@ -1002,6 +1116,32 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     }
     await ctx.reply('▶️ Продолжаем. Заполните оставшиеся поля.');
     await this.sendStepPrompt(ctx, session);
+  }
+
+  /**
+   * Re-enqueue any image row that is still PROCESSING but has no processed result —
+   * i.e. its job never ran or was lost (enqueue-loop crash, worker gone, etc.). Uses
+   * reenqueueImage so a job still in the queue is not duplicated while a genuinely
+   * stuck row gets a fresh job. Best-effort per row; a failure to enqueue one row is
+   * logged and does not block the others.
+   */
+  private async reenqueueStuckImages(draft: DraftWithImages): Promise<void> {
+    const stuck = draft.images.filter(
+      (img) => img.status === 'PROCESSING' && !img.processedUrl,
+    );
+    for (const img of stuck) {
+      try {
+        const job = await this.queue.reenqueueImage({
+          draftId: draft.id,
+          imageId: img.id,
+        });
+        if (job.id) await this.drafts.setImageJobId(img.id, job.id);
+      } catch (err) {
+        this.logger.error(
+          `Failed to re-enqueue stuck image ${img.id} (draft ${draft.id}): ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
   }
 
   /**
@@ -1035,7 +1175,9 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     }
     for (const img of toReenqueue) {
       try {
-        const job = await this.queue.enqueueImage({
+        // reenqueueImage (not enqueueImage): the previous FAILED job is still in
+        // Redis under the same deterministic id, so a plain add() would be a no-op.
+        const job = await this.queue.reenqueueImage({
           draftId: draft.id,
           imageId: img.id,
         });
@@ -1832,6 +1974,15 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       // failure must not fail the seller's confirmation; it is logged and the
       // next update (or a backfill) will reconcile.
       await this.projectToCatalog(stock.id);
+
+      // PARALLEL flow: the product write succeeded, so finalize the backing draft.
+      // Mark it PUBLISHED (so the TTL sweep never touches it — critical now that the
+      // sweep also covers READY_FOR_PREVIEW) and delete the STORED ORIGINALS (the
+      // processed URLs are now the product's images and are kept). Best-effort: a
+      // failure here must NOT fail the already-committed product.
+      if (session.draftId) {
+        await this.finalizePublishedDraft(session.draftId, sellerId);
+      }
 
       // The preview already served as the confirmation UI — the success message
       // only needs to confirm the write completed. Do not resend product details.

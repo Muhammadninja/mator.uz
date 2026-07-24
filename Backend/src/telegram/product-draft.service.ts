@@ -120,6 +120,28 @@ export class ProductDraftService {
     });
   }
 
+  /**
+   * The most recent draft for a seller that is READY_FOR_PREVIEW and within TTL —
+   * used on /start to RE-PRESENT a preview whose delivery was lost (e.g. the backend
+   * crashed after the coordinator flipped the draft but before the preview message
+   * was sent). Without this such a draft is invisible (findResumable only matches
+   * CREATING) and its assets would orphan until the sweep.
+   */
+  findAwaitingPreview(
+    sellerId: number,
+    now: Date = new Date(),
+  ): Promise<DraftWithImages | null> {
+    return this.prisma.productDraft.findFirst({
+      where: {
+        sellerId,
+        status: DraftStatus.READY_FOR_PREVIEW,
+        expiresAt: { gt: now },
+      },
+      orderBy: { createdAt: 'desc' },
+      include: { images: { orderBy: { sortOrder: 'asc' } } },
+    });
+  }
+
   // ── Form-field writes ───────────────────────────────────────────────────────
   /** Patch the wizard fields that changed on a step (and usually `formStep`). Does
    *  NOT touch `status`/`version` — form progress is not a status transition. */
@@ -279,10 +301,46 @@ export class ProductDraftService {
     return ids;
   }
 
-  /** Drafts whose TTL has elapsed and are still in progress — the sweep's input. */
+  /**
+   * The STORED-ORIGINAL public_ids only. On publish the PROCESSED assets become the
+   * product's images (kept), but the originals were just an intermediate for the
+   * worker — they should be deleted so they don't orphan.
+   */
+  async collectOriginalPublicIds(draftId: string): Promise<string[]> {
+    const rows = await this.prisma.productDraftImage.findMany({
+      where: { draftId, originalPublicId: { not: null } },
+      select: { originalPublicId: true },
+    });
+    return rows.map((r) => r.originalPublicId as string);
+  }
+
+  /**
+   * Mark a draft PUBLISHED (idempotent): only a READY_FOR_PREVIEW draft transitions,
+   * so a double-tap or a repeat is a safe no-op. Terminal, so no version guard is
+   * needed (nothing legitimately competes to move a READY_FOR_PREVIEW draft other
+   * than the TTL sweep, which the `status` predicate already excludes once
+   * published). Returns whether this call performed the transition.
+   */
+  async publishDraft(draftId: string): Promise<boolean> {
+    const { count } = await this.prisma.productDraft.updateMany({
+      where: { id: draftId, status: DraftStatus.READY_FOR_PREVIEW },
+      data: { status: DraftStatus.PUBLISHED },
+    });
+    return count === 1;
+  }
+
+  /**
+   * Drafts whose TTL has elapsed and are not yet terminal — the sweep's input.
+   * Includes BOTH CREATING (abandoned mid-flow) and READY_FOR_PREVIEW (a preview
+   * that was produced but never confirmed/cancelled, e.g. the seller walked away or
+   * its delivery was lost) so neither leaves Cloudinary assets orphaned forever.
+   */
   findExpired(now: Date = new Date(), take = 100): Promise<DraftWithImages[]> {
     return this.prisma.productDraft.findMany({
-      where: { status: DraftStatus.CREATING, expiresAt: { lte: now } },
+      where: {
+        status: { in: [DraftStatus.CREATING, DraftStatus.READY_FOR_PREVIEW] },
+        expiresAt: { lte: now },
+      },
       orderBy: { expiresAt: 'asc' },
       take,
       include: { images: { orderBy: { sortOrder: 'asc' } } },

@@ -40,9 +40,11 @@ function makeService(over: Partial<Record<string, unknown>> = {}): AnyService {
     draftCoordinator: { onFormStep: jest.fn().mockResolvedValue(undefined) },
     queue: {
       enqueueImage: jest.fn().mockResolvedValue({ id: 'job1' }),
+      reenqueueImage: jest.fn().mockResolvedValue({ id: 'job1' }),
       removeImageJob: jest.fn().mockResolvedValue(undefined),
     },
     cloudinary: { deleteAssets: jest.fn().mockResolvedValue(undefined) },
+    telemetry: { event: jest.fn(), metric: jest.fn() },
     bot: {
       telegram: {
         sendMessage: jest.fn().mockResolvedValue(undefined),
@@ -271,6 +273,101 @@ describe('TelegramService — parallel flow', () => {
       const [chatId, text] = svc.bot.telegram.sendMessage.mock.calls[0];
       expect(chatId).toBe(7);
       expect(text).toContain('2');
+    });
+  });
+
+  describe('Phase 2 recovery/hardening', () => {
+    it('startParallelProductCreation re-presents a READY_FOR_PREVIEW draft (lost-preview recovery)', async () => {
+      const awaiting = { id: 'draft_ready' };
+      const drafts = {
+        findAwaitingPreview: jest.fn().mockResolvedValue(awaiting),
+        findResumable: jest.fn(),
+      };
+      const svc = makeService({ drafts });
+      const present = jest
+        .spyOn(svc, 'presentDraftPreview')
+        .mockResolvedValue(undefined);
+
+      await svc.startParallelProductCreation(makeCtx(), 7, 1);
+
+      expect(present).toHaveBeenCalledWith('draft_ready', 7);
+      // Did NOT fall through to the resume prompt.
+      expect(drafts.findResumable).not.toHaveBeenCalled();
+    });
+
+    it('retryFailedImages uses reenqueueImage (not enqueueImage) so a retained failed job is replaced', async () => {
+      const drafts = {
+        findResumable: jest
+          .fn()
+          .mockResolvedValue({ id: 'draft_1', images: [] }),
+        resetFailedImages: jest
+          .fn()
+          .mockResolvedValue([
+            { id: 'dimg_1', status: 'PROCESSING', processedUrl: null },
+          ]),
+        setImageJobId: jest.fn().mockResolvedValue(undefined),
+      };
+      const svc = makeService({ drafts });
+
+      await svc.retryFailedImages(makeCtx(), 7);
+
+      expect(svc.queue.reenqueueImage).toHaveBeenCalledWith({
+        draftId: 'draft_1',
+        imageId: 'dimg_1',
+      });
+      expect(svc.queue.enqueueImage).not.toHaveBeenCalled();
+    });
+
+    it('reenqueueStuckImages re-enqueues PROCESSING rows without a result (heals the enqueue-crash window)', async () => {
+      const drafts = { setImageJobId: jest.fn().mockResolvedValue(undefined) };
+      const svc = makeService({ drafts });
+      const draft = {
+        id: 'draft_1',
+        images: [
+          { id: 'a', status: 'PROCESSING', processedUrl: null }, // stuck → re-enqueue
+          { id: 'b', status: 'READY', processedUrl: 'u' }, // done → left alone
+          { id: 'c', status: 'PROCESSING', processedUrl: 'u2' }, // has result → left alone
+        ],
+      };
+
+      await svc.reenqueueStuckImages(draft);
+
+      expect(svc.queue.reenqueueImage).toHaveBeenCalledTimes(1);
+      expect(svc.queue.reenqueueImage).toHaveBeenCalledWith({
+        draftId: 'draft_1',
+        imageId: 'a',
+      });
+    });
+
+    it('finalizePublishedDraft marks the draft PUBLISHED and deletes ONLY the original assets', async () => {
+      const drafts = {
+        publishDraft: jest.fn().mockResolvedValue(true),
+        collectOriginalPublicIds: jest
+          .fn()
+          .mockResolvedValue(['orig_0', 'orig_1']),
+      };
+      const svc = makeService({ drafts });
+
+      await svc.finalizePublishedDraft('draft_1', 1);
+
+      expect(drafts.publishDraft).toHaveBeenCalledWith('draft_1');
+      expect(svc.cloudinary.deleteAssets).toHaveBeenCalledWith([
+        'orig_0',
+        'orig_1',
+      ]);
+      expect(svc.telemetry.metric).toHaveBeenCalled(); // draft.published metric
+    });
+
+    it('finalizePublishedDraft swallows errors (product already committed)', async () => {
+      const drafts = {
+        publishDraft: jest.fn().mockRejectedValue(new Error('db down')),
+        collectOriginalPublicIds: jest.fn(),
+      };
+      const svc = makeService({ drafts });
+
+      await expect(
+        svc.finalizePublishedDraft('draft_1', 1),
+      ).resolves.toBeUndefined();
     });
   });
 });

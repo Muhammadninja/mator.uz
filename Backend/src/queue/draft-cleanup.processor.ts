@@ -14,6 +14,7 @@ import {
 } from './queue.constants';
 import { CloudinaryService } from '../cloudinary/cloudinary.service';
 import { ProductDraftService } from '../telegram/product-draft.service';
+import { DraftTelemetry, DraftMetric } from '../telegram/draft-telemetry';
 
 /**
  * Scheduled sweep of abandoned product drafts (the TTL mechanism from the plan).
@@ -21,11 +22,12 @@ import { ProductDraftService } from '../telegram/product-draft.service';
  * so it survives restarts and, being delivered to a single BullMQ worker, needs no
  * scale-out lock.
  *
- * For each CREATING draft past its `expiresAt`:
+ * For each expired non-terminal draft (CREATING, or READY_FOR_PREVIEW whose preview
+ * was never confirmed) past its `expiresAt`:
  *   1. delete its Cloudinary assets (stored originals + processed results),
  *   2. remove any still-unfinished image jobs for it from the image queue,
- *   3. transition it CREATING → EXPIRED under the optimistic lock (so a draft that
- *      concurrently advanced to READY_FOR_PREVIEW is left alone).
+ *   3. transition it from its CURRENT status → EXPIRED under the optimistic lock
+ *      (so a draft that concurrently advanced — e.g. got published — is left alone).
  *
  * The repeatable job is registered once on module init with a stable jobId, so
  * repeated boots don't stack duplicate schedules.
@@ -42,6 +44,7 @@ export class DraftCleanupProcessor extends WorkerHost implements OnModuleInit {
     private readonly imageQueue: Queue,
     private readonly drafts: ProductDraftService,
     private readonly cloudinary: CloudinaryService,
+    private readonly telemetry: DraftTelemetry,
   ) {
     super();
   }
@@ -90,14 +93,25 @@ export class DraftCleanupProcessor extends WorkerHost implements OnModuleInit {
           }
         }
 
-        // 3. Versioned transition so we never clobber a draft that just advanced.
+        // 3. Versioned transition from the draft's CURRENT status (CREATING or
+        //    READY_FOR_PREVIEW — both are sweepable) so we never clobber a draft
+        //    that concurrently advanced (e.g. was just published/cancelled).
         const moved = await this.drafts.tryTransition(
           draft.id,
-          DraftStatus.CREATING,
+          draft.status,
           DraftStatus.EXPIRED,
           draft.version,
         );
-        if (!moved) {
+        if (moved) {
+          this.telemetry.event('draft.expired', {
+            draftId: draft.id,
+            sellerId: draft.sellerId,
+          });
+          this.telemetry.metric(DraftMetric.DRAFT_EXPIRED, {
+            draftId: draft.id,
+            sellerId: draft.sellerId,
+          });
+        } else {
           this.logger.debug(
             `Draft ${draft.id} changed during sweep — skipped EXPIRED transition`,
           );
