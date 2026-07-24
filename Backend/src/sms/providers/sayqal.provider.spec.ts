@@ -62,6 +62,20 @@ describe('SayqalSmsProvider', () => {
     expect(config?.headers?.['X-Access-Token']).toBe(expected);
   });
 
+  it('returns the API transactionid/smsid/parts as send metadata (verbatim, not fabricated)', async () => {
+    mockedAxios.post.mockResolvedValueOnce({
+      data: { transactionid: 'tx-9', smsid: 'sms-9', parts: 2 },
+    });
+
+    const result = await provider.send('+998901234567', 'code 123456');
+
+    expect(result).toEqual({
+      providerTransactionId: 'tx-9',
+      providerSmsId: 'sms-9',
+      parts: 2,
+    });
+  });
+
   it('includes nickname only when configured', async () => {
     mockedAxios.post.mockResolvedValue({ data: { transactionid: '1', smsid: '1', parts: 1 } });
 

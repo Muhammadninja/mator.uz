@@ -1172,3 +1172,73 @@ model AiMessage {
   @@index([sessionId])
   @@map("ai_messages")
 }
+
+// ── SMS accounting & operator pricing ─────────────────────────────────────────
+// Additive analytics layer around the EXISTING SMS send path — no existing table,
+// endpoint, provider, or the SmsProvider interface is touched. An SmsMessage row
+// is written at send time with status='pending'; a future delivery callback (not
+// yet implemented) flips status→delivered/failed and fills delivered_at, so no
+// schema change is needed to add delivery tracking later.
+
+model SmsOperator {
+  id          Int                 @id @default(autoincrement())
+  // Canonical, stable key (e.g. "beeline"); snapshotted onto SmsMessage.operatorName.
+  name        String              @unique @db.VarChar(40)
+  displayName String              @map("display_name") @db.VarChar(80)
+  // Current price per SMS in UZS. NEVER used to recompute historical cost — each
+  // SmsMessage snapshots the price in force at send time (see SmsMessage.priceUzs).
+  priceUzs    Int                 @map("price_uzs")
+  isActive    Boolean             @default(true) @map("is_active")
+  createdAt   DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime            @updatedAt @map("updated_at") @db.Timestamptz(3)
+  prefixes    SmsOperatorPrefix[]
+  messages    SmsMessage[]
+
+  @@map("sms_operators")
+}
+
+model SmsOperatorPrefix {
+  id         Int         @id @default(autoincrement())
+  operatorId Int         @map("operator_id")
+  // 2-digit MSISDN operator code after the 998 country code (e.g. "90"). Globally
+  // unique: a prefix maps to exactly one operator.
+  prefix     String      @unique @db.VarChar(8)
+  operator   SmsOperator @relation(fields: [operatorId], references: [id], onDelete: Cascade)
+
+  @@index([operatorId])
+  @@map("sms_operator_prefixes")
+}
+
+model SmsMessage {
+  id                    Int          @id @default(autoincrement())
+  // Transport that accepted the send (SmsProvider.name, e.g. "sayqal").
+  provider              String       @db.VarChar(40)
+  // Provider-returned identifiers/parts. Null at insert: the SmsProvider contract
+  // returns void, so these are reserved for a later delivery callback.
+  providerTransactionId String?      @map("provider_transaction_id") @db.VarChar(120)
+  providerSmsId         String?      @map("provider_sms_id") @db.VarChar(120)
+  phoneE164             String       @map("phone_e164") @db.VarChar(20)
+  // Operator snapshot — resolved at send time and frozen. operatorName/priceUzs
+  // are copies, never re-derived from SmsOperator, so historical cost is immutable
+  // against later price edits. operatorId is a soft link (SET NULL on delete).
+  operatorId            Int?         @map("operator_id")
+  operatorName          String?      @map("operator_name") @db.VarChar(40)
+  priceUzs              Int?         @map("price_uzs")
+  // Optional message-template label (never the rendered text — OTP codes are not
+  // persisted). Nullable for callers that don't tag their sends.
+  template              String?      @db.VarChar(60)
+  parts                 Int?
+  // Lifecycle: 'pending' at insert → 'delivered' | 'failed' via future callback.
+  status                String       @default("pending") @db.VarChar(20)
+  errorCode             String?      @map("error_code") @db.VarChar(40)
+  errorMessage          String?      @map("error_message") @db.Text
+  createdAt             DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  deliveredAt           DateTime?    @map("delivered_at") @db.Timestamptz(3)
+  operator              SmsOperator? @relation(fields: [operatorId], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([operatorId])
+  @@index([createdAt])
+  @@index([phoneE164])
+  @@map("sms_messages")
+}

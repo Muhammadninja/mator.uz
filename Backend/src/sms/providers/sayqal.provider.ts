@@ -1,7 +1,7 @@
 import { Logger } from '@nestjs/common';
 import axios from 'axios';
 import { createHash, randomUUID } from 'crypto';
-import { SmsProvider } from '../sms-provider.interface';
+import { SmsProvider, SmsSendResult } from '../sms-provider.interface';
 
 export interface SayqalConfig {
   baseUrl: string; // https://routee.sayqal.uz
@@ -77,7 +77,7 @@ export class SayqalSmsProvider implements SmsProvider {
     return data.errorCode !== undefined ? `[${data.errorCode}] ${msg}` : msg;
   }
 
-  async send(toE164: string, text: string): Promise<void> {
+  async send(toE164: string, text: string): Promise<SmsSendResult> {
     // API expects 998YYXXXXXXX (12 digits, no '+'). Callers pass E.164 (+998...).
     const phone = toE164.replace(/\D/g, '');
     if (!/^998\d{9}$/.test(phone)) {
@@ -112,7 +112,14 @@ export class SayqalSmsProvider implements SmsProvider {
         this.logger.log(
           `Sayqal accepted sms transactionid=${res.data?.transactionid} parts=${res.data?.parts}`,
         );
-        return;
+        // Surface the gateway's own identifiers/parts for accounting. Read
+        // straight from the response — never fabricated; `?? null` covers a
+        // success body that omits a field.
+        return {
+          providerTransactionId: res.data?.transactionid ?? null,
+          providerSmsId: res.data?.smsid ?? null,
+          parts: res.data?.parts ?? null,
+        };
       } catch (err) {
         lastErr = err;
 

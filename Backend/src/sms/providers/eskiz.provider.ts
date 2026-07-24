@@ -1,6 +1,6 @@
 import { Logger } from '@nestjs/common';
 import axios from 'axios';
-import { SmsProvider } from '../sms-provider.interface';
+import { SmsProvider, SmsSendResult, EMPTY_SMS_RESULT } from '../sms-provider.interface';
 
 interface EskizConfig {
   baseUrl: string; // https://notify.eskiz.uz/api
@@ -32,7 +32,7 @@ export class EskizSmsProvider implements SmsProvider {
     return token;
   }
 
-  async send(toE164: string, text: string): Promise<void> {
+  async send(toE164: string, text: string): Promise<SmsSendResult> {
     const mobilePhone = toE164.replace(/\D/g, ''); // Eskiz expects digits only
     const payload = {
       mobile_phone: mobilePhone,
@@ -49,12 +49,14 @@ export class EskizSmsProvider implements SmsProvider {
     try {
       const token = this.token ?? (await this.authenticate());
       await post(token);
+      // Accounting metadata is not mapped for this provider — return nulls.
+      return EMPTY_SMS_RESULT;
     } catch (err) {
       // Token likely expired — re-auth once, then retry.
       if (axios.isAxiosError(err) && err.response?.status === 401) {
         const token = await this.authenticate();
         await post(token);
-        return;
+        return EMPTY_SMS_RESULT;
       }
       this.logger.error(`Eskiz send failed: ${(err as Error).message}`);
       throw err;

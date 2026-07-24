@@ -14,6 +14,26 @@ import {
 const prisma = new PrismaClient();
 
 /**
+ * SMS operator pricing reference (Uzbek MSISDN operator codes). Each `prefix` is
+ * the 2-digit code that follows the 998 country code; `priceUzs` is the per-SMS
+ * price used by the accounting layer. Data only — resolution logic lives in
+ * SmsOperatorResolver, historical cost is snapshotted onto SmsMessage.
+ */
+const SEED_SMS_OPERATORS: {
+  name: string;
+  displayName: string;
+  priceUzs: number;
+  prefixes: string[];
+}[] = [
+  { name: 'humans', displayName: 'Humans', priceUzs: 60, prefixes: ['33'] },
+  { name: 'mobiuz', displayName: 'MobiUz', priceUzs: 100, prefixes: ['97', '88', '87'] },
+  { name: 'perfectum', displayName: 'Perfectum', priceUzs: 110, prefixes: ['98', '80'] },
+  { name: 'uzmobile', displayName: 'UZMOBILE', priceUzs: 140, prefixes: ['95', '99', '77'] },
+  { name: 'beeline', displayName: 'Beeline', priceUzs: 155, prefixes: ['90', '91', '92', '20'] },
+  { name: 'ucell', displayName: 'Ucell', priceUzs: 160, prefixes: ['93', '94', '55', '50', '71'] },
+];
+
+/**
  * Phase 2A — reference-data seed. Idempotent (every write is an upsert keyed on
  * the stable frontend id), so `npm run seed` can be run repeatedly and converges.
  *
@@ -132,11 +152,34 @@ async function seedDealers() {
   }
 }
 
+/**
+ * SMS operators + their MSISDN prefixes. Idempotent: operators upsert on their
+ * unique `name`, prefixes upsert on their unique `prefix` (re-pointing to the
+ * owning operator if it ever moved). Re-running converges without duplicates.
+ */
+async function seedSmsOperators() {
+  for (const op of SEED_SMS_OPERATORS) {
+    const operator = await prisma.smsOperator.upsert({
+      where: { name: op.name },
+      update: { displayName: op.displayName, priceUzs: op.priceUzs, isActive: true },
+      create: { name: op.name, displayName: op.displayName, priceUzs: op.priceUzs },
+    });
+    for (const prefix of op.prefixes) {
+      await prisma.smsOperatorPrefix.upsert({
+        where: { prefix },
+        update: { operatorId: operator.id },
+        create: { prefix, operatorId: operator.id },
+      });
+    }
+  }
+}
+
 async function main() {
   await seedAdmin();
   await seedVehicleCatalog();
   await seedCategories();
   await seedDealers();
+  await seedSmsOperators();
 
   const counts = {
     vehicle_makes: await prisma.vehicleMake.count(),
@@ -145,6 +188,8 @@ async function main() {
     vehicle_engines: await prisma.vehicleEngine.count(),
     part_categories: await prisma.partCategory.count(),
     catalog_sellers: await prisma.catalogSeller.count(),
+    sms_operators: await prisma.smsOperator.count(),
+    sms_operator_prefixes: await prisma.smsOperatorPrefix.count(),
   };
   console.log('[seed] reference-data row counts:');
   console.table(counts);
