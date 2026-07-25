@@ -26,6 +26,9 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.100.1",
+    "@bull-board/api": "^8.3.0",
+    "@bull-board/express": "^8.3.0",
+    "@bull-board/nestjs": "^8.3.0",
     "@nestjs/bullmq": "^11.0.4",
     "@nestjs/common": "^11.0.1",
     "@nestjs/config": "^4.0.4",

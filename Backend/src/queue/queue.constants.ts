@@ -51,11 +51,19 @@ export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
  *   • backoff: exponential, 2s base → waits ~2s, ~4s, ~8s between attempts, so a
  *                          transient dependency blip is absorbed without hammering.
  *
- * Retention — keep the queue from growing without bound:
+ * Retention — bounded on BOTH age and count, so failures survive long enough to
+ * debug without ever growing unbounded (whichever limit is hit first wins):
  *   • removeOnComplete: keep the last 1 000 successes (for observability), drop
  *                       anything older or beyond 24h.
  *   • removeOnFail:     keep the last 5 000 failures for 7 days so they can be
- *                       inspected/retried, then let them age out automatically.
+ *                       inspected/retried in Bull Board, then let them age out
+ *                       automatically. Seven days spans a weekend plus a working
+ *                       day, so a Friday-night failure is still there on Monday.
+ *
+ * Failed-job retention is env-tunable (QUEUE_FAILED_RETENTION_DAYS /
+ * QUEUE_FAILED_RETENTION_COUNT) so an incident can widen the window without a
+ * deploy. Both remain bounded: a zero/invalid value falls back to the default
+ * rather than meaning "unlimited".
  *
  * These are defaults: a specific producer may override per-enqueue (e.g. a
  * deterministic jobId, a different attempt count) via QueueService.
@@ -68,6 +76,8 @@ export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
  */
 const DEFAULT_QUEUE_RETRIES = 3;
 const DEFAULT_QUEUE_BACKOFF_MS = 2_000;
+const DEFAULT_FAILED_RETENTION_DAYS = 7;
+const DEFAULT_FAILED_RETENTION_COUNT = 5_000;
 
 /** Parse a positive-integer env var, falling back to `fallback` when unset/invalid. */
 function positiveIntEnv(raw: string | undefined, fallback: number): number {
@@ -93,8 +103,18 @@ export const DEFAULT_JOB_OPTIONS: JobsOptions = {
     count: 1_000,
   },
   removeOnFail: {
-    age: 7 * 24 * 60 * 60, // 7 days
-    count: 5_000,
+    age:
+      positiveIntEnv(
+        process.env.QUEUE_FAILED_RETENTION_DAYS,
+        DEFAULT_FAILED_RETENTION_DAYS,
+      ) *
+      24 *
+      60 *
+      60,
+    count: positiveIntEnv(
+      process.env.QUEUE_FAILED_RETENTION_COUNT,
+      DEFAULT_FAILED_RETENTION_COUNT,
+    ),
   },
 };
 
