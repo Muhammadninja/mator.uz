@@ -1,4 +1,5 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
+import { MetricsService } from '../metrics/metrics.service';
 
 /**
  * DraftTelemetry — the ONE place the draft flow emits observability.
@@ -9,8 +10,10 @@ import { Injectable, Logger } from '@nestjs/common';
  *     (draftId / imageId / sellerId / jobId, whichever apply). Grep-able and
  *     ready for a log-based metrics pipeline.
  *   • a METRIC POINT — a counter-style line `metric=<name>` under a dedicated
- *     'DraftMetrics' logger, so swapping in a real metrics client later means
- *     changing only this class (find every `metric(...)` call site → one file).
+ *     'DraftMetrics' logger, AND (as of Phase A) an increment on the matching
+ *     Prometheus counter. The seam anticipated by the original design paid off:
+ *     wiring a real metrics client meant editing only this class, because every
+ *     draft/image call site already routed through `metric(...)`.
  *
  * Deliberately logs ONLY the identifiers above — never image bytes, URLs, tokens,
  * or seller PII.
@@ -43,6 +46,14 @@ export class DraftTelemetry {
   private readonly events = new Logger('DraftFlow');
   private readonly metrics = new Logger('DraftMetrics');
 
+  /**
+   * The Prometheus client. `@Optional()` so every existing unit test that
+   * constructs `new DraftTelemetry()` with no arguments keeps working unchanged
+   * — the counters simply aren't incremented there. In the running app the
+   * global MetricsModule always satisfies it.
+   */
+  constructor(@Optional() private readonly prom?: MetricsService) {}
+
   // Observability MUST NOT affect the business flow: every emit is wrapped so a
   // logging/serialization/metrics-client failure can never throw into a call site
   // (e.g. right after the product write in finalizePublishedDraft). This matters
@@ -68,8 +79,36 @@ export class DraftTelemetry {
   metric(name: DraftMetricName, ctx: DraftLogContext = {}): void {
     try {
       this.metrics.log(`metric=${name} ${this.format(ctx)}`);
+      this.toPrometheus(name);
     } catch {
       // Never let observability break the flow.
+    }
+  }
+
+  /**
+   * Map a draft metric point onto its Prometheus counter.
+   *
+   * Only the metrics with a defined business counter are mapped; the rest stay
+   * log-only (a metric nobody has agreed to alert on is a series nobody reads).
+   * Image duration is NOT recorded here — a counter call site has no notion of
+   * elapsed time; the image worker observes that histogram itself, where the
+   * start and end of the work are both in scope.
+   */
+  private toPrometheus(name: DraftMetricName): void {
+    if (!this.prom) return;
+    switch (name) {
+      case DraftMetric.DRAFT_CREATED:
+        this.prom.recordDraftCreated();
+        break;
+      case DraftMetric.DRAFT_PUBLISHED:
+        this.prom.recordProductPublished();
+        break;
+      case DraftMetric.DRAFT_EXPIRED:
+        this.prom.recordDraftExpired();
+        break;
+      default:
+        // Preview/image lifecycle points remain log-only.
+        break;
     }
   }
 

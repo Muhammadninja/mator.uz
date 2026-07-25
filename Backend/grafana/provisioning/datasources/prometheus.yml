@@ -1,0 +1,23 @@
+# Grafana datasource provisioning for the Mator backend dashboards.
+#
+# Drop this into Grafana's provisioning directory (see grafana/README.md) to have
+# the Prometheus datasource created automatically on startup. Only needed for the
+# provisioning workflow — if you import the dashboard JSON by hand through the
+# UI, Grafana asks you to pick an existing datasource instead.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    # Point this at your Prometheus server.
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      httpMethod: POST
+      # Must match the scrape_interval Prometheus uses for the mator-backend job.
+      # Grafana derives $__rate_interval from this, so a wrong value here makes
+      # every rate() panel either noisy or empty.
+      timeInterval: 15s

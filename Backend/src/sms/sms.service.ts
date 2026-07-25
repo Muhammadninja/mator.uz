@@ -1,5 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { MetricsService } from '../metrics/metrics.service';
 import { SmsProvider, SmsSendResult } from './sms-provider.interface';
 import { LogSmsProvider } from './providers/log.provider';
 import { EskizSmsProvider } from './providers/eskiz.provider';
@@ -23,6 +24,10 @@ export class SmsService {
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
     private readonly operatorResolver: SmsOperatorResolver,
+    // Prometheus counters for sent/failed sends. `@Optional()` so the existing
+    // unit tests, which construct SmsService with three arguments, keep working
+    // unchanged; the global MetricsModule always satisfies it in the app.
+    @Optional() private readonly metrics?: MetricsService,
   ) {
     this.provider = this.resolveProvider();
     this.logger.log(`SMS provider: ${this.provider.name}`);
@@ -100,7 +105,18 @@ export class SmsService {
     // logging. If this throws (delivery failed) we deliberately do NOT record a
     // row — accounting only reflects sends the gateway accepted. The returned
     // metadata is captured for persistence; a caller that ignores it is unaffected.
-    const result = await this.provider.send(toE164, text);
+    //
+    // The try/catch is OBSERVABILITY ONLY: the failure counter is incremented and
+    // the original error is re-thrown unchanged, so BullMQ's retry/backoff and
+    // every caller behave exactly as before.
+    let result: SmsSendResult;
+    try {
+      result = await this.provider.send(toE164, text);
+    } catch (err) {
+      this.metrics?.recordSmsFailed(this.provider.name, template ?? null, err);
+      throw err;
+    }
+    this.metrics?.recordSmsSent(this.provider.name, template ?? null);
 
     // Accounting is best-effort and MUST NOT change the send outcome: the SMS is
     // already accepted, so a persistence failure is logged and swallowed instead

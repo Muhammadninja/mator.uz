@@ -29,6 +29,7 @@ import { ReferenceModule } from './reference/reference.module';
 import { AddressesModule } from './addresses/addresses.module';
 import { DealersModule } from './dealers/dealers.module';
 import { OpsModule } from './ops/ops.module';
+import { MetricsModule } from './metrics/metrics.module';
 
 @Module({
   imports: [
@@ -42,6 +43,11 @@ import { OpsModule } from './ops/ops.module';
     PrismaModule,
     RedisModule,
     QueueModule,
+    // Prometheus metrics (/metrics). Global + additive: it exposes counters for
+    // work the app already does and changes no existing flow — see
+    // metrics.module.ts. Registered after QueueModule so the BullMQ root
+    // connection exists when it re-registers the queues for read-only sampling.
+    MetricsModule.forRoot(),
     AuthModule,
     SellersModule,
     AdminModule,
