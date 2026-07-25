@@ -1,0 +1,20 @@
+# Grafana dashboard provisioning for Mator.
+#
+# Loads every dashboard JSON from grafana/dashboards/ into a "Mator" folder on
+# startup, so a fresh Grafana comes up fully configured with no manual import.
+apiVersion: 1
+
+providers:
+  - name: mator
+    orgId: 1
+    folder: Mator
+    folderUid: mator
+    type: file
+    disableDeletion: false
+    # Re-read the files periodically so a regenerated dashboard is picked up.
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      # Path INSIDE the Grafana container — mount grafana/dashboards here.
+      path: /etc/grafana/provisioning/dashboards/mator
+      foldersFromFilesStructure: false

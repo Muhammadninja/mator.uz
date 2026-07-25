@@ -1,4 +1,4 @@
-import { Logger } from '@nestjs/common';
+import { Logger, Optional } from '@nestjs/common';
 import { OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq';
 import type { Job } from 'bullmq';
 import axios from 'axios';
@@ -22,6 +22,8 @@ import { DraftTelemetry, DraftMetric } from '../telegram/draft-telemetry';
 import { SmsService } from '../sms/sms.service';
 import { PushDispatchService } from '../notifications/push/push-dispatch.service';
 import { maskPhone } from '../common/pii.util';
+import { MetricsService } from '../metrics/metrics.service';
+import { jobDurationSeconds } from '../metrics/job-duration.util';
 
 /**
  * Workers (consumers), one per registered queue.
@@ -92,6 +94,9 @@ export class ImageProcessingProcessor extends WorkerHost {
     // here). Injected so it is mockable and shares one instance app-wide.
     private readonly imageEnhance: ImageEnhanceService,
     private readonly telemetry: DraftTelemetry,
+    // Prometheus. `@Optional()` so the existing processor unit tests, which
+    // construct this class directly, keep working unchanged.
+    @Optional() private readonly metrics?: MetricsService,
   ) {
     super();
   }
@@ -158,6 +163,14 @@ export class ImageProcessingProcessor extends WorkerHost {
   @OnWorkerEvent('completed')
   onCompleted(job: Job<ImageJobData>): void {
     this.logger.log(`Image job ${job.id} completed`);
+    // Both the generic queue histogram and the business-level image histogram:
+    // the former is comparable across queues, the latter is the one product
+    // cares about ("how long until a seller's photo is ready?").
+    const seconds = jobDurationSeconds(job);
+    this.metrics?.observeJob(QUEUE_NAMES.IMAGE_PROCESSING, 'success', seconds);
+    if (seconds !== undefined) {
+      this.metrics?.observeImageProcessing('success', seconds);
+    }
   }
 
   /**
@@ -178,6 +191,15 @@ export class ImageProcessingProcessor extends WorkerHost {
     if (!job) return;
     const maxAttempts = job.opts.attempts ?? 1;
     if (job.attemptsMade < maxAttempts) return; // more retries to come
+
+    // Recorded only once retries are exhausted, so the failure counters count
+    // JOBS that ultimately failed, not attempts — otherwise one flaky job with
+    // 3 attempts would read as 3 failures.
+    const seconds = jobDurationSeconds(job);
+    this.metrics?.observeJob(QUEUE_NAMES.IMAGE_PROCESSING, 'failure', seconds);
+    if (seconds !== undefined) {
+      this.metrics?.observeImageProcessing('failure', seconds);
+    }
 
     const { draftId, imageId } = job.data;
     this.telemetry.metric(DraftMetric.IMAGE_FAILED, {
@@ -224,7 +246,10 @@ export class ImageProcessingProcessor extends WorkerHost {
 export class SmsProcessor extends WorkerHost {
   private readonly logger = new Logger(SmsProcessor.name);
 
-  constructor(private readonly sms: SmsService) {
+  constructor(
+    private readonly sms: SmsService,
+    @Optional() private readonly metrics?: MetricsService,
+  ) {
     super();
   }
 
@@ -238,6 +263,7 @@ export class SmsProcessor extends WorkerHost {
   @OnWorkerEvent('completed')
   onCompleted(job: Job<SmsJobData>): void {
     this.logger.log(`Sms job ${job.id} completed`);
+    this.metrics?.observeJob(QUEUE_NAMES.SMS, 'success', jobDurationSeconds(job));
   }
 
   /**
@@ -257,6 +283,12 @@ export class SmsProcessor extends WorkerHost {
       );
       return;
     }
+    // Terminal only — see the note in ImageProcessingProcessor.onFailed.
+    this.metrics?.observeJob(
+      QUEUE_NAMES.SMS,
+      'failure',
+      jobDurationSeconds(job),
+    );
     this.logger.error(
       `Sms job ${job?.id ?? 'unknown'} failed permanently: ${err.message}`,
       err.stack,
@@ -288,7 +320,10 @@ export class SmsProcessor extends WorkerHost {
 export class NotificationsProcessor extends WorkerHost {
   private readonly logger = new Logger(NotificationsProcessor.name);
 
-  constructor(private readonly push: PushDispatchService) {
+  constructor(
+    private readonly push: PushDispatchService,
+    @Optional() private readonly metrics?: MetricsService,
+  ) {
     super();
   }
 
@@ -314,6 +349,11 @@ export class NotificationsProcessor extends WorkerHost {
   @OnWorkerEvent('completed')
   onCompleted(job: Job<NotificationJobData>): void {
     this.logger.log(`Notification job ${job.id} completed`);
+    this.metrics?.observeJob(
+      QUEUE_NAMES.NOTIFICATIONS,
+      'success',
+      jobDurationSeconds(job),
+    );
   }
 
   /**
@@ -331,6 +371,12 @@ export class NotificationsProcessor extends WorkerHost {
       );
       return;
     }
+    // Terminal only — see the note in ImageProcessingProcessor.onFailed.
+    this.metrics?.observeJob(
+      QUEUE_NAMES.NOTIFICATIONS,
+      'failure',
+      jobDurationSeconds(job),
+    );
     this.logger.error(
       `Notification job ${job?.id ?? 'unknown'} failed permanently (inbox row survives): ${err.message}`,
       err.stack,
