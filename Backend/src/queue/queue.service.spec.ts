@@ -14,6 +14,8 @@ import {
   DEFAULT_JOB_OPTIONS,
   IMAGE_WORKER_CONCURRENCY_DEFAULT,
   resolveImageWorkerConcurrency,
+  SMS_WORKER_CONCURRENCY_DEFAULT,
+  resolveSmsWorkerConcurrency,
 } from './queue.constants';
 import { buildQueueConnection } from './queue.config';
 import {
@@ -22,8 +24,13 @@ import {
   NotificationsProcessor,
 } from './queue.processors';
 
-/** Minimal BullMQ Queue double — records add()/remove() calls, returns a fake job. */
+/**
+ * Minimal BullMQ Queue double. `getJob` returns a fake job (with its own remove())
+ * by default so removeImageJob's getJob→job.remove() path runs; a test can override
+ * getJob to return null (already-gone) or a job whose remove() rejects (locked).
+ */
 function makeQueueMock() {
+  const jobRemove = jest.fn(async () => undefined);
   return {
     add: jest.fn(async (name: string, data: unknown, opts?: unknown) => ({
       id: (opts as any)?.jobId ?? 'auto-id',
@@ -31,7 +38,9 @@ function makeQueueMock() {
       data,
       opts,
     })),
-    remove: jest.fn(async () => undefined),
+    getJob: jest.fn(async (id: string) => ({ id, remove: jobRemove })),
+    // Exposed so tests can assert on the job-level remove() the code now calls.
+    __jobRemove: jobRemove,
   };
 }
 
@@ -101,6 +110,41 @@ describe('Queue infrastructure', () => {
     });
   });
 
+  describe('sms worker concurrency (outbound throttle)', () => {
+    it('resolveSmsWorkerConcurrency: default when unset/blank/invalid/out-of-range', () => {
+      expect(resolveSmsWorkerConcurrency(undefined)).toBe(
+        SMS_WORKER_CONCURRENCY_DEFAULT,
+      );
+      expect(resolveSmsWorkerConcurrency('')).toBe(SMS_WORKER_CONCURRENCY_DEFAULT);
+      expect(resolveSmsWorkerConcurrency('abc')).toBe(
+        SMS_WORKER_CONCURRENCY_DEFAULT,
+      );
+      expect(resolveSmsWorkerConcurrency('0')).toBe(SMS_WORKER_CONCURRENCY_DEFAULT);
+      expect(resolveSmsWorkerConcurrency('21')).toBe(
+        SMS_WORKER_CONCURRENCY_DEFAULT,
+      );
+      expect(resolveSmsWorkerConcurrency('2.5')).toBe(
+        SMS_WORKER_CONCURRENCY_DEFAULT,
+      );
+    });
+
+    it('resolveSmsWorkerConcurrency: accepts a valid in-range integer', () => {
+      expect(resolveSmsWorkerConcurrency('1')).toBe(1);
+      expect(resolveSmsWorkerConcurrency('20')).toBe(20);
+    });
+
+    it('keeps SMS concurrency low — aggregators rate-limit per account', () => {
+      const workerOpts = Reflect.getMetadata(
+        'bullmq:worker_metadata',
+        SmsProcessor,
+      ) as { concurrency?: number } | undefined;
+      expect(workerOpts?.concurrency).toBe(SMS_WORKER_CONCURRENCY_DEFAULT);
+      expect(workerOpts?.concurrency).toBeLessThan(
+        IMAGE_WORKER_CONCURRENCY_DEFAULT * 2,
+      );
+    });
+  });
+
   describe('default job options (retry + retention policy)', () => {
     it('uses bounded, exponential retries — never infinite', () => {
       expect(DEFAULT_JOB_OPTIONS.attempts).toBe(3);
@@ -166,12 +210,52 @@ describe('Queue infrastructure', () => {
       expect(job.id).toBe('image:draft_1:dimg_9');
     });
 
-    it('reenqueueImage removes the stale job by id BEFORE adding (retry must not collapse into a retained failed job)', async () => {
+    // ── Image-flow isolation (regression guard for the SMS/notification migration) ──
+    // The image pipeline predates this migration and must be byte-for-byte
+    // unaffected by it. These pin the boundaries that a careless change to the
+    // shared QueueService would break.
+    it('enqueueSms/enqueueNotification never touch the image queue', async () => {
+      const { service, imageQueue } = buildService();
+
+      await service.enqueueSms({ phone: '+998901112233', message: 'x' });
+      await service.enqueueNotification({
+        userId: 'u1',
+        type: 'ORDER_PAID',
+        notificationId: 'ntf_1',
+        title: 'T',
+        body: 'B',
+      });
+
+      expect(imageQueue.add).not.toHaveBeenCalled();
+      expect(imageQueue.getJob).not.toHaveBeenCalled();
+    });
+
+    it('image jobIds stay in their own namespace, distinct from sms/notify ids', () => {
+      const { service } = buildService();
+      // A collision across namespaces would let one flow's job silently collapse
+      // another's, since BullMQ dedupes on jobId within a queue.
+      expect(service.imageJobId({ draftId: 'd', imageId: 'i' })).toMatch(/^image:/);
+      expect(service.otpSmsJobId('otp_1', 0)).toMatch(/^sms:otp:/);
+      expect(
+        service.notificationJobId({
+          userId: 'u',
+          type: 't',
+          notificationId: 'ntf_1',
+          title: 'T',
+          body: 'B',
+        }),
+      ).toMatch(/^notify:/);
+    });
+
+    it('reenqueueImage removes the stale job BEFORE adding (retry must not collapse into a retained failed job)', async () => {
       const { service, imageQueue } = buildService();
       const order: string[] = [];
-      imageQueue.remove.mockImplementation(async () => {
-        order.push('remove');
-      });
+      imageQueue.getJob.mockImplementation(async (id: string) => ({
+        id,
+        remove: jest.fn(async () => {
+          order.push('remove');
+        }),
+      }));
       imageQueue.add.mockImplementation(async (_n, _d, opts?: unknown) => {
         order.push('add');
         return { id: (opts as any)?.jobId };
@@ -179,9 +263,31 @@ describe('Queue infrastructure', () => {
 
       await service.reenqueueImage({ draftId: 'draft_1', imageId: 'dimg_9' });
 
-      expect(imageQueue.remove).toHaveBeenCalledWith('image:draft_1:dimg_9');
+      expect(imageQueue.getJob).toHaveBeenCalledWith('image:draft_1:dimg_9');
       expect(imageQueue.add).toHaveBeenCalled();
       expect(order).toEqual(['remove', 'add']); // remove strictly precedes add
+    });
+
+    it('removeImageJob is a no-op when the job already vanished (getJob → null)', async () => {
+      const { service, imageQueue } = buildService();
+      imageQueue.getJob.mockResolvedValue(null);
+      await expect(
+        service.removeImageJob('image:x:y'),
+      ).resolves.toBeUndefined();
+      expect(imageQueue.__jobRemove).not.toHaveBeenCalled();
+    });
+
+    it('removeImageJob swallows a rejecting job.remove() (locked/active job must not break retry/cancel)', async () => {
+      const { service, imageQueue } = buildService();
+      imageQueue.getJob.mockResolvedValue({
+        id: 'image:x:y',
+        remove: jest.fn(async () => {
+          throw new Error('Missing lock for job (job is active)');
+        }),
+      });
+      await expect(
+        service.removeImageJob('image:x:y'),
+      ).resolves.toBeUndefined();
     });
 
     it('imageJobId builds the deterministic id', () => {
@@ -201,13 +307,39 @@ describe('Queue infrastructure', () => {
       );
     });
 
-    it('enqueueNotification delegates to the notifications queue', async () => {
+    it('enqueueNotification delegates with a deterministic jobId from the row id', async () => {
       const { service, notificationQueue } = buildService();
-      await service.enqueueNotification({ userId: 'u1', type: 'ORDER_UPDATE' });
-      expect(notificationQueue.add).toHaveBeenCalledWith(
-        'notify',
-        { userId: 'u1', type: 'ORDER_UPDATE' },
-        undefined,
+      const data = {
+        userId: 'u1',
+        type: 'ORDER_UPDATE',
+        notificationId: 'ntf_1',
+        title: 'T',
+        body: 'B',
+      };
+      await service.enqueueNotification(data);
+      // One committed inbox row → at most one push fan-out job.
+      expect(notificationQueue.add).toHaveBeenCalledWith('notify', data, {
+        jobId: 'notify:ntf_1',
+      });
+    });
+
+    it('gives two distinct notifications distinct jobIds (no false collapse)', async () => {
+      const { service } = buildService();
+      const base = { userId: 'u1', type: 'ORDER_UPDATE', title: 'T', body: 'B' };
+      expect(
+        service.notificationJobId({ ...base, notificationId: 'ntf_1' }),
+      ).not.toBe(
+        service.notificationJobId({ ...base, notificationId: 'ntf_2' }),
+      );
+    });
+
+    it('builds OTP sms jobIds that collapse a repeat but not a resend', async () => {
+      const { service } = buildService();
+      // Same (requestId, sendCount) → same id, so a retried HTTP request cannot
+      // double-send. A resend bumps sendCount → distinct id, so it delivers.
+      expect(service.otpSmsJobId('otp_1', 0)).toBe(service.otpSmsJobId('otp_1', 0));
+      expect(service.otpSmsJobId('otp_1', 0)).not.toBe(
+        service.otpSmsJobId('otp_1', 1),
       );
     });
 
@@ -224,8 +356,11 @@ describe('Queue infrastructure', () => {
   });
 
   describe('workers (consumers) start and log', () => {
-    it('the placeholder processors have a callable process() and lifecycle handlers', async () => {
-      const procs = [new SmsProcessor(), new NotificationsProcessor()];
+    it('the processors have a callable process() and lifecycle handlers', async () => {
+      const procs = [
+        new SmsProcessor({ sendSms: jest.fn() } as never),
+        new NotificationsProcessor({ sendToUser: jest.fn() } as never),
+      ];
       for (const p of procs) {
         jest
           .spyOn((p as any).logger, 'log')
@@ -244,7 +379,7 @@ describe('Queue infrastructure', () => {
     });
 
     it('failed handler tolerates an undefined job', () => {
-      const p = new SmsProcessor();
+      const p = new SmsProcessor({ sendSms: jest.fn() } as never);
       jest
         .spyOn((p as any).logger, 'error')
         .mockImplementation(() => undefined);

@@ -1,7 +1,7 @@
-// Tests for the product-creation wizard FSM: step ordering, button-only brand /
-// model / category selection, text-input validation, the optional description
-// and part-number branches, and stale-event protection. Pure logic — no
-// Telegraf, no I/O.
+// Tests for the photos-first product-creation wizard FSM: step ordering,
+// button-only brand / model / category selection, text-input validation, the
+// optional description and part-number branches, and stale-event protection.
+// Pure logic — no Telegraf, no I/O.
 
 import { PartVehicleCategory } from '@prisma/client';
 import {
@@ -17,13 +17,9 @@ import {
   choosePartNumberType,
   inputPartNumber,
   inputPrice,
-  beginProcessing,
   beginQuestionnaire,
-  backToPhotos,
   previousStep,
   goBack,
-  changePhotos,
-  hasProcessedPhotos,
   stepPrompt,
   brandKeyboard,
   modelKeyboard,
@@ -42,8 +38,11 @@ import { WIZARD_BRANDS, WIZARD_CATEGORIES } from './wizard-catalog';
 const CHEVROLET = 0; // index in WIZARD_BRANDS
 const COBALT = 0; // index in Chevrolet's model list
 
+/** A session that has passed PHOTOS_FIRST and sits at the first question (BRAND). */
 function freshSession(): WizardSession {
-  return new WizardSessionStore().start(1);
+  const s = new WizardSessionStore().start(1);
+  beginQuestionnaire(s); // photos accepted → BRAND
+  return s;
 }
 
 /** Drive a session through the button steps up to TITLE. */
@@ -55,8 +54,8 @@ function sessionAtTitle(): WizardSession {
   return s;
 }
 
-/** Drive a session through every step up to PHOTOS (happy path with OEM). */
-function sessionAtPhotos(): WizardSession {
+/** Drive a session through every question (happy path with OEM) → QUESTIONNAIRE_DONE. */
+function sessionAtDone(): WizardSession {
   const s = sessionAtTitle();
   inputTitle(s, 'Передний амортизатор');
   inputDescription(s, 'Новый, оригинал');
@@ -67,10 +66,11 @@ function sessionAtPhotos(): WizardSession {
 }
 
 describe('WizardSessionStore', () => {
-  it('start() creates a fresh session at the BRAND step', () => {
+  it('start() creates a fresh session at the PHOTOS_FIRST step', () => {
     const store = new WizardSessionStore();
     const s = store.start(42);
-    expect(s.step).toBe(WizardStep.BRAND);
+    expect(s.step).toBe(WizardStep.PHOTOS_FIRST);
+    expect(s.draftId).toBeNull();
     expect(s.brand).toBeNull();
     expect(s.partNumberType).toBe('UNKNOWN');
     expect(store.get(42)).toBe(s);
@@ -79,17 +79,30 @@ describe('WizardSessionStore', () => {
   it('start() replaces an in-progress session (wizard restart)', () => {
     const store = new WizardSessionStore();
     const first = store.start(42);
+    beginQuestionnaire(first);
     selectBrand(first, CHEVROLET);
     const second = store.start(42);
     expect(store.get(42)).toBe(second);
-    expect(second.step).toBe(WizardStep.BRAND);
+    expect(second.step).toBe(WizardStep.PHOTOS_FIRST);
+  });
+
+  it('restore() re-inserts a session rebuilt from a draft', () => {
+    const store = new WizardSessionStore();
+    const rebuilt: WizardSession = {
+      ...store.start(42),
+      step: WizardStep.PRICE,
+      draftId: 'draft_1',
+    };
+    store.restore(42, rebuilt);
+    expect(store.get(42)).toBe(rebuilt);
+    expect(store.get(42)?.step).toBe(WizardStep.PRICE);
   });
 
   it('deleteIf() removes only the expected session instance', () => {
     const store = new WizardSessionStore();
     const first = store.start(42);
     const second = store.start(42); // user restarted while first was processing
-    store.deleteIf(42, first); // old flow finishing must NOT kill the new session
+    store.deleteIf(42, first); // the finishing draft must NOT kill the new session
     expect(store.get(42)).toBe(second);
     store.deleteIf(42, second);
     expect(store.get(42)).toBeUndefined();
@@ -97,10 +110,10 @@ describe('WizardSessionStore', () => {
 });
 
 describe('wizard happy path', () => {
-  it('walks BRAND → … → PHOTOS collecting every field', () => {
-    const s = sessionAtPhotos();
+  it('walks PHOTOS_FIRST → BRAND → … → QUESTIONNAIRE_DONE collecting every field', () => {
+    const s = sessionAtDone();
     expect(s).toMatchObject({
-      step: WizardStep.PHOTOS,
+      step: WizardStep.QUESTIONNAIRE_DONE,
       brand: 'Chevrolet',
       model: 'Cobalt',
       category: PartVehicleCategory.BRAKE_SYSTEM,
@@ -110,16 +123,6 @@ describe('wizard happy path', () => {
       partNumber: '96535062',
       price: 250000,
     });
-  });
-
-  it('PHOTOS → PROCESSING → (failure) → PHOTOS', () => {
-    const s = sessionAtPhotos();
-    expect(beginProcessing(s).status).toBe('ok');
-    expect(s.step).toBe(WizardStep.PROCESSING);
-    // A second album may not race the first.
-    expect(beginProcessing(s).status).toBe('stale');
-    expect(backToPhotos(s).status).toBe('ok');
-    expect(s.step).toBe(WizardStep.PHOTOS);
   });
 });
 
@@ -343,11 +346,11 @@ describe('price input (shared parsePrice rules)', () => {
     ['130.000 сум', 130000],
     ['1.250.000', 1250000],
     ['350000', 350000],
-  ])('parses %s → %i and advances to PHOTOS', (raw, expected) => {
+  ])('parses %s → %i and advances to QUESTIONNAIRE_DONE', (raw, expected) => {
     const s = atPrice();
     expect(inputPrice(s, raw).status).toBe('ok');
     expect(s.price).toBe(expected);
-    expect(s.step).toBe(WizardStep.PHOTOS);
+    expect(s.step).toBe(WizardStep.QUESTIONNAIRE_DONE);
   });
 
   it.each([['нет цены'], ['0'], ['-500'], ['9999999999999999']])(
@@ -436,42 +439,11 @@ describe('back navigation ("⬅️ Назад")', () => {
     expect(s.step).toBe(WizardStep.PART_NUMBER_TYPE);
   });
 
-  it('PHOTOS → PRICE, and PROCESSING has no back', () => {
-    const s = sessionAtPhotos(); // at PHOTOS (OEM path)
-    expect(previousStep(s)).toBe(WizardStep.PRICE);
-    // From PROCESSING there is no going back (transient blocking state).
-    beginProcessing(s);
+  it('QUESTIONNAIRE_DONE has no back (terminal — the coordinator owns the flow)', () => {
+    const s = sessionAtDone();
     expect(previousStep(s)).toBeNull();
     expect(goBack(s).status).toBe('stale');
-    expect(s.step).toBe(WizardStep.PROCESSING);
-  });
-});
-
-describe('photo reuse (return from preview)', () => {
-  it('a fresh session has no processed photos', () => {
-    expect(hasProcessedPhotos(freshSession())).toBe(false);
-  });
-
-  it('hasProcessedPhotos is true once assets are carried on the session', () => {
-    const s = freshSession();
-    s.processedUrls = ['https://cdn/a.webp'];
-    s.publicIds = ['mator/products/a'];
-    expect(hasProcessedPhotos(s)).toBe(true);
-  });
-
-  it('changePhotos clears the carried photos and lands on PHOTOS', () => {
-    const s = sessionAtPhotos();
-    s.step = WizardStep.PRICE; // as if reopened from the preview at PRICE
-    s.processedUrls = ['https://cdn/a.webp', 'https://cdn/b.webp'];
-    s.publicIds = ['mator/products/a', 'mator/products/b'];
-
-    expect(changePhotos(s).status).toBe('ok');
-    expect(s.step).toBe(WizardStep.PHOTOS);
-    expect(hasProcessedPhotos(s)).toBe(false);
-    expect(s.processedUrls).toEqual([]);
-    expect(s.publicIds).toEqual([]);
-    // Other collected data is untouched — only the photos were dropped.
-    expect(s).toMatchObject({ brand: 'Chevrolet', model: 'Cobalt' });
+    expect(s.step).toBe(WizardStep.QUESTIONNAIRE_DONE);
   });
 });
 
@@ -505,79 +477,41 @@ describe('stepPrompt', () => {
     expect(stepPrompt(s).text).toContain('OEM');
     inputPartNumber(s, '96535062');
     expect(labels(s)).toContain('⬅️ Назад'); // PRICE
-    inputPrice(s, '250 000');
-    expect(labels(s)).toContain('⬅️ Назад'); // PHOTOS
-    expect(stepPrompt(s).text).toContain('фото');
+    inputPrice(s, '250 000'); // → QUESTIONNAIRE_DONE (terminal, no keyboard)
+    expect(stepPrompt(s).keyboard).toBeUndefined();
   });
 });
 
-describe('parallel flow (photos-first)', () => {
-  it('startParallel() begins at PHOTOS_FIRST with flow=parallel and no draft yet', () => {
-    const s = new WizardSessionStore().startParallel(7);
+describe('photos-first entry', () => {
+  it('a new session starts at PHOTOS_FIRST with no draft yet', () => {
+    const s = new WizardSessionStore().start(7);
     expect(s.step).toBe(WizardStep.PHOTOS_FIRST);
-    expect(s.flow).toBe('parallel');
     expect(s.draftId).toBeNull();
   });
 
-  it('start() (legacy) begins at BRAND with flow=legacy', () => {
-    const s = new WizardSessionStore().start(7);
-    expect(s.step).toBe(WizardStep.BRAND);
-    expect(s.flow).toBe('legacy');
-  });
-
   it('beginQuestionnaire advances PHOTOS_FIRST → BRAND (and is stale elsewhere)', () => {
-    const s = new WizardSessionStore().startParallel(7);
+    const s = new WizardSessionStore().start(7);
     expect(beginQuestionnaire(s).status).toBe('ok');
     expect(s.step).toBe(WizardStep.BRAND);
-    // A second call at BRAND is a stale no-op.
+    // A second call at BRAND is a stale no-op — a second album can't race the first.
     expect(beginQuestionnaire(s).status).toBe('stale');
     expect(s.step).toBe(WizardStep.BRAND);
   });
 
   it('PHOTOS_FIRST has no previous step (Back is stale)', () => {
-    const s = new WizardSessionStore().startParallel(7);
+    const s = new WizardSessionStore().start(7);
     expect(previousStep(s)).toBeNull();
     expect(goBack(s).status).toBe('stale');
   });
 
-  it('parallel PRICE → QUESTIONNAIRE_DONE (not PHOTOS)', () => {
-    const store = new WizardSessionStore();
-    const s = store.startParallel(7);
-    beginQuestionnaire(s); // → BRAND
-    selectBrand(s, CHEVROLET);
-    selectModel(s, COBALT);
-    selectCategory(s, 0);
-    inputTitle(s, 'Амортизатор');
-    skipDescription(s);
-    choosePartNumberType(s, 'SKIP');
-    expect(inputPrice(s, '250 000').status).toBe('ok');
-    expect(s.step).toBe(WizardStep.QUESTIONNAIRE_DONE);
-  });
-
-  it('legacy PRICE → PHOTOS (unchanged)', () => {
-    const s = sessionAtPhotos(); // built via legacy start()
-    expect(s.step).toBe(WizardStep.PHOTOS);
-  });
-
-  it('QUESTIONNAIRE_DONE is terminal — no previous step', () => {
-    const store = new WizardSessionStore();
-    const s = store.startParallel(7);
-    beginQuestionnaire(s);
-    selectBrand(s, CHEVROLET);
-    selectModel(s, COBALT);
-    selectCategory(s, 0);
-    inputTitle(s, 'Амортизатор');
-    skipDescription(s);
-    choosePartNumberType(s, 'SKIP');
-    inputPrice(s, '250 000'); // → QUESTIONNAIRE_DONE
+  it('BRAND has no previous step — photos precede it but are not a question', () => {
+    const s = freshSession(); // at BRAND
     expect(previousStep(s)).toBeNull();
+    expect(goBack(s).status).toBe('stale');
   });
 
-  it('the questionnaire steps behave identically in both flows (back-nav within BRAND…PRICE)', () => {
-    // Parallel flow: once at TITLE, ⬅️ Назад still walks back to CATEGORY etc.
-    const store = new WizardSessionStore();
-    const s = store.startParallel(7);
-    beginQuestionnaire(s);
+  it('back-navigation walks the questionnaire and preserves data', () => {
+    const s = freshSession();
     selectBrand(s, CHEVROLET);
     selectModel(s, COBALT);
     selectCategory(s, 0);
@@ -591,10 +525,26 @@ describe('parallel flow (photos-first)', () => {
   });
 
   it('stepPrompt: PHOTOS_FIRST asks for photos first; QUESTIONNAIRE_DONE shows the holding message', () => {
-    const store = new WizardSessionStore();
-    const s = store.startParallel(7);
+    const s = new WizardSessionStore().start(7);
     expect(stepPrompt(s).text).toContain('Сначала отправьте фотографии');
     s.step = WizardStep.QUESTIONNAIRE_DONE;
     expect(stepPrompt(s).text).toContain('Завершаем обработку');
+  });
+
+  it('the FSM has exactly the ten photos-first states (no legacy leftovers)', () => {
+    expect(Object.keys(WizardStep).sort()).toEqual(
+      [
+        'PHOTOS_FIRST',
+        'BRAND',
+        'MODEL',
+        'CATEGORY',
+        'TITLE',
+        'DESCRIPTION',
+        'PART_NUMBER_TYPE',
+        'PART_NUMBER',
+        'PRICE',
+        'QUESTIONNAIRE_DONE',
+      ].sort(),
+    );
   });
 });

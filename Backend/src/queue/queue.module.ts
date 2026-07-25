@@ -11,6 +11,11 @@ import {
 } from './queue.processors';
 import { DraftCleanupProcessor } from './draft-cleanup.processor';
 import { ProductDraftModule } from '../telegram/product-draft.module';
+import { SmsModule } from '../sms/sms.module';
+import { PushDispatchService } from '../notifications/push/push-dispatch.service';
+import { ExpoPushProvider } from '../notifications/push/providers/expo.provider';
+import { FcmPushProvider } from '../notifications/push/providers/fcm.provider';
+import { ApnsPushProvider } from '../notifications/push/providers/apns.provider';
 
 /**
  * BullMQ infrastructure for the app.
@@ -49,6 +54,10 @@ import { ProductDraftModule } from '../telegram/product-draft.module';
     // ProductDraftService (used by the draft-cleanup sweep). Imported rather than
     // re-declared so there is one instance shared with the Telegram side.
     ProductDraftModule,
+    // SmsService for SmsProcessor — the worker is now the only caller of the SMS
+    // provider. Imported (not re-declared) so provider selection/accounting has
+    // exactly one instance.
+    SmsModule,
   ],
   providers: [
     QueueService,
@@ -56,6 +65,14 @@ import { ProductDraftModule } from '../telegram/product-draft.module';
     SmsProcessor,
     NotificationsProcessor,
     DraftCleanupProcessor,
+    // Push stack for NotificationsProcessor. Declared here rather than importing
+    // NotificationsModule: that module imports AuthModule (controllers/guards),
+    // and pulling the whole HTTP surface into the worker graph would be both
+    // wasteful and a cycle risk. These providers are leaf services over Prisma.
+    PushDispatchService,
+    ExpoPushProvider,
+    FcmPushProvider,
+    ApnsPushProvider,
   ],
   exports: [QueueService],
 })

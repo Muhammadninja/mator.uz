@@ -8,7 +8,7 @@ import { ProductDraftModule } from './product-draft.module';
   // CatalogModule provides CatalogProjectionService so a confirmed listing is
   // immediately projected into the buyer catalog (live read model).
   // ProductDraftModule provides ProductDraftService + DraftCoordinator for the
-  // photos-first parallel flow (also imported by QueueModule for the worker).
+  // photos-first draft flow (also imported by QueueModule for the worker).
   imports: [SellersModule, CatalogModule, ProductDraftModule],
   providers: [TelegramService],
 })

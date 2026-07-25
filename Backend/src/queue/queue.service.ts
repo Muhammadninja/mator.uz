@@ -20,8 +20,14 @@ export interface ImageJobData {
 export interface SmsJobData {
   /** E.164 destination number. */
   phone: string;
-  /** Message body. */
+  /** Message body. Rendered text — for OTP this contains the code, so it lives
+   *  only in the job payload (never persisted by SmsService accounting). */
   message: string;
+  /**
+   * Accounting-only template label (e.g. 'otp', 'order_paid') forwarded to
+   * `SmsService.sendSms`. Never the rendered text.
+   */
+  template?: string | null;
 }
 
 export interface NotificationJobData {
@@ -29,7 +35,18 @@ export interface NotificationJobData {
   userId: string;
   /** Notification type discriminator. */
   type: string;
-  /** Free-form payload the eventual notifier will interpret. */
+  /**
+   * The already-persisted Notification row id. The inbox row is written
+   * SYNCHRONOUSLY by NotificationsService.emit (the DB is the source of truth);
+   * this job only performs the push fan-out for that row, so the id doubles as
+   * the natural idempotency key.
+   */
+  notificationId: string;
+  /** Push title/body, snapshotted at emit time. */
+  title: string;
+  body: string;
+  deeplinkPath?: string | null;
+  /** Free-form data merged into the push payload. */
   payload?: Record<string, unknown>;
 }
 
@@ -102,10 +119,25 @@ export class QueueService {
   /**
    * Remove an image job by id (used when cancelling/expiring a draft so a not-yet-
    * run job doesn't process an asset we're about to delete, and by reenqueueImage
-   * before a retry). A missing or already-active job is a harmless no-op.
+   * before a retry).
+   *
+   * Look the job up first and remove only if it still exists: a job that already
+   * vanished on its own (retention/cleanup, or a concurrent removal) must NOT make
+   * a retry/cancel throw. `job.remove()` on an ACTIVE job can still reject (BullMQ
+   * won't remove a locked job); that too is swallowed — the job will finish or
+   * stall-recover on its own, and the caller's intent (free the id for re-add, or
+   * stop a pending job) is already satisfied for every non-active state.
    */
   async removeImageJob(jobId: string): Promise<void> {
-    await this.imageQueue.remove(jobId);
+    const job = await this.imageQueue.getJob(jobId);
+    if (!job) return; // already gone — nothing to do
+    try {
+      await job.remove();
+    } catch (err) {
+      this.logger.debug(
+        `removeImageJob(${jobId}) skipped: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /**
@@ -115,7 +147,10 @@ export class QueueService {
    * number (e.g. two separate OTP requests) must both be delivered, so collapsing
    * on (phone) or (phone+message) would silently drop the second one. Callers
    * that DO need idempotency (a specific business event that must send at most
-   * once) should pass their own stable `opts.jobId` derived from that event id.
+   * once) should pass their own stable `opts.jobId` derived from that event id —
+   * OtpService does exactly this via {@link otpSmsJobId}, keyed on the OTP
+   * request id + send attempt, so a retried HTTP request cannot double-send a
+   * code while a legitimate resend (a new attempt) still goes out.
    */
   async enqueueSms(
     data: SmsJobData,
@@ -126,18 +161,38 @@ export class QueueService {
   }
 
   /**
-   * Enqueue a notification job.
+   * Stable jobId for an OTP delivery: `sms:otp:<requestId>:<sendCount>`.
    *
-   * No deterministic jobId by default for the same reason as SMS — repeated
-   * notifications of the same type to the same user are usually legitimately
-   * distinct events. Callers with an at-most-once event should pass their own
-   * `opts.jobId`.
+   * `sendCount` (0 for the initial issue, then the resend counter) is what keeps
+   * this correct in both directions: the same issue/resend enqueued twice
+   * collapses to one job, while a genuine resend — which mints a NEW code and
+   * bumps the counter — gets a distinct id and is delivered.
+   */
+  otpSmsJobId(requestId: string, sendCount: number): string {
+    return `sms:otp:${requestId}:${sendCount}`;
+  }
+
+  /**
+   * Enqueue a notification PUSH fan-out job.
+   *
+   * Deterministic jobId (`notify:<notificationId>`): the inbox row was already
+   * committed by NotificationsService.emit, and one row must produce at most one
+   * push fan-out. Because the id comes from that committed row it is unique per
+   * real event, so this collapses accidental double-enqueues (a retried request,
+   * a duplicated event handler) without ever merging two genuinely distinct
+   * notifications — they have different row ids.
    */
   async enqueueNotification(
     data: NotificationJobData,
     opts?: JobsOptions,
   ): Promise<Job<NotificationJobData>> {
-    this.logger.debug(`Enqueue notification job for ${data.userId}`);
-    return this.notificationQueue.add('notify', data, opts);
+    const jobId = this.notificationJobId(data);
+    this.logger.debug(`Enqueue notification job ${jobId}`);
+    return this.notificationQueue.add('notify', data, { jobId, ...opts });
+  }
+
+  /** The deterministic notification jobId: `notify:<notificationId>`. */
+  notificationJobId(data: NotificationJobData): string {
+    return `notify:${data.notificationId}`;
   }
 }

@@ -3,7 +3,11 @@ import { OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq';
 import type { Job } from 'bullmq';
 import axios from 'axios';
 import { ImageProcessingStage } from '@prisma/client';
-import { QUEUE_NAMES, resolveImageWorkerConcurrency } from './queue.constants';
+import {
+  QUEUE_NAMES,
+  resolveImageWorkerConcurrency,
+  resolveSmsWorkerConcurrency,
+} from './queue.constants';
 import type {
   ImageJobData,
   NotificationJobData,
@@ -15,6 +19,9 @@ import { ProductDraftService } from '../telegram/product-draft.service';
 import { DraftCoordinator } from '../telegram/draft-coordinator';
 import { TelegramFileService } from '../telegram/telegram-file.service';
 import { DraftTelemetry, DraftMetric } from '../telegram/draft-telemetry';
+import { SmsService } from '../sms/sms.service';
+import { PushDispatchService } from '../notifications/push/push-dispatch.service';
+import { maskPhone } from '../common/pii.util';
 
 /**
  * Workers (consumers), one per registered queue.
@@ -25,9 +32,16 @@ import { DraftTelemetry, DraftMetric } from '../telegram/draft-telemetry';
  *     SIGTERM/SIGINT (app.enableShutdownHooks() is already on in main.ts) every
  *     worker drains its active job and disconnects cleanly. No orphan workers.
  *
- * The SMS/Notification workers are still placeholders (they only log); their real
- * pipelines migrate later. The IMAGE worker below is the real, two-phase draft
- * image pipeline.
+ * All three workers are now real consumers:
+ *   • IMAGE         — the two-phase draft image pipeline (unchanged).
+ *   • SMS           — the only caller of the SMS provider (OTP enqueues here).
+ *   • NOTIFICATIONS — the push fan-out for an already-committed inbox row.
+ *
+ * The division of labour is the same everywhere: producers own BUSINESS STATE
+ * (the OTP record in Redis, the Notification row in Postgres) and commit it
+ * before enqueueing; workers own DELIVERY only and never write that state back.
+ * So a job that fails, retries, or is dropped degrades delivery — it can never
+ * corrupt or lose the record the user's flow depends on.
  */
 
 /** How long to wait when downloading a source/original image. */
@@ -187,15 +201,38 @@ export class ImageProcessingProcessor extends WorkerHost {
   }
 }
 
-@Processor(QUEUE_NAMES.SMS)
+/**
+ * SmsProcessor — the ONLY place an SMS provider is invoked. Producers
+ * (OtpService and any future sender) enqueue; this worker delivers.
+ *
+ * Delegates to `SmsService.sendSms`, which owns provider selection, the
+ * provider's own internal retries, and the best-effort accounting row. Letting a
+ * failure propagate is deliberate: BullMQ then applies the bounded retry policy
+ * (attempts + exponential backoff from DEFAULT_JOB_OPTIONS) and, once exhausted,
+ * parks the job in the failed set for inspection rather than losing it silently.
+ *
+ * Idempotency is the producer's job (see QueueService.otpSmsJobId): a job that
+ * runs twice WOULD send twice, so at-most-once senders must supply a stable
+ * jobId. Retries of a job whose provider call already succeeded are the one
+ * genuine at-least-once risk here, and the OTP flow tolerates a duplicate SMS
+ * far better than a missing one.
+ *
+ * Concurrency is intentionally low (SMS_CONCURRENCY, default 3): aggregators
+ * rate-limit per account, so this doubles as a crude outbound throttle.
+ */
+@Processor(QUEUE_NAMES.SMS, { concurrency: resolveSmsWorkerConcurrency() })
 export class SmsProcessor extends WorkerHost {
   private readonly logger = new Logger(SmsProcessor.name);
 
-  process(job: Job<SmsJobData>): Promise<void> {
-    // Placeholder: real SMS sending is NOT wired in yet (OTP/SMS still send
-    // inline). Real impl will await the provider call; nothing to await now.
-    this.logger.log(`Processing sms job ${job.id} (phone=${job.data.phone})`);
-    return Promise.resolve();
+  constructor(private readonly sms: SmsService) {
+    super();
+  }
+
+  async process(job: Job<SmsJobData>): Promise<void> {
+    const { phone, message, template } = job.data;
+    this.logger.log(`Sending sms job ${job.id} to ${maskPhone(phone)}`);
+    // Throwing here is what triggers BullMQ's retry/backoff — do not swallow.
+    await this.sms.sendSms(phone, message, template ?? null);
   }
 
   @OnWorkerEvent('completed')
@@ -203,10 +240,25 @@ export class SmsProcessor extends WorkerHost {
     this.logger.log(`Sms job ${job.id} completed`);
   }
 
+  /**
+   * Fires on EVERY attempt. Only the final failure is escalated to `error` — an
+   * intermediate blip is a warning, since a retry is still coming. Nothing is
+   * mutated here: the OTP record in Redis is untouched by a delivery failure
+   * (the code stays valid for its TTL and the user can resend), so there is no
+   * business state to roll back.
+   */
   @OnWorkerEvent('failed')
   onFailed(job: Job<SmsJobData> | undefined, err: Error): void {
+    const maxAttempts = job?.opts.attempts ?? 1;
+    const attemptsMade = job?.attemptsMade ?? 0;
+    if (job && attemptsMade < maxAttempts) {
+      this.logger.warn(
+        `Sms job ${job.id} attempt ${attemptsMade}/${maxAttempts} failed: ${err.message} — retrying`,
+      );
+      return;
+    }
     this.logger.error(
-      `Sms job ${job?.id ?? 'unknown'} failed: ${err.message}`,
+      `Sms job ${job?.id ?? 'unknown'} failed permanently: ${err.message}`,
       err.stack,
     );
   }
@@ -217,17 +269,46 @@ export class SmsProcessor extends WorkerHost {
   }
 }
 
+/**
+ * NotificationsProcessor — performs the PUSH fan-out for a notification whose
+ * inbox row is already committed. The DB row is the source of truth and is
+ * written by NotificationsService.emit before this job exists; the worker only
+ * delivers, and never writes notification state.
+ *
+ * The preference/quiet-hours gate already ran at emit time (a suppressed
+ * notification is never enqueued), so this worker deliberately does not re-check
+ * it — re-evaluating on a delayed retry could suppress a push whose quiet-hours
+ * window opened in the meantime, which is not the emit-time decision.
+ *
+ * A failure propagates so BullMQ retries with backoff; PushDispatchService is
+ * itself tolerant (it prunes dead tokens and no-ops for a user with no devices),
+ * so a retry is safe and at worst re-delivers to still-live tokens.
+ */
 @Processor(QUEUE_NAMES.NOTIFICATIONS)
 export class NotificationsProcessor extends WorkerHost {
   private readonly logger = new Logger(NotificationsProcessor.name);
 
-  process(job: Job<NotificationJobData>): Promise<void> {
-    // Placeholder: real notification fan-out is NOT wired in yet. Real impl will
-    // await the fan-out; nothing to await now.
+  constructor(private readonly push: PushDispatchService) {
+    super();
+  }
+
+  async process(job: Job<NotificationJobData>): Promise<void> {
+    const { userId, type, notificationId, title, body, deeplinkPath, payload } =
+      job.data;
     this.logger.log(
-      `Processing notification job ${job.id} (userId=${job.data.userId}, type=${job.data.type})`,
+      `Processing notification job ${job.id} (userId=${userId}, type=${type})`,
     );
-    return Promise.resolve();
+    await this.push.sendToUser(userId, {
+      title,
+      body,
+      deeplinkPath,
+      // Same payload shape the inline path built, so clients see no change.
+      data: {
+        ...payload,
+        notification_id: notificationId,
+        type: type.toLowerCase(),
+      },
+    });
   }
 
   @OnWorkerEvent('completed')
@@ -235,10 +316,23 @@ export class NotificationsProcessor extends WorkerHost {
     this.logger.log(`Notification job ${job.id} completed`);
   }
 
+  /**
+   * Only escalate once retries are exhausted. A permanently failed push leaves
+   * the inbox row intact and unread — the user still sees the notification in
+   * the app, which is why a lost push is degraded delivery, not lost data.
+   */
   @OnWorkerEvent('failed')
   onFailed(job: Job<NotificationJobData> | undefined, err: Error): void {
+    const maxAttempts = job?.opts.attempts ?? 1;
+    const attemptsMade = job?.attemptsMade ?? 0;
+    if (job && attemptsMade < maxAttempts) {
+      this.logger.warn(
+        `Notification job ${job.id} attempt ${attemptsMade}/${maxAttempts} failed: ${err.message} — retrying`,
+      );
+      return;
+    }
     this.logger.error(
-      `Notification job ${job?.id ?? 'unknown'} failed: ${err.message}`,
+      `Notification job ${job?.id ?? 'unknown'} failed permanently (inbox row survives): ${err.message}`,
       err.stack,
     );
   }

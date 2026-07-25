@@ -11,7 +11,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { createHash, randomInt } from 'crypto';
 import { OtpChannel } from '@prisma/client';
-import { SmsService } from '../../sms/sms.service';
+import { QueueService } from '../../queue/queue.service';
 import { prefixedId, IdPrefix } from '../../common/ulid.util';
 import { maskPhone } from '../../common/pii.util';
 import { RedisService } from '../../redis/redis.service';
@@ -91,7 +91,9 @@ export class OtpService {
 
   constructor(
     private readonly redis: RedisService,
-    private readonly sms: SmsService,
+    // The QUEUE, not SmsService: OTP delivery is enqueued and executed by
+    // SmsProcessor. Nothing on the request path talks to an SMS provider.
+    private readonly queue: QueueService,
     private readonly config: ConfigService,
     @Inject(RATE_LIMITER) private readonly rateLimiter: RateLimiter,
   ) {
@@ -158,30 +160,66 @@ export class OtpService {
     }
   }
 
-  private async deliver(phoneE164: string, code: string): Promise<void> {
-    // The 'otp' argument is an accounting-only template label (persisted by
-    // SmsService); the rendered text — and therefore the code — is never stored.
-    // Delivery behaviour is unchanged.
-    await this.sms.sendSms(
-      phoneE164,
-      `Mator: tasdiqlash kodingiz ${code}. Hech kimga bermang. Amal qilish muddati 5 daqiqa.`,
-      'otp',
+  /**
+   * ENQUEUE the OTP SMS — the provider is never called on the request path.
+   *
+   * The OTP record is already persisted in Redis (the source of truth for
+   * verification) before this runs, so the code is redeemable the moment it is
+   * issued regardless of when the SMS actually goes out. Delivery is retried by
+   * BullMQ (bounded attempts + exponential backoff) instead of failing the HTTP
+   * request; the user can also resend, which is the real recovery path.
+   *
+   * `jobId` is keyed on (requestId, sendCount) so a retried request cannot
+   * double-send the same code while a genuine resend still delivers.
+   * The 'otp' template is an accounting-only label — the rendered text (and
+   * therefore the code) is never persisted by SmsService.
+   */
+  private async deliver(
+    phoneE164: string,
+    code: string,
+    requestId: string,
+    sendCount: number,
+  ): Promise<void> {
+    await this.queue.enqueueSms(
+      {
+        phone: phoneE164,
+        message: `Mator: tasdiqlash kodingiz ${code}. Hech kimga bermang. Amal qilish muddati 5 daqiqa.`,
+        template: 'otp',
+      },
+      { jobId: this.queue.otpSmsJobId(requestId, sendCount) },
     );
   }
 
   /**
-   * Route a freshly generated OTP to the user. In dev mode the SMS provider is
+   * Route a freshly generated OTP to the user. In dev mode the SMS pipeline is
    * skipped entirely — the code is logged and returned to the caller so the
-   * frontend can complete auth without a provider. In every other case this is
-   * a straight pass-through to {@link deliver}, so production is unchanged.
+   * frontend can complete auth without a provider. In every other case this
+   * enqueues the delivery via {@link deliver}.
    * Returns the plaintext code only in dev mode; `undefined` otherwise.
+   *
+   * Enqueue failures are logged and swallowed: the OTP is already valid in Redis
+   * and the user can resend, so a queue hiccup must not fail an otherwise
+   * successful issue (and must not leak a 500 to the auth screen).
    */
-  private async dispatch(phoneE164: string, code: string): Promise<string | undefined> {
+  private async dispatch(
+    phoneE164: string,
+    code: string,
+    requestId: string,
+    sendCount: number,
+  ): Promise<string | undefined> {
     if (this.devMode) {
       this.logger.warn(`[AUTH_DEV_MODE] OTP for ${phoneE164}: ${code} (SMS skipped)`);
       return code;
     }
-    await this.deliver(phoneE164, code);
+    try {
+      await this.deliver(phoneE164, code, requestId, sendCount);
+    } catch (err) {
+      this.logger.error(
+        `Failed to enqueue OTP SMS for ${maskPhone(phoneE164)} (code is still valid; user can resend): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
     return undefined;
   }
 
@@ -217,7 +255,8 @@ export class OtpService {
     };
     await this.persist(record);
 
-    const devOtpCode = await this.dispatch(phoneE164, code);
+    // sendCount 0 — the initial issue for this requestId.
+    const devOtpCode = await this.dispatch(phoneE164, code, requestId, 0);
     this.logger.log(`OTP issued ${requestId} for ${maskPhone(phoneE164)}`);
     return {
       requestId,
@@ -260,7 +299,14 @@ export class OtpService {
     };
     await this.persist(updated);
 
-    const devOtpCode = await this.dispatch(record.phoneE164, code);
+    // A resend mints a NEW code, so it must reach the user: keying the job on
+    // the bumped resendCount gives it a distinct id from the previous send.
+    const devOtpCode = await this.dispatch(
+      record.phoneE164,
+      code,
+      record.requestId,
+      updated.resendCount,
+    );
     return {
       requestId: record.requestId,
       expiresAt,

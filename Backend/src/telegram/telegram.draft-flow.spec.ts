@@ -1,12 +1,13 @@
-// Unit tests for the PARALLEL (photos-first) orchestration methods on
-// TelegramService. Like the confirmation spec, the service is built via
+// Unit tests for the photos-first draft-flow orchestration methods on
+// TelegramService — the ONLY product-creation path. Like the confirmation spec,
+// the service is built via
 // Object.create(prototype) + Object.assign so we exercise the private helpers
 // without Nest DI or a live bot. All collaborators are mocked.
 //
 // Covered:
-//   • handleParallelPhotos: creates the draft, enqueues a job per image, stores
+//   • handlePhotos: creates the draft, enqueues a job per image, stores
 //     jobIds, advances the FSM to BRAND, and starts the questionnaire.
-//   • handleParallelFormAdvance: persists fields to the draft each step; on
+//   • handleFormAdvance: persists fields to the draft each step; on
 //     QUESTIONNAIRE_DONE consumes the session and calls the coordinator; shows the
 //     holding message only while still processing (and never when an image failed).
 //   • presentDraftPreview: builds the pending confirmation from a READY draft and
@@ -15,6 +16,7 @@
 
 import { Decimal } from '@prisma/client/runtime/library';
 import { TelegramService } from './telegram.service';
+import { makeFakeLock } from './draft-lock.test-util';
 import {
   WizardSessionStore,
   WizardStep,
@@ -45,6 +47,9 @@ function makeService(over: Partial<Record<string, unknown>> = {}): AnyService {
     },
     cloudinary: { deleteAssets: jest.fn().mockResolvedValue(undefined) },
     telemetry: { event: jest.fn(), metric: jest.fn() },
+    // A real (in-memory) mutex, not a pass-through: the guarded paths must
+    // behave correctly both when they win the lock and when they lose it.
+    locks: makeFakeLock(),
     bot: {
       telegram: {
         sendMessage: jest.fn().mockResolvedValue(undefined),
@@ -66,8 +71,8 @@ function makeCtx() {
   return { reply: jest.fn().mockResolvedValue(undefined) };
 }
 
-describe('TelegramService — parallel flow', () => {
-  describe('handleParallelPhotos', () => {
+describe('TelegramService — draft flow (photos-first)', () => {
+  describe('handlePhotos (the ONE image-pipeline entry)', () => {
     it('creates a draft, enqueues a job per image, advances to BRAND, and starts the questionnaire', async () => {
       const drafts = {
         createWithImages: jest.fn().mockResolvedValue({
@@ -81,9 +86,9 @@ describe('TelegramService — parallel flow', () => {
       };
       const svc = makeService({ drafts });
       const ctx = makeCtx();
-      const session = svc.wizard.startParallel(7); // step = PHOTOS_FIRST
+      const session = svc.wizard.start(7); // step = PHOTOS_FIRST
 
-      await svc.handleParallelPhotos(ctx, 7, session, ['file_a', 'file_b']);
+      await svc.handlePhotos(ctx, 7, session, ['file_a', 'file_b']);
 
       expect(drafts.createWithImages).toHaveBeenCalledTimes(1);
       const arg = drafts.createWithImages.mock.calls[0][0];
@@ -108,21 +113,21 @@ describe('TelegramService — parallel flow', () => {
         },
       });
       const ctx = makeCtx();
-      const session = svc.wizard.startParallel(7);
+      const session = svc.wizard.start(7);
 
-      await svc.handleParallelPhotos(ctx, 7, session, ['file_a']);
+      await svc.handlePhotos(ctx, 7, session, ['file_a']);
 
       expect(drafts.createWithImages).not.toHaveBeenCalled();
       expect(session.step).toBe(WizardStep.PHOTOS_FIRST); // unchanged
     });
   });
 
-  describe('handleParallelFormAdvance', () => {
+  describe('handleFormAdvance', () => {
     it('persists fields and re-prompts while the questionnaire continues', async () => {
       const drafts = { updateForm: jest.fn().mockResolvedValue(undefined) };
       const svc = makeService({ drafts });
       const ctx = makeCtx();
-      const session = svc.wizard.startParallel(7);
+      const session = svc.wizard.start(7);
       beginQuestionnaire(session); // → BRAND
       session.draftId = 'draft_1';
       selectBrand(session, 0); // → MODEL
@@ -130,7 +135,7 @@ describe('TelegramService — parallel flow', () => {
         .spyOn(svc, 'sendStepPrompt')
         .mockResolvedValue(undefined);
 
-      await svc.handleParallelFormAdvance(ctx, 7, session);
+      await svc.handleFormAdvance(ctx, 7, session);
 
       expect(drafts.updateForm).toHaveBeenCalledWith(
         'draft_1',
@@ -151,7 +156,7 @@ describe('TelegramService — parallel flow', () => {
       const svc = makeService({ drafts });
       const ctx = makeCtx();
       // Drive a session to QUESTIONNAIRE_DONE.
-      const session = svc.wizard.startParallel(7);
+      const session = svc.wizard.start(7);
       session.draftId = 'draft_1';
       session.step = WizardStep.PRICE;
       session.brand = 'Chevrolet';
@@ -160,7 +165,7 @@ describe('TelegramService — parallel flow', () => {
       session.title = 'Фильтр';
       inputPrice(session, '250 000'); // → QUESTIONNAIRE_DONE (parallel)
 
-      await svc.handleParallelFormAdvance(ctx, 7, session);
+      await svc.handleFormAdvance(ctx, 7, session);
 
       expect(svc.draftCoordinator.onFormStep).toHaveBeenCalledWith('draft_1');
       expect(svc.wizard.get(7)).toBeUndefined(); // session consumed
@@ -180,7 +185,7 @@ describe('TelegramService — parallel flow', () => {
       };
       const svc = makeService({ drafts });
       const ctx = makeCtx();
-      const session = svc.wizard.startParallel(7);
+      const session = svc.wizard.start(7);
       session.draftId = 'draft_1';
       session.step = WizardStep.PRICE;
       session.brand = 'Chevrolet';
@@ -189,7 +194,7 @@ describe('TelegramService — parallel flow', () => {
       session.title = 'Фильтр';
       inputPrice(session, '250 000');
 
-      await svc.handleParallelFormAdvance(ctx, 7, session);
+      await svc.handleFormAdvance(ctx, 7, session);
 
       const texts = ctx.reply.mock.calls.map((c: unknown[]) => c[0]);
       expect(texts.some((t: string) => t.includes('Завершаем обработку'))).toBe(
@@ -227,7 +232,10 @@ describe('TelegramService — parallel flow', () => {
           },
         ],
       };
-      const drafts = { findWithImages: jest.fn().mockResolvedValue(draft) };
+      const drafts = {
+        findWithImages: jest.fn().mockResolvedValue(draft),
+        claimPreviewSend: jest.fn().mockResolvedValue(true), // won the claim
+      };
       const svc = makeService({ drafts });
       const storePending = jest
         .spyOn(svc, 'storePending')
@@ -251,6 +259,7 @@ describe('TelegramService — parallel flow', () => {
         findWithImages: jest
           .fn()
           .mockResolvedValue({ status: 'PUBLISHED', images: [] }),
+        claimPreviewSend: jest.fn(),
       };
       const svc = makeService({ drafts });
       const storePending = jest.spyOn(svc, 'storePending');
@@ -258,6 +267,47 @@ describe('TelegramService — parallel flow', () => {
       await svc.presentDraftPreview('draft_1', 7);
 
       expect(storePending).not.toHaveBeenCalled();
+      expect(drafts.claimPreviewSend).not.toHaveBeenCalled(); // never got to the claim
+    });
+
+    it('LOSES the atomic claim (a racing candidate already sent) → bails, no storePending, no send', async () => {
+      const draft = {
+        id: 'draft_1',
+        sellerId: 1,
+        status: 'READY_FOR_PREVIEW',
+        title: 'Фильтр',
+        brand: 'Chevrolet',
+        model: 'Cobalt',
+        category: 'ENGINE',
+        description: null,
+        partNumber: null,
+        partNumberType: 'UNKNOWN',
+        priceUzs: new Decimal(250000),
+        images: [
+          {
+            status: 'READY',
+            sortOrder: 0,
+            processedUrl: 'u0',
+            processedPublicId: 'p0',
+          },
+        ],
+      };
+      const drafts = {
+        findWithImages: jest.fn().mockResolvedValue(draft),
+        claimPreviewSend: jest.fn().mockResolvedValue(false), // lost the race
+      };
+      const svc = makeService({ drafts });
+      const storePending = jest.spyOn(svc, 'storePending');
+
+      await svc.presentDraftPreview('draft_1', 7);
+
+      expect(drafts.claimPreviewSend).toHaveBeenCalledWith('draft_1');
+      expect(storePending).not.toHaveBeenCalled(); // would delete the winner's assets
+      const sends =
+        svc.bot.telegram.sendMediaGroup.mock.calls.length +
+        svc.bot.telegram.sendPhoto.mock.calls.length +
+        svc.bot.telegram.sendMessage.mock.calls.length;
+      expect(sends).toBe(0);
     });
   });
 
@@ -276,8 +326,8 @@ describe('TelegramService — parallel flow', () => {
     });
   });
 
-  describe('Phase 2 recovery/hardening', () => {
-    it('startParallelProductCreation re-presents a READY_FOR_PREVIEW draft (lost-preview recovery)', async () => {
+  describe('recovery / hardening', () => {
+    it('startProductCreation re-presents a READY_FOR_PREVIEW draft (lost-preview recovery)', async () => {
       const awaiting = { id: 'draft_ready' };
       const drafts = {
         findAwaitingPreview: jest.fn().mockResolvedValue(awaiting),
@@ -288,7 +338,7 @@ describe('TelegramService — parallel flow', () => {
         .spyOn(svc, 'presentDraftPreview')
         .mockResolvedValue(undefined);
 
-      await svc.startParallelProductCreation(makeCtx(), 7, 1);
+      await svc.startProductCreation(makeCtx(), 7, 1);
 
       expect(present).toHaveBeenCalledWith('draft_ready', 7);
       // Did NOT fall through to the resume prompt.
@@ -337,6 +387,41 @@ describe('TelegramService — parallel flow', () => {
         draftId: 'draft_1',
         imageId: 'a',
       });
+    });
+
+    it('resuming a draft reopened by "⬅️ Назад" enqueues NOTHING (all images already READY)', async () => {
+      // A draft moved READY_FOR_PREVIEW → CREATING for a text/price edit keeps its
+      // READY images. /start during that edit must not re-enqueue them: the queue is
+      // not involved in an edit at all, so no image is ever processed twice.
+      const reopened = {
+        id: 'draft_1',
+        formStep: WizardStep.PRICE,
+        brand: 'Chevrolet',
+        model: 'Cobalt',
+        category: 'ENGINE',
+        title: 'Фильтр',
+        description: null,
+        partNumberType: 'UNKNOWN',
+        partNumber: null,
+        priceUzs: new Decimal(250000),
+        images: [
+          { id: 'a', status: 'READY', processedUrl: 'u1', jobId: 'j1' },
+          { id: 'b', status: 'READY', processedUrl: 'u2', jobId: 'j2' },
+        ],
+      };
+      const drafts = {
+        findResumable: jest.fn().mockResolvedValue(reopened),
+        setImageJobId: jest.fn().mockResolvedValue(undefined),
+      };
+      const svc = makeService({ drafts });
+
+      await svc.resumeDraft(makeCtx(), 7);
+
+      expect(svc.queue.reenqueueImage).not.toHaveBeenCalled();
+      expect(svc.queue.enqueueImage).not.toHaveBeenCalled();
+      // The dialogue is restored at the saved edit step with the draft's data.
+      expect(svc.wizard.get(7)?.step).toBe(WizardStep.PRICE);
+      expect(svc.wizard.get(7)?.draftId).toBe('draft_1');
     });
 
     it('finalizePublishedDraft marks the draft PUBLISHED and deletes ONLY the original assets', async () => {

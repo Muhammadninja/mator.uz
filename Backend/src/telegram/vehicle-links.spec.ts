@@ -8,7 +8,10 @@ import { persistVehicleLinks, VehicleLinkDb } from './vehicle-links';
 /** In-memory VehicleLinkDb capturing rows the way Postgres would hold them. */
 function makeDb() {
   const brands = new Map<string, { id: number; name: string }>();
-  const carModels = new Map<string, { id: number; brandId: number; name: string }>();
+  const carModels = new Map<
+    string,
+    { id: number; brandId: number; name: string }
+  >();
   const partModels = new Set<string>(); // "partId:modelId"
   let nextBrandId = 1;
   let nextModelId = 1;
@@ -28,14 +31,20 @@ function makeDb() {
         const key = `${where.brandId_name.brandId}:${where.brandId_name.name}`;
         const existing = carModels.get(key);
         if (existing) return existing;
-        const row = { id: nextModelId++, brandId: create.brandId, name: create.name };
+        const row = {
+          id: nextModelId++,
+          brandId: create.brandId,
+          name: create.name,
+        };
         carModels.set(key, row);
         return row;
       },
     },
     partModel: {
       async upsert({ where }) {
-        partModels.add(`${where.partId_modelId.partId}:${where.partId_modelId.modelId}`);
+        partModels.add(
+          `${where.partId_modelId.partId}:${where.partId_modelId.modelId}`,
+        );
         return {};
       },
       async deleteMany({ where }) {

@@ -1,21 +1,21 @@
 // src/telegram/product-wizard.ts
 //
-// Finite-state machine for the step-by-step product-creation wizard:
+// Finite-state machine for the step-by-step, photos-FIRST product-creation wizard:
 //
-//   BRAND → MODEL → CATEGORY → TITLE → DESCRIPTION → PART_NUMBER_TYPE
-//     → [PART_NUMBER] → PRICE → PHOTOS → PROCESSING → (pending confirmation)
+//   PHOTOS_FIRST → BRAND → MODEL → CATEGORY → TITLE → DESCRIPTION
+//     → PART_NUMBER_TYPE → [PART_NUMBER] → PRICE → QUESTIONNAIRE_DONE
 //
-// Brand, model, category and part-number type come ONLY from inline buttons
-// (the seller never types them); title / part number / price are validated text
-// inputs; description is text or an explicit Skip. Photos are handled by the
-// existing image pipeline in TelegramService — once they arrive the session is
-// consumed and the flow hands over to the existing preview/confirm machinery.
+// Photos come first and are processed in the BACKGROUND (BullMQ) while the seller
+// answers the questionnaire; the preview appears when both tracks meet (see
+// DraftCoordinator). Brand, model, category and part-number type come ONLY from
+// inline buttons (the seller never types them); title / part number / price are
+// validated text inputs; description is text or an explicit Skip.
 //
-// This module is pure state + validation + prompt/keyboard builders (no
-// Telegraf handlers, no I/O) so the whole FSM is unit-testable. Sessions are
-// in-memory, one per Telegram user, replaced by /start and deleted on hand-off
-// — they hold no uploaded assets, so no TTL/cleanup is required (unlike the
-// pending-confirmation sessions, which own Cloudinary uploads).
+// This module is pure state + validation + prompt/keyboard builders (no Telegraf
+// handlers, no I/O) so the whole FSM is unit-testable. A session holds only
+// CONVERSATIONAL state — where the seller is in the dialogue and the id of the
+// ProductDraft that owns the business data. It never holds uploaded assets: the
+// draft (Postgres) is the single source of truth for those.
 
 import { PartVehicleCategory } from '@prisma/client';
 import { Markup } from 'telegraf';
@@ -24,10 +24,9 @@ import { parsePrice } from '../ai/price-parser';
 import { WIZARD_BRANDS, WIZARD_CATEGORIES } from './wizard-catalog';
 
 export enum WizardStep {
-  /** Photos-first entry (PARALLEL flow only): the very first thing the seller does
-   *  is upload photos. Once they arrive, image processing is kicked off in the
-   *  background (BullMQ) and the FSM jumps straight to BRAND so the questionnaire
-   *  runs while the images process. Not used by the legacy (photos-last) flow. */
+  /** Entry state: the very first thing the seller does is upload photos. Once they
+   *  arrive, image processing is kicked off in the background (BullMQ) and the FSM
+   *  jumps straight to BRAND so the questionnaire runs while the images process. */
   PHOTOS_FIRST = 'PHOTOS_FIRST',
   BRAND = 'BRAND',
   MODEL = 'MODEL',
@@ -37,35 +36,22 @@ export enum WizardStep {
   PART_NUMBER_TYPE = 'PART_NUMBER_TYPE',
   PART_NUMBER = 'PART_NUMBER',
   PRICE = 'PRICE',
-  PHOTOS = 'PHOTOS',
-  /** Photos received; image pipeline running. Blocks further input until the
-   *  preview is sent (→ session deleted) or processing fails (→ PHOTOS).
-   *  LEGACY flow only. */
-  PROCESSING = 'PROCESSING',
-  /** Questionnaire finished (PARALLEL flow only): every form field is collected.
-   *  The wizard's work is done; the draft coordinator now owns the rendezvous with
-   *  image processing and decides when to show the preview. Terminal for the FSM. */
+  /** Questionnaire finished: every form field is collected. The wizard's work is
+   *  done; the draft coordinator now owns the rendezvous with image processing and
+   *  decides when to show the preview. Terminal for the FSM. */
   QUESTIONNAIRE_DONE = 'QUESTIONNAIRE_DONE',
 }
 
 /**
- * Which product-creation flow a session belongs to:
- *   • 'legacy'   — the original synchronous, photos-LAST flow (BRAND→…→PRICE→PHOTOS
- *                  →PROCESSING). Kept behind the PARALLEL_DRAFT_FLOW flag for rollback.
- *   • 'parallel' — the photos-FIRST flow (PHOTOS_FIRST→BRAND→…→PRICE→QUESTIONNAIRE_DONE)
- *                  where images process in the background via the DB draft.
- * The questionnaire steps (BRAND→…→PRICE) are IDENTICAL in both; the flow only
- * changes the entry point and what happens after PRICE.
+ * The conversational state of one seller's wizard dialogue. Business state lives
+ * on the ProductDraft identified by `draftId` — this object only tracks WHERE the
+ * seller is and WHICH draft the answers belong to, so losing it (restart, TTL)
+ * costs nothing but the dialogue position, which /start rebuilds from the draft.
  */
-export type WizardFlow = 'legacy' | 'parallel';
-
-/** Everything the wizard collects (the requirement's FSM fields). */
 export interface WizardSession {
   step: WizardStep;
-  /** Which flow this session runs (default 'legacy' for back-compat). */
-  flow: WizardFlow;
-  /** PARALLEL flow only: the DB draft id backing this session (created once photos
-   *  are accepted). null for legacy sessions and before photos arrive. */
+  /** The DB draft backing this session. Set once photos are accepted (or straight
+   *  away when resuming/reopening an existing draft); null before that. */
   draftId: string | null;
   brand: string | null;
   model: string | null;
@@ -76,17 +62,6 @@ export interface WizardSession {
   partNumberType: PartNumberType;
   partNumber: string | null;
   price: number | null;
-  /**
-   * Already-processed photos carried back when the seller returns from the
-   * preview ("⬅️ Назад"). Their presence means the PHOTOS step is ALREADY
-   * satisfied by these Cloudinary assets — editing text/price must NOT re-run
-   * the image pipeline, so the wizard reuses them and jumps straight to a new
-   * preview. Empty for a first-time listing (photos not uploaded yet) and after
-   * "🖼 Изменить фото" clears them to force a fresh upload. `processedUrls` and
-   * `publicIds` are index-aligned (URL ↔ its Cloudinary public_id).
-   */
-  processedUrls: string[];
-  publicIds: string[];
 }
 
 /**
@@ -183,11 +158,14 @@ const MAX_PRICE_UZS = 999_999_999_999;
 export class WizardSessionStore {
   private readonly sessions = new Map<number, WizardSession>();
 
-  /** Build a fresh session with the given flow + starting step (all fields empty). */
-  private fresh(flow: WizardFlow, step: WizardStep): WizardSession {
-    return {
-      step,
-      flow,
+  /**
+   * Start (or restart) the wizard: begins at PHOTOS_FIRST so the seller uploads
+   * photos before any question. Once photos arrive the service creates the draft
+   * (setting `draftId`) and advances to BRAND.
+   */
+  start(tgUserId: number): WizardSession {
+    const session: WizardSession = {
+      step: WizardStep.PHOTOS_FIRST,
       draftId: null,
       brand: null,
       model: null,
@@ -197,35 +175,17 @@ export class WizardSessionStore {
       partNumberType: 'UNKNOWN',
       partNumber: null,
       price: null,
-      processedUrls: [],
-      publicIds: [],
     };
-  }
-
-  /** Start (or restart) the LEGACY (photos-last) wizard: begins at BRAND. */
-  start(tgUserId: number): WizardSession {
-    const session = this.fresh('legacy', WizardStep.BRAND);
     this.sessions.set(tgUserId, session);
     return session;
   }
 
   /**
-   * Start (or restart) the PARALLEL (photos-first) wizard: begins at PHOTOS_FIRST
-   * so the seller uploads photos before any question. Once photos arrive the
-   * service creates the draft (setting `draftId`) and advances to BRAND.
-   */
-  startParallel(tgUserId: number): WizardSession {
-    const session = this.fresh('parallel', WizardStep.PHOTOS_FIRST);
-    this.sessions.set(tgUserId, session);
-    return session;
-  }
-
-  /**
-   * Re-insert an existing session object (used when the seller taps "⬅️ Назад"
-   * on the preview: the service rebuilds a WizardSession from the pending draft
-   * and restores it here so the wizard continues from where it left off — same
-   * data, already-processed photos preserved). Replaces any current session for
-   * the user, mirroring `start`'s single-session-per-user contract.
+   * Re-insert an existing session object, used when the service rebuilds the
+   * dialogue from a draft: /start resume, and the preview's "⬅️ Назад" edit. The
+   * draft supplies every field; this only restores the conversational position.
+   * Replaces any current session for the user, mirroring `start`'s
+   * single-session-per-user contract.
    */
   restore(tgUserId: number, session: WizardSession): void {
     this.sessions.set(tgUserId, session);
@@ -240,9 +200,9 @@ export class WizardSessionStore {
   }
 
   /**
-   * Delete only if the stored session IS `expected` (identity check). Protects
-   * an async hand-off: if the seller restarted the wizard while photos were
-   * processing, the fresh session must survive the old flow's cleanup.
+   * Delete only if the stored session IS `expected` (identity check). Protects the
+   * hand-off at QUESTIONNAIRE_DONE: if the seller sent /start while the images were
+   * still processing, the fresh session must survive the finishing draft's cleanup.
    */
   deleteIf(tgUserId: number, expected: WizardSession): void {
     if (this.sessions.get(tgUserId) === expected)
@@ -401,21 +361,17 @@ export function inputPrice(session: WizardSession, raw: string): WizardResult {
     );
   }
   session.price = price;
-  // PRICE is the last QUESTION in both flows. What comes AFTER it differs:
-  //   • legacy   → PHOTOS (the seller now uploads photos, processed synchronously).
-  //   • parallel → QUESTIONNAIRE_DONE (form complete; photos were uploaded first and
-  //     are already processing — the coordinator handles the rendezvous/preview).
-  session.step =
-    session.flow === 'parallel'
-      ? WizardStep.QUESTIONNAIRE_DONE
-      : WizardStep.PHOTOS;
+  // PRICE is the last QUESTION: the form is now complete. Photos were uploaded
+  // first and are already processing — the coordinator handles the rendezvous and
+  // decides when the preview appears.
+  session.step = WizardStep.QUESTIONNAIRE_DONE;
   return OK;
 }
 
 /**
- * PHOTOS_FIRST → BRAND (PARALLEL flow): called once the uploaded photos have been
- * accepted and the backing draft created, so the questionnaire begins while the
- * images process in the background. Stale outside the PHOTOS_FIRST step.
+ * PHOTOS_FIRST → BRAND: called once the uploaded photos have been accepted and the
+ * backing draft created, so the questionnaire begins while the images process in
+ * the background. Stale outside the PHOTOS_FIRST step.
  */
 export function beginQuestionnaire(session: WizardSession): WizardResult {
   if (session.step !== WizardStep.PHOTOS_FIRST) return STALE;
@@ -423,24 +379,9 @@ export function beginQuestionnaire(session: WizardSession): WizardResult {
   return OK;
 }
 
-/** PHOTOS → PROCESSING; blocks a second album from racing the first. (LEGACY.) */
-export function beginProcessing(session: WizardSession): WizardResult {
-  if (session.step !== WizardStep.PHOTOS) return STALE;
-  session.step = WizardStep.PROCESSING;
-  return OK;
-}
-
-/** PROCESSING → PHOTOS after a failed image run, so the seller can retry. */
-export function backToPhotos(session: WizardSession): WizardResult {
-  if (session.step !== WizardStep.PROCESSING) return STALE;
-  session.step = WizardStep.PHOTOS;
-  return OK;
-}
-
 /**
  * The step the "⬅️ Назад" button returns to from the CURRENT step, or `null`
- * when there is nowhere to go back (the first step BRAND, and the transient
- * PROCESSING state which blocks input while photos upload).
+ * when there is nowhere to go back.
  *
  * Derived from session STATE, not just the step, so the OEM/GM branch resolves
  * correctly: PRICE goes back to PART_NUMBER only when a number was actually
@@ -467,13 +408,10 @@ export function previousStep(session: WizardSession): WizardStep | null {
       return session.partNumberType === 'UNKNOWN'
         ? WizardStep.PART_NUMBER_TYPE
         : WizardStep.PART_NUMBER;
-    case WizardStep.PHOTOS:
-      return WizardStep.PRICE;
-    // No previous step: BRAND (first question) and the transient PROCESSING state,
-    // plus the parallel-flow endpoints — PHOTOS_FIRST (very first step) and
+    // No previous step: BRAND (first question — photos precede it but are not a
+    // question to go back to), PHOTOS_FIRST (the very first step) and
     // QUESTIONNAIRE_DONE (terminal; the coordinator owns the flow now).
     case WizardStep.BRAND:
-    case WizardStep.PROCESSING:
     case WizardStep.PHOTOS_FIRST:
     case WizardStep.QUESTIONNAIRE_DONE:
       return null;
@@ -491,29 +429,6 @@ export function goBack(session: WizardSession): WizardResult {
   const target = previousStep(session);
   if (target === null) return STALE;
   session.step = target;
-  return OK;
-}
-
-/**
- * True when the session already carries processed, uploaded photos (the seller
- * returned from the preview via "⬅️ Назад"). In that case editing text/price
- * must NOT re-run the image pipeline: the PHOTOS step is already satisfied, so
- * the flow reuses these assets and rebuilds the preview directly.
- */
-export function hasProcessedPhotos(session: WizardSession): boolean {
-  return session.processedUrls.length > 0;
-}
-
-/**
- * "🖼 Изменить фото": drop the carried-over photos so the PHOTOS step demands a
- * fresh upload (which re-runs the full pipeline). Only the in-session references
- * are cleared here — the caller deletes the old Cloudinary assets separately,
- * since this pure module performs no I/O. Positions the session on PHOTOS.
- */
-export function changePhotos(session: WizardSession): WizardResult {
-  session.processedUrls = [];
-  session.publicIds = [];
-  session.step = WizardStep.PHOTOS;
   return OK;
 }
 
@@ -590,9 +505,8 @@ export function partNumberTypeKeyboard(session: WizardSession): InlineKeyboard {
 
 /**
  * Keyboard for a step whose only control is "⬅️ Назад" — the text-input steps
- * (title, part number, price) and the photo step, which previously had no
- * keyboard at all. `withBack` omits the button on a first-with-no-previous step,
- * yielding an empty keyboard (never rendered — see stepPrompt).
+ * (title, part number, price). `withBack` omits the button on a step with no
+ * previous one, yielding an empty keyboard (never rendered — see stepPrompt).
  */
 export function backOnlyKeyboard(session: WizardSession): InlineKeyboard {
   return withBack(session, []);
@@ -647,16 +561,8 @@ export function stepPrompt(session: WizardSession): StepPrompt {
         text: '💰 Введите цену в сумах.\nПример: 250 000',
         keyboard: backOnlyKeyboard(session),
       };
-    case WizardStep.PHOTOS:
-      return {
-        text: '📸 Отправьте фотографии товара — одно фото или альбом до 10 фото.',
-        keyboard: backOnlyKeyboard(session),
-      };
-    case WizardStep.PROCESSING:
-      // Transient blocking state — no Back button (previousStep returns null).
-      return { text: '⏳ Пожалуйста, подождите — идёт обработка фото.' };
     case WizardStep.PHOTOS_FIRST:
-      // Parallel-flow entry: photos before any question. No Back button.
+      // Entry step: photos before any question. No Back button.
       return {
         text:
           '📸 Сначала отправьте фотографии товара — одно фото или альбом до 10 фото.\n' +

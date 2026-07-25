@@ -16,8 +16,8 @@ import { ImageEnhanceService } from '../ai/image-enhance.service';
  *   • DraftCoordinator     — rendezvous/orchestration + domain events,
  *   • TelegramFileService  — file_id → download URL for the worker (download-only,
  *                            a standalone Telegram client; NOT the polling bot).
- *   • ImageEnhanceService  — the FLUX pipeline, shared by the worker (and, once
- *                            wired, TelegramService) instead of being new'd inline.
+ *   • ImageEnhanceService  — the FLUX pipeline, used by the image worker (the ONLY
+ *                            place images are processed).
  *
  * Dependencies are all global (PrismaService, EventEmitter2, ConfigService).
  */

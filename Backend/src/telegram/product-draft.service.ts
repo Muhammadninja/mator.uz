@@ -91,6 +91,105 @@ export class ProductDraftService {
     });
   }
 
+  /**
+   * "🖼 Изменить фото" — clone a draft's FORM fields into a brand-new CREATING draft
+   * with NO images, and mark the source CANCELLED, in one transaction.
+   *
+   * Replacing photos is modelled as "a new draft based on the existing one" rather
+   * than as mutating the current draft: the source already carries READY images,
+   * their Cloudinary assets, and possibly in-flight jobs, so clearing and reusing it
+   * would race the worker and the coordinator. Cloning sidesteps that entirely — the
+   * old draft becomes terminal (nothing can advance it, the sweep ignores it) while
+   * the new one starts clean at PHOTOS_FIRST with every answered field carried over,
+   * so the seller retypes nothing.
+   *
+   * The source's asset ids are collected by the CALLER (collectPublicIds) before this
+   * runs, since deletion is external I/O this data layer does not perform.
+   * Returns the new draft, or null if the source was no longer in `expectedStatus`
+   * (already published/cancelled/expired — a stale tap).
+   */
+  async cloneForPhotoReplacement(params: {
+    sourceId: string;
+    expectedStatus: DraftStatus;
+    expiresAt: Date;
+    formStep: string;
+  }): Promise<ProductDraft | null> {
+    const source = await this.prisma.productDraft.findUnique({
+      where: { id: params.sourceId },
+    });
+    if (!source || source.status !== params.expectedStatus) return null;
+
+    const newId = prefixedId(IdPrefix.DRAFT);
+    // One transaction: if the create fails, the source's CANCELLED rolls back too,
+    // so the seller keeps their preview and can simply tap again.
+    return this.prisma.$transaction(async (tx) => {
+      // Terminate the source under its OBSERVED status+version, so a concurrent
+      // transition (publish, sweep, another tap) makes this whole clone a no-op.
+      const { count } = await tx.productDraft.updateMany({
+        where: {
+          id: params.sourceId,
+          status: params.expectedStatus,
+          version: source.version,
+        },
+        data: { status: DraftStatus.CANCELLED, version: { increment: 1 } },
+      });
+      if (count !== 1) return null;
+
+      return tx.productDraft.create({
+        data: {
+          id: newId,
+          sellerId: source.sellerId,
+          tgId: source.tgId,
+          status: DraftStatus.CREATING,
+          formStep: params.formStep,
+          expiresAt: params.expiresAt,
+          // Every answered field carries over; images deliberately do NOT.
+          brand: source.brand,
+          model: source.model,
+          category: source.category,
+          title: source.title,
+          description: source.description,
+          partNumberType: source.partNumberType,
+          partNumber: source.partNumber,
+          priceUzs: source.priceUzs,
+        },
+      });
+    });
+  }
+
+  /**
+   * "⬅️ Назад" — move a READY_FOR_PREVIEW draft back to CREATING so the seller can
+   * edit text/price, under the optimistic lock. The images (and their processed
+   * assets) are untouched and stay READY, so returning to the preview reuses them
+   * and re-runs NO image processing — the rendezvous simply fires again once the
+   * form is re-submitted.
+   *
+   * `previewSentAt` is CLEARED so the next rendezvous may send a fresh preview: the
+   * send-once claim is per preview delivery, and this edit deliberately starts a new
+   * one. Returns false when the draft moved on (already published/cancelled/expired,
+   * or a double-tap won the race).
+   */
+  async reopenForEdit(
+    draftId: string,
+    expectedVersion: number,
+    formStep: string,
+  ): Promise<boolean> {
+    const { count } = await this.prisma.productDraft.updateMany({
+      where: {
+        id: draftId,
+        status: DraftStatus.READY_FOR_PREVIEW,
+        version: expectedVersion,
+      },
+      data: {
+        status: DraftStatus.CREATING,
+        formStep,
+        previewSentAt: null,
+        version: { increment: 1 },
+      },
+    });
+    return count === 1;
+  }
+
   // ── Reads ─────────────────────────────────────────────────────────────────
   /** Load a draft with its image rows (album order). null if it doesn't exist. */
   findWithImages(draftId: string): Promise<DraftWithImages | null> {
@@ -330,15 +429,53 @@ export class ProductDraftService {
   }
 
   /**
-   * Drafts whose TTL has elapsed and are not yet terminal — the sweep's input.
-   * Includes BOTH CREATING (abandoned mid-flow) and READY_FOR_PREVIEW (a preview
-   * that was produced but never confirmed/cancelled, e.g. the seller walked away or
-   * its delivery was lost) so neither leaves Cloudinary assets orphaned forever.
+   * Atomically claim the right to SEND the preview for a draft — a compare-and-set:
+   *   UPDATE ... SET previewSentAt = now, version = version + 1
+   *   WHERE id = ? AND status = READY_FOR_PREVIEW AND previewSentAt IS NULL
+   * Returns true iff exactly one row matched (this caller won). Two racing
+   * candidates — the worker's ready-for-preview event and a /start recovery — can
+   * both read READY_FOR_PREVIEW, but only one gets count === 1 and sends; the loser
+   * (count === 0) bails, so `storePending` never runs twice (which would delete the
+   * winner's Cloudinary assets). `status` is left READY_FOR_PREVIEW (still awaiting
+   * confirm); no reset is needed on publish/cancel since those are terminal.
+   */
+  async claimPreviewSend(
+    draftId: string,
+    now: Date = new Date(),
+  ): Promise<boolean> {
+    const { count } = await this.prisma.productDraft.updateMany({
+      where: {
+        id: draftId,
+        status: DraftStatus.READY_FOR_PREVIEW,
+        previewSentAt: null,
+      },
+      data: { previewSentAt: now, version: { increment: 1 } },
+    });
+    return count === 1;
+  }
+
+  /**
+   * Drafts whose TTL has elapsed and may still own assets — the sweep's input:
+   *   • CREATING           — abandoned mid-flow;
+   *   • READY_FOR_PREVIEW  — a preview produced but never confirmed/cancelled (the
+   *     seller walked away, or its delivery was lost);
+   *   • CANCELLED          — cancelled but possibly not yet cleaned: every cancel
+   *     path deletes assets right after the transition, so a crash in that gap
+   *     would otherwise orphan them forever. Sweeping CANCELLED closes that window;
+   *     re-deleting already-removed assets is a harmless no-op.
+   * PUBLISHED is deliberately excluded — its processed assets belong to a live
+   * product and must never be touched.
    */
   findExpired(now: Date = new Date(), take = 100): Promise<DraftWithImages[]> {
     return this.prisma.productDraft.findMany({
       where: {
-        status: { in: [DraftStatus.CREATING, DraftStatus.READY_FOR_PREVIEW] },
+        status: {
+          in: [
+            DraftStatus.CREATING,
+            DraftStatus.READY_FOR_PREVIEW,
+            DraftStatus.CANCELLED,
+          ],
+        },
         expiresAt: { lte: now },
       },
       orderBy: { expiresAt: 'asc' },

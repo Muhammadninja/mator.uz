@@ -5,7 +5,7 @@ import { prefixedId, IdPrefix } from '../common/ulid.util';
 import { UpdatePreferencesDto } from './dto/update-preferences.dto';
 import { ListNotificationsQuery } from './dto/list-notifications.query';
 import { presentNotification, presentPreferences } from './notification.presenter';
-import { PushDispatchService } from './push/push-dispatch.service';
+import { QueueService } from '../queue/queue.service';
 
 const DEFAULT_LIMIT = 20;
 
@@ -38,13 +38,29 @@ export class NotificationsService {
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly push: PushDispatchService,
+    // The QUEUE, not PushDispatchService: the fan-out runs in
+    // NotificationsProcessor. PushDispatchService stays exported by this module
+    // for the worker to inject — it is simply no longer called on the request path.
+    private readonly queue: QueueService,
   ) {}
 
   /**
-   * Single funnel for system notifications: always persists the in-app inbox
-   * row, then pushes to the user's devices when the category preference allows
-   * and we're outside quiet hours. Push failures never propagate to the caller.
+   * Single funnel for system notifications: persists the in-app inbox row
+   * SYNCHRONOUSLY (the DB is the source of truth and the row is returned to the
+   * caller), then ENQUEUES the push fan-out. The provider is never called on the
+   * request path.
+   *
+   * Why the row stays inline while only push moves to the queue: the inbox is
+   * the user-visible guarantee — it must exist the moment emit() returns, and
+   * callers use the returned row. Push is best-effort delivery of something
+   * already recorded, which is exactly the work that belongs off-request (it is
+   * retryable, slow, and touches third parties).
+   *
+   * The preference/quiet-hours gate is evaluated HERE rather than in the worker
+   * so a suppressed notification never becomes a job at all. Enqueue failures
+   * are logged and swallowed — identical to the previous push-failure contract,
+   * so a queue hiccup can never fail a caller whose inbox row is already
+   * committed.
    */
   async emit(userId: string, input: EmitInput) {
     const notification = await this.prisma.notification.create({
@@ -61,15 +77,24 @@ export class NotificationsService {
 
     try {
       if (await this.pushAllowed(userId, input.type)) {
-        await this.push.sendToUser(userId, {
+        await this.queue.enqueueNotification({
+          userId,
+          type: input.type,
+          // The committed row's id: both the fan-out target and the job's
+          // idempotency key (one row → at most one push fan-out).
+          notificationId: notification.id,
           title: input.title,
           body: input.body,
           deeplinkPath: input.deeplinkPath,
-          data: { ...input.data, notification_id: notification.id, type: input.type.toLowerCase() },
+          payload: input.data,
         });
       }
     } catch (err) {
-      this.logger.warn(`Push delivery failed for ${userId}: ${(err as Error).message}`);
+      this.logger.warn(
+        `Push enqueue failed for ${userId} (inbox row ${notification.id} is already saved): ${
+          (err as Error).message
+        }`,
+      );
     }
 
     return notification;

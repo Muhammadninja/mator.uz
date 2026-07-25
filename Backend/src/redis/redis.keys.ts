@@ -28,4 +28,19 @@ export const RedisKeys = {
   rateLogin: (ip: string): string => `rate:login:${ip}`,
   rateRefresh: (userId: string): string => `rate:refresh:${userId}`,
   rateSms: (phone: string): string => `rate:sms:${phone}`,
+
+  // ── Draft-flow locks (DraftLock) ──────────────────────────────────────────
+  // Short-lived mutexes that collapse duplicate taps on the draft/preview flow
+  // BEFORE the redundant work runs. They are an optimisation only: every guarded
+  // operation is independently enforced in PostgreSQL (versioned transitions,
+  // the previewSentAt compare-and-set, deterministic BullMQ job ids), so losing
+  // a lock means "a duplicate — skip", never "this succeeded". Scoped per draft
+  // so two sellers, or two different drafts, never contend.
+  lockDraftClone: (draftId: string): string => `lock:draft:clone:${draftId}`,
+  lockDraftPreview: (draftId: string): string => `lock:draft:preview:${draftId}`,
+  lockDraftReopen: (draftId: string): string => `lock:draft:reopen:${draftId}`,
+  // Keyed by the image ROW, matching the deterministic jobId's granularity: two
+  // enqueues of the same row collapse, two different rows never block each other.
+  lockDraftImageEnqueue: (draftId: string, imageId: string): string =>
+    `lock:draft:image:${draftId}:${imageId}`,
 } as const;
