@@ -2,6 +2,7 @@ import { Global, Module } from '@nestjs/common';
 import { redisProvider } from './redis.provider';
 import { RedisService } from './redis.service';
 import { CacheService } from './cache.service';
+import { DraftLock } from './draft-lock.service';
 import { FixedWindowRateLimiter, RATE_LIMITER } from './rate-limiter.service';
 
 // Bind the algorithm-agnostic RATE_LIMITER token to the fixed-window
@@ -14,7 +15,13 @@ const rateLimiterProvider = {
 
 @Global()
 @Module({
-  providers: [redisProvider, RedisService, CacheService, rateLimiterProvider],
-  exports: [RedisService, CacheService, RATE_LIMITER],
+  providers: [
+    redisProvider,
+    RedisService,
+    CacheService,
+    DraftLock,
+    rateLimiterProvider,
+  ],
+  exports: [RedisService, CacheService, DraftLock, RATE_LIMITER],
 })
 export class RedisModule {}

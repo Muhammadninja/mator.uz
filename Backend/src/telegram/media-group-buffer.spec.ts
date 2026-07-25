@@ -51,7 +51,8 @@ describe('MediaGroupBuffer', () => {
 
   it('caps the album at MAX images, dropping the overflow', () => {
     const { buf, flushed } = makeBuffer();
-    for (let i = 0; i < 15; i++) buf.add('g1', `f${i}`, i === 0 ? 'cap' : null, 1);
+    for (let i = 0; i < 15; i++)
+      buf.add('g1', `f${i}`, i === 0 ? 'cap' : null, 1);
     jest.advanceTimersByTime(DEBOUNCE);
 
     expect(flushed[0].fileIds).toHaveLength(MAX);
@@ -108,6 +109,10 @@ describe('MediaGroupBuffer', () => {
     const { buf, flushed } = makeBuffer();
     buf.add('g1', 'only', null, 7);
     jest.advanceTimersByTime(DEBOUNCE);
-    expect(flushed[0]).toEqual({ tgUserId: 7, fileIds: ['only'], caption: null });
+    expect(flushed[0]).toEqual({
+      tgUserId: 7,
+      fileIds: ['only'],
+      caption: null,
+    });
   });
 });

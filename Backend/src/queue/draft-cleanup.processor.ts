@@ -22,12 +22,16 @@ import { DraftTelemetry, DraftMetric } from '../telegram/draft-telemetry';
  * so it survives restarts and, being delivered to a single BullMQ worker, needs no
  * scale-out lock.
  *
- * For each expired non-terminal draft (CREATING, or READY_FOR_PREVIEW whose preview
- * was never confirmed) past its `expiresAt`:
+ * For each expired sweepable draft past its `expiresAt` (CREATING; READY_FOR_PREVIEW
+ * whose preview was never confirmed; or CANCELLED, swept only to reclaim assets a
+ * crashed cancel path may have left behind):
  *   1. delete its Cloudinary assets (stored originals + processed results),
  *   2. remove any still-unfinished image jobs for it from the image queue,
  *   3. transition it from its CURRENT status → EXPIRED under the optimistic lock
  *      (so a draft that concurrently advanced — e.g. got published — is left alone).
+ *      An already-terminal CANCELLED draft keeps its status.
+ *
+ * PUBLISHED drafts are never selected: their processed assets are a live product's.
  *
  * The repeatable job is registered once on module init with a stable jobId, so
  * repeated boots don't stack duplicate schedules.
@@ -93,9 +97,14 @@ export class DraftCleanupProcessor extends WorkerHost implements OnModuleInit {
           }
         }
 
-        // 3. Versioned transition from the draft's CURRENT status (CREATING or
-        //    READY_FOR_PREVIEW — both are sweepable) so we never clobber a draft
-        //    that concurrently advanced (e.g. was just published/cancelled).
+        // 3. A CANCELLED draft is ALREADY terminal — it is swept only to reclaim
+        //    assets a crashed cancel path may have left behind (see findExpired), so
+        //    its status is preserved rather than relabelled EXPIRED.
+        if (draft.status === DraftStatus.CANCELLED) continue;
+
+        //    Otherwise: versioned transition from the draft's CURRENT status
+        //    (CREATING or READY_FOR_PREVIEW) so we never clobber a draft that
+        //    concurrently advanced (e.g. was just published/cancelled).
         const moved = await this.drafts.tryTransition(
           draft.id,
           draft.status,

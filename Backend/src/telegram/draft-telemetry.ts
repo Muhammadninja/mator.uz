@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 
 /**
- * DraftTelemetry — the ONE place the parallel draft flow emits observability.
+ * DraftTelemetry — the ONE place the draft flow emits observability.
  *
  * It produces two things per event, both via the Nest Logger (no Prometheus /
  * Grafana yet — just well-shaped log lines that are trivial to replace later):
@@ -43,13 +43,22 @@ export class DraftTelemetry {
   private readonly events = new Logger('DraftFlow');
   private readonly metrics = new Logger('DraftMetrics');
 
+  // Observability MUST NOT affect the business flow: every emit is wrapped so a
+  // logging/serialization/metrics-client failure can never throw into a call site
+  // (e.g. right after the product write in finalizePublishedDraft). This matters
+  // more once `metric` is swapped for a real client that does network I/O.
+
   /**
    * Emit a structured lifecycle event: a stable `event=<name>` message with its id
    * context as compact JSON. Use for the human-readable trace of a draft's journey
    * (Draft created, Image queued, Original stored, FLUX started/finished, …).
    */
   event(name: string, ctx: DraftLogContext = {}): void {
-    this.events.log(`event=${name} ${this.format(ctx)}`);
+    try {
+      this.events.log(`event=${name} ${this.format(ctx)}`);
+    } catch {
+      // Never let observability break the flow.
+    }
   }
 
   /**
@@ -57,7 +66,11 @@ export class DraftTelemetry {
    * every call site already passes the right dimensions.
    */
   metric(name: DraftMetricName, ctx: DraftLogContext = {}): void {
-    this.metrics.log(`metric=${name} ${this.format(ctx)}`);
+    try {
+      this.metrics.log(`metric=${name} ${this.format(ctx)}`);
+    } catch {
+      // Never let observability break the flow.
+    }
   }
 
   /** Compact, stable-order JSON of only the present id fields. */

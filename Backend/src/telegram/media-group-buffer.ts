@@ -34,10 +34,21 @@ export class MediaGroupBuffer {
   ) {}
 
   /** Add one album photo; (re)arms the debounce timer for its group. */
-  add(groupId: string, fileId: string, caption: string | null, tgUserId: number): void {
+  add(
+    groupId: string,
+    fileId: string,
+    caption: string | null,
+    tgUserId: number,
+  ): void {
     let group = this.groups.get(groupId);
     if (!group) {
-      group = { fileIds: [], seen: new Set(), caption: null, tgUserId, timer: null };
+      group = {
+        fileIds: [],
+        seen: new Set(),
+        caption: null,
+        tgUserId,
+        timer: null,
+      };
       this.groups.set(groupId, group);
     }
 

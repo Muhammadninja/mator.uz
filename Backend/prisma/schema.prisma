@@ -447,6 +447,12 @@ model ProductDraft {
   createdAt      DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt      DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
   expiresAt      DateTime             @map("expires_at") @db.Timestamptz(3) // TTL sweep
+  // Delivery metadata (NOT a business state): set once, atomically, by whichever
+  // candidate (worker's ready-for-preview event OR /start recovery) first sends the
+  // preview — a compare-and-set on `previewSentAt IS NULL` that makes exactly one
+  // send win, so two racing sends can't both storePending (which would delete each
+  // other's Cloudinary assets). `status` stays READY_FOR_PREVIEW.
+  previewSentAt  DateTime?            @map("preview_sent_at") @db.Timestamptz(3)
   images         ProductDraftImage[]
 
   @@index([sellerId, status]) // "resumable draft for this seller"

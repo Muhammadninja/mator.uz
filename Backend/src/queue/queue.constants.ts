@@ -6,17 +6,16 @@ import type { JobsOptions } from 'bullmq';
  * never a raw string literal. A typo in a queue name silently creates a second,
  * orphaned queue that nothing consumes, so the name lives in exactly one place.
  *
- * These are infrastructure only. Registering a queue here does NOT move any
- * business logic onto it — see QueueService for the (currently placeholder)
- * producers and QUEUE.md-equivalent notes in the PR description for the
- * migration plan.
+ * Every queue here has a real producer and a real consumer (see queue.service.ts
+ * and queue.processors.ts). Producers commit business state first and enqueue
+ * only the DELIVERY/processing step.
  */
 export const QUEUE_NAMES = {
-  /** Off-request image processing (resize/optimize/upload). Not yet a consumer of the real pipeline. */
+  /** Off-request image processing (ingest original + FLUX enhance + upload). */
   IMAGE_PROCESSING: 'image-processing',
-  /** Outbound SMS delivery. Not yet a consumer of the real SMS sender. */
+  /** Outbound SMS delivery — the only path that reaches an SMS provider. */
   SMS: 'sms',
-  /** Fan-out notifications (push/realtime/email). Not yet a consumer of the real notifier. */
+  /** Push fan-out for notifications whose inbox row is already committed. */
   NOTIFICATIONS: 'notifications',
   /** Scheduled maintenance (repeatable jobs), e.g. the product-draft TTL sweep.
    *  Deliberately separate from IMAGE_PROCESSING so cleanup never mixes with the
@@ -100,10 +99,10 @@ export const DEFAULT_JOB_OPTIONS: JobsOptions = {
 };
 
 // ── Image worker concurrency ────────────────────────────────────────────────
-// How many image-processing jobs the worker runs at once. This is what actually
-// makes an album's photos process in PARALLEL (the enqueue is per-job, but a
-// concurrency=1 worker would drain them one at a time). Bounded so we don't hammer
-// FLUX/Cloudinary or spike memory with many large image buffers simultaneously.
+// How many image-processing jobs the worker runs at once. This is what makes an
+// album's photos process concurrently (the enqueue is per-job, but a concurrency=1
+// worker would drain them one at a time). Bounded so we don't hammer FLUX/Cloudinary
+// or spike memory with many large image buffers simultaneously.
 export const IMAGE_WORKER_CONCURRENCY_DEFAULT = 5;
 const IMAGE_WORKER_CONCURRENCY_MIN = 1;
 const IMAGE_WORKER_CONCURRENCY_MAX = 10;
@@ -113,8 +112,7 @@ const IMAGE_WORKER_CONCURRENCY_MAX = 10;
  * Accepts an integer in [MIN, MAX]; anything missing / non-integer / out of range
  * falls back to the default. Read from `process.env` directly (not ConfigService)
  * because the `@Processor` decorator's worker options are evaluated at class-load
- * time, before Nest DI is available. Same bounds/semantics as the legacy album
- * pool's resolver, so switching flows keeps identical throughput.
+ * time, before Nest DI is available.
  */
 export function resolveImageWorkerConcurrency(
   raw: string | undefined = process.env.IMAGE_CONCURRENCY,
@@ -129,6 +127,38 @@ export function resolveImageWorkerConcurrency(
     value > IMAGE_WORKER_CONCURRENCY_MAX
   ) {
     return IMAGE_WORKER_CONCURRENCY_DEFAULT;
+  }
+  return value;
+}
+
+// ── SMS worker concurrency ──────────────────────────────────────────────────
+// Deliberately much lower than the image worker: SMS aggregators rate-limit per
+// account, so bounded concurrency here doubles as a crude outbound throttle and
+// keeps us from tripping provider-side limits during an OTP burst. Same
+// class-load-time constraint as the image worker (see @Processor note there),
+// hence process.env rather than ConfigService.
+export const SMS_WORKER_CONCURRENCY_DEFAULT = 3;
+const SMS_WORKER_CONCURRENCY_MIN = 1;
+const SMS_WORKER_CONCURRENCY_MAX = 20;
+
+/**
+ * Resolve the SMS worker's concurrency from a raw env value (SMS_CONCURRENCY).
+ * Accepts an integer in [MIN, MAX]; anything missing / non-integer / out of range
+ * falls back to the default.
+ */
+export function resolveSmsWorkerConcurrency(
+  raw: string | undefined = process.env.SMS_CONCURRENCY,
+): number {
+  if (raw === undefined || raw.trim() === '') {
+    return SMS_WORKER_CONCURRENCY_DEFAULT;
+  }
+  const value = Number(raw);
+  if (
+    !Number.isInteger(value) ||
+    value < SMS_WORKER_CONCURRENCY_MIN ||
+    value > SMS_WORKER_CONCURRENCY_MAX
+  ) {
+    return SMS_WORKER_CONCURRENCY_DEFAULT;
   }
   return value;
 }

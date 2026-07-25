@@ -1,5 +1,6 @@
-// Unit tests for OtpService. The persistence layer is now Redis: RedisService,
-// SmsService and ConfigService are mocked — no DB, no real SMS, no live Redis.
+// Unit tests for OtpService. The persistence layer is Redis and DELIVERY IS
+// QUEUED: RedisService, QueueService and ConfigService are mocked — no DB, no
+// real SMS, no live Redis. OtpService no longer touches SmsService at all.
 // The RedisService double is backed by an in-memory map (with TTL bookkeeping)
 // so the full issue -> resend -> verify lifecycle can be exercised end-to-end.
 // Focus: AUTH_DEV_MODE behaviour, single-use consume, attempt counting, purpose
@@ -49,8 +50,19 @@ function makeRedisMock() {
   };
 }
 
-function makeSmsMock() {
-  return { sendSms: jest.fn().mockResolvedValue(undefined) };
+/**
+ * QueueService stand-in. OTP delivery is ENQUEUED, never sent inline, so this is
+ * what the production-mode tests assert against. `otpSmsJobId` mirrors the real
+ * implementation so the idempotency-key assertions are meaningful.
+ */
+function makeQueueMock() {
+  return {
+    enqueueSms: jest.fn().mockResolvedValue({ id: 'sms_job_1' }),
+    otpSmsJobId: jest.fn(
+      (requestId: string, sendCount: number) =>
+        `sms:otp:${requestId}:${sendCount}`,
+    ),
+  };
 }
 
 function makeConfig(devMode: boolean) {
@@ -61,13 +73,13 @@ function makeConfig(devMode: boolean) {
 
 function build(devMode: boolean) {
   const redis = makeRedisMock();
-  const sms = makeSmsMock();
+  const queue = makeQueueMock();
   const config = makeConfig(devMode);
   // Real FixedWindowRateLimiter backed by the same in-memory Redis double, so the
   // hourly ceiling is exercised through the shared infrastructure end-to-end.
   const rateLimiter = new FixedWindowRateLimiter(redis as never);
-  const service = new OtpService(redis as never, sms as never, config as never, rateLimiter);
-  return { service, redis, sms, config, rateLimiter };
+  const service = new OtpService(redis as never, queue as never, config as never, rateLimiter);
+  return { service, redis, queue, config, rateLimiter };
 }
 
 /** The record stored under RedisKeys.otp(phone) after an issue. */
@@ -84,8 +96,8 @@ function storedRecord(redis: ReturnType<typeof makeRedisMock>, phone: string) {
 
 describe('OtpService — AUTH_DEV_MODE', () => {
   describe('request()', () => {
-    it('development mode skips SMS sending and returns dev_otp_code', async () => {
-      const { service, redis, sms } = build(true);
+    it('development mode skips SMS entirely and returns dev_otp_code', async () => {
+      const { service, redis, queue } = build(true);
 
       const issued = await service.request('+998901234567');
 
@@ -95,8 +107,8 @@ describe('OtpService — AUTH_DEV_MODE', () => {
       expect(persisted.createdAt).toEqual(expect.any(Number));
       expect(persisted.attempts).toBe(0);
 
-      // SMS provider is NOT called.
-      expect(sms.sendSms).not.toHaveBeenCalled();
+      // Nothing is queued either — dev mode short-circuits before delivery.
+      expect(queue.enqueueSms).not.toHaveBeenCalled();
 
       // Plaintext code is returned, is 6 digits, and its hash matches storage.
       expect(issued.devOtpCode).toMatch(/^\d{6}$/);
@@ -104,15 +116,35 @@ describe('OtpService — AUTH_DEV_MODE', () => {
       expect(createHash('sha256').update(issued.devOtpCode!).digest('hex')).toBe(persisted.codeHash);
     });
 
-    it('production mode still calls SmsService and never returns dev_otp_code', async () => {
-      const { service, sms } = build(false);
+    it('production mode QUEUES the OTP SMS instead of sending inline', async () => {
+      const { service, queue } = build(false);
 
       const issued = await service.request('+998901234567');
 
-      expect(sms.sendSms).toHaveBeenCalledTimes(1);
-      // Message carries the plaintext code but it is never exposed on the result.
-      expect(sms.sendSms.mock.calls[0][0]).toBe('+998901234567');
+      expect(queue.enqueueSms).toHaveBeenCalledTimes(1);
+      const [data, opts] = queue.enqueueSms.mock.calls[0];
+      expect(data.phone).toBe('+998901234567');
+      expect(data.template).toBe('otp');
+      // The rendered message carries the plaintext code (it lives only in the
+      // job payload) but is never exposed on the API result.
+      expect(data.message).toMatch(/\d{6}/);
       expect(issued.devOtpCode).toBeUndefined();
+      // Idempotency: keyed on (requestId, sendCount=0) for the initial issue.
+      expect(opts.jobId).toBe(`sms:otp:${issued.requestId}:0`);
+    });
+
+    it('issues a usable OTP even when the enqueue fails (code stays valid)', async () => {
+      const { service, redis, queue } = build(false);
+      queue.enqueueSms.mockRejectedValueOnce(new Error('redis down'));
+
+      // The request must still succeed: the code is already persisted and
+      // redeemable, and the user can resend. A queue hiccup is not a 500.
+      const issued = await service.request('+998901234567');
+
+      expect(issued.requestId).toEqual(expect.any(String));
+      expect(storedRecord(redis, '+998901234567').codeHash).toEqual(
+        expect.any(String),
+      );
     });
 
     it('enforces the per-hour ceiling (6th request in the window is rejected)', async () => {
@@ -131,10 +163,10 @@ describe('OtpService — AUTH_DEV_MODE', () => {
 
   describe('resend()', () => {
     it('development mode regenerates, updates Redis, skips SMS, returns dev_otp_code', async () => {
-      const { service, redis, sms } = build(true);
+      const { service, redis, queue } = build(true);
       const first = await service.request('+998901234567');
       const beforeHash = storedRecord(redis, '+998901234567').codeHash;
-      sms.sendSms.mockClear();
+      queue.enqueueSms.mockClear();
 
       // Elapse the cooldown by rewriting lastSentAt into the past.
       const rec = storedRecord(redis, '+998901234567') as Record<string, unknown>;
@@ -149,8 +181,8 @@ describe('OtpService — AUTH_DEV_MODE', () => {
       expect(afterHash).not.toBe(beforeHash);
       expect(issued.requestId).toBe(first.requestId);
 
-      // SMS skipped, plaintext returned and consistent with the stored hash.
-      expect(sms.sendSms).not.toHaveBeenCalled();
+      // Delivery skipped, plaintext returned and consistent with the stored hash.
+      expect(queue.enqueueSms).not.toHaveBeenCalled();
       expect(issued.devOtpCode).toMatch(/^\d{6}$/);
       const { createHash } = require('crypto') as typeof import('crypto');
       expect(createHash('sha256').update(issued.devOtpCode!).digest('hex')).toBe(afterHash);
@@ -170,18 +202,36 @@ describe('OtpService — AUTH_DEV_MODE', () => {
       );
     });
 
-    it('production mode still calls SmsService and never returns dev_otp_code', async () => {
-      const { service, redis, sms } = build(false);
+    it('production mode QUEUES the resent OTP and never returns dev_otp_code', async () => {
+      const { service, redis, queue } = build(false);
       const first = await service.request('+998901234567');
-      sms.sendSms.mockClear();
+      queue.enqueueSms.mockClear();
       const rec = storedRecord(redis, '+998901234567') as Record<string, unknown>;
       rec.lastSentAt = Date.now() - 10 * 60 * 1000;
       redis.store.set(RedisKeys.otp('+998901234567'), rec);
 
       const issued = await service.resend(first.requestId);
 
-      expect(sms.sendSms).toHaveBeenCalledTimes(1);
+      expect(queue.enqueueSms).toHaveBeenCalledTimes(1);
       expect(issued.devOtpCode).toBeUndefined();
+    });
+
+    it('gives a resend a DISTINCT jobId so it is never collapsed into the first send', async () => {
+      // The idempotency key must not be so aggressive that it swallows a real
+      // resend: a resend mints a NEW code, so it has to reach the user.
+      const { service, redis, queue } = build(false);
+      const first = await service.request('+998901234567');
+      const firstJobId = queue.enqueueSms.mock.calls[0][1].jobId;
+
+      const rec = storedRecord(redis, '+998901234567') as Record<string, unknown>;
+      rec.lastSentAt = Date.now() - 10 * 60 * 1000;
+      redis.store.set(RedisKeys.otp('+998901234567'), rec);
+      await service.resend(first.requestId);
+
+      const resendJobId = queue.enqueueSms.mock.calls[1][1].jobId;
+      expect(firstJobId).toBe(`sms:otp:${first.requestId}:0`);
+      expect(resendJobId).toBe(`sms:otp:${first.requestId}:1`);
+      expect(resendJobId).not.toBe(firstJobId);
     });
   });
 

@@ -1,7 +1,7 @@
 // Boot smoke for ProductDraftModule: proves its providers (ProductDraftService,
 // DraftCoordinator, TelegramFileService, ImageEnhanceService) resolve together
 // under Nest DI with only their real global deps (Prisma, EventEmitter2, Config)
-// available. Guards the wiring the parallel flow depends on — and that both the
+// available. Guards the wiring the draft flow depends on — and that both the
 // Telegram side and the image worker import.
 
 import { Global, Module } from '@nestjs/common';
