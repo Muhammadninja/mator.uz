@@ -28,6 +28,7 @@ import { ShippingModule } from './shipping/shipping.module';
 import { ReferenceModule } from './reference/reference.module';
 import { AddressesModule } from './addresses/addresses.module';
 import { DealersModule } from './dealers/dealers.module';
+import { OpsModule } from './ops/ops.module';
 
 @Module({
   imports: [
@@ -62,6 +63,9 @@ import { DealersModule } from './dealers/dealers.module';
     ReferenceModule,
     AddressesModule,
     DealersModule,
+    // Operations tooling (Bull Board, queue monitoring, alerts). Read-only with
+    // respect to every existing flow — see ops.module.ts.
+    OpsModule,
   ],
   // Bind ThrottlerGuard globally. Without this APP_GUARD registration the
   // ThrottlerModule config and every @Throttle/@SkipThrottle decorator across
