@@ -23,13 +23,18 @@ import { DraftTelemetry, DraftMetric } from '../telegram/draft-telemetry';
  * scale-out lock.
  *
  * For each expired sweepable draft past its `expiresAt` (CREATING; READY_FOR_PREVIEW
- * whose preview was never confirmed; or CANCELLED, swept only to reclaim assets a
- * crashed cancel path may have left behind):
+ * whose preview was never confirmed; COMMITTING, whose commit was interrupted before
+ * the product write; or CANCELLED, swept only to reclaim assets a crashed cancel path
+ * may have left behind):
  *   1. delete its Cloudinary assets (stored originals + processed results),
  *   2. remove any still-unfinished image jobs for it from the image queue,
  *   3. transition it from its CURRENT status → EXPIRED under the optimistic lock
  *      (so a draft that concurrently advanced — e.g. got published — is left alone).
  *      An already-terminal CANCELLED draft keeps its status.
+ *
+ * A COMMITTING draft is swept only once `expiresAt` has passed — far longer than any
+ * commit takes — so this never races a commit that is genuinely in flight, and the
+ * versioned transition in step 3 makes a late-finishing commit win regardless.
  *
  * PUBLISHED drafts are never selected: their processed assets are a live product's.
  *

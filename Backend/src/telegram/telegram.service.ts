@@ -1138,9 +1138,19 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
    * Cloudinary assets, and mark the backing READY_FOR_PREVIEW draft CANCELLED so the
    * sweep has nothing left to do. Best-effort on the draft side — the seller's cancel
    * must always be acknowledged.
+   *
+   * The DB transition must NOT depend on the in-memory `pending` record. That record
+   * is process-local and evicted after CONFIRMATION_TTL_MS, so a cancel tapped late
+   * (or after a restart/redeploy) used to return here before writing anything: the
+   * draft stayed READY_FOR_PREVIEW and the next /start re-presented the very preview
+   * the seller had just cancelled. When `pending` is gone we resolve the draft from
+   * the DB instead — the same lookup /start recovery uses — so cancel is always
+   * terminal.
    */
   private async cancelPendingDraft(tgUserId: number): Promise<void> {
-    const pending = this.takePending(tgUserId);
+    const pending =
+      this.takePending(tgUserId) ??
+      (await this.rebuildPendingFromDraft(tgUserId));
     if (!pending) return;
     if (pending.publicIds.length > 0) {
       await this.cloudinary.deleteAssets(pending.publicIds);
@@ -1159,9 +1169,76 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       );
     } catch (err) {
       this.logger.error(
-        `Failed to cancel draft ${pending.draftId}: ${err instanceof Error ? err.message : String(err)}`,
+        `Failed to cancel draft for tg user ${tgUserId}: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+  }
+
+  /**
+   * The seller's READY_FOR_PREVIEW draft, resolved from the DB — the fallback used
+   * when the in-memory pending record is gone (TTL eviction or a restart).
+   */
+  private async resolveAwaitingPreviewDraft(
+    tgUserId: number,
+  ): Promise<DraftWithImages | null> {
+    const seller = await this.sellers.findByTgId(BigInt(tgUserId));
+    if (!seller) return null;
+    return this.drafts.findAwaitingPreview(seller.id);
+  }
+
+  /**
+   * Rebuild a pending confirmation from the DB for a seller whose in-memory record
+   * is gone. The `pending` map is a UX cache, never the source of truth: every field
+   * below is derived from the draft exactly as {@link deliverDraftPreview} derives it
+   * when the preview is first sent, so a cache miss costs a query — never a lost
+   * state transition. Returns null when the seller has no draft awaiting a preview,
+   * or when that draft is missing the data a preview requires.
+   *
+   * The returned record is NOT inserted into `pending` (there is no live preview
+   * message to own it) and carries no `expiry` timer — callers consume it directly.
+   */
+  private async rebuildPendingFromDraft(
+    tgUserId: number,
+  ): Promise<Omit<PendingProduct, 'expiry'> | null> {
+    const draft = await this.resolveAwaitingPreviewDraft(tgUserId);
+    if (!draft) return null;
+
+    const processedUrls = draft.images
+      .filter((img) => img.status === 'READY' && img.processedUrl)
+      .sort((a, b) => a.sortOrder - b.sortOrder)
+      .map((img) => img.processedUrl as string);
+    const publicIds = draft.images
+      .filter((img) => img.processedPublicId)
+      .map((img) => img.processedPublicId as string);
+
+    if (
+      processedUrls.length === 0 ||
+      draft.title === null ||
+      draft.brand === null ||
+      draft.model === null ||
+      draft.category === null ||
+      draft.priceUzs === null
+    ) {
+      this.logger.error(
+        `Draft ${draft.id} cannot be rebuilt for confirmation — incomplete data.`,
+      );
+      return null;
+    }
+
+    return {
+      sellerId: draft.sellerId,
+      tgUserId,
+      metadata: this.buildMetadataFromDraft(draft),
+      title: draft.title,
+      vehicleCategory: draft.category,
+      processedUrls,
+      publicIds,
+      price: new Decimal(draft.priceUzs),
+      draftId: draft.id,
+      // The row's CURRENT version — the preview send already bumped it, so this is
+      // the value an optimistic transition must present.
+      draftVersion: draft.version,
+    };
   }
 
   /**
@@ -1171,14 +1248,16 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
    * re-submitting the form rebuilds the preview with NO image re-processing: the
    * coordinator's rendezvous simply passes again on the image axis.
    *
-   * A missing/expired pending record, or a draft that has moved on, is reported and
-   * left alone (nothing to reopen).
+   * A missing pending record falls back to the DB (the cache is not the source of
+   * truth); only a draft that has genuinely moved on is reported and left alone.
    */
   private async reopenDraftForEdit(
     ctx: Context,
     tgUserId: number,
   ): Promise<void> {
-    const pending = this.takePending(tgUserId);
+    const pending =
+      this.takePending(tgUserId) ??
+      (await this.rebuildPendingFromDraft(tgUserId));
     if (!pending) {
       await ctx.reply(
         '⌛ Нет товара для редактирования (возможно, время истекло). Нажмите /start, чтобы начать заново.',
@@ -1239,7 +1318,9 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     ctx: Context,
     tgUserId: number,
   ): Promise<void> {
-    const pending = this.takePending(tgUserId);
+    const pending =
+      this.takePending(tgUserId) ??
+      (await this.rebuildPendingFromDraft(tgUserId));
     if (!pending) {
       await ctx.reply(
         '⌛ Нет товара для редактирования (возможно, время истекло). Нажмите /start, чтобы начать заново.',
@@ -1650,18 +1731,50 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   /**
    * Commit a confirmed pending product: perform the database writes, then send a
    * simple success message (the preview already showed the full product). No-op
-   * with a notice if there is nothing pending. Uploaded assets are kept.
+   * with a notice if there is nothing to confirm. Uploaded assets are kept.
    */
   private async commitPending(ctx: Context, tgUserId: number): Promise<void> {
     // Take the session (without deleting its Cloudinary assets — the saved
-    // product keeps them). Consuming it up front also makes a double-tap safe.
-    const session = this.takePending(tgUserId);
+    // product keeps them). A cache miss (TTL eviction / restart) falls back to the
+    // draft: the `pending` map is a UX cache, so losing it must not cost the seller
+    // a confirmed listing.
+    const session =
+      this.takePending(tgUserId) ??
+      (await this.rebuildPendingFromDraft(tgUserId));
     if (!session) {
       await ctx.reply(
         '⌛ Нет товара для подтверждения (возможно, время истекло). Нажмите /start, чтобы начать заново.',
       );
       return;
     }
+
+    // Claim the draft BEFORE writing the product. Consuming the in-memory record
+    // used to be what made a double-tap safe; now that a cache miss falls back to
+    // the DB, two rapid taps could both rebuild the same draft and both commit
+    // (the `gmNumber` upsert does NOT dedupe them — an unlabeled part gets a
+    // per-call `tg_<id>_<now>` key). This versioned CAS is the real guard: exactly
+    // one caller takes READY_FOR_PREVIEW → COMMITTING and proceeds.
+    //
+    // COMMITTING — not PUBLISHED — is the claim, so the status never claims an
+    // outcome that has not happened yet. A crash between here and the product write
+    // leaves a COMMITTING draft: recoverable and sweepable (its assets are reclaimed
+    // once the TTL passes), unlike a PUBLISHED draft with no product, which the
+    // sweep deliberately refuses to touch and would leak assets forever.
+    const claimed = await this.drafts.tryTransition(
+      session.draftId,
+      DraftStatus.READY_FOR_PREVIEW,
+      DraftStatus.COMMITTING,
+      session.draftVersion,
+    );
+    if (!claimed) {
+      await ctx.reply(
+        '⌛ Это объявление уже обработано. Нажмите /start, чтобы добавить следующий товар.',
+      );
+      return;
+    }
+    // The claim bumped the row's version; the PUBLISHED transition below must
+    // present this one.
+    const committingVersion = session.draftVersion + 1;
 
     const { sellerId, metadata, title, vehicleCategory, processedUrls, price } =
       session;
@@ -1757,11 +1870,11 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       // next update (or a backfill) will reconcile.
       await this.projectToCatalog(stock.id);
 
-      // The product write succeeded, so finalize the backing draft: mark it PUBLISHED
-      // (so the TTL sweep never touches it — critical because the sweep also covers
-      // READY_FOR_PREVIEW) and delete the STORED ORIGINALS (the processed URLs are now
-      // the product's images and are kept). Best-effort: a failure here must NOT fail
-      // the already-committed product.
+      // The product write succeeded, so close the claim: COMMITTING → PUBLISHED (so
+      // the TTL sweep never touches it — critical because the sweep covers COMMITTING
+      // precisely to reclaim a crashed commit) and delete the STORED ORIGINALS (the
+      // processed URLs are now the product's images and are kept). Best-effort: a
+      // failure here must NOT fail the already-committed product.
       await this.finalizePublishedDraft(session.draftId, sellerId);
 
       // The preview already served as the confirmation UI — the success message

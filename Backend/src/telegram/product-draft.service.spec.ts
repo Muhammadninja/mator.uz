@@ -29,6 +29,11 @@ function makePrismaMock() {
       updateMany: jest.fn(),
       findMany: jest.fn(),
     },
+    // Consulted by collectPublicIds to spare assets a live product already claims.
+    // Default: nothing claimed, so every asset is reclaimable.
+    productImage: {
+      findMany: jest.fn().mockResolvedValue([]),
+    },
   };
 }
 
@@ -106,14 +111,140 @@ describe('ProductDraftService', () => {
   describe('collectPublicIds', () => {
     it('returns both original and processed public_ids, skipping nulls', async () => {
       prisma.productDraftImage.findMany.mockResolvedValue([
-        { originalPublicId: 'orig_1', processedPublicId: 'proc_1' },
-        { originalPublicId: 'orig_2', processedPublicId: null },
-        { originalPublicId: null, processedPublicId: null },
+        {
+          originalPublicId: 'orig_1',
+          processedPublicId: 'proc_1',
+          processedUrl: 'https://cdn/p1.jpg',
+        },
+        {
+          originalPublicId: 'orig_2',
+          processedPublicId: null,
+          processedUrl: null,
+        },
+        {
+          originalPublicId: null,
+          processedPublicId: null,
+          processedUrl: null,
+        },
       ]);
 
       const ids = await service.collectPublicIds('draft_1');
 
-      expect(ids).toEqual(['orig_1', 'proc_1', 'orig_2']);
+      // Originals first, then the unclaimed processed assets.
+      expect(ids.sort()).toEqual(['orig_1', 'orig_2', 'proc_1'].sort());
+    });
+
+    // A draft swept in COMMITTING may have written its product rows and died before
+    // publishDraft. Its processed assets are then a LIVE product's images — deleting
+    // them would leave the product intact with every image 404ing.
+    it('never returns a processed asset a live ProductImage already points at', async () => {
+      prisma.productDraftImage.findMany.mockResolvedValue([
+        {
+          originalPublicId: 'orig_1',
+          processedPublicId: 'proc_1',
+          processedUrl: 'https://cdn/p1.jpg',
+        },
+        {
+          originalPublicId: 'orig_2',
+          processedPublicId: 'proc_2',
+          processedUrl: 'https://cdn/p2.jpg',
+        },
+      ]);
+      // The committed product claimed BOTH processed images.
+      prisma.productImage.findMany.mockResolvedValue([
+        { url: 'https://cdn/p1.jpg' },
+        { url: 'https://cdn/p2.jpg' },
+      ]);
+
+      const ids = await service.collectPublicIds('draft_1');
+
+      // Only the intermediate originals are reclaimed; the product keeps its images.
+      expect(ids).toEqual(['orig_1', 'orig_2']);
+      expect(ids).not.toContain('proc_1');
+      expect(ids).not.toContain('proc_2');
+      expect(prisma.productImage.findMany).toHaveBeenCalledWith({
+        where: { url: { in: ['https://cdn/p1.jpg', 'https://cdn/p2.jpg'] } },
+        select: { url: true },
+      });
+    });
+
+    it('reclaims processed assets no product claims (the ordinary abandoned draft)', async () => {
+      prisma.productDraftImage.findMany.mockResolvedValue([
+        {
+          originalPublicId: 'orig_1',
+          processedPublicId: 'proc_1',
+          processedUrl: 'https://cdn/p1.jpg',
+        },
+      ]);
+      prisma.productImage.findMany.mockResolvedValue([]); // nothing published
+
+      const ids = await service.collectPublicIds('draft_1');
+
+      expect(ids).toEqual(['orig_1', 'proc_1']);
+    });
+
+    it('spares only the claimed asset when a product took some but not all images', async () => {
+      prisma.productDraftImage.findMany.mockResolvedValue([
+        {
+          originalPublicId: null,
+          processedPublicId: 'proc_1',
+          processedUrl: 'https://cdn/p1.jpg',
+        },
+        {
+          originalPublicId: null,
+          processedPublicId: 'proc_2',
+          processedUrl: 'https://cdn/p2.jpg',
+        },
+      ]);
+      prisma.productImage.findMany.mockResolvedValue([
+        { url: 'https://cdn/p1.jpg' },
+      ]);
+
+      const ids = await service.collectPublicIds('draft_1');
+
+      expect(ids).toEqual(['proc_2']);
+    });
+
+    // The guard's real invariant is "a ProductImage row's url is never rewritten in
+    // place" — NOT "a URL is immutable forever". A URL can stop being claimed (the
+    // confirm path upserts on the globally-unique gmNumber, so a second seller
+    // listing the same part number replaces the gallery and deletes the first
+    // seller's rows). That direction only leaks an asset, which is harmless. The
+    // dangerous direction — a URL this draft owns newly becoming some OTHER product's
+    // image after the query — cannot happen, because only the confirm path writes
+    // product_images and it writes the URLs of the draft it is committing.
+    it('errs toward SPARING: a URL claimed at query time is spared even if the claim later disappears', async () => {
+      prisma.productDraftImage.findMany.mockResolvedValue([
+        {
+          originalPublicId: 'orig_1',
+          processedPublicId: 'proc_1',
+          processedUrl: 'https://cdn/p1.jpg',
+        },
+      ]);
+      prisma.productImage.findMany.mockResolvedValue([
+        { url: 'https://cdn/p1.jpg' },
+      ]);
+
+      const ids = await service.collectPublicIds('draft_1');
+
+      // Spared. If the claim vanishes a moment later the asset merely lingers —
+      // the sweep is best-effort and a later pass (or re-delete) is a no-op.
+      expect(ids).toEqual(['orig_1']);
+    });
+
+    it('skips the product lookup entirely when the draft has no processed assets', async () => {
+      prisma.productDraftImage.findMany.mockResolvedValue([
+        {
+          originalPublicId: 'orig_1',
+          processedPublicId: null,
+          processedUrl: null,
+        },
+      ]);
+
+      const ids = await service.collectPublicIds('draft_1');
+
+      expect(ids).toEqual(['orig_1']);
+      expect(prisma.productImage.findMany).not.toHaveBeenCalled();
     });
   });
 
@@ -192,7 +323,7 @@ describe('ProductDraftService', () => {
       });
     });
 
-    it('findExpired sweeps CREATING, READY_FOR_PREVIEW and CANCELLED past TTL — never PUBLISHED', async () => {
+    it('findExpired sweeps CREATING, READY_FOR_PREVIEW, COMMITTING and CANCELLED past TTL — never PUBLISHED', async () => {
       prisma.productDraft.findMany.mockResolvedValue([]);
       const now = new Date('2026-07-25T12:00:00Z');
 
@@ -201,10 +332,14 @@ describe('ProductDraftService', () => {
       const arg = prisma.productDraft.findMany.mock.calls[0][0];
       // CANCELLED is included as the backstop for a cancel path that died between
       // its transition and its asset deletion (re-deleting gone assets is a no-op).
+      // COMMITTING is included so a commit that died before the product write has
+      // its assets reclaimed — the whole reason the claim is COMMITTING and not
+      // PUBLISHED, which the sweep must never touch.
       expect(arg.where.status).toEqual({
         in: [
           DraftStatus.CREATING,
           DraftStatus.READY_FOR_PREVIEW,
+          DraftStatus.COMMITTING,
           DraftStatus.CANCELLED,
         ],
       });
@@ -213,11 +348,16 @@ describe('ProductDraftService', () => {
       expect(arg.where.expiresAt).toEqual({ lte: now });
     });
 
-    it('publishDraft transitions only a READY_FOR_PREVIEW draft (idempotent) and reports whether it moved', async () => {
+    it('publishDraft closes a COMMITTING claim (or an unclaimed READY_FOR_PREVIEW draft) and reports whether it moved', async () => {
       prisma.productDraft.updateMany.mockResolvedValueOnce({ count: 1 });
       expect(await service.publishDraft('draft_1')).toBe(true);
       expect(prisma.productDraft.updateMany).toHaveBeenCalledWith({
-        where: { id: 'draft_1', status: DraftStatus.READY_FOR_PREVIEW },
+        where: {
+          id: 'draft_1',
+          status: {
+            in: [DraftStatus.COMMITTING, DraftStatus.READY_FOR_PREVIEW],
+          },
+        },
         data: { status: DraftStatus.PUBLISHED },
       });
 

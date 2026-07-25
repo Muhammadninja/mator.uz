@@ -88,6 +88,64 @@ describe('DraftCleanupProcessor — TTL sweep', () => {
     );
   });
 
+  it('reclaims a COMMITTING draft whose commit died before the product write', async () => {
+    // The reason the confirm path claims COMMITTING instead of PUBLISHED: a crashed
+    // commit stays sweepable, so its Cloudinary assets are reclaimed. A PUBLISHED
+    // draft is excluded from the sweep entirely and would leak them forever.
+    const { processor, drafts, cloudinary, imageQueue, telemetry } = make([
+      draft({ status: DraftStatus.COMMITTING, version: 6 }),
+    ]);
+
+    await processor.process(sweepJob);
+
+    expect(cloudinary.deleteAssets).toHaveBeenCalledWith(['asset_1']);
+    expect(imageQueue.remove).toHaveBeenCalledWith('job_1');
+    expect(drafts.tryTransition).toHaveBeenCalledWith(
+      'draft_1',
+      DraftStatus.COMMITTING,
+      DraftStatus.EXPIRED,
+      6,
+    );
+    expect(telemetry.metric).toHaveBeenCalled(); // draft.expired
+  });
+
+  it('sweeping a COMMITTING draft whose product WAS written deletes only the originals', async () => {
+    // The crash window this whole design exists for: product.upsert() succeeded,
+    // publishDraft() never ran. collectPublicIds spares the processed assets the
+    // product now claims, so the sweep reclaims only the intermediate originals —
+    // the live product keeps every image.
+    const { processor, drafts, cloudinary } = make([
+      draft({ status: DraftStatus.COMMITTING, version: 6 }),
+    ]);
+    drafts.collectPublicIds.mockResolvedValue(['orig_1']); // processed ones spared
+
+    await processor.process(sweepJob);
+
+    expect(cloudinary.deleteAssets).toHaveBeenCalledWith(['orig_1']);
+    const deleted = cloudinary.deleteAssets.mock.calls.flat(2);
+    expect(deleted).not.toContain('proc_1');
+    // The draft row is settled, but nothing in the sweep touches product tables.
+    expect(drafts.tryTransition).toHaveBeenCalledWith(
+      'draft_1',
+      DraftStatus.COMMITTING,
+      DraftStatus.EXPIRED,
+      6,
+    );
+  });
+
+  it('a commit that finishes late still wins: the sweep loses the version race', async () => {
+    // The sweep only sees a COMMITTING draft once expiresAt has passed, and even
+    // then the versioned transition defers to a commit that completed meanwhile.
+    const { processor, drafts, telemetry } = make([
+      draft({ status: DraftStatus.COMMITTING, version: 6 }),
+    ]);
+    drafts.tryTransition.mockResolvedValue(false); // draft moved on (→ PUBLISHED)
+
+    await processor.process(sweepJob);
+
+    expect(telemetry.metric).not.toHaveBeenCalled();
+  });
+
   it('reclaims a CANCELLED draft’s assets but KEEPS its status (no relabel to EXPIRED)', async () => {
     const { processor, drafts, cloudinary, imageQueue, telemetry } = make([
       draft({ status: DraftStatus.CANCELLED }),

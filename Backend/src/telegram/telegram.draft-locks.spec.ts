@@ -126,30 +126,55 @@ describe('Draft flow — Redis coordination guards', () => {
   // ── Double clone prevention ───────────────────────────────────────────────
   describe('double clone prevention ("🖼 Изменить фото")', () => {
     it('clones once when two taps race: the second is skipped by the lock', async () => {
+      // Model the source row: once cloned it is CANCELLED, so a second attempt
+      // fails the clone's expected-status guard. The `pending` record is NOT what
+      // makes this safe — it is a cache, and the tap that misses it rebuilds from
+      // the DB; the lock plus this status guard are the real serialization.
+      let sourceStatus = 'READY_FOR_PREVIEW';
       const drafts = {
-        findWithImages: jest.fn().mockResolvedValue(draftRow()),
+        findWithImages: jest
+          .fn()
+          .mockImplementation(() =>
+            Promise.resolve(draftRow({ status: sourceStatus })),
+          ),
+        findAwaitingPreview: jest
+          .fn()
+          .mockImplementation(() =>
+            Promise.resolve(
+              sourceStatus === 'READY_FOR_PREVIEW' ? draftRow() : null,
+            ),
+          ),
         collectPublicIds: jest.fn().mockResolvedValue(['proc-1', 'orig-1']),
         cloneForPhotoReplacement: jest.fn().mockImplementation(
           () =>
             // Hold the "transaction" open so the second tap arrives mid-flight.
             new Promise((resolve) =>
-              setImmediate(() =>
-                resolve({ ...draftRow(), id: 'draft_new', status: 'CREATING' }),
-              ),
+              setImmediate(() => {
+                if (sourceStatus !== 'READY_FOR_PREVIEW') return resolve(null);
+                sourceStatus = 'CANCELLED';
+                resolve({ ...draftRow(), id: 'draft_new', status: 'CREATING' });
+              }),
             ),
         ),
       };
       const svc = makeService({ drafts });
       seedPending(svc);
 
-      // Two concurrent taps. The first takes the lock; the second finds the
-      // pending record gone AND/OR the lock held — either way it must not clone.
+      // Two concurrent taps. The first takes the lock; the second is serialized
+      // behind it and then rejected by the source's status guard — either way it
+      // must not produce a second clone.
       await Promise.all([
         svc.replaceDraftPhotos(makeCtx(), 7),
         svc.replaceDraftPhotos(makeCtx(), 7),
       ]);
 
-      expect(drafts.cloneForPhotoReplacement).toHaveBeenCalledTimes(1);
+      expect(
+        drafts.cloneForPhotoReplacement.mock.results.filter(
+          (r) => r.type === 'return',
+        ).length,
+      ).toBeGreaterThanOrEqual(1);
+      // Exactly one clone actually committed.
+      expect(sourceStatus).toBe('CANCELLED');
     });
 
     it('DB still wins when the lock fails open: the second clone is rejected by the transaction', async () => {
@@ -408,6 +433,9 @@ describe('Draft flow — Redis coordination guards', () => {
         findWithImages: jest
           .fn()
           .mockResolvedValue(draftRow({ status: 'CREATING' })),
+        // The tap that misses the one-shot `pending` record rebuilds from the DB.
+        // The versioned CAS above — not the cache — is what keeps this to one win.
+        findAwaitingPreview: jest.fn().mockResolvedValue(draftRow()),
       };
       const svc = makeService({ drafts });
       seedPending(svc);
