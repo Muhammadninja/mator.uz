@@ -191,6 +191,13 @@ enum PartNumberType {
 enum DraftStatus {
   CREATING
   READY_FOR_PREVIEW
+  // Claimed by a commit that is writing the product rows. Short-lived and NOT
+  // terminal: it exists so the confirm path can take an exclusive claim BEFORE the
+  // product write (blocking a double-tap) without lying about the outcome — a crash
+  // mid-write leaves COMMITTING, which is recoverable, rather than PUBLISHED with no
+  // product. The sweep collects it only once `expiresAt` has passed, so an
+  // interrupted commit reclaims its assets instead of leaking them.
+  COMMITTING
   PUBLISHED
   CANCELLED
   EXPIRED

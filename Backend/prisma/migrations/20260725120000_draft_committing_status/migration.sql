@@ -1,0 +1,14 @@
+-- Add the COMMITTING draft status: a short-lived, NON-terminal claim taken by the
+-- Telegram confirm path BEFORE it writes the product rows, so two rapid taps cannot
+-- both commit. Previously the claim flipped the draft straight to PUBLISHED, which
+-- made a crash mid-write indistinguishable from a completed publish (a PUBLISHED
+-- draft with no product, whose assets the sweep then refuses to reclaim).
+--
+-- Placed AFTER 'READY_FOR_PREVIEW' and BEFORE 'PUBLISHED' so the physical enum order
+-- matches the lifecycle (and the Prisma schema's declaration order).
+--
+-- Note: ALTER TYPE ... ADD VALUE cannot run inside a transaction block on
+-- PostgreSQL < 12. Prisma wraps each migration in one, so this file targets
+-- PostgreSQL 12+, where the restriction was lifted for values not used in the same
+-- transaction. No existing row is rewritten — this is purely additive.
+ALTER TYPE "DraftStatus" ADD VALUE IF NOT EXISTS 'COMMITTING' BEFORE 'PUBLISHED';

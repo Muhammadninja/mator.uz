@@ -110,6 +110,10 @@ function draftRow(over: Record<string, unknown> = {}) {
 function makeDrafts(over: Record<string, unknown> = {}) {
   return {
     findWithImages: jest.fn().mockResolvedValue(draftRow()),
+    // The DB fallback used when the in-memory `pending` record is missing. Default
+    // to "no draft awaiting a preview" so the no-pending tests below assert the
+    // genuinely empty case; tests exercising the fallback override it.
+    findAwaitingPreview: jest.fn().mockResolvedValue(null),
     collectPublicIds: jest.fn().mockResolvedValue(['old-1', 'old-2']),
     collectOriginalPublicIds: jest.fn().mockResolvedValue(['orig-1']),
     reopenForEdit: jest.fn().mockResolvedValue(true),
@@ -211,6 +215,11 @@ function makeService(
     pending: new Map<number, unknown>(),
     // The draft-backed preview actions (edit / replace-photos / cancel).
     drafts: makeDrafts(),
+    // Needed by the DB fallback that runs when the `pending` cache misses: the
+    // preview actions resolve the seller, then look up their awaiting-preview draft.
+    sellers: {
+      findByTgId: jest.fn().mockResolvedValue({ id: 1, status: 'ACTIVE' }),
+    },
     queue: makeQueue(),
     telemetry: { event: jest.fn(), metric: jest.fn() },
     // Real in-memory mutex for the clone / reopen guards (see draft-lock.test-util).

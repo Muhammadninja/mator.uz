@@ -386,16 +386,63 @@ export class ProductDraftService {
    * processed results), for asset deletion on cancel/expiry/replace. The caller
    * (which owns the CloudinaryService) performs the actual deletion — this data
    * layer does no external I/O.
+   *
+   * A processed asset is EXCLUDED once a live ProductImage points at its URL: on the
+   * publish path those assets stop belonging to the draft and become the product's.
+   * This matters for a draft swept in COMMITTING, where the commit may have written
+   * the product rows and died before `publishDraft` — the draft looks abandoned but
+   * its processed assets are already a live product's images. Deleting them would
+   * leave the product intact with every image 404ing. Stored originals are never
+   * referenced by a product and are always reclaimed.
+   *
+   * The invariant this relies on is NOT "a URL is immutable" — it is the weaker and
+   * actually-true "a ProductImage row's `url` is never rewritten in place". Verified:
+   * the only writes to product_images anywhere are the deleteMany + createMany pair
+   * in the confirm path (telegram.service.ts), which replaces whole rows; no code
+   * path issues an UPDATE on that column, and no raw SQL touches the table.
+   *
+   * Consequence — a URL can stop being claimed (seller B lists the same gmNumber, and
+   * the confirm path's gallery replacement deletes seller A's rows), but a URL a
+   * draft owns can never START being claimed by a product this draft did not write.
+   * So the query can only err toward SPARING an asset, never toward deleting a live
+   * one: a stale "claimed" answer leaks an asset (harmless — cleanup is best-effort
+   * and re-deleting is a no-op), while the dangerous direction is unreachable.
    */
   async collectPublicIds(draftId: string): Promise<string[]> {
     const rows = await this.prisma.productDraftImage.findMany({
       where: { draftId },
-      select: { originalPublicId: true, processedPublicId: true },
+      select: {
+        originalPublicId: true,
+        processedPublicId: true,
+        processedUrl: true,
+      },
     });
+
     const ids: string[] = [];
     for (const r of rows) {
       if (r.originalPublicId) ids.push(r.originalPublicId);
-      if (r.processedPublicId) ids.push(r.processedPublicId);
+    }
+
+    const processed = rows.filter((r) => r.processedPublicId);
+    if (processed.length === 0) return ids;
+
+    // One query for the whole draft: which processed URLs a product already claims.
+    const claimedUrls = await this.prisma.productImage.findMany({
+      where: {
+        url: {
+          in: processed
+            .map((r) => r.processedUrl)
+            .filter((u): u is string => !!u),
+        },
+      },
+      select: { url: true },
+    });
+    const claimed = new Set(claimedUrls.map((row) => row.url));
+
+    for (const r of processed) {
+      // A row whose processedUrl is null cannot be a product's image — reclaim it.
+      if (r.processedUrl && claimed.has(r.processedUrl)) continue;
+      ids.push(r.processedPublicId as string);
     }
     return ids;
   }
@@ -414,15 +461,26 @@ export class ProductDraftService {
   }
 
   /**
-   * Mark a draft PUBLISHED (idempotent): only a READY_FOR_PREVIEW draft transitions,
-   * so a double-tap or a repeat is a safe no-op. Terminal, so no version guard is
-   * needed (nothing legitimately competes to move a READY_FOR_PREVIEW draft other
-   * than the TTL sweep, which the `status` predicate already excludes once
-   * published). Returns whether this call performed the transition.
+   * Mark a draft PUBLISHED (idempotent): a repeat or a double-tap is a safe no-op.
+   * Terminal, so no version guard is needed — once PUBLISHED the `status` predicate
+   * excludes every competitor, including the TTL sweep. Returns whether this call
+   * performed the transition.
+   *
+   * Two source states are accepted:
+   *   • COMMITTING       — the normal path. The confirm flow claims the draft before
+   *     writing the product and closes the claim here once the write succeeded.
+   *   • READY_FOR_PREVIEW — the parallel/legacy path, where a caller publishes a
+   *     draft it never claimed (and any in-flight draft still in that state when this
+   *     ships).
    */
   async publishDraft(draftId: string): Promise<boolean> {
     const { count } = await this.prisma.productDraft.updateMany({
-      where: { id: draftId, status: DraftStatus.READY_FOR_PREVIEW },
+      where: {
+        id: draftId,
+        status: {
+          in: [DraftStatus.COMMITTING, DraftStatus.READY_FOR_PREVIEW],
+        },
+      },
       data: { status: DraftStatus.PUBLISHED },
     });
     return count === 1;
@@ -463,6 +521,11 @@ export class ProductDraftService {
    *     path deletes assets right after the transition, so a crash in that gap
    *     would otherwise orphan them forever. Sweeping CANCELLED closes that window;
    *     re-deleting already-removed assets is a harmless no-op.
+   *   • COMMITTING         — a commit claimed the draft but never finished (the
+   *     process died between the claim and the product write). This is exactly why
+   *     the claim uses COMMITTING rather than PUBLISHED: the draft stays sweepable,
+   *     so its assets are reclaimed instead of leaking. `expiresAt` gates it, so a
+   *     commit genuinely in flight is never swept out from under itself.
    * PUBLISHED is deliberately excluded — its processed assets belong to a live
    * product and must never be touched.
    */
@@ -473,6 +536,7 @@ export class ProductDraftService {
           in: [
             DraftStatus.CREATING,
             DraftStatus.READY_FOR_PREVIEW,
+            DraftStatus.COMMITTING,
             DraftStatus.CANCELLED,
           ],
         },

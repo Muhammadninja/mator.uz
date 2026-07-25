@@ -14,6 +14,8 @@
 //     sends the preview; is idempotent for a non-READY_FOR_PREVIEW draft.
 //   • onDraftImagesFailed: sends the retry/cancel buttons to the seller's chat.
 
+import { readFileSync, readdirSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import { Decimal } from '@prisma/client/runtime/library';
 import { TelegramService } from './telegram.service';
 import { makeFakeLock } from './draft-lock.test-util';
@@ -46,6 +48,7 @@ function makeService(over: Partial<Record<string, unknown>> = {}): AnyService {
       removeImageJob: jest.fn().mockResolvedValue(undefined),
     },
     cloudinary: { deleteAssets: jest.fn().mockResolvedValue(undefined) },
+    catalogProjection: { projectStock: jest.fn().mockResolvedValue(undefined) },
     telemetry: { event: jest.fn(), metric: jest.fn() },
     // A real (in-memory) mutex, not a pass-through: the guarded paths must
     // behave correctly both when they win the lock and when they lose it.
@@ -69,6 +72,63 @@ function makeService(over: Partial<Record<string, unknown>> = {}): AnyService {
 
 function makeCtx() {
   return { reply: jest.fn().mockResolvedValue(undefined) };
+}
+
+/** The prisma surface `commitPending` touches (incl. persistVehicleLinks). */
+function makePrismaStub() {
+  return {
+    product: {
+      upsert: jest.fn().mockResolvedValue({ id: 10 }),
+    },
+    productImage: {
+      deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
+      createMany: jest.fn().mockResolvedValue({ count: 2 }),
+    },
+    stock: { upsert: jest.fn().mockResolvedValue({ id: 20 }) },
+    partModel: {
+      deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
+      upsert: jest.fn().mockResolvedValue({ id: 30 }),
+    },
+    brand: { upsert: jest.fn().mockResolvedValue({ id: 40 }) },
+    carModel: { upsert: jest.fn().mockResolvedValue({ id: 50 }) },
+  };
+}
+
+/**
+ * A complete READY_FOR_PREVIEW draft — every field `rebuildPendingFromDraft` needs
+ * to reconstruct a pending confirmation from the DB when the in-memory cache is gone.
+ */
+function readyDraft(over: Record<string, unknown> = {}) {
+  return {
+    id: 'draft_1',
+    sellerId: 1,
+    status: 'READY_FOR_PREVIEW',
+    version: 3,
+    title: 'Фара левая',
+    description: null,
+    brand: 'Chevrolet',
+    model: 'Nexia',
+    category: 'SEDAN',
+    partNumber: '96littleendian',
+    partNumberType: 'UNKNOWN',
+    priceUzs: new Decimal(250000),
+    formStep: 'QUESTIONNAIRE_DONE',
+    images: [
+      {
+        status: 'READY',
+        processedUrl: 'https://cdn/p0.jpg',
+        processedPublicId: 'proc_0',
+        sortOrder: 0,
+      },
+      {
+        status: 'READY',
+        processedUrl: 'https://cdn/p1.jpg',
+        processedPublicId: 'proc_1',
+        sortOrder: 1,
+      },
+    ],
+    ...over,
+  };
 }
 
 describe('TelegramService — draft flow (photos-first)', () => {
@@ -453,6 +513,374 @@ describe('TelegramService — draft flow (photos-first)', () => {
       await expect(
         svc.finalizePublishedDraft('draft_1', 1),
       ).resolves.toBeUndefined();
+    });
+  });
+
+  // Regression: a CANCELLED draft must never be resumed or re-previewed.
+  //   preview → cancel → /start  ⇒  the old preview must NOT come back.
+  // The cancel used to be a no-op whenever the in-memory `pending` record was
+  // already gone (evicted after CONFIRMATION_TTL_MS, or lost on a restart): the
+  // draft stayed READY_FOR_PREVIEW, so /start's lost-preview recovery re-sent it.
+  describe('cancel is terminal (regression)', () => {
+    it('cancels in the DB even when the in-memory pending record is gone (TTL evicted / restart)', async () => {
+      const drafts = {
+        // No pending → cancel must resolve the draft from the DB instead.
+        findAwaitingPreview: jest.fn().mockResolvedValue(readyDraft()),
+        findWithImages: jest.fn().mockResolvedValue(readyDraft()),
+        collectOriginalPublicIds: jest.fn().mockResolvedValue(['orig_0']),
+        tryTransition: jest.fn().mockResolvedValue(true),
+      };
+      const svc = makeService({ drafts });
+      expect(svc.pending.size).toBe(0); // the exact broken precondition
+
+      await svc.cancelPendingDraft(7);
+
+      expect(drafts.tryTransition).toHaveBeenCalledWith(
+        'draft_1',
+        'READY_FOR_PREVIEW',
+        'CANCELLED',
+        3,
+      );
+      // Assets are not orphaned: the processed ids (which only the vanished pending
+      // record used to know about) are rebuilt from the draft's rows, and the
+      // originals are collected as before.
+      expect(svc.cloudinary.deleteAssets).toHaveBeenCalledWith([
+        'proc_0',
+        'proc_1',
+      ]);
+      expect(svc.cloudinary.deleteAssets).toHaveBeenCalledWith(['orig_0']);
+    });
+
+    it('after cancel, /start does NOT re-present the preview', async () => {
+      // Model the DB: cancel flips the row, and the /start recovery query only
+      // matches READY_FOR_PREVIEW — so once cancelled it must return null.
+      let status = 'READY_FOR_PREVIEW';
+      const drafts = {
+        findAwaitingPreview: jest
+          .fn()
+          .mockImplementation(() =>
+            Promise.resolve(
+              status === 'READY_FOR_PREVIEW' ? readyDraft() : null,
+            ),
+          ),
+        findResumable: jest.fn().mockResolvedValue(null),
+        findWithImages: jest
+          .fn()
+          .mockImplementation(() => Promise.resolve(readyDraft({ status }))),
+        collectOriginalPublicIds: jest.fn().mockResolvedValue([]),
+        tryTransition: jest.fn().mockImplementation(() => {
+          status = 'CANCELLED';
+          return Promise.resolve(true);
+        }),
+      };
+      const svc = makeService({ drafts });
+      const present = jest
+        .spyOn(svc, 'presentDraftPreview')
+        .mockResolvedValue(undefined);
+
+      // 1. Seller cancels the preview.
+      await svc.cancelPendingDraft(7);
+      expect(status).toBe('CANCELLED');
+
+      // 2. Seller sends /start.
+      const ctx = makeCtx();
+      await svc.startProductCreation(ctx, 7, 1);
+
+      // The old preview must NOT be re-sent; a fresh flow starts instead.
+      expect(present).not.toHaveBeenCalled();
+      expect(svc.wizard.get(7)).toBeDefined();
+    });
+
+    it('still cancels via the pending record when one exists (unchanged happy path)', async () => {
+      const drafts = {
+        findWithImages: jest.fn().mockResolvedValue(readyDraft()),
+        findAwaitingPreview: jest.fn(),
+        collectOriginalPublicIds: jest.fn().mockResolvedValue(['orig_0']),
+        tryTransition: jest.fn().mockResolvedValue(true),
+      };
+      const svc = makeService({ drafts });
+      svc.pending.set(7, {
+        draftId: 'draft_1',
+        publicIds: ['proc_0', 'proc_1'],
+        expiry: setTimeout(() => {}, 0),
+      });
+
+      await svc.cancelPendingDraft(7);
+
+      expect(drafts.findWithImages).toHaveBeenCalledWith('draft_1');
+      expect(drafts.findAwaitingPreview).not.toHaveBeenCalled();
+      expect(drafts.tryTransition).toHaveBeenCalledWith(
+        'draft_1',
+        'READY_FOR_PREVIEW',
+        'CANCELLED',
+        3,
+      );
+      expect(svc.pending.size).toBe(0);
+    });
+  });
+
+  // The `pending` map is a UX cache, never the source of truth. Every preview-button
+  // path must still work when it is empty (10-min TTL eviction, restart, redeploy) —
+  // previously each of these aborted its state transition and told the seller to
+  // /start over, silently stranding a READY_FOR_PREVIEW draft until the TTL sweep.
+  describe('pending map is a cache, not the source of truth (regression)', () => {
+    it('"⬅️ Назад" reopens the draft for edit after a cache miss', async () => {
+      const drafts = {
+        findAwaitingPreview: jest.fn().mockResolvedValue(readyDraft()),
+        reopenForEdit: jest.fn().mockResolvedValue(true),
+        findWithImages: jest.fn().mockResolvedValue(readyDraft()),
+      };
+      const svc = makeService({ drafts });
+      const ctx = makeCtx();
+
+      await svc.reopenDraftForEdit(ctx, 7);
+
+      // Reopened under the draft's CURRENT version (the preview send already bumped
+      // it), not a stale cached one.
+      expect(drafts.reopenForEdit).toHaveBeenCalledWith(
+        'draft_1',
+        3,
+        WizardStep.PRICE,
+      );
+      // The seller lands back in the wizard rather than being told to /start over.
+      expect(svc.wizard.get(7)).toBeDefined();
+      const said = ctx.reply.mock.calls.map(([t]: [string]) => t).join(' ');
+      expect(said).not.toContain('Нет товара для редактирования');
+    });
+
+    it('"🖼 Изменить фото" clones the draft after a cache miss', async () => {
+      const drafts = {
+        findAwaitingPreview: jest.fn().mockResolvedValue(readyDraft()),
+        findWithImages: jest.fn().mockResolvedValue(readyDraft()),
+        collectPublicIds: jest.fn().mockResolvedValue(['proc_0']),
+        cloneForPhotoReplacement: jest
+          .fn()
+          .mockResolvedValue(readyDraft({ id: 'draft_2', images: [] })),
+      };
+      const svc = makeService({ drafts });
+      jest.spyOn(svc, 'discardDraftJobs').mockResolvedValue(undefined);
+      const ctx = makeCtx();
+
+      await svc.replaceDraftPhotos(ctx, 7);
+
+      expect(drafts.cloneForPhotoReplacement).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sourceId: 'draft_1',
+          expectedStatus: 'READY_FOR_PREVIEW',
+        }),
+      );
+      expect(svc.wizard.get(7)).toBeDefined();
+    });
+
+    it('"✅ Подтвердить" commits the product after a cache miss', async () => {
+      const drafts = {
+        findAwaitingPreview: jest.fn().mockResolvedValue(readyDraft()),
+        tryTransition: jest.fn().mockResolvedValue(true),
+        publishDraft: jest.fn().mockResolvedValue(true),
+        collectOriginalPublicIds: jest.fn().mockResolvedValue([]),
+      };
+      const svc = makeService({ drafts, prisma: makePrismaStub() });
+      const ctx = makeCtx();
+
+      await svc.commitPending(ctx, 7);
+
+      // The product was actually written — not refused with "nothing to confirm".
+      expect(svc.prisma.product.upsert).toHaveBeenCalled();
+      expect(svc.prisma.stock.upsert).toHaveBeenCalled();
+      const said = ctx.reply.mock.calls.map(([t]: [string]) => t).join(' ');
+      expect(said).toContain('✅ Товар успешно добавлен');
+    });
+
+    it('commit claims the draft BEFORE writing, so a double-tap cannot commit twice', async () => {
+      // Both taps miss the cache and rebuild the same draft; only the winner of the
+      // versioned CAS may write. Without the claim, both would upsert a Product
+      // (the gmNumber key does not dedupe an unlabeled part).
+      let claimed = false;
+      const drafts = {
+        findAwaitingPreview: jest.fn().mockResolvedValue(readyDraft()),
+        tryTransition: jest.fn().mockImplementation(() => {
+          if (claimed) return Promise.resolve(false);
+          claimed = true;
+          return Promise.resolve(true);
+        }),
+        publishDraft: jest.fn().mockResolvedValue(true),
+        collectOriginalPublicIds: jest.fn().mockResolvedValue([]),
+      };
+      const svc = makeService({ drafts, prisma: makePrismaStub() });
+
+      await svc.commitPending(makeCtx(), 7);
+      const ctx2 = makeCtx();
+      await svc.commitPending(ctx2, 7);
+
+      expect(drafts.tryTransition).toHaveBeenCalledTimes(2);
+      expect(svc.prisma.product.upsert).toHaveBeenCalledTimes(1);
+      const said = ctx2.reply.mock.calls.map(([t]: [string]) => t).join(' ');
+      expect(said).toContain('уже обработано');
+    });
+  });
+
+  // The commit claim is COMMITTING, never PUBLISHED: the status must not assert an
+  // outcome that has not happened yet. A crash mid-write then leaves a recoverable,
+  // sweepable draft instead of a PUBLISHED one with no product (whose assets the
+  // sweep refuses to touch, leaking them forever).
+  describe('COMMITTING claim (crash-safe commit)', () => {
+    const commitDrafts = (over: Record<string, unknown> = {}) => ({
+      findAwaitingPreview: jest.fn().mockResolvedValue(readyDraft()),
+      tryTransition: jest.fn().mockResolvedValue(true),
+      publishDraft: jest.fn().mockResolvedValue(true),
+      collectOriginalPublicIds: jest.fn().mockResolvedValue(['orig_0']),
+      ...over,
+    });
+
+    it('claims READY_FOR_PREVIEW → COMMITTING (not PUBLISHED) before the product write', async () => {
+      const drafts = commitDrafts();
+      const svc = makeService({ drafts, prisma: makePrismaStub() });
+      const order: string[] = [];
+      drafts.tryTransition.mockImplementation((...a: unknown[]) => {
+        order.push(`claim:${String(a[2])}`);
+        return Promise.resolve(true);
+      });
+      svc.prisma.product.upsert.mockImplementation(() => {
+        order.push('product.upsert');
+        return Promise.resolve({ id: 10 });
+      });
+
+      await svc.commitPending(makeCtx(), 7);
+
+      expect(drafts.tryTransition).toHaveBeenCalledWith(
+        'draft_1',
+        'READY_FOR_PREVIEW',
+        'COMMITTING',
+        3,
+      );
+      // The claim strictly precedes the write — that ordering IS the guard.
+      expect(order).toEqual(['claim:COMMITTING', 'product.upsert']);
+    });
+
+    it('closes the claim COMMITTING → PUBLISHED only after the product write succeeds', async () => {
+      const drafts = commitDrafts();
+      const svc = makeService({ drafts, prisma: makePrismaStub() });
+      const order: string[] = [];
+      svc.prisma.product.upsert.mockImplementation(() => {
+        order.push('product.upsert');
+        return Promise.resolve({ id: 10 });
+      });
+      drafts.publishDraft.mockImplementation(() => {
+        order.push('publishDraft');
+        return Promise.resolve(true);
+      });
+
+      await svc.commitPending(makeCtx(), 7);
+
+      expect(order).toEqual(['product.upsert', 'publishDraft']);
+      expect(drafts.publishDraft).toHaveBeenCalledWith('draft_1');
+      // Publishing fires the telemetry again (the claim itself must not).
+      expect(svc.telemetry.metric).toHaveBeenCalled();
+    });
+
+    it('a crash during the product write leaves the draft COMMITTING — never PUBLISHED', async () => {
+      const drafts = commitDrafts();
+      const svc = makeService({ drafts, prisma: makePrismaStub() });
+      svc.prisma.product.upsert.mockRejectedValue(new Error('db down'));
+      const ctx = makeCtx();
+
+      await svc.commitPending(ctx, 7);
+
+      // The claim happened; the publish did NOT. The draft is left COMMITTING, so
+      // findExpired will reclaim its assets once the TTL passes.
+      expect(drafts.tryTransition).toHaveBeenCalledWith(
+        'draft_1',
+        'READY_FOR_PREVIEW',
+        'COMMITTING',
+        3,
+      );
+      expect(drafts.publishDraft).not.toHaveBeenCalled();
+      const said = ctx.reply.mock.calls.map(([t]: [string]) => t).join(' ');
+      expect(said).toContain('Произошла ошибка');
+    });
+
+    it('a draft mid-commit is invisible to /start: not re-previewed and not resumable', async () => {
+      // Both recovery queries are status-scoped (READY_FOR_PREVIEW / CREATING), so a
+      // COMMITTING draft matches neither — the seller cannot double-submit it.
+      const drafts = {
+        findAwaitingPreview: jest.fn().mockResolvedValue(null),
+        findResumable: jest.fn().mockResolvedValue(null),
+      };
+      const svc = makeService({ drafts });
+      const present = jest
+        .spyOn(svc, 'presentDraftPreview')
+        .mockResolvedValue(undefined);
+
+      await svc.startProductCreation(makeCtx(), 7, 1);
+
+      expect(present).not.toHaveBeenCalled();
+      // Falls through to a brand-new flow rather than touching the committing draft.
+      expect(svc.wizard.get(7)).toBeDefined();
+    });
+
+    it('reports "nothing to confirm" only when the DB really has no draft awaiting preview', async () => {
+      const drafts = {
+        findAwaitingPreview: jest.fn().mockResolvedValue(null),
+        tryTransition: jest.fn(),
+      };
+      const svc = makeService({ drafts, prisma: makePrismaStub() });
+      const ctx = makeCtx();
+
+      await svc.commitPending(ctx, 7);
+
+      expect(drafts.tryTransition).not.toHaveBeenCalled();
+      expect(svc.prisma.product.upsert).not.toHaveBeenCalled();
+      const said = ctx.reply.mock.calls.map(([t]: [string]) => t).join(' ');
+      expect(said).toContain('Нет товара для подтверждения');
+    });
+  });
+
+  // The COMMITTING sweep guard (collectPublicIds) decides "is this processed asset a
+  // live product's image?" by matching ProductImage.url. That is only sound while no
+  // workflow rewrites a ProductImage row's url in place — an UPDATE would let an
+  // asset silently stop matching and get deleted out from under a live product.
+  // This test fails loudly if such a write is ever introduced.
+  describe('ProductImage.url is never rewritten in place (guard invariant)', () => {
+    const srcDir = join(__dirname, '..');
+
+    function sourceFiles(dir: string): string[] {
+      return readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+        const full = join(dir, e.name);
+        if (e.isDirectory()) return sourceFiles(full);
+        return e.isFile() &&
+          e.name.endsWith('.ts') &&
+          !e.name.endsWith('.spec.ts')
+          ? [full]
+          : [];
+      });
+    }
+
+    it('no production code issues an update/updateMany on productImage', () => {
+      const offenders = sourceFiles(srcDir).filter((f) =>
+        /productImage\s*\.\s*(update|updateMany)\b/.test(
+          readFileSync(f, 'utf8'),
+        ),
+      );
+      expect(offenders).toEqual([]);
+    });
+
+    it('no production code writes product_images via raw SQL', () => {
+      const offenders = sourceFiles(srcDir).filter((f) => {
+        const src = readFileSync(f, 'utf8');
+        return (
+          /\$(queryRaw|executeRaw)/.test(src) && /product_images/i.test(src)
+        );
+      });
+      expect(offenders).toEqual([]);
+    });
+
+    it('the only productImage writes are the confirm path’s deleteMany + createMany', () => {
+      const writers = sourceFiles(srcDir).filter((f) =>
+        /productImage\s*\.\s*(create|createMany|delete|deleteMany|update|updateMany|upsert)\b/.test(
+          readFileSync(f, 'utf8'),
+        ),
+      );
+      expect(writers.map((f) => basename(f))).toEqual(['telegram.service.ts']);
     });
   });
 });
