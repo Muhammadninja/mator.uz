@@ -187,6 +187,29 @@ export class MetricsService {
     });
   }
 
+  // ── Read access (alerting) ──────────────────────────────────────────────
+  //
+  // The alerting rules need to READ the series they alert on. Exposing the two
+  // specific metric objects they consume — rather than the whole AppMetrics
+  // bundle or the registry — keeps the module's core rule intact: nothing
+  // outside metrics.definitions.ts constructs a metric, and every consumer
+  // still goes through this service. These are the only read accessors, and
+  // both are deliberately narrow.
+  //
+  // Both return the CUMULATIVE prom-client object. Turning that into a rolling
+  // window is the caller's job (see alerting/metric-window.ts) — a cumulative
+  // reading is not directly alertable.
+
+  /** The image-processing duration histogram, for windowed P95 evaluation. */
+  get imageProcessingDurationMetric(): AppMetrics['imageProcessingDuration'] {
+    return this.metrics.imageProcessingDuration;
+  }
+
+  /** The SMS failure counter, for windowed failure-rate evaluation. */
+  get smsFailedMetric(): AppMetrics['smsFailedTotal'] {
+    return this.metrics.smsFailedTotal;
+  }
+
   /**
    * Run an instrumentation side effect, swallowing anything it throws. See rule
    * 1 in the class docblock: no metric is worth an exception in a business path.

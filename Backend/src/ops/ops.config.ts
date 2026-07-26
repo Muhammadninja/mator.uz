@@ -115,9 +115,25 @@ export function resolveQueueMonitorConfig(
 }
 
 /**
- * The queues the monitor samples and the dashboard exposes — every registered
- * queue, derived from QUEUE_NAMES so a newly registered queue is covered without
- * touching this file.
+ * The queues the Bull Board dashboard exposes — every registered queue,
+ * derived from QUEUE_NAMES so a newly registered queue is covered without
+ * touching this file. The dashboard is a read-only inspector, so including the
+ * alerts queue here is desirable: a failed Telegram delivery is exactly the
+ * kind of job an operator needs to see and retry.
  */
 export const MONITORED_QUEUES: readonly QueueName[] =
   Object.values(QUEUE_NAMES);
+
+/**
+ * The queues the health MONITOR samples and the metrics collector publishes.
+ *
+ * Every registered queue except `alerts`. The alerts queue is deliberately
+ * excluded from monitoring-that-alerts: a backlog or failure there means alert
+ * delivery is broken, so an alert about it could not be delivered — a watchdog
+ * must not depend on the thing it watches. Its depth is still visible in Bull
+ * Board (above) and via the `bullmq_jobs` gauge that Prometheus scrapes, which
+ * is where that condition belongs.
+ */
+export const SAMPLED_QUEUES: readonly QueueName[] = MONITORED_QUEUES.filter(
+  (queue) => queue !== QUEUE_NAMES.ALERTS,
+);

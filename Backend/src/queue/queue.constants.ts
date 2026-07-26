@@ -21,6 +21,11 @@ export const QUEUE_NAMES = {
    *  Deliberately separate from IMAGE_PROCESSING so cleanup never mixes with the
    *  per-image work queue. */
   MAINTENANCE: 'maintenance',
+  /** Outbound operational alert notifications (Telegram). Kept separate from
+   *  NOTIFICATIONS — that queue carries user-facing push fan-out and can itself
+   *  be backlogged or stalled, which is one of the conditions we alert ON. An
+   *  alert must never queue behind the incident it is reporting. */
+  ALERTS: 'alerts',
 } as const;
 
 /**

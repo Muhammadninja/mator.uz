@@ -30,6 +30,7 @@ import { AddressesModule } from './addresses/addresses.module';
 import { DealersModule } from './dealers/dealers.module';
 import { OpsModule } from './ops/ops.module';
 import { MetricsModule } from './metrics/metrics.module';
+import { AlertingModule } from './alerting/alerting.module';
 
 @Module({
   imports: [
@@ -72,6 +73,11 @@ import { MetricsModule } from './metrics/metrics.module';
     // Operations tooling (Bull Board, queue monitoring, alerts). Read-only with
     // respect to every existing flow — see ops.module.ts.
     OpsModule,
+    // Internal alerting: rule evaluation every minute, Redis-backed dedupe,
+    // Telegram delivery via BullMQ. Registered after OpsModule (whose
+    // AlertService it bridges) and after MetricsModule (whose series the
+    // latency/SMS rules read). Additive — see alerting.module.ts.
+    AlertingModule,
   ],
   // Bind ThrottlerGuard globally. Without this APP_GUARD registration the
   // ThrottlerModule config and every @Throttle/@SkipThrottle decorator across

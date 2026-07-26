@@ -77,7 +77,7 @@ export class QueueService {
   /**
    * Enqueue an image-processing job for one draft image.
    *
-   * Deterministic jobId (`image:<draftId>:<imageId>`): the same draft image
+   * Deterministic jobId (`image_<draftId>_<imageId>`): the same draft image
    * enqueued twice — e.g. a retry that re-adds the row — collapses to a single
    * job. BullMQ ignores an add() whose jobId already exists, so this is idempotent
    * by construction and avoids double-processing the same asset.
@@ -111,9 +111,16 @@ export class QueueService {
     return this.enqueueImage(data, opts);
   }
 
-  /** The deterministic image jobId: `image:<draftId>:<imageId>`. */
+  /**
+   * The deterministic image jobId: `image_<draftId>_<imageId>`.
+   *
+   * `_` rather than `:` — BullMQ rejects a custom jobId containing `:` unless it
+   * splits into exactly 3 parts (a back-compat carve-out for legacy repeatable
+   * ids). This id happened to satisfy that by accident; the separator is now
+   * explicit so the id stays valid regardless of how many segments it grows.
+   */
   imageJobId(data: ImageJobData): string {
-    return `image:${data.draftId}:${data.imageId}`;
+    return `image_${data.draftId}_${data.imageId}`;
   }
 
   /**
@@ -161,21 +168,27 @@ export class QueueService {
   }
 
   /**
-   * Stable jobId for an OTP delivery: `sms:otp:<requestId>:<sendCount>`.
+   * Stable jobId for an OTP delivery: `sms_otp_<requestId>_<sendCount>`.
    *
    * `sendCount` (0 for the initial issue, then the resend counter) is what keeps
    * this correct in both directions: the same issue/resend enqueued twice
    * collapses to one job, while a genuine resend — which mints a NEW code and
    * bumps the counter — gets a distinct id and is delivered.
+   *
+   * `_` rather than `:` — BullMQ rejects a custom jobId containing `:` unless it
+   * splits into exactly 3 parts. The four-segment `sms:otp:<id>:<count>` form
+   * tripped that check and made every OTP enqueue throw "Custom Id cannot
+   * contain :". Only the separator changed; the (requestId, sendCount) keying —
+   * and therefore the dedup/idempotency semantics above — is untouched.
    */
   otpSmsJobId(requestId: string, sendCount: number): string {
-    return `sms:otp:${requestId}:${sendCount}`;
+    return `sms_otp_${requestId}_${sendCount}`;
   }
 
   /**
    * Enqueue a notification PUSH fan-out job.
    *
-   * Deterministic jobId (`notify:<notificationId>`): the inbox row was already
+   * Deterministic jobId (`notify_<notificationId>`): the inbox row was already
    * committed by NotificationsService.emit, and one row must produce at most one
    * push fan-out. Because the id comes from that committed row it is unique per
    * real event, so this collapses accidental double-enqueues (a retried request,
@@ -191,8 +204,13 @@ export class QueueService {
     return this.notificationQueue.add('notify', data, { jobId, ...opts });
   }
 
-  /** The deterministic notification jobId: `notify:<notificationId>`. */
+  /**
+   * The deterministic notification jobId: `notify_<notificationId>`.
+   *
+   * `_` rather than `:` — BullMQ rejects a custom jobId containing `:` unless it
+   * splits into exactly 3 parts, and the two-segment `notify:<id>` form did not.
+   */
   notificationJobId(data: NotificationJobData): string {
-    return `notify:${data.notificationId}`;
+    return `notify_${data.notificationId}`;
   }
 }
