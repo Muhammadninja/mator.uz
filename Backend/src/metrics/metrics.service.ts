@@ -175,24 +175,30 @@ export class MetricsService {
   }
 
   /**
-   * Publish the accounted SMS spend read from the accounting table.
+   * Publish the accounted SMS spend read from the accounting table, grouped by
+   * MOBILE OPERATOR (beeline, ucell, …) — the network that sets the price —
+   * rather than by the gateway provider that carried the send.
    *
    * `set` (not `inc`) because these are gauges holding a DB-wide cumulative sum
    * re-read on every scrape — see the metrics.definitions.ts note on why a
    * counter would be wrong here.
    *
-   * The per-provider gauge is RESET first so a provider that disappears from
+   * The per-operator gauge is RESET first so an operator that disappears from
    * the accounting table (rows pruned by retention) stops reporting a stale
    * value instead of flat-lining forever at its last reading. The total is
    * passed in rather than re-derived from the map: the collector computes it in
    * the same query pass, so nothing is calculated twice.
+   *
+   * A null/blank operator name becomes `operator="unknown"` via label(), so
+   * unresolved sends still contribute and the per-operator series re-sums to
+   * the total.
    */
-  setSmsCost(perProvider: Record<string, number>, totalUzs: number): void {
+  setSmsCost(perOperator: Record<string, number>, totalUzs: number): void {
     this.safe(() => {
-      this.metrics.smsProviderCostUzs.reset();
-      for (const [provider, uzs] of Object.entries(perProvider)) {
+      this.metrics.smsOperatorCostUzs.reset();
+      for (const [operator, uzs] of Object.entries(perOperator)) {
         if (Number.isFinite(uzs)) {
-          this.metrics.smsProviderCostUzs.set({ provider: label(provider) }, uzs);
+          this.metrics.smsOperatorCostUzs.set({ operator: label(operator) }, uzs);
         }
       }
       if (Number.isFinite(totalUzs)) {

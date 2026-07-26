@@ -64,11 +64,12 @@ export interface AppMetrics {
   /** SMS that failed to send, by provider and coarse reason. */
   smsFailedTotal: Counter<'provider' | 'template' | 'reason'>;
   /**
-   * Cumulative accounted SMS spend in UZS per provider, read from the SMS
-   * accounting table at scrape time. A GAUGE, not a counter — see below.
+   * Cumulative accounted SMS spend in UZS per MOBILE OPERATOR (beeline,
+   * ucell, …), read from the SMS accounting table at scrape time. A GAUGE, not
+   * a counter — see below.
    */
-  smsProviderCostUzs: Gauge<'provider'>;
-  /** Cumulative accounted SMS spend in UZS across all providers. */
+  smsOperatorCostUzs: Gauge<'operator'>;
+  /** Cumulative accounted SMS spend in UZS across all operators. */
   smsCostUzs: Gauge<string>;
   /** End-to-end image processing wall time in seconds, by outcome. */
   imageProcessingDuration: Histogram<'result'>;
@@ -198,17 +199,24 @@ export function createAppMetrics(
     // only the unit (`_uzs`); "cumulative to date" lives in the help text and
     // the dashboard panel descriptions instead.
     //
+    // ── Grouped by MOBILE OPERATOR, not by gateway provider ──
+    // The label is `sms_messages.operator_name` (beeline, ucell, …) — the
+    // network that actually sets the price — not the aggregator that carried
+    // the send. Sends whose operator could not be resolved report as
+    // `operator="unknown"` rather than being dropped, so the per-operator
+    // series always re-sums to the overall total.
+    //
     // Rows with a NULL price_uzs (operator unresolved at send time) contribute
     // nothing — see SmsCostCollector.
-    smsProviderCostUzs: new Gauge({
-      name: `${prefix}sms_provider_cost_uzs`,
-      help: 'Cumulative accounted SMS cost in UZS to date, per provider, summed from the SMS accounting table at scrape time.',
-      labelNames: ['provider'] as const,
+    smsOperatorCostUzs: new Gauge({
+      name: `${prefix}sms_operator_cost_uzs`,
+      help: 'Cumulative accounted SMS cost in UZS to date, per mobile operator (from sms_messages.operator_name; "unknown" when unresolved), summed from the SMS accounting table at scrape time.',
+      labelNames: ['operator'] as const,
       registers,
     }),
     smsCostUzs: new Gauge({
       name: `${prefix}sms_cost_uzs`,
-      help: 'Cumulative accounted SMS cost in UZS to date across all providers (the sum of mator_sms_provider_cost_uzs).',
+      help: 'Cumulative accounted SMS cost in UZS to date across all mobile operators (the sum of mator_sms_operator_cost_uzs).',
       registers,
     }),
 

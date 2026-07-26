@@ -1696,7 +1696,7 @@
       "id": 24,
       "type": "stat",
       "title": "Total SMS Cost",
-      "description": "Cumulative accounted SMS spend across all providers, summed from the SMS accounting table. Equals the sum of the per-provider panel beside it. Not affected by the dashboard time range: this is spend-to-date, not spend-in-window.",
+      "description": "Cumulative accounted SMS spend across all mobile operators, summed from the SMS accounting table. Equals the sum of the per-operator panel beside it. Not affected by the dashboard time range: this is spend-to-date, not spend-in-window.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1763,8 +1763,8 @@
     {
       "id": 25,
       "type": "stat",
-      "title": "SMS Cost by Provider",
-      "description": "Cumulative accounted spend per provider. One value per provider label, discovered automatically from the metric — a newly configured aggregator appears with no dashboard edit. Respects the Provider filter above.",
+      "title": "SMS Cost by Operator",
+      "description": "Cumulative accounted spend per mobile operator (Beeline, Uzmobile, Ucell, Humans, Perfectum, …), from sms_messages.operator_name. One value per operator label, discovered automatically from the metric — a newly seeded operator appears with no dashboard edit. Sends whose operator could not be resolved show as \"unknown\". Not filtered by the Provider variable: this metric is grouped by network, not by gateway.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1820,8 +1820,8 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by (provider) (mator_sms_provider_cost_uzs{instance=~\"$instance\", provider=~\"$provider\"})",
-          "legendFormat": "{{provider}}",
+          "expr": "max by (operator) (mator_sms_operator_cost_uzs{instance=~\"$instance\"})",
+          "legendFormat": "{{operator}}",
           "range": false,
           "instant": true,
           "refId": "A"

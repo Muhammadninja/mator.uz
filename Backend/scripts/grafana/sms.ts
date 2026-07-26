@@ -552,6 +552,14 @@ export function buildSms(): unknown {
   // from the SMS accounting table (sms_messages.price_uzs), aggregated by the
   // backend at scrape time — not from the sent/failed counters above.
   //
+  // ── Grouped by MOBILE OPERATOR, not by gateway provider ──
+  // Cost is broken out by the network that sets the price (beeline, ucell,
+  // …) via `mator_sms_operator_cost_uzs{operator}`, sourced from
+  // sms_messages.operator_name. The `operator` label is INDEPENDENT of the
+  // $provider variable above (which filters the sent/failed counters), so the
+  // cost panels deliberately do NOT apply that filter — doing so would return
+  // nothing, since these series carry no `provider` label at all.
+  //
   // ── Why `max` and not `sum`, and why no rate() ──
   // Both are GAUGES holding a cumulative DB-wide total, so under PM2 cluster
   // mode every instance reports the SAME number. `sum()` would multiply the
@@ -571,7 +579,7 @@ export function buildSms(): unknown {
       {
         title: 'Total SMS Cost',
         description:
-          'Cumulative accounted SMS spend across all providers, summed from the SMS accounting table. Equals the sum of the per-provider panel beside it. Not affected by the dashboard time range: this is spend-to-date, not spend-in-window.',
+          'Cumulative accounted SMS spend across all mobile operators, summed from the SMS accounting table. Equals the sum of the per-operator panel beside it. Not affected by the dashboard time range: this is spend-to-date, not spend-in-window.',
         unit: COST_UNIT,
         decimals: 0,
         width: 6,
@@ -592,25 +600,25 @@ export function buildSms(): unknown {
   panels.push(
     stat(
       {
-        title: 'SMS Cost by Provider',
+        title: 'SMS Cost by Operator',
         description:
-          'Cumulative accounted spend per provider. One value per provider label, discovered automatically from the metric — a newly configured aggregator appears with no dashboard edit. Respects the Provider filter above.',
+          'Cumulative accounted spend per mobile operator (Beeline, Uzmobile, Ucell, Humans, Perfectum, …), from sms_messages.operator_name. One value per operator label, discovered automatically from the metric — a newly seeded operator appears with no dashboard edit. Sends whose operator could not be resolved show as "unknown". Not filtered by the Provider variable: this metric is grouped by network, not by gateway.',
         unit: COST_UNIT,
         decimals: 0,
         width: 18,
         height: 5,
         graphMode: 'none',
-        // One tile per provider. A stat panel reduces EACH FRAME to one value,
-        // and an instant `max by (provider)` query returns one frame per
-        // provider — so `lastNotNull` yields a tile per provider rather than a
+        // One tile per operator. A stat panel reduces EACH FRAME to one value,
+        // and an instant `max by (operator)` query returns one frame per
+        // operator — so `lastNotNull` yields a tile per operator rather than a
         // single collapsed number. `perSeries` turns on the value+name text mode
-        // so each tile is labelled with the provider it belongs to.
+        // so each tile is labelled with the operator it belongs to.
         reducer: 'lastNotNull',
         perSeries: true,
         targets: [
           {
-            expr: `max by (provider) (mator_sms_provider_cost_uzs{${INST}, provider=~"$provider"})`,
-            legendFormat: '{{provider}}',
+            expr: `max by (operator) (mator_sms_operator_cost_uzs{${INST}})`,
+            legendFormat: '{{operator}}',
             instant: true,
           },
         ],
