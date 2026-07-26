@@ -1380,3 +1380,130 @@ model SmsMessage {
   @@index([phoneE164])
   @@map("sms_messages")
 }
+
+// ── Admin panel authentication ───────────────────────────────────────────────
+// Completely separate identity space from AppUser: admins are staff accounts for
+// the back-office console, log in with email + password (never OTP), and their
+// tokens are signed with a different key/algorithm/audience than the mobile
+// app's (see AdminTokenService). Nothing here references app_users, and the
+// mobile OTP flow is untouched.
+
+enum AdminRole {
+  SUPER_ADMIN
+  MANAGER
+  OPERATOR
+}
+
+/// Critical, security-relevant actions on administrator accounts. Only lifecycle
+/// and privilege changes belong here — routine reads are not audited.
+enum AdminAuditAction {
+  CREATE_ADMIN
+  DEACTIVATE_ADMIN
+  REACTIVATE_ADMIN
+  CHANGE_ROLE
+  CHANGE_PASSWORD
+  RESET_PASSWORD
+  DELETE_ADMIN
+}
+
+model AppAdmin {
+  id           String    @id @default(cuid())
+  email        String    @unique @db.VarChar(255)
+  // Bcrypt hash only — the plaintext password is never stored, logged or returned.
+  passwordHash String    @map("password_hash") @db.VarChar(255)
+  name         String    @db.VarChar(120)
+  role         AdminRole @default(OPERATOR)
+  isActive     Boolean   @default(true) @map("is_active")
+  // Session version — mirrors AppUser.tokenVersion: bumping it invalidates every
+  // outstanding admin access token on the next request (deactivation, password
+  // change, refresh-token reuse).
+  tokenVersion Int       @default(0) @map("token_version")
+  lastLoginAt  DateTime? @map("last_login_at") @db.Timestamptz(3)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  refreshTokens AdminRefreshToken[]
+  auditsPerformed AdminAudit[] @relation("AdminAuditActor")
+  auditsReceived  AdminAudit[] @relation("AdminAuditTarget")
+
+  @@map("app_admins")
+}
+
+/// Append-only audit trail for critical administrator actions (creation, role
+/// changes, deactivation, password changes, deletion).
+///
+/// Two properties make this trustworthy:
+///
+///   • Actor and target identities are SNAPSHOTS taken at write time — like
+///     OrderStatusHistory's actor columns — so an entry keeps saying WHO did
+///     WHAT to WHOM even after either account is renamed or deleted.
+///   • Both FKs are ON DELETE SET NULL, never CASCADE: deleting an administrator
+///     must not erase the record of what they did, or of their own deletion.
+///     That would let anyone destroy their own trail by removing the account.
+///
+/// Rows are never updated or deleted by application code.
+model AdminAudit {
+  id             String           @id @default(cuid())
+  action         AdminAuditAction
+  // Who performed it. Null only for actions with no signed-in actor — the CLI
+  // bootstrap of the first SUPER_ADMIN (see actorLabel).
+  actorId        String?          @map("actor_id")
+  actorEmail     String?          @map("actor_email") @db.VarChar(255)
+  actorName      String?          @map("actor_name") @db.VarChar(120)
+  // Human-readable origin for actions with no admin actor, e.g. "cli:admin:create".
+  actorLabel     String?          @map("actor_label") @db.VarChar(60)
+  // Which account it was performed on.
+  targetAdminId  String?          @map("target_admin_id")
+  targetEmail    String?          @map("target_email") @db.VarChar(255)
+  targetName     String?          @map("target_name") @db.VarChar(120)
+  // Before/after for privilege changes (CHANGE_ROLE). Null for other actions.
+  previousRole   AdminRole?       @map("previous_role")
+  newRole        AdminRole?       @map("new_role")
+  // Request provenance. Untrusted and display-only — never an authorization input.
+  ip             String?          @db.VarChar(45)
+  userAgent      String?          @map("user_agent") @db.VarChar(400)
+  createdAt      DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  actor  AppAdmin? @relation("AdminAuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+  target AppAdmin? @relation("AdminAuditTarget", fields: [targetAdminId], references: [id], onDelete: SetNull)
+
+  @@index([targetAdminId, createdAt])
+  @@index([actorId, createdAt])
+  @@index([createdAt])
+  @@map("admin_audits")
+}
+
+// One row per SESSION, not per admin: every login creates a new row, so an admin
+// signed in on a laptop, a home PC and a work PC holds three independent,
+// coexisting sessions that never evict one another. The metadata columns exist
+// so those sessions can be listed and revoked individually ("sign out this
+// device") rather than only all at once.
+model AdminRefreshToken {
+  id           Int       @id @default(autoincrement())
+  // SHA-256 of the opaque token; the raw value exists only in the client's hands.
+  tokenHash    String    @unique @map("token_hash") @db.VarChar(64)
+  adminId      String    @map("admin_id")
+  tokenVersion Int       @default(0) @map("token_version")
+  expiresAt    DateTime  @map("expires_at") @db.Timestamptz(3)
+  // Soft-rotation marker: a consumed row is kept so a replay is detectable as
+  // reuse rather than simply "not found".
+  consumedAt   DateTime? @map("consumed_at") @db.Timestamptz(3)
+  // Explicit single-session revocation (logout / "sign out this device"). Kept
+  // distinct from consumedAt: consumed means "rotated normally", revoked means
+  // "deliberately killed", and only the former is a theft signal when replayed.
+  revokedAt    DateTime? @map("revoked_at") @db.Timestamptz(3)
+  // Session provenance, for the "active sessions" list. Client-supplied and
+  // therefore untrusted — display-only, never used for an authorization
+  // decision. Carried across rotation so a session keeps its identity.
+  deviceName   String?   @map("device_name") @db.VarChar(120)
+  ip           String?   @db.VarChar(45) // 45 = max INET6_ADDRSTRLEN
+  userAgent    String?   @map("user_agent") @db.VarChar(400)
+  // Refreshed on every rotation, so the list can show "last active".
+  lastUsedAt   DateTime? @map("last_used_at") @db.Timestamptz(3)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  admin        AppAdmin  @relation(fields: [adminId], references: [id], onDelete: Cascade)
+
+  @@index([adminId])
+  @@index([expiresAt])
+  @@map("admin_refresh_tokens")
+}
