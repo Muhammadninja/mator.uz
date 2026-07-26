@@ -12,9 +12,19 @@ export const ADMIN_ORDER_LIST_SELECT = {
   createdAt: true,
   updatedAt: true,
   user: {
-    select: { id: true, displayName: true, firstName: true, lastName: true, phoneE164: true },
+    select: {
+      id: true,
+      displayName: true,
+      firstName: true,
+      lastName: true,
+      phoneE164: true,
+    },
   },
-  payments: { select: { provider: true, status: true }, orderBy: { createdAt: 'desc' }, take: 1 },
+  payments: {
+    select: { provider: true, status: true },
+    orderBy: { createdAt: 'desc' },
+    take: 1,
+  },
   _count: { select: { items: true } },
 } satisfies Prisma.OrderSelect;
 
@@ -40,13 +50,31 @@ export const ADMIN_ORDER_DETAIL_SELECT = {
     },
   },
   deliveryAddress: {
-    select: { regionCode: true, district: true, street: true, fullText: true, lat: true, lng: true },
+    select: {
+      regionCode: true,
+      district: true,
+      street: true,
+      fullText: true,
+      lat: true,
+      lng: true,
+    },
   },
   items: {
-    select: { id: true, partId: true, title: true, quantity: true, priceUzs: true, lineTotalUzs: true },
+    select: {
+      id: true,
+      partId: true,
+      title: true,
+      quantity: true,
+      priceUzs: true,
+      lineTotalUzs: true,
+    },
     orderBy: { id: 'asc' },
   },
-  payments: { select: { provider: true, status: true }, orderBy: { createdAt: 'desc' }, take: 1 },
+  payments: {
+    select: { provider: true, status: true },
+    orderBy: { createdAt: 'desc' },
+    take: 1,
+  },
   statusHistory: {
     select: {
       id: true,
@@ -61,8 +89,12 @@ export const ADMIN_ORDER_DETAIL_SELECT = {
   },
 } satisfies Prisma.OrderSelect;
 
-export type AdminOrderListRow = Prisma.OrderGetPayload<{ select: typeof ADMIN_ORDER_LIST_SELECT }>;
-export type AdminOrderDetail = Prisma.OrderGetPayload<{ select: typeof ADMIN_ORDER_DETAIL_SELECT }>;
+export type AdminOrderListRow = Prisma.OrderGetPayload<{
+  select: typeof ADMIN_ORDER_LIST_SELECT;
+}>;
+export type AdminOrderDetail = Prisma.OrderGetPayload<{
+  select: typeof ADMIN_ORDER_DETAIL_SELECT;
+}>;
 
 type CustomerFields = {
   displayName: string | null;
@@ -117,7 +149,8 @@ export function presentAdminOrderRow(o: AdminOrderListRow) {
  */
 function presentShippingAddress(a: AdminOrderDetail['deliveryAddress']) {
   if (!a) return null;
-  const location = a.lat != null && a.lng != null ? { lat: a.lat, lng: a.lng } : null;
+  const location =
+    a.lat != null && a.lng != null ? { lat: a.lat, lng: a.lng } : null;
   return {
     city: a.regionCode ?? null,
     district: a.district ?? null,
@@ -135,7 +168,9 @@ function presentHistoryRow(h: AdminOrderDetail['statusHistory'][number]) {
     actor: {
       type: h.actorType,
       id: h.actorId ?? null,
-      name: h.actorName ?? (h.actorType === OrderActorType.SYSTEM ? 'System' : null),
+      name:
+        h.actorName ??
+        (h.actorType === OrderActorType.SYSTEM ? 'System' : null),
     },
     createdAt: h.createdAt.toISOString(),
   };
@@ -157,7 +192,11 @@ export function presentAdminOrderDetail(o: AdminOrderDetail) {
             id: `sys_created_${o.id}`,
             status: OrderStatus.PENDING_PAYMENT.toLowerCase(),
             note: 'Order created',
-            actor: { type: OrderActorType.SYSTEM, id: null as string | null, name: 'System' },
+            actor: {
+              type: OrderActorType.SYSTEM,
+              id: null as string | null,
+              name: 'System',
+            },
             createdAt: o.createdAt.toISOString(),
           },
         ];

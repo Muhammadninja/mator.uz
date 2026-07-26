@@ -12,6 +12,7 @@
 //     than left anonymous.
 
 import { AdminAuditAction, AdminRole } from '@prisma/client';
+import { runWithRequestId } from '../../common/request-context';
 import { AdminAuditService } from './admin-audit.service';
 
 function makePrismaMock() {
@@ -161,6 +162,7 @@ describe('AdminAuditService', () => {
         'ip',
         'newRole',
         'previousRole',
+        'requestId',
         'targetAdminId',
         'targetEmail',
         'targetName',
@@ -181,6 +183,68 @@ describe('AdminAuditService', () => {
       ]) {
         expect(values).not.toContain(forbidden);
       }
+    });
+  });
+
+  describe('request correlation', () => {
+    it('picks the requestId up from the ambient context automatically', async () => {
+      // No call site passes it: threading a correlation id through every service
+      // signature would be forgotten somewhere, so it comes from the context.
+      await runWithRequestId('3AA7FC', () =>
+        service.record({
+          action: AdminAuditAction.DEACTIVATE_ADMIN,
+          actor: ACTOR,
+          target: TARGET,
+        }),
+      );
+
+      const { data } = firstCallArg<{ data: { requestId: string } }>(
+        prisma.adminAudit.create,
+      );
+      expect(data.requestId).toBe('3AA7FC');
+    });
+
+    it('stores null outside an HTTP request (CLI, cron, worker)', async () => {
+      await service.record({
+        action: AdminAuditAction.CREATE_ADMIN,
+        actorLabel: 'cli:admin:create',
+        target: TARGET,
+      });
+
+      const { data } = firstCallArg<{ data: { requestId: string | null } }>(
+        prisma.adminAudit.create,
+      );
+      expect(data.requestId).toBeNull();
+    });
+
+    it('lets an explicit id override the ambient one', async () => {
+      await runWithRequestId('AMBIENT', () =>
+        service.record({
+          action: AdminAuditAction.CHANGE_ROLE,
+          actor: ACTOR,
+          target: TARGET,
+          requestId: 'EXPLICIT',
+        }),
+      );
+
+      const { data } = firstCallArg<{ data: { requestId: string } }>(
+        prisma.adminAudit.create,
+      );
+      expect(data.requestId).toBe('EXPLICIT');
+    });
+
+    it('caps an oversized correlation id', async () => {
+      await runWithRequestId('x'.repeat(200), () =>
+        service.record({
+          action: AdminAuditAction.DELETE_ADMIN,
+          actor: ACTOR,
+          target: TARGET,
+        }),
+      );
+      const { data } = firstCallArg<{ data: { requestId: string } }>(
+        prisma.adminAudit.create,
+      );
+      expect(data.requestId).toHaveLength(64);
     });
   });
 

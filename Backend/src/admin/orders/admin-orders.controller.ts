@@ -1,4 +1,12 @@
-import { Controller, Get, HttpCode, HttpStatus, Param, Query, UseGuards } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../../auth/guards/roles.guard';
@@ -23,14 +31,20 @@ export class AdminOrdersController {
 
   @Get()
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'List all orders (admin/operator) — paginated, filterable, searchable' })
+  @ApiOperation({
+    summary:
+      'List all orders (admin/operator) — paginated, filterable, searchable',
+  })
   list(@Query() query: ListAdminOrdersQueryDto) {
     return this.adminOrders.list(query);
   }
 
   @Get(':id')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Get full order details (admin/operator), including status history' })
+  @ApiOperation({
+    summary:
+      'Get full order details (admin/operator), including status history',
+  })
   getOne(@Param('id') id: string) {
     return this.adminOrders.getOne(id);
   }

@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { AdminAuditAction, AdminRole, Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { getRequestId } from '../../common/request-context';
 
 /** Who performed an audited action. */
 export interface AdminAuditActor {
@@ -27,6 +28,12 @@ export interface AdminAuditEntry {
   /** Untrusted request provenance — display-only. */
   ip?: string | null;
   userAgent?: string | null;
+  /**
+   * Correlation id of the originating HTTP request. Normally omitted: it is
+   * read from the ambient request context, so no caller has to remember to pass
+   * it. Supply it only to override (e.g. replaying an action out-of-band).
+   */
+  requestId?: string | null;
 }
 
 /**
@@ -81,10 +88,18 @@ export class AdminAuditService {
         newRole: entry.newRole ?? null,
         ip: truncate(entry.ip, 45),
         userAgent: truncate(entry.userAgent, 400),
+        // Taken from the ambient context when not given explicitly, so every
+        // action performed over HTTP is correlatable without the call sites
+        // having to thread it through.
+        requestId: truncate(entry.requestId ?? getRequestId(), 64),
       },
     });
+    // The same id is prefixed onto this line, so grepping it returns the HTTP
+    // request, any exception, and this audit write together.
+    const requestId = entry.requestId ?? getRequestId();
     this.logger.log(
-      `[audit] ${entry.action} target=${entry.target.id} ` +
+      `${requestId ? `[${requestId}] ` : ''}[audit] ${entry.action} ` +
+        `target=${entry.target.id} ` +
         `actor=${entry.actor?.id ?? entry.actorLabel ?? 'unknown'}`,
     );
   }

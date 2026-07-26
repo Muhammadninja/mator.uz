@@ -1,8 +1,21 @@
-import { IsIn, IsInt, IsOptional, IsString, Max, MaxLength, Min } from 'class-validator';
+import {
+  IsIn,
+  IsInt,
+  IsOptional,
+  IsString,
+  Max,
+  MaxLength,
+  Min,
+} from 'class-validator';
 import { Type } from 'class-transformer';
 
 /** Sort fields the admin orders list accepts (mapped to real columns in the service). */
-export const ADMIN_ORDER_SORT_FIELDS = ['createdAt', 'updatedAt', 'totalAmount', 'status'] as const;
+export const ADMIN_ORDER_SORT_FIELDS = [
+  'createdAt',
+  'updatedAt',
+  'totalAmount',
+  'status',
+] as const;
 export type AdminOrderSortField = (typeof ADMIN_ORDER_SORT_FIELDS)[number];
 
 /**
@@ -40,7 +53,9 @@ export class ListAdminOrdersQueryDto {
 
   @IsOptional()
   @IsString()
-  @IsIn(ADMIN_ORDER_SORT_FIELDS, { message: 'sortBy is not a supported sort field' })
+  @IsIn(ADMIN_ORDER_SORT_FIELDS, {
+    message: 'sortBy is not a supported sort field',
+  })
   sortBy?: AdminOrderSortField;
 
   @IsOptional()

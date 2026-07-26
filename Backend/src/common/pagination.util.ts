@@ -12,7 +12,11 @@
  * - below 1                        → 1
  * - above `max`                    → `max`
  */
-export function clampLimit(value: number | undefined | null, fallback: number, max: number): number {
+export function clampLimit(
+  value: number | undefined | null,
+  fallback: number,
+  max: number,
+): number {
   if (value == null || !Number.isFinite(value)) return fallback;
   const n = Math.floor(value);
   if (n < 1) return 1;
@@ -21,7 +25,11 @@ export function clampLimit(value: number | undefined | null, fallback: number, m
 }
 
 /** Resolve a radius (metres) into a safe integer in [1, max]. */
-export function clampRadius(value: number | undefined | null, fallback: number, max: number): number {
+export function clampRadius(
+  value: number | undefined | null,
+  fallback: number,
+  max: number,
+): number {
   if (value == null || !Number.isFinite(value)) return fallback;
   const n = Math.floor(value);
   if (n < 1) return 1;

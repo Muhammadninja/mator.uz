@@ -32,7 +32,10 @@ export function getAllowedAssetHosts(): string[] {
  * subdomain of, an allowlisted host. Fail-closed on parse errors, non-HTTPS
  * schemes, and an empty allowlist.
  */
-export function isAllowedAssetUrl(value: unknown, allowedHosts: string[] = getAllowedAssetHosts()): boolean {
+export function isAllowedAssetUrl(
+  value: unknown,
+  allowedHosts: string[] = getAllowedAssetHosts(),
+): boolean {
   if (typeof value !== 'string' || value.length === 0) return false;
   if (allowedHosts.length === 0) return false;
 
@@ -45,5 +48,7 @@ export function isAllowedAssetUrl(value: unknown, allowedHosts: string[] = getAl
   if (url.protocol !== 'https:') return false;
 
   const host = url.hostname.toLowerCase();
-  return allowedHosts.some((allowed) => host === allowed || host.endsWith(`.${allowed}`));
+  return allowedHosts.some(
+    (allowed) => host === allowed || host.endsWith(`.${allowed}`),
+  );
 }

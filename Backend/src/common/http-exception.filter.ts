@@ -7,6 +7,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
+import { getRequestId } from './request-context';
 
 /** Stable machine-readable error codes the mobile client switches on. */
 const STATUS_CODE: Record<number, string> = {
@@ -36,6 +37,9 @@ interface ErrorBody {
   message: string;
 }
 
+/** Express request carrying the id stamped by requestIdMiddleware. */
+type RequestWithId = Request & { requestId?: string };
+
 /**
  * Normalizes every error into the frontend contract `{ code, message }` while
  * preserving the original HTTP status. SSE responses (AI advisor) are left
@@ -54,21 +58,32 @@ export class HttpExceptionFilter implements ExceptionFilter {
     const res = ctx.getResponse<Response>();
     const req = ctx.getRequest<Request>();
 
+    // Correlation id for this request. Prefixed into every line below so a
+    // reported error can be traced to the exact request: `grep 3AA7FC` returns
+    // the HTTP entry, the audit write, and this failure together.
+    const requestId = getRequestId() ?? (req as RequestWithId)?.requestId;
+    const tag = requestId ? `[${requestId}] ` : '';
+
     // If the response has already started (e.g. an SSE stream), we can't send a
     // JSON body — just end it and let the stream's own error frame stand.
     if (res.headersSent) {
-      this.logger.warn(`Exception after headers sent on ${req?.method} ${req?.url}`);
+      this.logger.warn(
+        `${tag}Exception after headers sent on ${req?.method} ${req?.url}`,
+      );
       return;
     }
 
     const { status, body } = this.normalize(exception);
     if (status >= HttpStatus.INTERNAL_SERVER_ERROR) {
       this.logger.error(
-        `${req?.method} ${req?.url} -> ${status} ${body.code}: ${(exception as Error)?.message}`,
+        `${tag}${req?.method} ${req?.url} -> ${status} ${body.code}: ${(exception as Error)?.message}`,
         (exception as Error)?.stack,
       );
     }
-    res.status(status).json(body);
+    // Hand the id to the client as well, so a user reporting "it failed" can
+    // quote something that pinpoints the request in the logs. Safe to expose:
+    // it is an opaque random token that reveals nothing about the system.
+    res.status(status).json(requestId ? { ...body, requestId } : body);
   }
 
   private normalize(exception: unknown): { status: number; body: ErrorBody } {
@@ -84,11 +99,17 @@ export class HttpExceptionFilter implements ExceptionFilter {
     };
   }
 
-  private bodyFromHttpException(status: number, resp: string | object): ErrorBody {
+  private bodyFromHttpException(
+    status: number,
+    resp: string | object,
+  ): ErrorBody {
     const fallbackCode = STATUS_CODE[status] ?? 'ERROR';
 
     if (typeof resp === 'string') {
-      return { code: fallbackCode, message: resp || DEFAULT_MESSAGE[fallbackCode] || resp };
+      return {
+        code: fallbackCode,
+        message: resp || DEFAULT_MESSAGE[fallbackCode] || resp,
+      };
     }
 
     const r = resp as Record<string, unknown>;
@@ -107,11 +128,15 @@ export class HttpExceptionFilter implements ExceptionFilter {
     // class-validator returns `message` as a string[]; collapse to the first.
     let message: string;
     if (Array.isArray(r.message)) {
-      message = (r.message[0] as string) ?? DEFAULT_MESSAGE[fallbackCode] ?? 'Invalid request.';
+      message =
+        (r.message[0] as string) ??
+        DEFAULT_MESSAGE[fallbackCode] ??
+        'Invalid request.';
     } else if (typeof r.message === 'string' && r.message) {
       message = r.message;
     } else {
-      message = DEFAULT_MESSAGE[code] ?? DEFAULT_MESSAGE[fallbackCode] ?? 'Error';
+      message =
+        DEFAULT_MESSAGE[code] ?? DEFAULT_MESSAGE[fallbackCode] ?? 'Error';
     }
 
     return { code, message };

@@ -21,8 +21,13 @@ function makePrismaMock() {
   const prisma: Record<string, unknown> = { order };
   // Array form runs the (already-invoked) query promises; callback form gets the mock.
   prisma.$transaction = (arg: unknown) =>
-    Array.isArray(arg) ? Promise.all(arg) : (arg as (tx: unknown) => unknown)(prisma);
-  return prisma as { order: typeof order; $transaction: (arg: unknown) => unknown };
+    Array.isArray(arg)
+      ? Promise.all(arg)
+      : (arg as (tx: unknown) => unknown)(prisma);
+  return prisma as {
+    order: typeof order;
+    $transaction: (arg: unknown) => unknown;
+  };
 }
 
 function listRow(over: Partial<Record<string, unknown>> = {}) {
@@ -70,7 +75,14 @@ function detailRow(over: Partial<Record<string, unknown>> = {}) {
       lng: 69.27,
     },
     items: [
-      { id: 'oi_1', partId: 'part_1', title: 'Brake pad', quantity: 2, priceUzs: 120000, lineTotalUzs: 240000 },
+      {
+        id: 'oi_1',
+        partId: 'part_1',
+        title: 'Brake pad',
+        quantity: 2,
+        priceUzs: 120000,
+        lineTotalUzs: 240000,
+      },
     ],
     payments: [{ provider: 'CLICK', status: 'PAID' }],
     statusHistory: [
@@ -122,7 +134,12 @@ describe('AdminOrdersService', () => {
 
       const res = await service.list({ page: 2, limit: 20 });
 
-      expect(res.meta).toEqual({ page: 2, limit: 20, totalItems: 142, totalPages: 8 });
+      expect(res.meta).toEqual({
+        page: 2,
+        limit: 20,
+        totalItems: 142,
+        totalPages: 8,
+      });
       expect(prisma.order.findMany).toHaveBeenCalledWith(
         expect.objectContaining({ skip: 20, take: 20 }),
       );
@@ -136,9 +153,18 @@ describe('AdminOrdersService', () => {
       const res = await service.list({});
 
       expect(prisma.order.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({ skip: 0, take: 20, orderBy: { createdAt: 'desc' } }),
+        expect.objectContaining({
+          skip: 0,
+          take: 20,
+          orderBy: { createdAt: 'desc' },
+        }),
       );
-      expect(res.meta).toEqual({ page: 1, limit: 20, totalItems: 0, totalPages: 0 });
+      expect(res.meta).toEqual({
+        page: 1,
+        limit: 20,
+        totalItems: 0,
+        totalPages: 0,
+      });
     });
 
     it('clamps a limit above 100 down to 100', async () => {
@@ -147,7 +173,9 @@ describe('AdminOrdersService', () => {
 
       const res = await service.list({ limit: 500 });
 
-      expect(prisma.order.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 100 }));
+      expect(prisma.order.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ take: 100 }),
+      );
       expect(res.meta.limit).toBe(100);
     });
 
@@ -168,7 +196,9 @@ describe('AdminOrdersService', () => {
 
       await service.list({ status: 'all' });
 
-      expect(prisma.order.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: {} }));
+      expect(prisma.order.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: {} }),
+      );
     });
 
     it('parses a comma-separated status filter into where.status.in', async () => {
@@ -179,15 +209,17 @@ describe('AdminOrdersService', () => {
 
       expect(prisma.order.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { status: { in: [OrderStatus.PENDING_PAYMENT, OrderStatus.PAID] } },
+          where: {
+            status: { in: [OrderStatus.PENDING_PAYMENT, OrderStatus.PAID] },
+          },
         }),
       );
     });
 
     it('rejects an unknown status token with 400', async () => {
-      await expect(service.list({ status: 'pending_payment,confirmed' })).rejects.toBeInstanceOf(
-        BadRequestException,
-      );
+      await expect(
+        service.list({ status: 'pending_payment,confirmed' }),
+      ).rejects.toBeInstanceOf(BadRequestException);
       expect(prisma.order.findMany).not.toHaveBeenCalled();
     });
 
@@ -202,9 +234,24 @@ describe('AdminOrdersService', () => {
           where: {
             OR: [
               { id: { contains: '+998903700340', mode: 'insensitive' } },
-              { user: { displayName: { contains: '+998903700340', mode: 'insensitive' } } },
-              { user: { firstName: { contains: '+998903700340', mode: 'insensitive' } } },
-              { user: { lastName: { contains: '+998903700340', mode: 'insensitive' } } },
+              {
+                user: {
+                  displayName: {
+                    contains: '+998903700340',
+                    mode: 'insensitive',
+                  },
+                },
+              },
+              {
+                user: {
+                  firstName: { contains: '+998903700340', mode: 'insensitive' },
+                },
+              },
+              {
+                user: {
+                  lastName: { contains: '+998903700340', mode: 'insensitive' },
+                },
+              },
               { user: { phoneE164: { contains: '998903700340' } } },
               { contactPhoneE164: { contains: '998903700340' } },
             ],
@@ -225,7 +272,9 @@ describe('AdminOrdersService', () => {
           where: {
             OR: [
               { id: { contains: 'Ali', mode: 'insensitive' } },
-              { user: { displayName: { contains: 'Ali', mode: 'insensitive' } } },
+              {
+                user: { displayName: { contains: 'Ali', mode: 'insensitive' } },
+              },
               { user: { firstName: { contains: 'Ali', mode: 'insensitive' } } },
               { user: { lastName: { contains: 'Ali', mode: 'insensitive' } } },
             ],
@@ -267,7 +316,9 @@ describe('AdminOrdersService', () => {
   describe('getOne', () => {
     it('404s on an unknown order', async () => {
       prisma.order.findUnique.mockResolvedValue(null);
-      await expect(service.getOne('nope')).rejects.toBeInstanceOf(NotFoundException);
+      await expect(service.getOne('nope')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
     });
 
     it('maps the full detail with items and chronological status history', async () => {
@@ -316,12 +367,14 @@ describe('AdminOrdersService', () => {
       const { data } = await service.getOne('ord_1');
 
       // The stored rows ARE the source of truth: created (10:00) -> paid (10:30) -> processing (11:15).
-      expect(data.statusHistory.map((h: { status: string }) => h.status)).toEqual([
-        'pending_payment',
-        'paid',
-        'processing',
-      ]);
-      expect(data.statusHistory[0].actor).toEqual({ type: 'SYSTEM', id: null, name: 'System' });
+      expect(
+        data.statusHistory.map((h: { status: string }) => h.status),
+      ).toEqual(['pending_payment', 'paid', 'processing']);
+      expect(data.statusHistory[0].actor).toEqual({
+        type: 'SYSTEM',
+        id: null,
+        name: 'System',
+      });
       expect(data.statusHistory[2].actor).toEqual({
         type: 'ADMIN',
         id: 'usr_admin',
@@ -330,7 +383,9 @@ describe('AdminOrdersService', () => {
     });
 
     it('synthesizes a single SYSTEM creation entry only for a legacy order with no history rows', async () => {
-      prisma.order.findUnique.mockResolvedValue(detailRow({ statusHistory: [] }));
+      prisma.order.findUnique.mockResolvedValue(
+        detailRow({ statusHistory: [] }),
+      );
 
       const { data } = await service.getOne('ord_1');
 
@@ -346,7 +401,9 @@ describe('AdminOrdersService', () => {
     });
 
     it('returns shippingAddress null for a pickup order (no address)', async () => {
-      prisma.order.findUnique.mockResolvedValue(detailRow({ deliveryAddress: null }));
+      prisma.order.findUnique.mockResolvedValue(
+        detailRow({ deliveryAddress: null }),
+      );
 
       const { data } = await service.getOne('ord_1');
 
@@ -357,12 +414,17 @@ describe('AdminOrdersService', () => {
 
 describe('ListAdminOrdersQueryDto validation', () => {
   it('accepts whitelisted sortBy/order', () => {
-    const dto = plainToInstance(ListAdminOrdersQueryDto, { sortBy: 'status', order: 'asc' });
+    const dto = plainToInstance(ListAdminOrdersQueryDto, {
+      sortBy: 'status',
+      order: 'asc',
+    });
     expect(validateSync(dto)).toHaveLength(0);
   });
 
   it('rejects an unsupported sortBy (→ 400 via ValidationPipe)', () => {
-    const dto = plainToInstance(ListAdminOrdersQueryDto, { sortBy: 'id; DROP TABLE' });
+    const dto = plainToInstance(ListAdminOrdersQueryDto, {
+      sortBy: 'id; DROP TABLE',
+    });
     const errors = validateSync(dto);
     expect(errors).not.toHaveLength(0);
     expect(errors[0].property).toBe('sortBy');
