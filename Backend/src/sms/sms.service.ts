@@ -151,12 +151,23 @@ export class SmsService {
     template: string | null,
   ): Promise<void> {
     try {
+      // Defence in depth against a provider that hands back a non-integer
+      // `parts` despite the SmsSendResult contract (Sayqal did exactly this,
+      // returning the string "1"). Prisma's `parts Int?` rejects such a value
+      // and the throw would discard the WHOLE accounting row — losing the
+      // price snapshot the SMS cost metrics are summed from. A bad `parts` is
+      // not worth that: coerce what we can, drop what we cannot.
+      const parts =
+        typeof result.parts === 'number'
+          ? result.parts
+          : Number.parseInt(String(result.parts), 10);
+
       await this.prisma.smsMessage.create({
         data: {
           provider: this.provider.name,
           providerTransactionId: result.providerTransactionId,
           providerSmsId: result.providerSmsId,
-          parts: result.parts,
+          parts: Number.isInteger(parts) ? parts : null,
           phoneE164: toE164,
           operatorId: operator?.operatorId ?? null,
           operatorName: operator?.operatorName ?? null,

@@ -76,6 +76,30 @@ describe('SayqalSmsProvider', () => {
     });
   });
 
+  it('coerces a string `parts` to a number (the gateway really returns "1")', async () => {
+    mockedAxios.post.mockResolvedValueOnce({
+      data: { transactionid: 'tx-1', smsid: 'sms-1', parts: '1' },
+    });
+
+    const result = await provider.send('+998901234567', 'code 123456');
+
+    // Must be a real number, not "1": Prisma's `parts Int?` rejects a string
+    // and the rejection previously discarded the whole accounting row.
+    expect(result.parts).toBe(1);
+  });
+
+  it('degrades a missing or unparseable `parts` to null rather than NaN', async () => {
+    mockedAxios.post.mockResolvedValueOnce({
+      data: { transactionid: 'tx-2', smsid: 'sms-2' },
+    });
+    expect((await provider.send('+998901234567', 'hi')).parts).toBeNull();
+
+    mockedAxios.post.mockResolvedValueOnce({
+      data: { transactionid: 'tx-3', smsid: 'sms-3', parts: 'abc' },
+    });
+    expect((await provider.send('+998901234567', 'hi')).parts).toBeNull();
+  });
+
   it('includes nickname only when configured', async () => {
     mockedAxios.post.mockResolvedValue({ data: { transactionid: '1', smsid: '1', parts: 1 } });
 

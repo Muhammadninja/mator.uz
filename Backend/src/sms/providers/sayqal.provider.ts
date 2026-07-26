@@ -11,11 +11,31 @@ export interface SayqalConfig {
   nickname?: string; // optional registered alpha-name (sender)
 }
 
-/** Shape of a successful /sms/TransmitSMS response (see Sayqal SMS API v2.0). */
+/**
+ * Shape of a successful /sms/TransmitSMS response (see Sayqal SMS API v2.0).
+ *
+ * `parts` is typed `number | string` because the gateway is documented as
+ * returning a number but actually sends a JSON string (`"1"`). The declared
+ * type is only an assertion about untrusted JSON — TypeScript cannot enforce
+ * it at runtime — so the value is normalised by `toParts()` before it leaves
+ * this provider, keeping SmsSendResult.parts a real `number | null`.
+ */
 interface SayqalSuccess {
   transactionid: string;
   smsid: string;
-  parts: number;
+  parts: number | string;
+}
+
+/**
+ * Coerce the gateway's `parts` into the `number | null` that SmsSendResult
+ * promises. Anything non-numeric (missing, null, `"abc"`, `NaN`) degrades to
+ * null rather than poisoning the accounting insert: `parts` is a reporting
+ * field, so an unusable value must never cost us the whole SmsMessage row.
+ */
+function toParts(raw: number | string | null | undefined): number | null {
+  if (raw == null) return null;
+  const n = typeof raw === 'number' ? raw : Number.parseInt(raw, 10);
+  return Number.isInteger(n) ? n : null;
 }
 
 /**
@@ -114,11 +134,14 @@ export class SayqalSmsProvider implements SmsProvider {
         );
         // Surface the gateway's own identifiers/parts for accounting. Read
         // straight from the response — never fabricated; `?? null` covers a
-        // success body that omits a field.
+        // success body that omits a field. `parts` additionally goes through
+        // toParts(): Sayqal sends it as the string "1", and Prisma's `parts
+        // Int?` column rejects a string outright, which previously threw away
+        // the entire accounting row (and with it the SMS cost metrics).
         return {
           providerTransactionId: res.data?.transactionid ?? null,
           providerSmsId: res.data?.smsid ?? null,
-          parts: res.data?.parts ?? null,
+          parts: toParts(res.data?.parts),
         };
       } catch (err) {
         lastErr = err;

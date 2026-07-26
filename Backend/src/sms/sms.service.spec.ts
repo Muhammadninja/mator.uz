@@ -114,6 +114,34 @@ describe('SmsService accounting', () => {
     });
   });
 
+  it('coerces a string `parts` from a misbehaving provider so the row still writes', async () => {
+    // Regression: Sayqal returns parts as the string "1". Prisma's `parts Int?`
+    // rejected it, the create() threw, and the accounting row — including the
+    // price snapshot the SMS cost metrics sum — was silently lost.
+    providerSend.mockResolvedValueOnce({
+      providerTransactionId: 'tx-1',
+      providerSmsId: 'sms-1',
+      parts: '1' as unknown as number,
+    });
+
+    await service.sendSms('+998901234567', 'hi', 'otp');
+
+    expect(lastCreatedData().parts).toBe(1);
+  });
+
+  it('writes null for an unparseable `parts` instead of losing the whole row', async () => {
+    providerSend.mockResolvedValueOnce({
+      providerTransactionId: 'tx-2',
+      providerSmsId: 'sms-2',
+      parts: 'abc' as unknown as number,
+    });
+
+    await service.sendSms('+998901234567', 'hi', 'otp');
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(lastCreatedData().parts).toBeNull();
+  });
+
   it('does not record a row when the provider send fails', async () => {
     providerSend.mockRejectedValueOnce(new Error('gateway down'));
     await expect(service.sendSms('+998901234567', 'hi', 'otp')).rejects.toThrow('gateway down');
