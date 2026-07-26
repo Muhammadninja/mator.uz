@@ -42,6 +42,13 @@ export interface MetricsConfig {
   prefix: string;
   /** Whether to collect BullMQ queue counts when a scrape arrives. */
   queueMetricsEnabled: boolean;
+  /**
+   * Whether to aggregate the SMS accounting table when a scrape arrives. Its own
+   * flag (rather than riding on queueMetricsEnabled) because it is the one
+   * collector that touches the DATABASE — an operator who needs to take that
+   * query off the scrape path should not have to give up queue depths too.
+   */
+  smsCostMetricsEnabled: boolean;
 }
 
 export const DEFAULT_METRICS_PATH = '/metrics';
@@ -82,6 +89,10 @@ export function resolveMetricsConfig(
     prefix: normalizeMetricsPrefix(config.get<string>('METRICS_PREFIX')),
     queueMetricsEnabled: boolEnv(
       config.get<string>('METRICS_QUEUE_ENABLED'),
+      true,
+    ),
+    smsCostMetricsEnabled: boolEnv(
+      config.get<string>('METRICS_SMS_COST_ENABLED'),
       true,
     ),
   };

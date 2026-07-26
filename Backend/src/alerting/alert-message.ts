@@ -136,6 +136,15 @@ export function renderAlertMessage(
   const labels = renderLabels(notification);
   if (labels !== null) lines.push('', `<i>${escapeHtml(labels)}</i>`);
 
+  // Links come BEFORE the build footer: during an incident "where do I look"
+  // and "what do I do" are the next actions, while provenance is context.
+  for (const [label, url] of linkEntries(notification)) {
+    // Telegram auto-links a bare URL, and `<a href>` would hide the address —
+    // which matters when someone needs to copy or verify it. The heading on its
+    // own line matches the values block above it.
+    lines.push('', `${label}:`, escapeHtml(url));
+  }
+
   const source = renderSourceLines(notification);
   if (source.length > 0) {
     lines.push('', ...source.map((line) => `<i>${escapeHtml(line)}</i>`));
@@ -144,6 +153,26 @@ export function renderAlertMessage(
   lines.push('', 'Time:', formatUtc(notification.firedAt));
 
   return lines.join('\n');
+}
+
+/**
+ * The alert's links as `[heading, url]` pairs, in the order an operator needs
+ * them: WHERE to look first, then WHAT to do.
+ *
+ * Empty when the alert has no links — a rule with no dashboard configured
+ * renders no heading rather than an empty section.
+ */
+export function linkEntries(
+  notification: AlertNotification,
+): [string, string][] {
+  const entries: [string, string][] = [];
+  if (notification.links.dashboard !== undefined) {
+    entries.push(['Dashboard', notification.links.dashboard]);
+  }
+  if (notification.links.runbook !== undefined) {
+    entries.push(['Runbook', notification.links.runbook]);
+  }
+  return entries;
 }
 
 /**
@@ -172,6 +201,10 @@ export function renderPlainMessage(
 
   const labels = renderLabels(notification);
   if (labels !== null) lines.push('', labels);
+
+  for (const [label, url] of linkEntries(notification)) {
+    lines.push('', `${label}:`, url);
+  }
 
   const source = renderSourceLines(notification);
   if (source.length > 0) lines.push('', ...source);

@@ -7,8 +7,9 @@ import {
   queueThresholdEnvVar,
   resolveAlertingConfig,
   resolveQueueThresholds,
+  resolveRuleLinkTemplates,
 } from './alerting.config';
-import { AlertSeverity } from './alerting.types';
+import { AlertSeverity, renderUrlTemplate } from './alerting.types';
 
 /**
  * Requirement 6: every threshold comes from configuration, never hardcoded.
@@ -262,6 +263,138 @@ describe('channel configuration', () => {
     expect(config.slackWebhookUrl).toBe('https://slack.test/a');
     expect(config.discordWebhookUrl).toBe('https://discord.test/b');
     expect(config.webhookUrl).toBe('https://sink.test/c');
+  });
+});
+
+describe('alert links', () => {
+  const rule = {
+    name: 'queue_backlog',
+    dashboardUrl: '/d/mator-bullmq?var-queue={{queue}}',
+  };
+
+  it('joins a rule-relative path onto the Grafana base URL', () => {
+    // Rules never hardcode a hostname, so the same code points at staging
+    // Grafana in staging and production Grafana in production.
+    const links = resolveRuleLinkTemplates(
+      rule,
+      configWith({ ALERT_GRAFANA_BASE_URL: 'https://grafana.mator.uz' }),
+    );
+
+    expect(links.dashboard).toBe(
+      'https://grafana.mator.uz/d/mator-bullmq?var-queue={{queue}}',
+    );
+  });
+
+  it('tolerates a trailing slash on the base URL', () => {
+    const links = resolveRuleLinkTemplates(
+      rule,
+      configWith({ ALERT_GRAFANA_BASE_URL: 'https://grafana.mator.uz/' }),
+    );
+
+    expect(links.dashboard).not.toContain('//d/');
+  });
+
+  it('yields no dashboard when no base URL is configured', () => {
+    // A half-formed link like "/d/mator-bullmq" is useless in a chat message.
+    expect(
+      resolveRuleLinkTemplates(rule, configWith()).dashboard,
+    ).toBeUndefined();
+  });
+
+  it('passes an absolute rule URL through untouched', () => {
+    const links = resolveRuleLinkTemplates(
+      { name: 'r', dashboardUrl: 'https://elsewhere.test/panel' },
+      configWith({ ALERT_GRAFANA_BASE_URL: 'https://grafana.mator.uz' }),
+    );
+
+    expect(links.dashboard).toBe('https://elsewhere.test/panel');
+  });
+
+  it('lets a per-rule env var override the declared URL', () => {
+    // A dashboard that moves can be re-pointed without a deploy — which matters
+    // because a stale link is discovered when it is least convenient to fix.
+    const links = resolveRuleLinkTemplates(
+      rule,
+      configWith({
+        ALERT_GRAFANA_BASE_URL: 'https://grafana.mator.uz',
+        ALERT_QUEUE_BACKLOG_DASHBOARD_URL: 'https://grafana.mator.uz/d/new',
+      }),
+    );
+
+    expect(links.dashboard).toBe('https://grafana.mator.uz/d/new');
+  });
+
+  it('derives a runbook from the base URL and the rule name', () => {
+    // Convention over configuration: writing the wiki page is enough.
+    const links = resolveRuleLinkTemplates(
+      rule,
+      configWith({ ALERT_RUNBOOK_BASE_URL: 'https://wiki.mator.uz/runbooks' }),
+    );
+
+    expect(links.runbook).toBe('https://wiki.mator.uz/runbooks/queue-backlog');
+  });
+
+  it('prefers an explicitly declared runbook over the convention', () => {
+    const links = resolveRuleLinkTemplates(
+      { name: 'queue_backlog', runbookUrl: 'https://wiki.test/custom' },
+      configWith({ ALERT_RUNBOOK_BASE_URL: 'https://wiki.mator.uz/runbooks' }),
+    );
+
+    expect(links.runbook).toBe('https://wiki.test/custom');
+  });
+
+  it('yields no runbook when nothing is configured', () => {
+    expect(
+      resolveRuleLinkTemplates(rule, configWith()).runbook,
+    ).toBeUndefined();
+  });
+});
+
+describe('renderUrlTemplate', () => {
+  it('substitutes labels into a template', () => {
+    // This is what makes one declaration serve every instance of a fan-out
+    // rule: the link lands on the panel for the queue that actually broke.
+    expect(
+      renderUrlTemplate('https://g.test/d/q?var-queue={{queue}}', {
+        queue: 'image-processing',
+      }),
+    ).toBe('https://g.test/d/q?var-queue=image-processing');
+  });
+
+  it('percent-encodes label values', () => {
+    // A label reaching the URL verbatim could otherwise produce a broken link.
+    expect(
+      renderUrlTemplate('https://g.test/d/q?var-queue={{queue}}', {
+        queue: 'a b&c',
+      }),
+    ).toBe('https://g.test/d/q?var-queue=a%20b%26c');
+  });
+
+  it('tolerates whitespace inside the placeholder', () => {
+    expect(
+      renderUrlTemplate('https://g.test/{{ queue }}', { queue: 'sms' }),
+    ).toBe('https://g.test/sms');
+  });
+
+  it('invalidates the URL when a placeholder has no matching label', () => {
+    // A link that 404s or shows the wrong panel costs MORE time than no link,
+    // because it is trusted before it is checked.
+    expect(
+      renderUrlTemplate('https://g.test/d/q?var-queue={{queue}}', {
+        provider: 'eskiz',
+      }),
+    ).toBeUndefined();
+  });
+
+  it('passes a template with no placeholders through', () => {
+    expect(renderUrlTemplate('https://g.test/d/q', {})).toBe(
+      'https://g.test/d/q',
+    );
+  });
+
+  it('is undefined for an absent or blank template', () => {
+    expect(renderUrlTemplate(undefined, {})).toBeUndefined();
+    expect(renderUrlTemplate('   ', {})).toBeUndefined();
   });
 });
 

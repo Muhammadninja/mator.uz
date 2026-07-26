@@ -63,6 +63,13 @@ export interface AppMetrics {
   smsSentTotal: Counter<'provider' | 'template'>;
   /** SMS that failed to send, by provider and coarse reason. */
   smsFailedTotal: Counter<'provider' | 'template' | 'reason'>;
+  /**
+   * Cumulative accounted SMS spend in UZS per provider, read from the SMS
+   * accounting table at scrape time. A GAUGE, not a counter — see below.
+   */
+  smsProviderCostUzs: Gauge<'provider'>;
+  /** Cumulative accounted SMS spend in UZS across all providers. */
+  smsCostUzs: Gauge<string>;
   /** End-to-end image processing wall time in seconds, by outcome. */
   imageProcessingDuration: Histogram<'result'>;
   /** Image jobs by terminal outcome — the counter beside the histogram. */
@@ -172,6 +179,39 @@ export function createAppMetrics(
       labelNames: ['provider', 'template', 'reason'] as const,
       registers,
     }),
+    // ── SMS cost ──────────────────────────────────────────────────────────
+    // GAUGES, even though the value is monotonic in practice. It is not
+    // accumulated by this process: it is the SUM of `sms_messages.price_uzs`
+    // read straight from Postgres on each scrape, so the DB — not process
+    // memory — is the source of truth. A Counter would be wrong twice over: it
+    // would reset to 0 on every deploy (losing spend a restart cannot un-spend),
+    // and under PM2 cluster mode each instance would accumulate only the sends
+    // it happened to serve. As a gauge, every instance reports the same DB-wide
+    // figure, which is why the dashboard aggregates these with `max` and never
+    // `sum` (the same rule the BullMQ gauges follow).
+    //
+    // ── Why no `_total` suffix ──
+    // By Prometheus convention `_total` marks a COUNTER, and tooling leans on
+    // that: promtool's lint and the exporter guidelines both read it as a
+    // monotonic cumulative counter, and a `_total` gauge invites someone to
+    // reach for rate()/increase() — which is meaningless here. The name carries
+    // only the unit (`_uzs`); "cumulative to date" lives in the help text and
+    // the dashboard panel descriptions instead.
+    //
+    // Rows with a NULL price_uzs (operator unresolved at send time) contribute
+    // nothing — see SmsCostCollector.
+    smsProviderCostUzs: new Gauge({
+      name: `${prefix}sms_provider_cost_uzs`,
+      help: 'Cumulative accounted SMS cost in UZS to date, per provider, summed from the SMS accounting table at scrape time.',
+      labelNames: ['provider'] as const,
+      registers,
+    }),
+    smsCostUzs: new Gauge({
+      name: `${prefix}sms_cost_uzs`,
+      help: 'Cumulative accounted SMS cost in UZS to date across all providers (the sum of mator_sms_provider_cost_uzs).',
+      registers,
+    }),
+
     // Wider buckets than the generic queue histogram: FLUX + two Cloudinary
     // round trips routinely run tens of seconds. See IMAGE_DURATION_BUCKETS.
     imageProcessingDuration: new Histogram({

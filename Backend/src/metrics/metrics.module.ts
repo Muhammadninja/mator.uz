@@ -9,6 +9,7 @@ import { HttpMetricsInterceptor } from './http-metrics.interceptor';
 import { metricsProviders } from './metrics.providers';
 import { MetricsService } from './metrics.service';
 import { QueueMetricsCollector } from './queue-metrics.collector';
+import { SmsCostCollector } from './sms-cost.collector';
 
 /**
  * Phase A observability: Prometheus metrics for the API, the Node process, the
@@ -93,6 +94,9 @@ function buildMetricsModule() {
       ...metricsProviders(),
       MetricsService,
       QueueMetricsCollector,
+      // Reads the SMS accounting table on scrape. No import is needed for
+      // PrismaService: PrismaModule is @Global, exactly like this module.
+      SmsCostCollector,
       ...interceptor,
     ],
     exports: [MetricsService],

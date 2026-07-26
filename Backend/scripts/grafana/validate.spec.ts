@@ -34,6 +34,7 @@ function realMetrics(): {
     path: '/metrics',
     prefix: DEFAULT_METRICS_PREFIX,
     queueMetricsEnabled: true,
+    smsCostMetricsEnabled: true,
   };
   const registry = new Registry();
   createAppMetrics(registry, config);

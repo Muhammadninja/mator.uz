@@ -53,6 +53,13 @@ interface HealthProbe {
 export class BackendHealthRule implements AlertRule {
   readonly name = 'backend_health';
 
+  /**
+   * The backend overview — process, HTTP and dependency health in one place.
+   * Not per-component: when Postgres is unreachable the useful view is the
+   * whole backend's state, not one panel.
+   */
+  readonly dashboardUrl = '/d/mator-backend-overview';
+
   private readonly logger = new Logger(BackendHealthRule.name);
   private readonly timeoutMs: number;
   private readonly probes: readonly HealthProbe[];

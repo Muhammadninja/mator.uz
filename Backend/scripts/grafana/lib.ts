@@ -59,6 +59,17 @@ export interface PanelOptions {
   overrides?: unknown[];
   /** Reduce options for stat panels. */
   reducer?: string;
+  /**
+   * Stat panels only: LABEL each tile with its series name (`value_and_name`)
+   * rather than showing the bare number.
+   *
+   * A stat panel already renders one tile per returned series; the default
+   * `textMode: 'auto'` hides the name when there is only one, which is right for
+   * every existing panel here (all of them query a single aggregated series).
+   * Set true for a panel whose query returns a series PER LABEL VALUE (e.g. cost
+   * by provider) — without a name, a row of numbers is unreadable.
+   */
+  perSeries?: boolean;
   noValue?: string;
   maxDataPoints?: number;
 }
@@ -237,10 +248,14 @@ export function stat(o: PanelOptions, layout: Layout): unknown {
       reduceOptions: {
         calcs: [o.reducer ?? 'lastNotNull'],
         fields: '',
+        // Always false: `values: true` would reduce a frame to one tile per
+        // DATAPOINT, not per series. One tile per series is what a stat panel
+        // already does with a multi-frame query — see `perSeries`, which only
+        // changes how each tile is LABELLED.
         values: false,
       },
       showPercentChange: false,
-      textMode: 'auto',
+      textMode: o.perSeries ? 'value_and_name' : 'auto',
       wideLayout: true,
       ...(o.textSize ? { text: { valueSize: o.textSize } } : {}),
     },

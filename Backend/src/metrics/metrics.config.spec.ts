@@ -21,6 +21,7 @@ describe('resolveMetricsConfig', () => {
     expect(config.path).toBe(DEFAULT_METRICS_PATH);
     expect(config.prefix).toBe(DEFAULT_METRICS_PREFIX);
     expect(config.queueMetricsEnabled).toBe(true);
+    expect(config.smsCostMetricsEnabled).toBe(true);
   });
 
   it('disables only on an unambiguously false value', () => {
@@ -51,6 +52,17 @@ describe('resolveMetricsConfig', () => {
     );
     expect(config.path).toBe('/internal/prom');
     expect(config.queueMetricsEnabled).toBe(false);
+  });
+
+  it('toggles the SMS cost query independently of the queue collector', () => {
+    // The two collectors hit different backends (Postgres vs Redis), so an
+    // operator taking the DB query off the scrape path must not lose queue
+    // depths as a side effect.
+    const config = resolveMetricsConfig(
+      configWith({ METRICS_SMS_COST_ENABLED: 'false' }),
+    );
+    expect(config.smsCostMetricsEnabled).toBe(false);
+    expect(config.queueMetricsEnabled).toBe(true);
   });
 });
 

@@ -182,6 +182,114 @@ describe('AlertEvaluatorService', () => {
     expect(new Set(sent.map((n) => n.fingerprint)).size).toBe(1);
   });
 
+  describe('links', () => {
+    /** A rule declaring a label-templated dashboard, like the real one. */
+    function linkedRule(result: RuleResult) {
+      return {
+        ...stubRule('queue_backlog', result),
+        dashboardUrl: '/d/mator-bullmq?var-queue={{queue}}',
+      } as unknown as jest.Mocked<AlertRule> & AlertRule;
+    }
+
+    function buildLinked(rules: AlertRule[], env: Record<string, string>) {
+      const { notifier, sent } = stubNotifier();
+      const evaluator = new AlertEvaluatorService(
+        rules,
+        stubStore(),
+        notifier,
+        stubSilence(),
+        SOURCE,
+        configWith({ ALERT_ENVIRONMENT_LABEL: 'Production', ...env }),
+      );
+      return { evaluator, sent };
+    }
+
+    it("resolves the dashboard against the firing alert's own labels", async () => {
+      // The point of the templating: the link lands on the panel for the queue
+      // that actually broke, not a generic overview to filter by hand.
+      const { evaluator, sent } = buildLinked(
+        [linkedRule({ firing: [payload({ labels: { queue: 'sms' } })] })],
+        { ALERT_GRAFANA_BASE_URL: 'https://grafana.mator.uz' },
+      );
+
+      await evaluator.evaluate();
+
+      expect(sent[0].links.dashboard).toBe(
+        'https://grafana.mator.uz/d/mator-bullmq?var-queue=sms',
+      );
+    });
+
+    it('gives each fan-out instance its own dashboard link', async () => {
+      const { evaluator, sent } = buildLinked(
+        [
+          linkedRule({
+            firing: [
+              payload({ labels: { queue: 'sms' } }),
+              payload({ labels: { queue: 'image-processing' } }),
+            ],
+          }),
+        ],
+        { ALERT_GRAFANA_BASE_URL: 'https://grafana.mator.uz' },
+      );
+
+      await evaluator.evaluate();
+
+      expect(sent.map((n) => n.links.dashboard).sort()).toEqual([
+        'https://grafana.mator.uz/d/mator-bullmq?var-queue=image-processing',
+        'https://grafana.mator.uz/d/mator-bullmq?var-queue=sms',
+      ]);
+    });
+
+    it('derives the runbook from the configured base', async () => {
+      const { evaluator, sent } = buildLinked(
+        [linkedRule({ firing: [payload()] })],
+        { ALERT_RUNBOOK_BASE_URL: 'https://wiki.mator.uz/runbooks' },
+      );
+
+      await evaluator.evaluate();
+
+      expect(sent[0].links.runbook).toBe(
+        'https://wiki.mator.uz/runbooks/queue-backlog',
+      );
+    });
+
+    it('emits no links when nothing is configured', async () => {
+      // An unconfigured deployment renders no link section at all.
+      const { evaluator, sent } = buildLinked(
+        [linkedRule({ firing: [payload()] })],
+        {},
+      );
+
+      await evaluator.evaluate();
+
+      expect(sent[0].links).toEqual({});
+    });
+
+    it('carries no links on a resolution', async () => {
+      // The incident is over — "open the dashboard" is no longer the ask.
+      const key = 'queue_backlog{environment="production",queue="sms"}';
+      const rule = linkedRule(NO_ALERTS);
+      const store = stubStore([key]);
+      const { notifier, sent } = stubNotifier();
+      const evaluator = new AlertEvaluatorService(
+        [rule],
+        store,
+        notifier,
+        stubSilence(),
+        SOURCE,
+        configWith({
+          ALERT_ENVIRONMENT_LABEL: 'Production',
+          ALERT_GRAFANA_BASE_URL: 'https://grafana.mator.uz',
+        }),
+      );
+
+      await evaluator.evaluate();
+
+      expect(sent[0].state).toBe(ALERT_STATE.RESOLVED);
+      expect(sent[0].links).toEqual({});
+    });
+  });
+
   it('attaches the build/host source to every notification', async () => {
     const { evaluator, sent } = buildEvaluator([
       stubRule('queue_backlog', { firing: [payload()] }),

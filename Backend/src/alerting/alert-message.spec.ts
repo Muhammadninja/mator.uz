@@ -46,6 +46,7 @@ function notification(
     values: { waiting: 186, threshold: 100 },
     title: 'Image Processing Queue Backlog',
     summary: 'image processing queue backlog',
+    links: {},
     source: SOURCE,
     firedAt: FIRED_AT,
     ...over,
@@ -103,6 +104,57 @@ describe('renderAlertMessage', () => {
       expect(alertFingerprint('queue_backlog{queue="sms"}')).not.toBe(
         alertFingerprint('queue_backlog{queue="image-processing"}'),
       );
+    });
+  });
+
+  describe('links', () => {
+    const LINKS = {
+      dashboard: 'https://grafana.mator.uz/d/mator-bullmq?var-queue=sms',
+      runbook: 'https://wiki.mator.uz/runbooks/queue-backlog',
+    };
+
+    it('renders dashboard and runbook above the build footer', () => {
+      // Order matters: during an incident "where do I look" and "what do I do"
+      // are the next actions; provenance is context that comes after.
+      const text = plain(
+        renderAlertMessage(notification({ links: LINKS }), 'Production'),
+      );
+
+      expect(text).toContain(`Dashboard:\n${LINKS.dashboard}`);
+      expect(text).toContain(`Runbook:\n${LINKS.runbook}`);
+      expect(text.indexOf('Dashboard:')).toBeLessThan(text.indexOf('Build:'));
+    });
+
+    it('renders only the links that exist', () => {
+      const text = plain(
+        renderAlertMessage(
+          notification({ links: { runbook: LINKS.runbook } }),
+          'Production',
+        ),
+      );
+
+      expect(text).toContain('Runbook:');
+      // An empty "Dashboard:" heading is worse than no section at all.
+      expect(text).not.toContain('Dashboard:');
+    });
+
+    it('omits the section entirely when a rule has no links', () => {
+      const text = plain(renderAlertMessage(notification(), 'Production'));
+
+      expect(text).not.toContain('Dashboard:');
+      expect(text).not.toContain('Runbook:');
+    });
+
+    it('leaves the URL visible rather than hiding it behind an anchor', () => {
+      // Telegram auto-links a bare URL, and an <a href> would hide the address
+      // just when someone needs to copy or verify it.
+      const html = renderAlertMessage(
+        notification({ links: LINKS }),
+        'Production',
+      );
+
+      expect(html).toContain(LINKS.dashboard);
+      expect(html).not.toContain('<a href');
     });
   });
 

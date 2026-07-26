@@ -22,6 +22,7 @@ function buildService(overrides: Partial<MetricsConfig> = {}) {
     path: '/metrics',
     prefix: DEFAULT_METRICS_PREFIX,
     queueMetricsEnabled: true,
+    smsCostMetricsEnabled: true,
     ...overrides,
   };
   const registry = new Registry();
@@ -324,6 +325,7 @@ describe('default process metrics', () => {
       path: '/metrics',
       prefix: DEFAULT_METRICS_PREFIX,
       queueMetricsEnabled: true,
+      smsCostMetricsEnabled: true,
     });
 
     const text = await registry.metrics();

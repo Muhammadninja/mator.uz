@@ -147,6 +147,8 @@ when zoomed in nor lie when zoomed out. Every ratio wraps its denominator in
 | Failure % by provider | `100 * failed_by_provider / clamp_min(sent_by_provider + failed_by_provider, 1e-9)` |
 | By template | `60 * sum by (template) (rate(mator_sms_sent_total{…}[…]))` |
 | Failure reasons | `60 * sum by (reason) (rate(mator_sms_failed_total{…}[…]))` |
+| Total SMS Cost | `max(mator_sms_cost_uzs{…})` |
+| SMS Cost by Provider | `max by (provider) (mator_sms_provider_cost_uzs{…})` |
 
 ### Business
 
@@ -215,6 +217,18 @@ exhausted. One flaky job with 3 attempts is one failure.
 **`sms_sent_total` means "the provider accepted it"**, not "delivered to a
 handset". Final delivery status arrives via provider callbacks and is not in
 these metrics.
+
+**SMS cost gauges use `max`, never `sum`, and are never wrapped in `rate()`.**
+`sms_cost_uzs` and `sms_provider_cost_uzs` are cumulative sums of
+`sms_messages.price_uzs` read from Postgres at scrape time, so every instance
+reports the same DB-wide figure — `sum()` would multiply spend by the instance
+count. Being DB-backed they survive deploys, so they are **gauges, not counters**,
+and carry no `_total` suffix: that suffix is a Prometheus convention for counters
+and would wrongly invite `rate()`/`increase()`, which is meaningless on a value
+that never resets. They show **spend to date**, not spend within the dashboard
+time range, and cover only sends where an operator price was resolved (a NULL
+`price_uzs` contributes 0). Set `METRICS_SMS_COST_ENABLED=false` to take the
+aggregate query off the scrape path.
 
 **Publication success rate is `published / (published + expired)`** — the share
 of *settled* drafts. Dividing by `created` would count drafts that simply have

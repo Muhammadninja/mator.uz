@@ -6,7 +6,7 @@ import type { MetricsService } from '../../metrics/metrics.service';
 import type { PrismaService } from '../../prisma/prisma.service';
 import type { RedisService } from '../../redis/redis.service';
 import { IMAGE_DURATION_BUCKETS } from '../../metrics/metrics.config';
-import { AlertSeverity } from '../alerting.types';
+import { AlertSeverity, type AlertRule } from '../alerting.types';
 import { BackendHealthRule, truncate } from './backend-health.rule';
 import { ImageLatencyRule } from './image-latency.rule';
 import { QueueBacklogRule, queueLabel } from './queue-backlog.rule';
@@ -135,6 +135,42 @@ describe('QueueBacklogRule', () => {
 
       expect(await rule.resolvedValuesFor({})).toBeUndefined();
     });
+  });
+});
+
+describe('rule dashboard declarations', () => {
+  it('every rule points at a dashboard that actually exists', () => {
+    // Guards the "renamed the dashboard, forgot the alert link" regression:
+    // these UIDs are the ones scripts/grafana/* generates.
+    const declared: [AlertRule, string][] = [
+      [new QueueBacklogRule(configWith()), 'mator-bullmq'],
+      [
+        new ImageLatencyRule({} as never, configWith()),
+        'mator-image-processing',
+      ],
+      [new SmsFailureRule({} as never, configWith()), 'mator-sms'],
+      [
+        new BackendHealthRule({} as never, {} as never, configWith()),
+        'mator-backend-overview',
+      ],
+    ];
+
+    for (const [rule, uid] of declared) {
+      expect(rule.dashboardUrl).toContain(uid);
+    }
+  });
+
+  it('templates the queue backlog link so it lands on the right queue', () => {
+    // Without this the link would open a multi-queue overview the operator has
+    // to filter by hand — the exact step it exists to remove.
+    expect(new QueueBacklogRule(configWith()).dashboardUrl).toContain(
+      '{{queue}}',
+    );
+  });
+
+  it('declares dashboards as RELATIVE paths, never a hardcoded host', () => {
+    // So the same code points at staging Grafana in staging.
+    expect(new QueueBacklogRule(configWith()).dashboardUrl).toMatch(/^\//);
   });
 });
 
