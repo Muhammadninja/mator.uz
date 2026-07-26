@@ -22,7 +22,8 @@
     "grafana:test": "jest --rootDir . --testPathPatterns scripts/grafana",
     "grafana:check": "npm run grafana:build && npm run grafana:test",
     "backfill:catalog": "ts-node --compiler-options '{\"module\":\"commonjs\"}' prisma/backfill-catalog.ts",
-    "seed": "ts-node --compiler-options '{\"module\":\"commonjs\"}' src/prisma/seed.ts"
+    "seed": "ts-node --compiler-options '{\"module\":\"commonjs\"}' src/prisma/seed.ts",
+    "admin:create": "ts-node --compiler-options '{\"module\":\"commonjs\"}' scripts/create-admin.ts"
   },
   "prisma": {
     "seed": "ts-node --compiler-options '{\"module\":\"commonjs\"}' src/prisma/seed.ts"
