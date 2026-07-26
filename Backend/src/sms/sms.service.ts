@@ -166,10 +166,19 @@ export class SmsService {
         },
       });
     } catch (err) {
+      const prismaErr = err as {
+        code?: string;
+        meta?: unknown;
+        message?: string;
+        stack?: string;
+      };
       this.logger.warn(
-        `SMS accounting insert failed (send already succeeded): ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        `SMS accounting insert failed (send already succeeded): ${JSON.stringify({
+          message: prismaErr?.message ?? String(err),
+          code: prismaErr?.code,
+          meta: prismaErr?.meta,
+          stack: prismaErr?.stack,
+        })}`,
       );
     }
   }
