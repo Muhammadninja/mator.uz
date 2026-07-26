@@ -148,7 +148,7 @@ when zoomed in nor lie when zoomed out. Every ratio wraps its denominator in
 | By template | `60 * sum by (template) (rate(mator_sms_sent_total{…}[…]))` |
 | Failure reasons | `60 * sum by (reason) (rate(mator_sms_failed_total{…}[…]))` |
 | Total SMS Cost | `max(mator_sms_cost_uzs{…})` |
-| SMS Cost by Provider | `max by (provider) (mator_sms_provider_cost_uzs{…})` |
+| SMS Cost by Operator | `max by (operator) (mator_sms_operator_cost_uzs{…})` |
 
 ### Business
 
@@ -219,7 +219,7 @@ handset". Final delivery status arrives via provider callbacks and is not in
 these metrics.
 
 **SMS cost gauges use `max`, never `sum`, and are never wrapped in `rate()`.**
-`sms_cost_uzs` and `sms_provider_cost_uzs` are cumulative sums of
+`sms_cost_uzs` and `sms_operator_cost_uzs` are cumulative sums of
 `sms_messages.price_uzs` read from Postgres at scrape time, so every instance
 reports the same DB-wide figure — `sum()` would multiply spend by the instance
 count. Being DB-backed they survive deploys, so they are **gauges, not counters**,
@@ -229,6 +229,16 @@ that never resets. They show **spend to date**, not spend within the dashboard
 time range, and cover only sends where an operator price was resolved (a NULL
 `price_uzs` contributes 0). Set `METRICS_SMS_COST_ENABLED=false` to take the
 aggregate query off the scrape path.
+
+**SMS cost is grouped by mobile operator, not by gateway provider.**
+`sms_operator_cost_uzs{operator}` is labelled from `sms_messages.operator_name`
+(`beeline`, `ucell`, `uzmobile`, `humans`, `perfectum`, …) — the network that
+sets the per-SMS price — while `sms_sent_total{provider}` stays labelled by the
+aggregator that carried the send. The two label sets are unrelated, so the cost
+panels deliberately ignore the dashboard's `$provider` variable: filtering a
+metric that has no `provider` label would return nothing. Sends whose operator
+did not resolve report as `operator="unknown"` rather than being dropped, so the
+per-operator series always re-sums to `sms_cost_uzs`.
 
 **Publication success rate is `published / (published + expired)`** — the share
 of *settled* drafts. Dividing by `created` would count drafts that simply have

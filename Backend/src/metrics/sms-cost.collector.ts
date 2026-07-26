@@ -2,18 +2,25 @@ import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import type { MetricsConfig } from './metrics.config';
 import { METRICS_CONFIG } from './metrics.providers';
-import { MetricsService } from './metrics.service';
+import { MetricsService, UNKNOWN_LABEL } from './metrics.service';
 
 /**
  * Publishes the accounted SMS spend into the registry.
  *
  * ── Reuses the existing accounting, computes nothing new ──
- * SmsService already snapshots the operator price onto every accepted send
- * (`sms_messages.price_uzs`, frozen at send time so later price edits never
- * rewrite history — see the SmsMessage model). This collector is READ-ONLY over
- * that table: one `groupBy(provider) _sum(priceUzs)` and the numbers are the
- * DB's, not ours. No accounting logic is touched, no column is added, and the
- * cost is never recomputed from SmsOperator.
+ * SmsService already snapshots the operator name and price onto every accepted
+ * send (`sms_messages.operator_name` / `price_uzs`, frozen at send time so later
+ * price edits never rewrite history — see the SmsMessage model). This collector
+ * is READ-ONLY over that table: one `groupBy(operatorName) _sum(priceUzs)` and
+ * the numbers are the DB's, not ours. No accounting logic is touched, no column
+ * is added, and the cost is never recomputed from SmsOperator.
+ *
+ * ── Grouped by mobile operator, not by gateway provider ──
+ * Spend is reported per NETWORK (beeline, ucell, …) because that is what sets
+ * the per-SMS price; which aggregator carried the message is a delivery detail
+ * tracked by the sent/failed counters instead. Sends whose operator could not
+ * be resolved are reported as "unknown" rather than dropped, so the
+ * per-operator series always re-sums to `mator_sms_cost_uzs`.
  *
  * PULL, NOT POLL — the same contract as QueueMetricsCollector: `collect()` runs
  * when Prometheus scrapes, so the aggregate is computed as often as it is
@@ -56,23 +63,32 @@ export class SmsCostCollector {
 
     try {
       const grouped = await this.prisma.smsMessage.groupBy({
-        by: ['provider'],
+        by: ['operatorName'],
         _sum: { priceUzs: true },
       });
 
-      // Fold the per-provider sums into the overall total in the same pass, so
+      // Fold the per-operator sums into the overall total in the same pass, so
       // the two metrics are guaranteed consistent and nothing is summed twice.
       // `_sum` is null when every row in a group has a NULL price (operator
       // unresolved at send time); such sends contribute 0, not NaN.
-      const perProvider: Record<string, number> = {};
+      //
+      // Accumulate with `+=` rather than assigning: operatorName is nullable,
+      // so NULL and any blank-ish name are DISTINCT groups in SQL that all
+      // collapse onto the same "unknown" label. Overwriting would silently
+      // drop every group but the last and make the per-operator series stop
+      // re-summing to the total.
+      const perOperator: Record<string, number> = {};
       let total = 0;
       for (const row of grouped) {
         const uzs = row._sum.priceUzs ?? 0;
-        perProvider[row.provider] = uzs;
+        // Normalise here as well as in MetricsService.label() so the merge
+        // above keys on exactly the label that will be exported.
+        const operator = (row.operatorName ?? '').trim() || UNKNOWN_LABEL;
+        perOperator[operator] = (perOperator[operator] ?? 0) + uzs;
         total += uzs;
       }
 
-      this.metrics.setSmsCost(perProvider, total);
+      this.metrics.setSmsCost(perOperator, total);
       this.warned = false;
     } catch (err) {
       if (!this.warned) {

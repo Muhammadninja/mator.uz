@@ -32,7 +32,10 @@ function buildService(cfg = config()) {
   return { service, registry };
 }
 
-type GroupRow = { provider: string; _sum: { priceUzs: number | null } };
+type GroupRow = {
+  operatorName: string | null;
+  _sum: { priceUzs: number | null };
+};
 
 function prismaDouble(rows: GroupRow[] | Error) {
   const groupBy = jest.fn(() =>
@@ -45,28 +48,70 @@ function prismaDouble(rows: GroupRow[] | Error) {
 }
 
 describe('SmsCostCollector', () => {
-  it('publishes a per-provider gauge and an overall total', async () => {
+  it('publishes a per-operator gauge and an overall total', async () => {
     const { service, registry } = buildService();
     const { double } = prismaDouble([
-      { provider: 'mator', _sum: { priceUzs: 125_000 } },
-      { provider: 'playmobile', _sum: { priceUzs: 84_200 } },
-      { provider: 'eskiz', _sum: { priceUzs: 31_000 } },
+      { operatorName: 'beeline', _sum: { priceUzs: 125_000 } },
+      { operatorName: 'ucell', _sum: { priceUzs: 84_200 } },
+      { operatorName: 'uzmobile', _sum: { priceUzs: 31_000 } },
     ]);
 
     await new SmsCostCollector(service, config(), double).collect();
     const text = await registry.metrics();
 
     expect(text).toContain(
-      'mator_sms_provider_cost_uzs{provider="mator"} 125000',
+      'mator_sms_operator_cost_uzs{operator="beeline"} 125000',
     );
     expect(text).toContain(
-      'mator_sms_provider_cost_uzs{provider="playmobile"} 84200',
+      'mator_sms_operator_cost_uzs{operator="ucell"} 84200',
     );
     expect(text).toContain(
-      'mator_sms_provider_cost_uzs{provider="eskiz"} 31000',
+      'mator_sms_operator_cost_uzs{operator="uzmobile"} 31000',
     );
-    // The stated contract: the total equals the sum of the providers.
+    // The stated contract: the total equals the sum of the operators.
     expect(text).toContain('mator_sms_cost_uzs 240200');
+    // Cost is grouped by network, never by gateway provider.
+    expect(text).not.toContain('mator_sms_provider_cost_uzs');
+  });
+
+  it('labels an unresolved operator "unknown" rather than dropping its spend', async () => {
+    const { service, registry } = buildService();
+    // operator_name is nullable: resolution can fail for an unrecognised prefix.
+    const { double } = prismaDouble([
+      { operatorName: 'humans', _sum: { priceUzs: 900 } },
+      { operatorName: null, _sum: { priceUzs: 350 } },
+    ]);
+
+    await new SmsCostCollector(service, config(), double).collect();
+    const text = await registry.metrics();
+
+    expect(text).toContain('mator_sms_operator_cost_uzs{operator="humans"} 900');
+    expect(text).toContain(
+      'mator_sms_operator_cost_uzs{operator="unknown"} 350',
+    );
+    // Unknown spend still counts toward the total, so the per-operator series
+    // re-sums to it exactly.
+    expect(text).toContain('mator_sms_cost_uzs 1250');
+  });
+
+  it('merges NULL and blank operator names into a single "unknown" series', async () => {
+    const { service, registry } = buildService();
+    // SQL treats NULL, '' and '  ' as three distinct groups, but all three
+    // export as operator="unknown". Assigning instead of accumulating would
+    // keep only the last and silently lose the rest.
+    const { double } = prismaDouble([
+      { operatorName: null, _sum: { priceUzs: 100 } },
+      { operatorName: '', _sum: { priceUzs: 20 } },
+      { operatorName: '   ', _sum: { priceUzs: 3 } },
+    ]);
+
+    await new SmsCostCollector(service, config(), double).collect();
+    const text = await registry.metrics();
+
+    expect(text).toContain(
+      'mator_sms_operator_cost_uzs{operator="unknown"} 123',
+    );
+    expect(text).toContain('mator_sms_cost_uzs 123');
   });
 
   it('reads the accounting table with ONE aggregate query and no row fetch', async () => {
@@ -84,7 +129,7 @@ describe('SmsCostCollector', () => {
     };
     const groupBy = jest
       .fn()
-      .mockResolvedValue([{ provider: 'sayqal', _sum: { priceUzs: 10 } }]);
+      .mockResolvedValue([{ operatorName: 'beeline', _sum: { priceUzs: 10 } }]);
     const prisma = {
       smsMessage: { groupBy, ...forbidden },
     } as unknown as PrismaService;
@@ -93,7 +138,7 @@ describe('SmsCostCollector', () => {
 
     expect(groupBy).toHaveBeenCalledTimes(1);
     expect(groupBy).toHaveBeenCalledWith({
-      by: ['provider'],
+      by: ['operatorName'],
       _sum: { priceUzs: true },
     });
     expect(forbidden.findMany).not.toHaveBeenCalled();
@@ -103,7 +148,7 @@ describe('SmsCostCollector', () => {
   it('is read-only: it never writes to the accounting table', async () => {
     const { service } = buildService();
     const { double, groupBy } = prismaDouble([
-      { provider: 'mator', _sum: { priceUzs: 5 } },
+      { operatorName: 'beeline', _sum: { priceUzs: 5 } },
     ]);
 
     await new SmsCostCollector(service, config(), double).collect();
@@ -122,29 +167,33 @@ describe('SmsCostCollector', () => {
 
   it('counts a NULL price as zero rather than NaN', async () => {
     const { service, registry } = buildService();
-    // priceUzs is nullable: the operator may not have resolved at send time.
+    // priceUzs is nullable: the price may not have resolved at send time.
     const { double } = prismaDouble([
-      { provider: 'log', _sum: { priceUzs: null } },
-      { provider: 'mator', _sum: { priceUzs: 700 } },
+      { operatorName: 'perfectum', _sum: { priceUzs: null } },
+      { operatorName: 'beeline', _sum: { priceUzs: 700 } },
     ]);
 
     await new SmsCostCollector(service, config(), double).collect();
     const text = await registry.metrics();
 
-    expect(text).toContain('mator_sms_provider_cost_uzs{provider="log"} 0');
+    expect(text).toContain(
+      'mator_sms_operator_cost_uzs{operator="perfectum"} 0',
+    );
     expect(text).toContain('mator_sms_cost_uzs 700');
     expect(text).not.toContain('NaN');
   });
 
-  it('drops a provider that disappears from the table instead of flat-lining', async () => {
+  it('drops an operator that disappears from the table instead of flat-lining', async () => {
     const { service, registry } = buildService();
     const groupBy = jest
       .fn()
       .mockResolvedValueOnce([
-        { provider: 'eskiz', _sum: { priceUzs: 400 } },
-        { provider: 'mator', _sum: { priceUzs: 600 } },
+        { operatorName: 'ucell', _sum: { priceUzs: 400 } },
+        { operatorName: 'beeline', _sum: { priceUzs: 600 } },
       ])
-      .mockResolvedValueOnce([{ provider: 'mator', _sum: { priceUzs: 600 } }]);
+      .mockResolvedValueOnce([
+        { operatorName: 'beeline', _sum: { priceUzs: 600 } },
+      ]);
     const prisma = { smsMessage: { groupBy } } as unknown as PrismaService;
     const collector = new SmsCostCollector(service, config(), prisma);
 
@@ -152,9 +201,9 @@ describe('SmsCostCollector', () => {
     await collector.collect();
     const text = await registry.metrics();
 
-    // Retention pruned every eskiz row; reporting its last value forever would
+    // Retention pruned every ucell row; reporting its last value forever would
     // overstate the total against a DB that no longer backs it.
-    expect(text).not.toContain('provider="eskiz"');
+    expect(text).not.toContain('operator="ucell"');
     expect(text).toContain('mator_sms_cost_uzs 600');
   });
 
@@ -167,7 +216,7 @@ describe('SmsCostCollector', () => {
     await expect(collector.collect()).resolves.toBeUndefined();
     // Nothing was published, so the gauge is absent rather than wrong.
     const text = await registry.metrics();
-    expect(text).not.toContain('mator_sms_provider_cost_uzs{');
+    expect(text).not.toContain('mator_sms_operator_cost_uzs{');
   });
 
   it('does nothing when metrics are disabled', async () => {
