@@ -1462,6 +1462,10 @@ model AdminAudit {
   // Request provenance. Untrusted and display-only — never an authorization input.
   ip             String?          @db.VarChar(45)
   userAgent      String?          @map("user_agent") @db.VarChar(400)
+  // Correlation id of the HTTP request that performed the action. Grepping the
+  // server log for it returns the whole story of the incident — the HTTP entry,
+  // any exception, and this audit write — with no join table.
+  requestId      String?          @map("request_id") @db.VarChar(64)
   createdAt      DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
 
   actor  AppAdmin? @relation("AdminAuditActor", fields: [actorId], references: [id], onDelete: SetNull)

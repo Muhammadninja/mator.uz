@@ -1,4 +1,8 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { OrderStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { clampLimit } from '../../common/pagination.util';
@@ -9,7 +13,10 @@ import {
   presentAdminOrderDetail,
   presentAdminOrderRow,
 } from './admin-orders.presenter';
-import { AdminOrderSortField, ListAdminOrdersQueryDto } from './dto/list-admin-orders.query.dto';
+import {
+  AdminOrderSortField,
+  ListAdminOrdersQueryDto,
+} from './dto/list-admin-orders.query.dto';
 
 const DEFAULT_ADMIN_ORDER_LIMIT = 20;
 const MAX_ADMIN_ORDER_LIMIT = 100;
@@ -18,7 +25,10 @@ const MAX_ADMIN_ORDER_LIMIT = 100;
 const MIN_PHONE_SEARCH_DIGITS = 4;
 
 /** Whitelist mapping the accepted sort field onto the real Prisma column. */
-const SORT_COLUMN: Record<AdminOrderSortField, keyof Prisma.OrderOrderByWithRelationInput> = {
+const SORT_COLUMN: Record<
+  AdminOrderSortField,
+  keyof Prisma.OrderOrderByWithRelationInput
+> = {
   createdAt: 'createdAt',
   updatedAt: 'updatedAt',
   totalAmount: 'totalUzs',
@@ -35,7 +45,11 @@ export class AdminOrdersService {
 
   async list(query: ListAdminOrdersQueryDto) {
     const page = query.page ?? 1;
-    const limit = clampLimit(query.limit, DEFAULT_ADMIN_ORDER_LIMIT, MAX_ADMIN_ORDER_LIMIT);
+    const limit = clampLimit(
+      query.limit,
+      DEFAULT_ADMIN_ORDER_LIMIT,
+      MAX_ADMIN_ORDER_LIMIT,
+    );
     const sortField = query.sortBy ?? 'createdAt';
     const direction = query.order ?? 'desc';
 
@@ -45,7 +59,9 @@ export class AdminOrdersService {
     const search = this.buildSearch(query.search);
     if (search) where.OR = search;
 
-    const orderBy: Prisma.OrderOrderByWithRelationInput = { [SORT_COLUMN[sortField]]: direction };
+    const orderBy: Prisma.OrderOrderByWithRelationInput = {
+      [SORT_COLUMN[sortField]]: direction,
+    };
 
     const [orders, totalItems] = await this.prisma.$transaction([
       this.prisma.order.findMany({

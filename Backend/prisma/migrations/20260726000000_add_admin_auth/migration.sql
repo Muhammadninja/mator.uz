@@ -94,6 +94,7 @@ CREATE TABLE "admin_audits" (
     "new_role" "AdminRole",
     "ip" VARCHAR(45),
     "user_agent" VARCHAR(400),
+    "request_id" VARCHAR(64),
     "created_at" TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT "admin_audits_pkey" PRIMARY KEY ("id")

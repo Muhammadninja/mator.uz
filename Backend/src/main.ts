@@ -7,6 +7,7 @@ import helmet from 'helmet';
 import type { RequestHandler } from 'express';
 import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/http-exception.filter';
+import { requestIdMiddleware } from './common/request-id.middleware';
 import {
   createSwaggerAuthMiddleware,
   resolveSwaggerCredentials,
@@ -77,6 +78,11 @@ async function bootstrap() {
   // of the proxy's — required for per-IP throttling (@nestjs/throttler) to key
   // on individual clients rather than bucketing everyone behind Nginx together.
   app.getHttpAdapter().getInstance().set('trust proxy', 1);
+
+  // Correlation id, FIRST in the chain so every subsequent log line — including
+  // ones emitted by rejected requests — can carry it. Echoed back as
+  // X-Request-Id and readable anywhere downstream via getRequestId().
+  app.use(requestIdMiddleware);
 
   // Security headers. The API serves JSON (and SSE for the AI advisor), so the
   // restrictive CSP defaults don't apply; disable CSP to avoid breaking the
