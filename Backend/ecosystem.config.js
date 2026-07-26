@@ -15,6 +15,12 @@ module.exports = {
       max_memory_restart: '500M',
       env_production: {
         NODE_ENV: 'production',
+        // Serve the OpenAPI docs at /docs in production. NOT public: /docs,
+        // /docs-json and /docs-yaml sit behind HTTP Basic Auth, the same
+        // protection Bull Board uses. Credentials come from SWAGGER_USERNAME /
+        // SWAGGER_PASSWORD in .env (never committed) — if they are missing,
+        // /docs refuses every request rather than publishing the route map.
+        ENABLE_SWAGGER: 'true',
       },
       // Give app.enableShutdownHooks() time to run OnModuleDestroy (e.g. the
       // Telegram bot stopping cleanly) before PM2 sends SIGKILL.
