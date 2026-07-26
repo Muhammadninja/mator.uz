@@ -46,6 +46,7 @@ function notification(
     values: { waiting: 150, threshold: 100 },
     title: 'Sms Queue Backlog',
     summary: 'sms queue backlog',
+    links: {},
     source: SOURCE,
     firedAt: Date.UTC(2026, 6, 26, 14, 31),
     ...over,
@@ -200,6 +201,60 @@ describe('DiscordAlertChannel', () => {
       ]),
     );
     expect(typeof body.embeds[0].color).toBe('number');
+  });
+});
+
+describe('link rendering per channel', () => {
+  const LINKS = {
+    dashboard: 'https://grafana.mator.uz/d/mator-bullmq?var-queue=sms',
+    runbook: 'https://wiki.mator.uz/runbooks/queue-backlog',
+  };
+
+  it('Slack renders links as tappable buttons', async () => {
+    // Buttons, not a bare URL to long-press — this is read on a phone during
+    // an incident.
+    await new SlackAlertChannel(
+      configWith({ ALERT_SLACK_WEBHOOK_URL: 'https://hooks.slack.test/x' }),
+    ).deliver(notification({ links: LINKS }));
+
+    const body = mockedAxios.post.mock.calls[0][1] as {
+      blocks: { type: string; elements?: { text?: unknown; url?: string }[] }[];
+    };
+    const actions = body.blocks.find((b) => b.type === 'actions');
+
+    expect(actions?.elements?.map((e) => e.url)).toEqual([
+      LINKS.dashboard,
+      LINKS.runbook,
+    ]);
+  });
+
+  it('Discord renders links as full-width embed fields', async () => {
+    // A URL in an inline column wraps into unreadable fragments.
+    await new DiscordAlertChannel(
+      configWith({
+        ALERT_DISCORD_WEBHOOK_URL: 'https://discord.test/api/webhooks/x',
+      }),
+    ).deliver(notification({ links: LINKS }));
+
+    const body = mockedAxios.post.mock.calls[0][1] as {
+      embeds: { fields: { name: string; value: string; inline: boolean }[] }[];
+    };
+    const linkFields = body.embeds[0].fields.filter((f) => !f.inline);
+
+    expect(linkFields.map((f) => f.name)).toEqual(['Dashboard', 'Runbook']);
+    expect(linkFields[0].value).toContain(LINKS.dashboard);
+  });
+
+  it('every channel omits links when the alert has none', async () => {
+    await new SlackAlertChannel(
+      configWith({ ALERT_SLACK_WEBHOOK_URL: 'https://hooks.slack.test/x' }),
+    ).deliver(notification());
+
+    const body = mockedAxios.post.mock.calls[0][1] as {
+      blocks: { type: string }[];
+    };
+
+    expect(body.blocks.some((b) => b.type === 'actions')).toBe(false);
   });
 });
 

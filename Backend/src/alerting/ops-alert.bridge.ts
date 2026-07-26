@@ -94,6 +94,11 @@ export class OpsAlertBridge implements OnModuleInit, OpsAlertChannel {
       values: { detail: alert.message, ...contextValues(alert.context) },
       title: opsAlertTitle(alert),
       summary: alert.message,
+      // Ops alerts carry no links: their conditions (failed jobs, stalled
+      // workers) are diagnosed in Bull Board rather than on a Grafana panel,
+      // and inventing a dashboard URL for them would send the operator to the
+      // wrong place. Wiring them up is a config-only change if that changes.
+      links: {},
       source: this.source,
       firedAt: alert.firedAt.getTime(),
     });

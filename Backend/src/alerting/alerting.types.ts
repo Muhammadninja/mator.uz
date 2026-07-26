@@ -173,6 +173,31 @@ export interface AlertRule {
    * every dedupe key the rule emits, so it must be unique across rules.
    */
   readonly name: string;
+
+  /**
+   * Where to LOOK when this fires — the Grafana dashboard/panel showing the
+   * metric that tripped it.
+   *
+   * May contain `{{label}}` placeholders, substituted from the firing alert's
+   * labels (see {@link renderUrlTemplate}). That is what makes one declaration
+   * serve every instance of a fan-out rule: `?var-queue={{queue}}` lands on the
+   * image-processing panel for an image backlog and the SMS panel for an SMS
+   * one, instead of dumping the operator on a generic overview they then have
+   * to filter by hand.
+   *
+   * Overridable per rule from the environment — see alerting.config.ts — so the
+   * URL can be corrected after a dashboard move without a deploy.
+   */
+  readonly dashboardUrl?: string;
+
+  /**
+   * What to DO when this fires — the runbook for this specific condition.
+   *
+   * Usually one static page per rule (the procedure does not differ by queue),
+   * but the same `{{label}}` substitution applies if it does.
+   */
+  readonly runbookUrl?: string;
+
   evaluate(): Promise<RuleResult>;
 
   /**
@@ -264,6 +289,61 @@ export function alertFingerprint(dedupeKey: string): string {
 export const FINGERPRINT_LENGTH = 6;
 
 /**
+ * Resolved links for one firing alert — where to look, and what to do.
+ *
+ * Both optional: a rule with no dashboard is still a valid rule, and rendering
+ * an empty "Dashboard:" heading would be worse than omitting the section.
+ */
+export interface AlertLinks {
+  /** Grafana dashboard/panel showing the metric that tripped. */
+  dashboard?: string;
+  /** Runbook for this condition. */
+  runbook?: string;
+}
+
+/**
+ * Substitute `{{label}}` placeholders in a URL template from an alert's labels.
+ *
+ * `https://grafana/d/queues?var-queue={{queue}}` + `{queue: 'sms'}` →
+ * `https://grafana/d/queues?var-queue=sms`.
+ *
+ * Values are percent-encoded, because a label reaches the URL verbatim and a
+ * queue name containing `&` or a space would otherwise produce a broken (or
+ * subtly wrong) link. Labels are low-cardinality identifiers we generate, so
+ * this is defence in depth rather than a live injection worry — but a link an
+ * operator clicks mid-incident has to be right.
+ *
+ * An UNMATCHED placeholder invalidates the whole URL (returns `undefined`)
+ * rather than leaving a literal `{{queue}}` in it: a link that 404s or silently
+ * shows the wrong panel costs more time than no link at all, because it is
+ * trusted before it is checked.
+ */
+export function renderUrlTemplate(
+  template: string | undefined,
+  labels: AlertLabels,
+): string | undefined {
+  if (template === undefined || template.trim() === '') return undefined;
+
+  let unresolved = false;
+  const rendered = template.replace(
+    URL_PLACEHOLDER,
+    (_match, name: string): string => {
+      const value = labels[name];
+      if (value === undefined) {
+        unresolved = true;
+        return '';
+      }
+      return encodeURIComponent(value);
+    },
+  );
+
+  return unresolved ? undefined : rendered;
+}
+
+/** `{{label}}` / `{{ label }}` — the placeholder syntax in a URL template. */
+const URL_PLACEHOLDER = /\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g;
+
+/**
  * The rule name embedded in a dedupe key — `queue_backlog{queue="sms"}` →
  * `queue_backlog`. Inverse of {@link alertDedupeKey}'s prefix.
  */
@@ -292,6 +372,11 @@ export interface AlertNotification {
   values: AlertValues;
   title: string;
   summary: string;
+  /**
+   * Where to look and what to do. Resolved by the evaluator from the rule's
+   * templates plus this alert's labels, so the links point at THIS instance.
+   */
+  links: AlertLinks;
   /** Which build and which instance produced this. See {@link AlertSource}. */
   source: AlertSource;
   /** Epoch ms of the transition. Rendered as UTC in the message footer. */

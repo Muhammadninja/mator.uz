@@ -4,6 +4,7 @@ import { SkipThrottle } from '@nestjs/throttler';
 import type { Response } from 'express';
 import { MetricsService } from './metrics.service';
 import { QueueMetricsCollector } from './queue-metrics.collector';
+import { SmsCostCollector } from './sms-cost.collector';
 
 /**
  * The Prometheus scrape endpoint.
@@ -35,14 +36,18 @@ export class MetricsController {
   constructor(
     private readonly metrics: MetricsService,
     private readonly queues: QueueMetricsCollector,
+    private readonly smsCost: SmsCostCollector,
   ) {}
 
   /**
    * Render the registry in Prometheus exposition format.
    *
-   * Queue depths are refreshed first so a scrape reflects Redis as of this
-   * request; `collect()` swallows its own errors, so a Redis outage degrades to
-   * stale queue gauges while process/HTTP/business metrics still return 200.
+   * The pull-based collectors run first so a scrape reflects Redis and the SMS
+   * accounting table as of this request. Both `collect()` methods swallow their
+   * own errors, so a Redis or Postgres outage degrades to stale gauges while
+   * process/HTTP/business metrics still return 200. They run in PARALLEL: they
+   * touch different backends, so total scrape latency is one round trip rather
+   * than two.
    *
    * Writes through `@Res({ passthrough: false })`-style direct response because
    * the payload is text, not the app's `{ code, message }` JSON contract — the
@@ -51,7 +56,7 @@ export class MetricsController {
   @Get()
   @Header('Cache-Control', 'no-store')
   async scrape(@Res() res: Response): Promise<void> {
-    await this.queues.collect();
+    await Promise.all([this.queues.collect(), this.smsCost.collect()]);
     const body = await this.metrics.scrape();
     res.setHeader('Content-Type', this.metrics.contentType);
     res.send(body);

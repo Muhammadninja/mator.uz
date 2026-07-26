@@ -40,6 +40,17 @@ const CRITICAL_MULTIPLIER = 2;
 export class QueueBacklogRule implements AlertRule {
   readonly name = 'queue_backlog';
 
+  /**
+   * The BullMQ dashboard, pre-filtered to the queue that actually backed up via
+   * its `queue` template variable. Without the `{{queue}}` substitution this
+   * would land on a multi-queue overview the operator has to filter by hand —
+   * exactly the step the link exists to remove.
+   *
+   * Relative: joined onto ALERT_GRAFANA_BASE_URL, so the same code points at
+   * staging Grafana in staging and production Grafana in production.
+   */
+  readonly dashboardUrl = '/d/mator-bullmq?var-queue={{queue}}';
+
   private readonly logger = new Logger(QueueBacklogRule.name);
   private readonly thresholds: QueueThresholds;
   private readonly queues: ReadonlyMap<BacklogQueueName, Queue>;

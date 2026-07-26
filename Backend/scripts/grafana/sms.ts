@@ -547,6 +547,78 @@ export function buildSms(): unknown {
     ),
   );
 
+  // ── Cost ──────────────────────────────────────────────────────────────────
+  // Appended last so no existing panel changes position. These two series come
+  // from the SMS accounting table (sms_messages.price_uzs), aggregated by the
+  // backend at scrape time — not from the sent/failed counters above.
+  //
+  // ── Why `max` and not `sum`, and why no rate() ──
+  // Both are GAUGES holding a cumulative DB-wide total, so under PM2 cluster
+  // mode every instance reports the SAME number. `sum()` would multiply the
+  // spend by the instance count; `max()` is correct — the identical rule the
+  // BullMQ depth gauges follow. And because the value is a cumulative sum read
+  // from Postgres rather than a process counter, it survives deploys and must
+  // NOT be wrapped in rate()/increase().
+  //
+  // Grafana has no built-in UZS currency unit, so `suffix:UZS` renders
+  // "240200 UZS" — the closest faithful option to the requested unit.
+  panels.push(row('Cost', l));
+
+  const COST_UNIT = 'suffix:UZS';
+
+  panels.push(
+    stat(
+      {
+        title: 'Total SMS Cost',
+        description:
+          'Cumulative accounted SMS spend across all providers, summed from the SMS accounting table. Equals the sum of the per-provider panel beside it. Not affected by the dashboard time range: this is spend-to-date, not spend-in-window.',
+        unit: COST_UNIT,
+        decimals: 0,
+        width: 6,
+        height: 5,
+        graphMode: 'none',
+        targets: [
+          {
+            expr: `max(mator_sms_cost_uzs{${INST}})`,
+            legendFormat: 'total',
+            instant: true,
+          },
+        ],
+      },
+      l,
+    ),
+  );
+
+  panels.push(
+    stat(
+      {
+        title: 'SMS Cost by Provider',
+        description:
+          'Cumulative accounted spend per provider. One value per provider label, discovered automatically from the metric — a newly configured aggregator appears with no dashboard edit. Respects the Provider filter above.',
+        unit: COST_UNIT,
+        decimals: 0,
+        width: 18,
+        height: 5,
+        graphMode: 'none',
+        // One tile per provider. A stat panel reduces EACH FRAME to one value,
+        // and an instant `max by (provider)` query returns one frame per
+        // provider — so `lastNotNull` yields a tile per provider rather than a
+        // single collapsed number. `perSeries` turns on the value+name text mode
+        // so each tile is labelled with the provider it belongs to.
+        reducer: 'lastNotNull',
+        perSeries: true,
+        targets: [
+          {
+            expr: `max by (provider) (mator_sms_provider_cost_uzs{${INST}, provider=~"$provider"})`,
+            legendFormat: '{{provider}}',
+            instant: true,
+          },
+        ],
+      },
+      l,
+    ),
+  );
+
   return dashboard({
     uid: 'mator-sms',
     title: 'Mator — SMS Delivery',

@@ -7,7 +7,10 @@ import {
   TRANSITION,
   type Transition,
 } from './alert-state.store';
-import { resolveAlertingConfig } from './alerting.config';
+import {
+  resolveAlertingConfig,
+  resolveRuleLinkTemplates,
+} from './alerting.config';
 import { ALERT_SOURCE } from './build-info';
 import {
   ALERT_RULES,
@@ -15,9 +18,11 @@ import {
   AlertSeverity,
   alertFingerprint,
   payloadDedupeKey,
+  renderUrlTemplate,
   ruleNameOf,
   severityName,
   type AlertLabels,
+  type AlertLinks,
   type AlertNotification,
   type AlertPayload,
   type AlertRule,
@@ -74,6 +79,18 @@ export class AlertEvaluatorService {
    */
   private readonly lastPayloads = new Map<string, AlertPayload>();
 
+  /**
+   * Each rule's dashboard/runbook URL TEMPLATES, resolved once at construction.
+   *
+   * Config lookup and base-URL joining do not depend on the firing alert, so
+   * doing them per evaluation would repeat the same work every minute forever.
+   * Only the `{{label}}` substitution is per-alert.
+   */
+  private readonly linkTemplates: ReadonlyMap<
+    string,
+    { dashboard?: string; runbook?: string }
+  >;
+
   constructor(
     @Inject(ALERT_RULES) private readonly rules: readonly AlertRule[],
     private readonly state: AlertStateStore,
@@ -83,6 +100,31 @@ export class AlertEvaluatorService {
     config: ConfigService,
   ) {
     this.environmentLabel = resolveAlertingConfig(config).environmentLabel;
+    this.linkTemplates = new Map(
+      rules.map((rule) => [rule.name, resolveRuleLinkTemplates(rule, config)]),
+    );
+  }
+
+  /**
+   * Resolve this alert's links: the rule's templates with `{{label}}` filled in
+   * from the firing instance's labels.
+   *
+   * That substitution is the whole point — it turns one declaration into a link
+   * that lands on the image-processing panel for an image backlog and the SMS
+   * panel for an SMS one, instead of a generic overview the operator then has
+   * to filter by hand while the incident runs.
+   */
+  private linksFor(rule: string, labels: AlertLabels): AlertLinks {
+    const templates = this.linkTemplates.get(rule);
+    if (templates === undefined) return {};
+
+    const dashboard = renderUrlTemplate(templates.dashboard, labels);
+    const runbook = renderUrlTemplate(templates.runbook, labels);
+
+    return {
+      ...(dashboard !== undefined ? { dashboard } : {}),
+      ...(runbook !== undefined ? { runbook } : {}),
+    };
   }
 
   /**
@@ -275,6 +317,7 @@ export class AlertEvaluatorService {
       values: payload.values,
       title: payload.title,
       summary: payload.summary,
+      links: this.linksFor(payload.rule, payload.labels),
       source: this.source,
       firedAt: now,
       // Only on a re-notification: the first message has nothing to report and
@@ -316,6 +359,10 @@ export class AlertEvaluatorService {
       values: fresh ?? previous?.resolvedValues ?? previous?.values ?? {},
       title: previous?.title ?? dedupeKey,
       summary: previous?.summary ?? dedupeKey,
+      // A resolution carries no links: the incident is over, so "open the
+      // dashboard" and "follow the runbook" are no longer the actions being
+      // asked for. Keeping the message terse is the point of a recovery notice.
+      links: {},
       source: this.source,
       firedAt: now,
       activeForMs,

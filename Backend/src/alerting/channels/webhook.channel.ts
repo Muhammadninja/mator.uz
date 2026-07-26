@@ -119,6 +119,9 @@ export function genericAlertBody(
     // it as its own dedup key and it will agree with what the chat message and
     // the logs show for the same incident.
     fingerprint: notification.fingerprint,
+    // A receiver that renders its own incident page (PagerDuty, an internal
+    // tracker) can surface these as links without re-deriving them.
+    links: notification.links,
     source: notification.source,
     firedAt: new Date(notification.firedAt).toISOString(),
     ...(notification.activeForMs !== undefined

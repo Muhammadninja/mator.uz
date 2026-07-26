@@ -174,6 +174,33 @@ export class MetricsService {
     );
   }
 
+  /**
+   * Publish the accounted SMS spend read from the accounting table.
+   *
+   * `set` (not `inc`) because these are gauges holding a DB-wide cumulative sum
+   * re-read on every scrape — see the metrics.definitions.ts note on why a
+   * counter would be wrong here.
+   *
+   * The per-provider gauge is RESET first so a provider that disappears from
+   * the accounting table (rows pruned by retention) stops reporting a stale
+   * value instead of flat-lining forever at its last reading. The total is
+   * passed in rather than re-derived from the map: the collector computes it in
+   * the same query pass, so nothing is calculated twice.
+   */
+  setSmsCost(perProvider: Record<string, number>, totalUzs: number): void {
+    this.safe(() => {
+      this.metrics.smsProviderCostUzs.reset();
+      for (const [provider, uzs] of Object.entries(perProvider)) {
+        if (Number.isFinite(uzs)) {
+          this.metrics.smsProviderCostUzs.set({ provider: label(provider) }, uzs);
+        }
+      }
+      if (Number.isFinite(totalUzs)) {
+        this.metrics.smsCostUzs.set(totalUzs);
+      }
+    });
+  }
+
   /** An image job finished; record its wall time and outcome. */
   observeImageProcessing(result: JobResult, durationSeconds: number): void {
     this.safe(() => {

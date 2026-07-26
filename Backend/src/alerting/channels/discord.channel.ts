@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
+  linkEntries,
   renderDurationLine,
   renderHeader,
   renderLabels,
@@ -53,6 +54,12 @@ export class DiscordAlertChannel extends WebhookAlertChannel {
       // Discord caps an embed at 25 fields.
       .slice(0, DISCORD_MAX_FIELDS)
       .map(([label, value]) => ({ name: label, value, inline: true }));
+
+    // Links as full-width markdown fields rather than inline ones: a URL in an
+    // inline column wraps into unreadable fragments.
+    for (const [label, url] of linkEntries(notification)) {
+      fields.push({ name: label, value: `[Open](${url})`, inline: false });
+    }
 
     const labels = renderLabels(notification);
 

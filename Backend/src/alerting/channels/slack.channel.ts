@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
+  linkEntries,
   renderHeader,
   renderLabels,
   renderDurationLine,
@@ -77,6 +78,20 @@ export class SlackAlertChannel extends WebhookAlertChannel {
       blocks.push({
         type: 'section',
         fields: fields.slice(0, SLACK_MAX_FIELDS),
+      });
+    }
+
+    // Links as an actions block — real buttons, which is what makes them
+    // tappable on a phone during an incident rather than a URL to long-press.
+    const links = linkEntries(notification);
+    if (links.length > 0) {
+      blocks.push({
+        type: 'actions',
+        elements: links.map(([label, url]) => ({
+          type: 'button',
+          text: { type: 'plain_text', text: label },
+          url,
+        })),
       });
     }
 

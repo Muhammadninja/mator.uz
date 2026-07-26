@@ -47,6 +47,7 @@ function notification(
     values: { waiting: 150, threshold: 100 },
     title: 'Sms Queue Backlog',
     summary: 'sms queue backlog',
+    links: {},
     source: SOURCE,
     firedAt: 1_700_000_000_000,
     ...over,

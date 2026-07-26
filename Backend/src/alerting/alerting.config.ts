@@ -216,6 +216,19 @@ export interface AlertingConfig {
   /** Duration used when a silence is requested without one. */
   defaultSilenceMin: number;
 
+  // ── Links ─────────────────────────────────────────────────────────────
+  /**
+   * Base URL of the Grafana install, e.g. `https://grafana.mator.uz`. Used to
+   * turn a rule's relative dashboard path into an absolute link.
+   */
+  grafanaBaseUrl: string;
+  /**
+   * Base URL of the runbook wiki, e.g. `https://wiki.mator.uz/runbooks`. A rule
+   * with no explicit runbook falls back to `<base>/<rule-name>`, so writing the
+   * page is enough to make the link appear — no code change.
+   */
+  runbookBaseUrl: string;
+
   // ── Channels ──────────────────────────────────────────────────────────
   /** Minimum severity delivered, per channel. Unset entries use the default. */
   minSeverity: AlertSeverity;
@@ -377,6 +390,12 @@ export function resolveAlertingConfig(
       config.get<string>('ALERT_DEFAULT_SILENCE_MIN'),
       DEFAULT_SILENCE_MIN,
     ),
+    grafanaBaseUrl: trimTrailingSlash(
+      config.get<string>('ALERT_GRAFANA_BASE_URL'),
+    ),
+    runbookBaseUrl: trimTrailingSlash(
+      config.get<string>('ALERT_RUNBOOK_BASE_URL'),
+    ),
 
     // ── Channels ────────────────────────────────────────────────────────
     minSeverity,
@@ -418,4 +437,87 @@ export function nonNegativeIntEnv(
   if (raw === undefined || raw.trim() === '') return fallback;
   const value = Number(raw);
   return Number.isInteger(value) && value >= 0 ? value : fallback;
+}
+
+/** Normalize a base URL: trimmed, no trailing slash, so joins are predictable. */
+export function trimTrailingSlash(raw: string | undefined): string {
+  return (raw ?? '').trim().replace(/\/+$/, '');
+}
+
+// ── Alert links ─────────────────────────────────────────────────────────────
+
+/**
+ * Env var overriding one rule's dashboard URL, e.g. `queue_backlog` →
+ * `ALERT_QUEUE_BACKLOG_DASHBOARD_URL`.
+ *
+ * Derived from the rule name so a new rule gets an override var for free, and
+ * so a dashboard that moves can be re-pointed by an operator without a deploy —
+ * which matters because a stale link is discovered exactly when it is least
+ * convenient to fix.
+ */
+export function ruleDashboardEnvVar(rule: string): string {
+  return `ALERT_${rule.toUpperCase()}_DASHBOARD_URL`;
+}
+
+/** Same, for the runbook: `queue_backlog` → `ALERT_QUEUE_BACKLOG_RUNBOOK_URL`. */
+export function ruleRunbookEnvVar(rule: string): string {
+  return `ALERT_${rule.toUpperCase()}_RUNBOOK_URL`;
+}
+
+/**
+ * The URL TEMPLATES for one rule, before label substitution.
+ *
+ * Resolution order, first match wins:
+ *   1. the per-rule env override            (ALERT_QUEUE_BACKLOG_DASHBOARD_URL)
+ *   2. the rule's own declaration           (`dashboardUrl` on the class)
+ *   3. for runbooks only, `<ALERT_RUNBOOK_BASE_URL>/<rule-name-kebab>`
+ *
+ * A rule-declared path that is RELATIVE (`/d/queues?...`) is joined onto
+ * ALERT_GRAFANA_BASE_URL, so rules never hardcode a hostname — the same rule
+ * code points at staging Grafana in staging and production Grafana in
+ * production, with one env var per environment.
+ *
+ * Returns `undefined` per link when nothing resolves, so the message simply
+ * omits that section rather than rendering a dead heading.
+ */
+export function resolveRuleLinkTemplates(
+  rule: { name: string; dashboardUrl?: string; runbookUrl?: string },
+  config: Pick<ConfigService, 'get'>,
+): { dashboard?: string; runbook?: string } {
+  const alerting = {
+    grafana: trimTrailingSlash(config.get<string>('ALERT_GRAFANA_BASE_URL')),
+    runbooks: trimTrailingSlash(config.get<string>('ALERT_RUNBOOK_BASE_URL')),
+  };
+
+  const dashboardRaw =
+    config.get<string>(ruleDashboardEnvVar(rule.name))?.trim() ||
+    rule.dashboardUrl;
+
+  const runbookRaw =
+    config.get<string>(ruleRunbookEnvVar(rule.name))?.trim() ||
+    rule.runbookUrl ||
+    // Convention over configuration: with a runbook base configured, every rule
+    // gets `<base>/<rule-name>` for free. Writing the wiki page is enough to
+    // make the link work.
+    (alerting.runbooks !== ''
+      ? `${alerting.runbooks}/${rule.name.replace(/_/g, '-')}`
+      : undefined);
+
+  return {
+    dashboard: absolutize(dashboardRaw, alerting.grafana),
+    runbook: absolutize(runbookRaw, alerting.runbooks),
+  };
+}
+
+/**
+ * Join a relative path onto its base. Absolute URLs pass through untouched, and
+ * a relative path with no configured base resolves to `undefined` — a
+ * half-formed link like `/d/queues` is useless in a chat message.
+ */
+function absolutize(raw: string | undefined, base: string): string | undefined {
+  const value = (raw ?? '').trim();
+  if (value === '') return undefined;
+  if (/^https?:\/\//i.test(value)) return value;
+  if (base === '') return undefined;
+  return `${base}${value.startsWith('/') ? '' : '/'}${value}`;
 }

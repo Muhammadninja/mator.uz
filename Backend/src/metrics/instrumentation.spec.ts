@@ -18,6 +18,7 @@ function buildMetrics() {
     path: '/metrics',
     prefix: DEFAULT_METRICS_PREFIX,
     queueMetricsEnabled: true,
+    smsCostMetricsEnabled: true,
   };
   const registry = new Registry();
   const service = new MetricsService(

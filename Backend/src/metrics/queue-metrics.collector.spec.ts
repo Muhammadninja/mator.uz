@@ -11,6 +11,7 @@ function config(overrides: Partial<MetricsConfig> = {}): MetricsConfig {
     path: '/metrics',
     prefix: DEFAULT_METRICS_PREFIX,
     queueMetricsEnabled: true,
+    smsCostMetricsEnabled: true,
     ...overrides,
   };
 }

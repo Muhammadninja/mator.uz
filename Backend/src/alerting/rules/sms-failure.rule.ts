@@ -37,6 +37,9 @@ import { SnapshotWindow } from '../snapshot-window';
 export class SmsFailureRule implements AlertRule {
   readonly name = 'sms_failures';
 
+  /** The SMS dashboard, where the per-provider failure breakdown lives. */
+  readonly dashboardUrl = '/d/mator-sms';
+
   private readonly logger = new Logger(SmsFailureRule.name);
   private readonly config: AlertingConfig;
   /** One window of snapshots per provider label. */

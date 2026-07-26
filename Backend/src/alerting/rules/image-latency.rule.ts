@@ -46,6 +46,9 @@ const SECONDS_PRECISION = 1;
 export class ImageLatencyRule implements AlertRule {
   readonly name = 'image_processing_latency';
 
+  /** The image pipeline dashboard — the same histogram this rule reads. */
+  readonly dashboardUrl = '/d/mator-image-processing';
+
   private readonly logger = new Logger(ImageLatencyRule.name);
   private readonly config: AlertingConfig;
   /**
