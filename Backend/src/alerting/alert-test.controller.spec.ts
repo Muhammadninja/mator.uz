@@ -1,6 +1,12 @@
 import {
+  ValidationPipe,
+  type ArgumentMetadata,
+  type BadRequestException,
+} from '@nestjs/common';
+import {
   AlertTestController,
   TEST_ALERT_DEDUPE_KEY,
+  TestAlertDto,
 } from './alert-test.controller';
 import type { AlertNotifierService } from './alert-notifier.service';
 import {
@@ -155,5 +161,66 @@ describe('AlertTestController', () => {
     (notifier.notify as jest.Mock).mockRejectedValue(new Error('redis down'));
 
     await expect(controller.test({})).rejects.toThrow('redis down');
+  });
+
+  /**
+   * Regression: the body must survive the GLOBAL pipe, not just the handler.
+   * Every test above calls `controller.test` directly, which skips validation
+   * entirely — that blind spot is how a decorator-less TestAlertDto shipped and
+   * made the endpoint 400 on `{}` with "property severity should not exist".
+   * These run the same ValidationPipe configuration as main.ts.
+   */
+  describe('under the global ValidationPipe', () => {
+    const pipe = new ValidationPipe({
+      whitelist: true,
+      forbidNonWhitelisted: true,
+      transform: true,
+    });
+    const meta: ArgumentMetadata = {
+      type: 'body',
+      metatype: TestAlertDto,
+      data: '',
+    };
+
+    it('accepts an empty body', async () => {
+      await expect(pipe.transform({}, meta)).resolves.toEqual({});
+    });
+
+    it('accepts the documented fields', async () => {
+      await expect(
+        pipe.transform(
+          { severity: 'critical', title: 'T', message: 'M' },
+          meta,
+        ),
+      ).resolves.toMatchObject({
+        severity: 'critical',
+        title: 'T',
+        message: 'M',
+      });
+    });
+
+    /** The 400 detail lives in the response payload, not `error.message`. */
+    async function rejectionMessages(body: unknown): Promise<string[]> {
+      try {
+        await pipe.transform(body, meta);
+      } catch (err) {
+        const res = (err as BadRequestException).getResponse();
+        const message = (res as { message?: string[] | string }).message;
+        return Array.isArray(message) ? message : [String(message)];
+      }
+      throw new Error('expected the pipe to reject');
+    }
+
+    it('still rejects a genuinely unknown property', async () => {
+      expect((await rejectionMessages({ nope: 1 })).join(' ')).toMatch(
+        /nope should not exist/,
+      );
+    });
+
+    it('rejects a non-string severity', async () => {
+      expect((await rejectionMessages({ severity: 5 })).join(' ')).toMatch(
+        /severity must be a string/,
+      );
+    });
   });
 });

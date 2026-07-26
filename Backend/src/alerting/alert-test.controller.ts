@@ -8,6 +8,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
+import { IsOptional, IsString, MaxLength } from 'class-validator';
 import { SkipThrottle } from '@nestjs/throttler';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -26,11 +27,31 @@ import {
 import { ALERT_SOURCE } from './build-info';
 import type { AlertSource } from './alerting.types';
 
-/** Request body — every field optional; the defaults are the smoke test. */
+/**
+ * Request body — every field optional; the defaults are the smoke test.
+ *
+ * The decorators are load-bearing, not decoration: the global ValidationPipe
+ * runs `whitelist` + `forbidNonWhitelisted`, which allowlist properties purely
+ * from class-validator metadata. Without them this class has an EMPTY allowlist,
+ * and since `transform: true` instantiates it (the Swagger CLI plugin adds field
+ * initializers, so the keys exist even for a `{}` body) every property reads as
+ * non-whitelisted and the endpoint 400s on any input, including none.
+ */
 export class TestAlertDto {
   /** INFO | WARNING | ERROR | CRITICAL. Defaults to WARNING (see below). */
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
   severity?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
   title?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(1000)
   message?: string;
 }
 
