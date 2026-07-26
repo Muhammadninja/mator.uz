@@ -1,6 +1,7 @@
 import { ConfigService } from '@nestjs/config';
 import {
   MONITORED_QUEUES,
+  SAMPLED_QUEUES,
   resolveBullBoardConfig,
   resolveQueueMonitorConfig,
 } from './ops.config';
@@ -109,5 +110,19 @@ describe('MONITORED_QUEUES', () => {
     expect([...MONITORED_QUEUES].sort()).toEqual(
       Object.values(QUEUE_NAMES).sort(),
     );
+  });
+});
+
+describe('SAMPLED_QUEUES', () => {
+  it('covers every registered queue except the alerts queue', () => {
+    // A new queue must be sampled by default (the same regression guard as
+    // above), while `alerts` stays excluded: monitoring the alert-delivery
+    // queue with the system that delivers alerts cannot report its own failure.
+    expect([...SAMPLED_QUEUES].sort()).toEqual(
+      Object.values(QUEUE_NAMES)
+        .filter((queue) => queue !== QUEUE_NAMES.ALERTS)
+        .sort(),
+    );
+    expect(SAMPLED_QUEUES).not.toContain(QUEUE_NAMES.ALERTS);
   });
 });

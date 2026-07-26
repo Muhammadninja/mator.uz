@@ -60,7 +60,7 @@ function makeQueueMock() {
     enqueueSms: jest.fn().mockResolvedValue({ id: 'sms_job_1' }),
     otpSmsJobId: jest.fn(
       (requestId: string, sendCount: number) =>
-        `sms:otp:${requestId}:${sendCount}`,
+        `sms_otp_${requestId}_${sendCount}`,
     ),
   };
 }
@@ -130,7 +130,7 @@ describe('OtpService — AUTH_DEV_MODE', () => {
       expect(data.message).toMatch(/\d{6}/);
       expect(issued.devOtpCode).toBeUndefined();
       // Idempotency: keyed on (requestId, sendCount=0) for the initial issue.
-      expect(opts.jobId).toBe(`sms:otp:${issued.requestId}:0`);
+      expect(opts.jobId).toBe(`sms_otp_${issued.requestId}_0`);
     });
 
     it('issues a usable OTP even when the enqueue fails (code stays valid)', async () => {
@@ -229,8 +229,8 @@ describe('OtpService — AUTH_DEV_MODE', () => {
       await service.resend(first.requestId);
 
       const resendJobId = queue.enqueueSms.mock.calls[1][1].jobId;
-      expect(firstJobId).toBe(`sms:otp:${first.requestId}:0`);
-      expect(resendJobId).toBe(`sms:otp:${first.requestId}:1`);
+      expect(firstJobId).toBe(`sms_otp_${first.requestId}_0`);
+      expect(resendJobId).toBe(`sms_otp_${first.requestId}_1`);
       expect(resendJobId).not.toBe(firstJobId);
     });
   });

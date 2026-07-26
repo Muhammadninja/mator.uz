@@ -67,6 +67,10 @@ describe('Queue infrastructure', () => {
         SMS: 'sms',
         NOTIFICATIONS: 'notifications',
         MAINTENANCE: 'maintenance',
+        // Outbound operational alert delivery (src/alerting). Separate from
+        // NOTIFICATIONS so an alert never queues behind the user-facing push
+        // backlog it may be reporting on.
+        ALERTS: 'alerts',
       });
     });
   });
@@ -204,10 +208,10 @@ describe('Queue infrastructure', () => {
       expect(imageQueue.add).toHaveBeenCalledWith(
         'process',
         { draftId: 'draft_1', imageId: 'dimg_9' },
-        { jobId: 'image:draft_1:dimg_9' },
+        { jobId: 'image_draft_1_dimg_9' },
       );
       // Same draft image enqueued twice → same jobId → BullMQ collapses to one job.
-      expect(job.id).toBe('image:draft_1:dimg_9');
+      expect(job.id).toBe('image_draft_1_dimg_9');
     });
 
     // ── Image-flow isolation (regression guard for the SMS/notification migration) ──
@@ -234,8 +238,8 @@ describe('Queue infrastructure', () => {
       const { service } = buildService();
       // A collision across namespaces would let one flow's job silently collapse
       // another's, since BullMQ dedupes on jobId within a queue.
-      expect(service.imageJobId({ draftId: 'd', imageId: 'i' })).toMatch(/^image:/);
-      expect(service.otpSmsJobId('otp_1', 0)).toMatch(/^sms:otp:/);
+      expect(service.imageJobId({ draftId: 'd', imageId: 'i' })).toMatch(/^image_/);
+      expect(service.otpSmsJobId('otp_1', 0)).toMatch(/^sms_otp_/);
       expect(
         service.notificationJobId({
           userId: 'u',
@@ -244,7 +248,7 @@ describe('Queue infrastructure', () => {
           title: 'T',
           body: 'B',
         }),
-      ).toMatch(/^notify:/);
+      ).toMatch(/^notify_/);
     });
 
     it('reenqueueImage removes the stale job BEFORE adding (retry must not collapse into a retained failed job)', async () => {
@@ -263,7 +267,7 @@ describe('Queue infrastructure', () => {
 
       await service.reenqueueImage({ draftId: 'draft_1', imageId: 'dimg_9' });
 
-      expect(imageQueue.getJob).toHaveBeenCalledWith('image:draft_1:dimg_9');
+      expect(imageQueue.getJob).toHaveBeenCalledWith('image_draft_1_dimg_9');
       expect(imageQueue.add).toHaveBeenCalled();
       expect(order).toEqual(['remove', 'add']); // remove strictly precedes add
     });
@@ -272,7 +276,7 @@ describe('Queue infrastructure', () => {
       const { service, imageQueue } = buildService();
       imageQueue.getJob.mockResolvedValue(null);
       await expect(
-        service.removeImageJob('image:x:y'),
+        service.removeImageJob('image_x_y'),
       ).resolves.toBeUndefined();
       expect(imageQueue.__jobRemove).not.toHaveBeenCalled();
     });
@@ -280,20 +284,20 @@ describe('Queue infrastructure', () => {
     it('removeImageJob swallows a rejecting job.remove() (locked/active job must not break retry/cancel)', async () => {
       const { service, imageQueue } = buildService();
       imageQueue.getJob.mockResolvedValue({
-        id: 'image:x:y',
+        id: 'image_x_y',
         remove: jest.fn(async () => {
           throw new Error('Missing lock for job (job is active)');
         }),
       });
       await expect(
-        service.removeImageJob('image:x:y'),
+        service.removeImageJob('image_x_y'),
       ).resolves.toBeUndefined();
     });
 
     it('imageJobId builds the deterministic id', () => {
       const { service } = buildService();
       expect(service.imageJobId({ draftId: 'd', imageId: 'i' })).toBe(
-        'image:d:i',
+        'image_d_i',
       );
     });
 
@@ -319,7 +323,7 @@ describe('Queue infrastructure', () => {
       await service.enqueueNotification(data);
       // One committed inbox row → at most one push fan-out job.
       expect(notificationQueue.add).toHaveBeenCalledWith('notify', data, {
-        jobId: 'notify:ntf_1',
+        jobId: 'notify_ntf_1',
       });
     });
 

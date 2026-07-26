@@ -4,6 +4,7 @@ import { QueueMonitorService } from './queue-monitor.service';
 import { AlertService } from './alert.service';
 import { ALERT_TYPES, type Alert } from './alert.types';
 import { QUEUE_NAMES } from '../queue/queue.constants';
+import { SAMPLED_QUEUES } from './ops.config';
 
 interface Counts {
   waiting?: number;
@@ -205,13 +206,16 @@ describe('QueueMonitorService', () => {
       expect(samples).toHaveLength(3);
     });
 
-    it('returns a sample for every registered queue', async () => {
+    it('returns a sample for every sampled queue', async () => {
       const { monitor } = buildMonitor(idle());
 
       const samples = await monitor.sweep();
 
+      // SAMPLED_QUEUES, not every registered queue: the `alerts` queue is
+      // deliberately outside monitoring-that-alerts, since a failure there is
+      // precisely a failure to deliver alerts. See ops.config.ts.
       expect(samples.map((s) => s.queue).sort()).toEqual(
-        Object.values(QUEUE_NAMES).sort(),
+        [...SAMPLED_QUEUES].sort(),
       );
     });
   });

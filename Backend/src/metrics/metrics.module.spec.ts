@@ -6,6 +6,7 @@ import { getQueueToken } from '@nestjs/bullmq';
 import type { Registry } from 'prom-client';
 import request from 'supertest';
 import { QUEUE_NAMES } from '../queue/queue.constants';
+import { SAMPLED_QUEUES } from '../ops/ops.config';
 import { MetricsModule } from './metrics.module';
 import { MetricsService } from './metrics.service';
 import { METRICS_REGISTRY } from './metrics.providers';
@@ -145,8 +146,10 @@ describe('/metrics endpoint', () => {
       'mator_bullmq_jobs{queue="image-processing",state="failed"} 3',
     );
     expect(text).toContain('mator_bullmq_workers{queue="image-processing"} 5');
-    // Every queue in QUEUE_NAMES is represented, not just the busy one.
-    for (const name of Object.values(QUEUE_NAMES)) {
+    // Every SAMPLED queue is represented, not just the busy one. The `alerts`
+    // queue is excluded by design (see ops.config.ts): the collector does not
+    // inject it, so no series exists for it here.
+    for (const name of SAMPLED_QUEUES) {
       expect(text).toContain(`mator_bullmq_jobs{queue="${name}"`);
     }
   });
