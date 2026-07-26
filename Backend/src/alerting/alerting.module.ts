@@ -6,6 +6,7 @@ import { OpsModule } from '../ops/ops.module';
 import { AlertEvaluatorService } from './alert-evaluator.service';
 import { AlertNotifierService } from './alert-notifier.service';
 import { AlertProcessor } from './alert.processor';
+import { AlertTestController } from './alert-test.controller';
 import { AlertScheduler } from './alert.scheduler';
 import { AlertSilenceService } from './alert-silence.service';
 import { AlertStateStore } from './alert-state.store';
@@ -135,6 +136,9 @@ const sourceProvider: Provider = {
     // for the existing queue-monitor alerts.
     OpsModule,
   ],
+  // The ADMIN-guarded smoke-test endpoint (POST api/admin/alerts/test), which
+  // pushes a synthetic notification through the real delivery path.
+  controllers: [AlertTestController],
   providers: [
     ...RULES,
     ...CHANNELS,
