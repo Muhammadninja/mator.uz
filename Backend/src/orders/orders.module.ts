@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { PrismaModule } from '../prisma/prisma.module';
 import { AuthModule } from '../auth/auth.module';
+import { AdminAuthModule } from '../admin/auth/admin-auth.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { RealtimeModule } from '../realtime/realtime.module';
 import { OrdersService } from './orders.service';
@@ -14,7 +15,16 @@ import { ClickService } from './webhooks/click.service';
 import { PaymentWebhookController } from './webhooks/payment-webhook.controller';
 
 @Module({
-  imports: [PrismaModule, AuthModule, NotificationsModule, RealtimeModule],
+  // AdminAuthModule supplies the admin-token guards for the single operator
+  // route (PATCH /v1/orders/:id/status). AuthModule stays: every other route
+  // here is customer-facing and still authenticates with the app-user token.
+  imports: [
+    PrismaModule,
+    AuthModule,
+    AdminAuthModule,
+    NotificationsModule,
+    RealtimeModule,
+  ],
   providers: [
     OrdersService,
     OrderStatusService,
