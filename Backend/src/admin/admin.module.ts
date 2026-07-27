@@ -6,6 +6,8 @@ import { AdminOrdersService } from './orders/admin-orders.service';
 import { AdminOrdersController } from './orders/admin-orders.controller';
 import { AdminUsersService } from './users/admin-users.service';
 import { AdminUsersController } from './users/admin-users.controller';
+import { AdminDealersService } from './dealers/admin-dealers.service';
+import { AdminDealersController } from './dealers/admin-dealers.controller';
 import { SellersModule } from '../sellers/sellers.module';
 import { AuthModule } from '../auth/auth.module';
 import { AdminAuthModule } from './auth/admin-auth.module';
@@ -22,7 +24,18 @@ import { AdminManagementModule } from './management/admin-management.module';
     AdminAuthModule,
     AdminManagementModule,
   ],
-  providers: [AdminService, AdminOrdersService, AdminUsersService],
-  controllers: [AdminController, AdminOrdersController, AdminUsersController],
+  // AdminDealersService takes AdminAuditService, which AdminAuthModule exports.
+  providers: [
+    AdminService,
+    AdminOrdersService,
+    AdminUsersService,
+    AdminDealersService,
+  ],
+  controllers: [
+    AdminController,
+    AdminOrdersController,
+    AdminUsersController,
+    AdminDealersController,
+  ],
 })
 export class AdminModule {}

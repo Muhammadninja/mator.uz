@@ -11,7 +11,7 @@
 //   • actions with no signed-in actor (the CLI bootstrap) are labelled rather
 //     than left anonymous.
 
-import { AdminAuditAction, AdminRole } from '@prisma/client';
+import { AdminAuditAction, AdminAuditEntity, AdminRole } from '@prisma/client';
 import { runWithRequestId } from '../../common/request-context';
 import { AdminAuditService } from './admin-audit.service';
 
@@ -161,10 +161,19 @@ describe('AdminAuditService', () => {
         'actorName',
         'ip',
         'newRole',
+        // previousValues/newValues carry a before/after snapshot of the fields a
+        // dealer mutation changed. Never populated on an admin-account action —
+        // the assertion below proves they hold no part of the credential.
+        'newValues',
         'previousRole',
+        'previousValues',
+        'reason',
         'requestId',
         'targetAdminId',
         'targetEmail',
+        // Target of an action on a non-admin entity (a dealer). Null here.
+        'targetEntity',
+        'targetEntityId',
         'targetName',
         'userAgent',
       ]);
@@ -183,6 +192,75 @@ describe('AdminAuditService', () => {
       ]) {
         expect(values).not.toContain(forbidden);
       }
+    });
+  });
+
+  // Actions performed on something that is NOT an administrator account — today
+  // a dealer. targetAdminId is an FK to app_admins, so a dealer id must never
+  // land there; it goes to targetEntity/targetEntityId instead.
+  describe('entity targets', () => {
+    it('writes a dealer target to the entity columns, never the admin FK', async () => {
+      await service.record({
+        action: AdminAuditAction.DEALER_SUSPENDED,
+        actor: ACTOR,
+        target: {
+          entity: AdminAuditEntity.DEALER,
+          id: 'd1',
+          name: 'AutoPro Parts',
+        },
+        previousValues: { status: 'ACTIVE' },
+        newValues: { status: 'SUSPENDED' },
+        reason: 'Manual moderation',
+      });
+
+      const { data } = firstCallArg<{
+        data: Record<string, unknown>;
+      }>(prisma.adminAudit.create);
+
+      expect(data.targetEntity).toBe(AdminAuditEntity.DEALER);
+      expect(data.targetEntityId).toBe('d1');
+      // Would violate the FK to app_admins.
+      expect(data.targetAdminId).toBeNull();
+      expect(data.targetEmail).toBeNull();
+      // The display name is still snapshotted, so the entry stays readable
+      // after the dealer is renamed or deleted.
+      expect(data.targetName).toBe('AutoPro Parts');
+      expect(data.previousValues).toEqual({ status: 'ACTIVE' });
+      expect(data.newValues).toEqual({ status: 'SUSPENDED' });
+      expect(data.reason).toBe('Manual moderation');
+    });
+
+    it('leaves the entity columns null for an admin-account target', async () => {
+      await service.record({
+        action: AdminAuditAction.DEACTIVATE_ADMIN,
+        actor: ACTOR,
+        target: TARGET,
+      });
+
+      const { data } = firstCallArg<{ data: Record<string, unknown> }>(
+        prisma.adminAudit.create,
+      );
+      expect(data.targetEntity).toBeNull();
+      expect(data.targetEntityId).toBeNull();
+      expect(data.targetAdminId).toBe(TARGET.id);
+    });
+
+    it('clamps an over-long suspension reason to its column width', async () => {
+      await service.record({
+        action: AdminAuditAction.DEALER_SUSPENDED,
+        actor: ACTOR,
+        target: {
+          entity: AdminAuditEntity.DEALER,
+          id: 'd1',
+          name: 'AutoPro Parts',
+        },
+        reason: 'R'.repeat(900),
+      });
+
+      const { data } = firstCallArg<{ data: { reason: string } }>(
+        prisma.adminAudit.create,
+      );
+      expect(data.reason).toHaveLength(500);
     });
   });
 
