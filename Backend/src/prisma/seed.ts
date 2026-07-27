@@ -1,4 +1,4 @@
-import { PrismaClient, Role } from '@prisma/client';
+import { DealerStatus, PrismaClient, Role } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import {
   SEED_MAKES,
@@ -143,6 +143,14 @@ async function seedDealers() {
       color: d.color,
       orders: d.orders,
       years: d.years,
+      // Admin console state. These dealers are live, human-verified storefronts,
+      // so they land ACTIVE and certified rather than in the moderation queue —
+      // the same conclusion the migration reaches when backfilling an existing
+      // database. Without this, a freshly seeded DB would show every curated
+      // dealer as PENDING. brandColor mirrors `color` so both surfaces agree.
+      status: DealerStatus.ACTIVE,
+      certified: true,
+      brandColor: d.color,
     };
     await prisma.catalogSeller.upsert({
       where: { id: d.id },

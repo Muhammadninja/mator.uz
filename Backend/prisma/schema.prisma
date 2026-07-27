@@ -991,10 +991,59 @@ model CatalogSeller {
   color            String?       @db.VarChar(9) // brand accent hex (#RRGGBB[AA])
   orders           String?       @db.VarChar(20) // pre-formatted lifetime order count, e.g. "18k+"
   years            Int? // years in business
+  // ── Admin dealer console (/v1/admin/dealers) ──
+  // A dealer IS a CatalogSeller; these columns carry the moderation state and
+  // the commercial metrics the console shows. All are additive with safe
+  // defaults, so every existing row (curated or projected) keeps working and
+  // GET /v1/dealers is byte-for-byte unaffected.
+  city             String?       @db.VarChar(120)
+  // Dealer contact, used by the console's search and detail view. Held here
+  // rather than read through internalSellerId: that column is a loose id with
+  // no FK (the projection writes it opportunistically), the supply-side Seller
+  // has no email column at all, and its `phone` is the Telegram account behind
+  // the listing rather than the storefront's public contact. Nothing is
+  // duplicated — this is the only place a dealer's own contact details live.
+  email            String?       @db.VarChar(255)
+  phoneE164        String?       @map("phone_e164") @db.VarChar(20)
+  // Brand accent for the admin console. Distinct from `color`: `color` is the
+  // legacy storefront field GET /v1/dealers still returns, and is only set on
+  // curated rows. Kept separate rather than reused so neither surface can
+  // silently repaint the other; the seed points both at the same value.
+  brandColor       String?       @map("brand_color") @db.VarChar(9)
+  certified        Boolean       @default(false)
+  lowestPrice      Boolean       @default(false) @map("lowest_price")
+  status           DealerStatus  @default(PENDING)
+  // Why the dealer was suspended, as typed by the acting admin. Cleared on
+  // reactivation so a stale reason can never trail an active dealer.
+  suspendedReason  String?       @map("suspended_reason") @db.VarChar(500)
+  // Lifetime gross merchandise value in whole UZS. Stored, not derived:
+  // OrderItem deliberately holds no FK to the catalog (immutable snapshot), so
+  // there is no join that could compute a seller's GMV. BigInt because lifetime
+  // UZS overruns a 32-bit integer at ~2.1bn (a few hundred orders).
+  gmvUzs           BigInt        @default(0) @map("gmv_uzs")
+  // Lifetime order count as an INTEGER. `orders` above is a different thing —
+  // a pre-formatted display string ("18k+") that GET /v1/dealers returns — and
+  // is left untouched so that contract does not change.
+  ordersCount      Int           @default(0) @map("orders_count")
+  // When the dealer joined. Existing rows have no creation timestamp, so the
+  // migration backfills them to now(); new rows default to insert time.
+  joinedAt         DateTime      @default(now()) @map("joined_at") @db.Timestamptz(3)
+  updatedAt        DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
   parts            CatalogPart[]
 
   @@index([internalSellerId])
+  // Covering the console's default sort and its status filter.
+  @@index([status, joinedAt])
   @@map("catalog_sellers")
+}
+
+// Moderation state of a dealer. The admin console drives the transitions:
+// PENDING → ACTIVE (approve), ACTIVE → SUSPENDED (suspend), SUSPENDED → ACTIVE
+// (reactivate). Lowercased on the wire ("active"), like OrderStatus.
+enum DealerStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
 }
 
 model CatalogPart {
@@ -1404,6 +1453,24 @@ enum AdminAuditAction {
   CHANGE_PASSWORD
   RESET_PASSWORD
   DELETE_ADMIN
+  // Dealer moderation (/v1/admin/dealers). The target is a dealer, not an
+  // administrator, so these entries carry targetEntity/targetEntityId rather
+  // than targetAdminId — see AdminAudit.
+  DEALER_CERTIFIED_ENABLED
+  DEALER_CERTIFIED_DISABLED
+  DEALER_LOWEST_PRICE_ENABLED
+  DEALER_LOWEST_PRICE_DISABLED
+  DEALER_APPROVED
+  DEALER_SUSPENDED
+  DEALER_REACTIVATED
+  DEALER_UPDATED
+}
+
+// What kind of thing an audit entry is about, for entries whose target is not
+// an administrator account. Null on the admin-account actions, which keep using
+// the targetAdminId FK.
+enum AdminAuditEntity {
+  DEALER
 }
 
 model AppAdmin {
@@ -1459,6 +1526,20 @@ model AdminAudit {
   // Before/after for privilege changes (CHANGE_ROLE). Null for other actions.
   previousRole   AdminRole?       @map("previous_role")
   newRole        AdminRole?       @map("new_role")
+  // Target for actions performed on something OTHER than an administrator
+  // account — today a dealer. targetAdminId cannot carry these: it is an FK to
+  // app_admins, so a dealer id would violate it. Deliberately NOT a foreign key
+  // itself: the trail is append-only and must survive deletion of its subject,
+  // which is also why targetName above snapshots the display name at write time.
+  targetEntity   AdminAuditEntity? @map("target_entity")
+  targetEntityId String?           @map("target_entity_id") @db.VarChar(64)
+  // Before/after snapshot of the changed fields, e.g.
+  // {"certified": false} → {"certified": true}. Only the fields the action
+  // touched, never a whole row — and never a credential.
+  previousValues Json?             @map("previous_values")
+  newValues      Json?             @map("new_values")
+  // Free-text reason supplied by the acting admin (dealer suspension).
+  reason         String?           @db.VarChar(500)
   // Request provenance. Untrusted and display-only — never an authorization input.
   ip             String?          @db.VarChar(45)
   userAgent      String?          @map("user_agent") @db.VarChar(400)
@@ -1474,6 +1555,8 @@ model AdminAudit {
   @@index([targetAdminId, createdAt])
   @@index([actorId, createdAt])
   @@index([createdAt])
+  // "everything that happened to this dealer", newest first.
+  @@index([targetEntity, targetEntityId, createdAt])
   @@map("admin_audits")
 }
 
