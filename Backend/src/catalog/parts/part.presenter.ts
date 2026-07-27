@@ -108,6 +108,14 @@ export function presentPartItem(part: PartWithRelations, vehicle: VehicleCompatC
         model_name: f.modelName,
       })),
     images: part.images,
-    seller: { id: part.seller.id, name: part.seller.name, rating_avg: Number(part.seller.ratingAvg) },
+    // `certified` is the "MATOR Certified" dealer badge (CatalogSeller.certified,
+    // maintained by the admin dealer console). Non-null by schema default, so
+    // every seller — curated or projected — reports a real boolean, never null.
+    seller: {
+      id: part.seller.id,
+      name: part.seller.name,
+      rating_avg: Number(part.seller.ratingAvg),
+      certified: part.seller.certified,
+    },
   };
 }

@@ -25,12 +25,17 @@ import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 
 @ApiTags('Orders')
 @ApiBearerAuth('jwt')
+// NOTE: authentication is declared PER ROUTE, not on the class. Nest guards are
+// additive — a class-level @UseGuards runs BEFORE the method-level one and can
+// only ever narrow access, never be replaced by it. With JwtAuthGuard on the
+// class, the operator route below 401'd every admin token (HS256) inside the
+// user strategy (RS256) before AdminJwtGuard was ever reached.
 @Controller('v1/orders')
-@UseGuards(JwtAuthGuard)
 export class OrdersController {
   constructor(private readonly orders: OrdersService) {}
 
   @Post()
+  @UseGuards(JwtAuthGuard)
   @HttpCode(HttpStatus.CREATED)
   create(@Request() req: { user: { id: string } }, @Body() dto: CreateOrderDto) {
     return this.orders.createFromCart(req.user.id, dto);
@@ -39,22 +44,24 @@ export class OrdersController {
   // Order history (paginated, optional status filter). Declared before the
   // parameterized :id route for clarity; the paths are distinct regardless.
   @Get()
+  @UseGuards(JwtAuthGuard)
   @HttpCode(HttpStatus.OK)
   list(@Request() req: { user: { id: string } }, @Query() query: ListOrdersQueryDto) {
     return this.orders.list(req.user.id, query);
   }
 
   @Get(':id')
+  @UseGuards(JwtAuthGuard)
   @HttpCode(HttpStatus.OK)
   get(@Request() req: { user: { id: string } }, @Param('id') id: string) {
     return this.orders.getOrder(req.user.id, id);
   }
 
   // Operator status write. Server-authoritative state machine lives in the
-  // service; gated on an admin-panel token — a customer can't self-advance their
-  // own order. These method-level guards REPLACE the class-level JwtAuthGuard
-  // for this route only: the operator console signs in through /v1/auth/admin,
-  // so the caller carries an admin token (HS256), not a mobile app-user one.
+  // service; gated on an admin-panel token ONLY — a customer can't self-advance
+  // their own order. The operator console signs in through /v1/auth/admin, so
+  // the caller carries an admin token (HS256), never a mobile app-user one; this
+  // route therefore carries no JwtAuthGuard at all (see the class-level note).
   // Every admin role is an operator here; AdminRoleGuard 403s anything else.
   @Patch(':id/status')
   @UseGuards(AdminJwtGuard, AdminRoleGuard)

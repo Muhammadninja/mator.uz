@@ -45,7 +45,12 @@ function part(over: Partial<PartWithRelations> = {}): PartWithRelations {
     updatedAt: new Date() as never,
     brand: null,
     category: { id: 'cat-1', name: 'Filters' } as never,
-    seller: { id: 'seller-1', name: 'AutoPro', ratingAvg: 0 } as never,
+    seller: {
+      id: 'seller-1',
+      name: 'AutoPro',
+      ratingAvg: 0,
+      certified: false,
+    } as never,
     compatibilities: [],
     fits: [],
     ...over,
@@ -98,5 +103,32 @@ describe('presentPartItem — fits[]', () => {
       'model_chevrolet_tracker',
       'model_chevrolet_cobalt',
     ]);
+  });
+});
+
+describe('presentPartItem — seller', () => {
+  it('exposes the certified badge alongside id/name/rating_avg', () => {
+    const out = presentPartItem(
+      part({
+        seller: {
+          id: 'seller-1',
+          name: 'AutoPro',
+          ratingAvg: 4.5,
+          certified: true,
+        } as never,
+      }),
+      null,
+    );
+    expect(out.seller).toEqual({
+      id: 'seller-1',
+      name: 'AutoPro',
+      rating_avg: 4.5,
+      certified: true,
+    });
+  });
+
+  it('reports certified:false for an uncertified seller, never null', () => {
+    const out = presentPartItem(part(), null);
+    expect(out.seller.certified).toBe(false);
   });
 });
