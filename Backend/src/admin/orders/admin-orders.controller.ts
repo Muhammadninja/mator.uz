@@ -8,24 +8,26 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
-import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
-import { RolesGuard } from '../../auth/guards/roles.guard';
-import { Roles } from '../../auth/decorators/roles.decorator';
+import { AdminRole } from '@prisma/client';
+import { Roles } from '../auth/decorators/roles.decorator';
+import { AdminJwtGuard } from '../auth/guards/admin-jwt.guard';
+import { AdminRoleGuard } from '../auth/guards/admin-role.guard';
 import { AdminOrdersService } from './admin-orders.service';
 import { ListAdminOrdersQueryDto } from './dto/list-admin-orders.query.dto';
 
 /**
- * Admin/operator order console (read-only). Bearer JWT + role gate: only ADMIN
- * passes — ADMIN is the operator role in this system (the `Role` enum is
- * USER/SELLER/ADMIN; there is no separate OPERATOR value). A USER is rejected
- * with 403. These endpoints return orders across the ENTIRE system — never
- * scoped to the caller — and do not touch any customer-facing order endpoint.
+ * Admin/operator order console (read-only). Admin-panel bearer token
+ * (AdminJwtGuard, HS256) + role gate — a mobile app-user token cannot reach it
+ * at all. Every admin role is an operator here: SUPER_ADMIN, MANAGER and
+ * OPERATOR all pass. These endpoints return orders across the ENTIRE system —
+ * never scoped to the caller — and do not touch any customer-facing order
+ * endpoint.
  */
 @ApiTags('Admin Orders')
 @ApiBearerAuth('jwt')
 @Controller('v1/admin/orders')
-@UseGuards(JwtAuthGuard, RolesGuard)
-@Roles('ADMIN')
+@UseGuards(AdminJwtGuard, AdminRoleGuard)
+@Roles(AdminRole.SUPER_ADMIN, AdminRole.MANAGER, AdminRole.OPERATOR)
 export class AdminOrdersController {
   constructor(private readonly adminOrders: AdminOrdersService) {}
 

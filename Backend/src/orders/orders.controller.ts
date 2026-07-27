@@ -12,9 +12,12 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
+import { AdminRole } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
-import { RolesGuard } from '../auth/guards/roles.guard';
-import { Roles } from '../auth/decorators/roles.decorator';
+import { Roles } from '../admin/auth/decorators/roles.decorator';
+import { AdminJwtGuard } from '../admin/auth/guards/admin-jwt.guard';
+import { AdminRoleGuard } from '../admin/auth/guards/admin-role.guard';
+import { AuthenticatedAdmin } from '../admin/auth/strategies/admin-jwt.strategy';
 import { OrdersService, StatusActor } from './orders.service';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { ListOrdersQueryDto } from './dto/list-orders.query.dto';
@@ -48,19 +51,29 @@ export class OrdersController {
   }
 
   // Operator status write. Server-authoritative state machine lives in the
-  // service; gated on the ADMIN (operator) role — a customer can't self-advance
-  // their own order. The class-level JwtAuthGuard authenticates; RolesGuard here
-  // enforces the role (403 otherwise).
+  // service; gated on an admin-panel token — a customer can't self-advance their
+  // own order. These method-level guards REPLACE the class-level JwtAuthGuard
+  // for this route only: the operator console signs in through /v1/auth/admin,
+  // so the caller carries an admin token (HS256), not a mobile app-user one.
+  // Every admin role is an operator here; AdminRoleGuard 403s anything else.
   @Patch(':id/status')
-  @UseGuards(RolesGuard)
-  @Roles('ADMIN')
+  @UseGuards(AdminJwtGuard, AdminRoleGuard)
+  @Roles(AdminRole.SUPER_ADMIN, AdminRole.MANAGER, AdminRole.OPERATOR)
   @HttpCode(HttpStatus.OK)
   updateStatus(
-    @Request() req: { user: StatusActor },
+    @Request() req: { user: AuthenticatedAdmin },
     @Param('id') id: string,
     @Body() dto: UpdateOrderStatusDto,
   ) {
-    // Pass the acting operator so the change is attributed in the status history.
-    return this.orders.updateStatus(id, dto, req.user);
+    // Pass the acting operator so the change is attributed in the status
+    // history. AuthenticatedAdmin carries a single `name`, mapped onto the
+    // actor's displayName; role stays 'ADMIN' so the history keeps recording
+    // these as ADMIN transitions exactly as before.
+    const actor: StatusActor = {
+      id: req.user.id,
+      role: 'ADMIN',
+      displayName: req.user.name,
+    };
+    return this.orders.updateStatus(id, dto, actor);
   }
 }
