@@ -13,6 +13,7 @@ import {
 } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { IdPrefix, prefixedId } from '../common/ulid.util';
+import { capabilitiesOf, type KindRequiredField } from '../common/product-kind';
 
 /**
  * ProductDraftService — the THIN data layer for the product-creation draft
@@ -56,6 +57,61 @@ export interface DraftFormPatch {
 export interface DraftImageInput {
   sortOrder: number;
   tgFileId: string;
+}
+
+/**
+ * The draft fields {@link isDraftFormComplete} reads (a structural subset, so
+ * both a full Prisma row and a hand-built object satisfy it).
+ *
+ * Every {@link KindRequiredField} must appear here — the assertion below makes
+ * that a COMPILE-TIME guarantee, so a capability entry cannot name a field the
+ * completeness check has no way to read.
+ */
+export interface DraftFormFields {
+  kind: ProductKind;
+  title: string | null;
+  priceUzs: Prisma.Decimal | null;
+  brand: string | null;
+  model: string | null;
+  category: PartVehicleCategory | null;
+  oilViscosity: string | null;
+  oilType: OilType | null;
+  oilVolumeMl: number | null;
+}
+
+// Compile-time guarantee that every field a capability entry can REQUIRE is a
+// field this interface actually exposes. If a new kind declares a required field
+// that DraftFormFields cannot read, this line fails to compile — rather than the
+// completeness check silently reading `undefined` and passing.
+type _RequiredFieldsAreReadable =
+  KindRequiredField extends keyof DraftFormFields ? true : never;
+const _requiredFieldsAreReadable: _RequiredFieldsAreReadable = true;
+void _requiredFieldsAreReadable;
+
+/**
+ * Whether a draft carries every field ITS KIND requires — i.e. the questionnaire
+ * that ran actually filled in what it asks for.
+ *
+ * THE SINGLE DEFINITION OF "form complete", and it holds NO per-kind knowledge of
+ * its own: the required fields come from the kind capability table
+ * (common/product-kind.ts), so adding a kind changes that table and nothing here.
+ *
+ * Both gates call this one function and therefore cannot disagree:
+ * DraftCoordinator uses it for the rendezvous (CREATING → READY_FOR_PREVIEW), and
+ * TelegramService uses it to decide a draft may be previewed/committed. A second,
+ * hand-maintained copy is exactly the bug this replaces — the coordinator's own
+ * version demanded brand/model/category, which a motor oil never has, so a fully
+ * answered oil whose images had all gone READY silently failed the rendezvous and
+ * left the seller on "⏳ Завершаем обработку фото…" forever.
+ *
+ * Title and price are required by every kind, so they are checked here rather
+ * than repeated in every capability entry.
+ */
+export function isDraftFormComplete(draft: DraftFormFields): boolean {
+  if (draft.title === null || draft.priceUzs === null) return false;
+  return capabilitiesOf(draft.kind).requiredFields.every(
+    (field) => draft[field] !== null,
+  );
 }
 
 @Injectable()

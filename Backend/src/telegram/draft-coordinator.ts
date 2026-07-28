@@ -8,6 +8,7 @@ import {
 } from './draft-events';
 import {
   ProductDraftService,
+  isDraftFormComplete,
   type DraftWithImages,
 } from './product-draft.service';
 import { DraftTelemetry, DraftMetric } from './draft-telemetry';
@@ -90,8 +91,11 @@ export class DraftCoordinator {
         return;
       }
 
-      // All images READY here. Gate on the form axis.
-      if (images.length === 0 || !this.isFormComplete(draft)) return;
+      // All images READY here. Gate on the form axis, using the draft domain's
+      // SINGLE definition of completeness — never a local copy, which is how a
+      // motor oil (no brand/model/category by design) once failed this gate
+      // silently and stranded the seller on the "processing photos" message.
+      if (images.length === 0 || !isDraftFormComplete(draft)) return;
 
       const won = await this.drafts.tryTransition(
         draftId,
@@ -108,21 +112,6 @@ export class DraftCoordinator {
     }
     this.logger.warn(
       `maybeAdvanceToPreview(${draftId}) exhausted retries under version contention`,
-    );
-  }
-
-  /**
-   * The form axis is complete when every REQUIRED field is present. This is
-   * field-based (not step-string based) so it is robust regardless of how the FSM
-   * labels its final step. Description and part number are optional by design.
-   */
-  private isFormComplete(draft: DraftWithImages): boolean {
-    return (
-      draft.title !== null &&
-      draft.brand !== null &&
-      draft.model !== null &&
-      draft.category !== null &&
-      draft.priceUzs !== null
     );
   }
 

@@ -38,6 +38,7 @@ import { OilType, PartVehicleCategory, ProductKind } from '@prisma/client';
 import { Markup } from 'telegraf';
 import type { PartNumberType } from '../ai/part-parser.types';
 import { parsePrice } from '../ai/price-parser';
+import { capabilitiesOf, isUniversalKind } from '../common/product-kind';
 import {
   OIL_TYPES,
   OIL_TYPE_LABELS,
@@ -113,20 +114,12 @@ const FLOWS: Record<ProductKind, WizardStep[]> = {
   ],
 };
 
-/**
- * Whether a kind's products fit EVERY vehicle by design, so `isUniversal` is a
- * property of the kind rather than a question to ask. A motor oil is universal:
- * its questionnaire deliberately has no compatibility step, so there is nothing
- * to derive fitment from and nothing for the seller to answer.
- *
- * Defined here, next to FLOWS, because it is the same statement from the other
- * side: a kind is universal exactly when its flow asks no compatibility question.
- * A new kind declares both together — a flow with MODEL/CATEGORY steps is not
- * universal; one without them is.
- */
-export function isUniversalKind(kind: ProductKind): boolean {
-  return kind === ProductKind.MOTOR_OIL;
-}
+// `isUniversalKind` is NOT defined here. Whether a kind fits every vehicle is a
+// domain fact shared with the buyer catalog and the projection, so it lives in
+// the kind capability table (common/product-kind.ts) and is re-exported for the
+// wizard's callers. Defining it here as well is how the rule drifted before: the
+// bot said one thing and the catalog card another.
+export { isUniversalKind };
 
 /**
  * The session's flow as ACTUALLY walked, with the conditional detours spliced in
@@ -145,6 +138,11 @@ function flowSteps(session: WizardSession): WizardStep[] {
   // MOTOR_OIL's flow made it unreachable from the session that is standing on
   // it (kind is still SPARE_PART at that moment), which left `previousStep`
   // returning null and the step rendering with no "⬅️ Назад" button at all.
+  //
+  // The condition below is deliberately NOT a capability lookup: it asks "did
+  // this dialogue go through the Другое menu", which is a fact about the SESSION's
+  // path, not about what the kind is. SPARE_PART is the only kind reachable
+  // without that menu, so it is the one excluded.
   const steps: WizardStep[] = [WizardStep.BRAND];
   if (
     session.step === WizardStep.OTHER_CATEGORY ||
@@ -986,18 +984,36 @@ export function previewLines(
   },
   vehicleLine: string,
 ): string[] {
-  if (listing.kind === ProductKind.MOTOR_OIL) {
-    // Deliberately NO vehicle, category or part-number lines: those concepts
-    // belong to spare parts only.
-    return [
-      `🛢 *Вязкость:* ${listing.oilViscosity ?? '—'}`,
-      `🧪 *Тип масла:* ${listing.oilType ? OIL_TYPE_LABELS[listing.oilType] : '—'}`,
-      `🧴 *Объём:* ${listing.oilVolumeMl !== null ? formatVolume(listing.oilVolumeMl) : '—'}`,
-    ];
+  const caps = capabilitiesOf(listing.kind);
+  const lines: string[] = [];
+
+  // Which SHARED lines appear is read from the capability table, never from a
+  // local kind check — so a kind without fitment automatically shows no vehicle
+  // line, and one without part numbers shows no number line. This is the same
+  // table the buyer card and the commit path read.
+  if (caps.hasVehicleFitment) lines.push(`🚗 *Автомобиль:* ${vehicleLine}`);
+  if (caps.hasVehicleCategory) {
+    lines.push(`🗂 *Категория:* ${listing.vehicleCategoryLabel}`);
   }
-  return [
-    `🚗 *Автомобиль:* ${vehicleLine}`,
-    `🗂 *Категория:* ${listing.vehicleCategoryLabel}`,
-    `🔢 *${listing.partNumberLabel}:* ${listing.partNumber ?? '—'}`,
-  ];
+  if (caps.hasPartNumbers) {
+    lines.push(`🔢 *${listing.partNumberLabel}:* ${listing.partNumber ?? '—'}`);
+  }
+
+  // The kind's OWN attribute lines. This switch is exhaustive, so a new kind
+  // cannot compile until it states how its attributes are rendered — the one
+  // place per-kind preview knowledge is allowed to live.
+  switch (listing.kind) {
+    case ProductKind.MOTOR_OIL:
+      lines.push(
+        `🛢 *Вязкость:* ${listing.oilViscosity ?? '—'}`,
+        `🧪 *Тип масла:* ${listing.oilType ? OIL_TYPE_LABELS[listing.oilType] : '—'}`,
+        `🧴 *Объём:* ${listing.oilVolumeMl !== null ? formatVolume(listing.oilVolumeMl) : '—'}`,
+      );
+      break;
+    case ProductKind.SPARE_PART:
+      // No attributes beyond the shared lines above.
+      break;
+  }
+
+  return lines;
 }

@@ -31,6 +31,7 @@ import { MediaGroupBuffer } from './media-group-buffer';
 import { persistVehicleLinks } from './vehicle-links';
 import {
   ProductDraftService,
+  isDraftFormComplete,
   type DraftWithImages,
 } from './product-draft.service';
 import { DraftCoordinator } from './draft-coordinator';
@@ -267,46 +268,14 @@ export function formatVehicleLine(metadata: ParseOutcome): string {
   return '—';
 }
 
-/** The draft fields the completeness check reads (a structural subset). */
-interface DraftFormFields {
-  kind: ProductKind;
-  brand: string | null;
-  model: string | null;
-  category: PartVehicleCategory | null;
-  title: string | null;
-  oilViscosity: string | null;
-  oilType: OilType | null;
-  oilVolumeMl: number | null;
-  priceUzs: Decimal | null;
-}
-
 /**
- * Whether a draft carries every field ITS KIND requires to be previewed and
- * committed — i.e. the questionnaire that ran actually filled in what it asks
- * for. Kept as one table keyed by kind so the rule lives beside the flow it
- * mirrors (FLOWS in product-wizard.ts) rather than being duplicated at each of
- * the two call sites that gate on it.
- *
- * A spare part needs its vehicle (brand + model) and category; a motor oil needs
- * its viscosity, type and volume and must NOT be required to have a vehicle —
- * that is exactly the distinction the branch exists for. Title and price are
- * required by every flow.
+ * Whether a draft carries every field its kind requires. Re-exported from the
+ * draft domain, which owns the SINGLE definition — the coordinator's rendezvous
+ * gate and this module's preview/commit gate must always agree, and they only do
+ * so by calling the same function. Kept exported here for the existing callers
+ * and tests that import it from this module.
  */
-export function isDraftComplete(draft: DraftFormFields): boolean {
-  if (draft.title === null || draft.priceUzs === null) return false;
-  switch (draft.kind) {
-    case ProductKind.MOTOR_OIL:
-      return (
-        draft.oilViscosity !== null &&
-        draft.oilType !== null &&
-        draft.oilVolumeMl !== null
-      );
-    case ProductKind.SPARE_PART:
-      return (
-        draft.brand !== null && draft.model !== null && draft.category !== null
-      );
-  }
-}
+export { isDraftFormComplete as isDraftComplete };
 
 /**
  * Rebuild the wizard's conversational state from a draft, positioning the dialogue
@@ -1063,7 +1032,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       .filter((img) => img.processedPublicId)
       .map((img) => img.processedPublicId as string);
 
-    if (processedUrls.length === 0 || !isDraftComplete(draft)) {
+    if (processedUrls.length === 0 || !isDraftFormComplete(draft)) {
       this.logger.error(
         `Draft ${draftId} reached preview with incomplete data — skipping.`,
       );
@@ -1427,7 +1396,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       .filter((img) => img.processedPublicId)
       .map((img) => img.processedPublicId as string);
 
-    if (processedUrls.length === 0 || !isDraftComplete(draft)) {
+    if (processedUrls.length === 0 || !isDraftFormComplete(draft)) {
       this.logger.error(
         `Draft ${draft.id} cannot be rebuilt for confirmation — incomplete data.`,
       );

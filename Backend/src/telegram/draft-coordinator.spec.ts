@@ -8,7 +8,12 @@
 //   • a lost optimistic race (version bumped underneath) re-reads and does not
 //     double-emit / does not advance a terminal draft.
 
-import { DraftImageStatus, DraftStatus } from '@prisma/client';
+import {
+  DraftImageStatus,
+  DraftStatus,
+  OilType,
+  ProductKind,
+} from '@prisma/client';
 import { DraftCoordinator } from './draft-coordinator';
 import { DraftEvent } from './draft-events';
 
@@ -21,14 +26,33 @@ function makeDraft(over: Partial<Record<string, unknown>> = {}) {
     tgId: 123n,
     status: DraftStatus.CREATING,
     version: 0,
+    kind: ProductKind.SPARE_PART,
     title: 'Amortizator',
     brand: 'Chevrolet',
     model: 'Cobalt',
     category: 'SUSPENSION_AND_STEERING',
+    oilViscosity: null,
+    oilType: null,
+    oilVolumeMl: null,
     priceUzs: 250000,
     images: [] as Img[],
     ...over,
   };
+}
+
+/** A fully-answered MOTOR_OIL draft: no vehicle, no category — by design. */
+function makeOilDraft(over: Partial<Record<string, unknown>> = {}) {
+  return makeDraft({
+    kind: ProductKind.MOTOR_OIL,
+    title: 'Mobil 1 ESP 5W-30 4L',
+    brand: null,
+    model: null,
+    category: null,
+    oilViscosity: '5W-30',
+    oilType: OilType.SYNTHETIC,
+    oilVolumeMl: 4000,
+    ...over,
+  });
 }
 
 /**
@@ -249,5 +273,110 @@ describe('DraftCoordinator rendezvous', () => {
     );
     expect(previewEmits).toHaveLength(1);
     expect(draft.status).toBe(DraftStatus.READY_FOR_PREVIEW);
+  });
+});
+
+// ── Per-KIND rendezvous ─────────────────────────────────────────────────────
+// Regression: the coordinator used to carry its OWN copy of the "form complete"
+// rule, which demanded brand + model + category. A motor oil never has those —
+// its questionnaire deliberately does not ask — so a fully-answered oil whose
+// images had all reached READY silently failed the gate: no transition, no
+// event, no exception. The seller sat on "⏳ Завершаем обработку фото…" forever
+// while the logs showed a perfectly healthy image pipeline.
+//
+// The rule now lives once in the draft domain (isDraftFormComplete) and both the
+// coordinator and TelegramService call it, so they cannot drift apart again.
+describe('DraftCoordinator rendezvous — per product kind', () => {
+  const READY = DraftImageStatus.READY;
+
+  /** Build a coordinator over `draft` and return it with its doubles. */
+  function coordinatorFor(draft: ReturnType<typeof makeDraft>) {
+    const drafts = makeDraftsMock(draft);
+    const events = makeEvents();
+    const coord = new DraftCoordinator(
+      drafts as never,
+      events as never,
+      makeTelemetry() as never,
+    );
+    return { coord, drafts, events };
+  }
+
+  const previewEmits = (events: ReturnType<typeof makeEvents>) =>
+    events.emit.mock.calls.filter(
+      (c: unknown[]) => c[0] === DraftEvent.READY_FOR_PREVIEW,
+    );
+
+  it('advances a MOTOR_OIL draft that has NO brand/model/category', async () => {
+    const draft = makeOilDraft({ images: [{ id: 'a', status: READY }] });
+    const { coord, events } = coordinatorFor(draft);
+
+    await coord.onImageSettled('draft_1');
+
+    expect(draft.status).toBe(DraftStatus.READY_FOR_PREVIEW);
+    expect(previewEmits(events)).toHaveLength(1);
+    expect(previewEmits(events)[0][1]).toMatchObject({
+      draftId: 'draft_1',
+      tgId: 123n,
+    });
+  });
+
+  it('emits exactly once for an oil when both tracks race', async () => {
+    const draft = makeOilDraft({ images: [{ id: 'a', status: READY }] });
+    const { coord, events } = coordinatorFor(draft);
+
+    await Promise.all([
+      coord.onFormStep('draft_1'),
+      coord.onImageSettled('draft_1'),
+    ]);
+
+    expect(previewEmits(events)).toHaveLength(1);
+  });
+
+  it.each([
+    ['viscosity', { oilViscosity: null }],
+    ['oil type', { oilType: null }],
+    ['volume', { oilVolumeMl: null }],
+    ['title', { title: null }],
+    ['price', { priceUzs: null }],
+  ])('waits when an oil is missing its %s', async (_label, missing) => {
+    const draft = makeOilDraft({
+      images: [{ id: 'a', status: READY }],
+      ...missing,
+    });
+    const { coord, events } = coordinatorFor(draft);
+
+    await coord.onImageSettled('draft_1');
+
+    expect(draft.status).toBe(DraftStatus.CREATING);
+    expect(previewEmits(events)).toHaveLength(0);
+  });
+
+  it('does NOT require oil attributes from a SPARE_PART (regression)', async () => {
+    // The mirror of the original bug: the shared rule must not start demanding
+    // viscosity/type/volume from a spare part.
+    const draft = makeDraft({ images: [{ id: 'a', status: READY }] });
+    const { coord, events } = coordinatorFor(draft);
+
+    await coord.onImageSettled('draft_1');
+
+    expect(draft.status).toBe(DraftStatus.READY_FOR_PREVIEW);
+    expect(previewEmits(events)).toHaveLength(1);
+  });
+
+  it.each([
+    ['brand', { brand: null }],
+    ['model', { model: null }],
+    ['category', { category: null }],
+  ])('still waits when a spare part is missing its %s', async (_l, missing) => {
+    const draft = makeDraft({
+      images: [{ id: 'a', status: READY }],
+      ...missing,
+    });
+    const { coord, events } = coordinatorFor(draft);
+
+    await coord.onImageSettled('draft_1');
+
+    expect(draft.status).toBe(DraftStatus.CREATING);
+    expect(previewEmits(events)).toHaveLength(0);
   });
 });

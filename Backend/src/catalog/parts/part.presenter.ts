@@ -1,5 +1,8 @@
 import { Prisma, CompatibilityStatus, ProductKind } from '@prisma/client';
 import { OIL_TYPE_LABELS, formatVolume } from '../../common/motor-oil.util';
+// The kind capability table — the SINGLE source of truth for what a kind is.
+// The card must never re-derive these from a local `kind === MOTOR_OIL` check.
+import { hasCompatibility, hasPartNumbers } from '../../common/product-kind';
 
 export const PART_INCLUDE = {
   brand: true,
@@ -85,34 +88,25 @@ export function computeCompatibility(
  * Each value is returned both raw (for filtering/sorting) and as a display label
  * (`*_label`), matching how `price_uzs` / `price_label` already pair up.
  */
-/**
- * Whether a listing's KIND has a part-number concept (GM / OEM). Spare parts do;
- * motor oils do not — their questionnaire never asks for one, so the columns are
- * empty by construction rather than by omission.
- */
-function hasPartNumbers(part: PartWithRelations): boolean {
-  return part.kind !== ProductKind.MOTOR_OIL;
-}
-
-/**
- * Whether a listing's KIND has a vehicle-compatibility concept. Motor oils are
- * universal by design (see isUniversalKind in the wizard), so asking "does this
- * fit your car" is not a question with a meaningful answer for them.
- */
-function hasCompatibility(part: PartWithRelations): boolean {
-  return part.kind !== ProductKind.MOTOR_OIL;
-}
-
 function presentKindAttributes(part: PartWithRelations) {
-  if (part.kind !== ProductKind.MOTOR_OIL) return null;
-  return {
-    viscosity: part.oilViscosity,
-    oil_type: part.oilType,
-    oil_type_label: part.oilType ? OIL_TYPE_LABELS[part.oilType] : null,
-    volume_ml: part.oilVolumeMl,
-    volume_label:
-      part.oilVolumeMl !== null ? formatVolume(part.oilVolumeMl) : null,
-  };
+  // Exhaustive switch, not an early `kind !== MOTOR_OIL` return: a future kind
+  // with its own attributes would silently fall through that check and present
+  // nothing. Here it fails to compile until its branch is written.
+  switch (part.kind) {
+    case ProductKind.MOTOR_OIL:
+      return {
+        viscosity: part.oilViscosity,
+        oil_type: part.oilType,
+        oil_type_label: part.oilType ? OIL_TYPE_LABELS[part.oilType] : null,
+        volume_ml: part.oilVolumeMl,
+        volume_label:
+          part.oilVolumeMl !== null ? formatVolume(part.oilVolumeMl) : null,
+      };
+    case ProductKind.SPARE_PART:
+      // A spare part's attributes are the shared ones (numbers, fitment,
+      // category), already present at the top level of the item.
+      return null;
+  }
 }
 
 /** Map a CatalogPart row to the contract's list-item shape. */
@@ -144,7 +138,7 @@ export function presentPartItem(
     // both. NULL for a kind that has no part-number concept at all (motor oils):
     // "UNKNOWN" there would read as "we don't know this oil's number", inviting a
     // UI to render an empty "OEM/GM №" row for a product that can never have one.
-    part_number_type: hasPartNumbers(part) ? part.partNumberType : null,
+    part_number_type: hasPartNumbers(part.kind) ? part.partNumberType : null,
     price_uzs: Number(part.priceUzs),
     price_label: formatUzs(part.priceUzs),
     currency: part.currency,
@@ -154,7 +148,7 @@ export function presentPartItem(
     // Null for a kind with no compatibility concept. Without this a motor oil
     // reported {status:'maybe'} — actively WRONG, since "maybe" tells the buyer
     // it might not fit their car, when an oil fits every car by definition.
-    compatibility: hasCompatibility(part)
+    compatibility: hasCompatibility(part.kind)
       ? computeCompatibility(part.compatibilities, vehicle)
       : null,
     // Static make/model fitment for this part, projected from the supply-side
