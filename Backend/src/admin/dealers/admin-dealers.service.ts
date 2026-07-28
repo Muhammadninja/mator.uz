@@ -256,6 +256,16 @@ export class AdminDealersService {
       const trimmedReason =
         next === DealerStatus.SUSPENDED ? (reason?.trim() ?? null) : null;
 
+      // Suspending a dealer REVOKES its trust badges: a suspended storefront must
+      // never remain MATOR Certified or advertise a lowest-price guarantee. They
+      // are cleared in the same write so the public /v1/dealers storefront and the
+      // admin console can never show a suspended-but-certified dealer. A later
+      // reactivation deliberately does NOT restore them — the dealer re-earns
+      // certification, it is not automatically reinstated.
+      const clearBadges =
+        next === DealerStatus.SUSPENDED &&
+        (dealer.certified || dealer.lowestPrice);
+
       await tx.catalogSeller.update({
         where: { id },
         data: {
@@ -263,13 +273,24 @@ export class AdminDealersService {
           // Cleared on any non-suspending transition, so a reactivated dealer
           // never carries the reason it was once suspended for.
           suspendedReason: trimmedReason,
+          ...(clearBadges ? { certified: false, lowestPrice: false } : {}),
         },
       });
 
       await this.recordDealerAudit(tx, {
         action: auditActionFor(dealer.status, next),
-        previousValues: { status: dealer.status },
-        newValues: { status: next },
+        // The audit snapshot includes the revoked badges so the trail shows the
+        // suspension also stripped certification, not just the status flip.
+        previousValues: {
+          status: dealer.status,
+          ...(clearBadges
+            ? { certified: dealer.certified, lowestPrice: dealer.lowestPrice }
+            : {}),
+        },
+        newValues: {
+          status: next,
+          ...(clearBadges ? { certified: false, lowestPrice: false } : {}),
+        },
         dealer,
         ctx,
         reason: trimmedReason,
