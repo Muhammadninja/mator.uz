@@ -43,7 +43,7 @@ import {
   normalizeViscosity,
   parseVolumeLitres,
 } from './motor-oil-catalog';
-import { WIZARD_OTHER_CATEGORIES } from './wizard-catalog';
+import { WIZARD_BRANDS, WIZARD_OTHER_CATEGORIES } from './wizard-catalog';
 
 const MOTOR_OIL = WIZARD_OTHER_CATEGORIES.findIndex(
   (c) => c.kind === ProductKind.MOTOR_OIL,
@@ -440,5 +440,180 @@ describe('motor-oil catalog parsers', () => {
 
   it('every preset viscosity survives normalization unchanged (buttons ≡ typed)', () => {
     for (const v of OIL_VISCOSITIES) expect(normalizeViscosity(v)).toBe(v);
+  });
+});
+
+// ── Rendered-UI tests ───────────────────────────────────────────────────────
+// These assert the KEYBOARD the seller actually receives, not the flow tables.
+// That distinction is the point: the "Другое" menu shipped with no "⬅️ Назад"
+// button while every flow-level test passed, because OTHER_CATEGORY sat inside
+// MOTOR_OIL's FLOWS entry — unreachable from the session standing on it, whose
+// kind is still SPARE_PART at that moment. previousStep returned null and
+// withBack silently omitted the row, trapping the seller on a dead-end screen.
+
+/** Button labels of the keyboard a step renders, in Telegram's own order. */
+function renderedButtons(session: WizardSession): string[] {
+  const prompt = stepPrompt(session);
+  if (!prompt.keyboard) return [];
+  return prompt.keyboard.reply_markup.inline_keyboard
+    .flat()
+    .map((b) => (b as { text: string }).text);
+}
+
+describe('rendered keyboards — every step the seller can reach', () => {
+  it('the BRAND keyboard renders every brand PLUS "Другое"', () => {
+    const buttons = renderedButtons(freshSession());
+    expect(buttons).toEqual([...WIZARD_BRANDS.map((b) => b.name), 'Другое']);
+    // First step: nothing to go back to, so no Back row.
+    expect(buttons).not.toContain('⬅️ Назад');
+  });
+
+  it('the "Другое" menu renders its categories AND a Back button', () => {
+    // The regression: this screen used to render "Моторные масла" alone, with no
+    // way back to the brand list short of /start.
+    const s = freshSession();
+    selectOtherBrand(s);
+    expect(renderedButtons(s)).toEqual(['Моторные масла', '⬅️ Назад']);
+  });
+
+  it('every oil step renders its full option set plus Back', () => {
+    const s = sessionAtViscosity();
+    expect(renderedButtons(s)).toEqual([
+      ...OIL_VISCOSITIES,
+      'Другое',
+      '⬅️ Назад',
+    ]);
+
+    selectOilViscosity(s, FIVE_W_30);
+    expect(renderedButtons(s)).toEqual([
+      ...OIL_TYPES.map((t) => t.label),
+      '⬅️ Назад',
+    ]);
+
+    selectOilType(s, SYNTHETIC);
+    expect(renderedButtons(s)).toEqual([
+      ...OIL_VOLUMES.map((v) => v.label),
+      'Другое',
+      '⬅️ Назад',
+    ]);
+  });
+
+  it('EVERY step of the oil flow except the first renders a Back button', () => {
+    // Walks the whole flow backwards and re-renders each step, so a future step
+    // that forgets its Back row fails here rather than in production.
+    const s = sessionAtDone();
+    s.step = WizardStep.PRICE;
+    const visited: WizardStep[] = [s.step];
+    while (goBack(s).status === 'ok') visited.push(s.step);
+
+    expect(visited[visited.length - 1]).toBe(WizardStep.BRAND);
+    for (const step of visited) {
+      s.step = step;
+      const buttons = renderedButtons(s);
+      if (step === WizardStep.BRAND) {
+        expect(buttons).not.toContain('⬅️ Назад');
+      } else {
+        expect(buttons).toContain('⬅️ Назад');
+      }
+    }
+  });
+
+  it('Back from the "Другое" menu returns to the brand list', () => {
+    const s = freshSession();
+    selectOtherBrand(s);
+    expect(goBack(s).status).toBe('ok');
+    expect(s.step).toBe(WizardStep.BRAND);
+    expect(renderedButtons(s)).toContain('Другое');
+  });
+
+  it('the full oil Back path mirrors the forward path exactly', () => {
+    const s = sessionAtDone();
+    s.step = WizardStep.PRICE;
+    const visited: WizardStep[] = [s.step];
+    while (goBack(s).status === 'ok') visited.push(s.step);
+    expect(visited).toEqual([
+      WizardStep.PRICE,
+      WizardStep.DESCRIPTION,
+      WizardStep.TITLE,
+      WizardStep.OIL_VOLUME,
+      WizardStep.OIL_TYPE,
+      WizardStep.OIL_VISCOSITY,
+      WizardStep.OTHER_CATEGORY,
+      WizardStep.BRAND,
+    ]);
+  });
+
+  it('the Back path through BOTH free-text branches is complete', () => {
+    const s = sessionAtViscosity();
+    selectOilViscosity(s, 'custom');
+    inputOilViscosity(s, '0W-16');
+    selectOilType(s, SYNTHETIC);
+    selectOilVolume(s, 'custom');
+    inputOilVolume(s, '3,5');
+
+    const visited: WizardStep[] = [s.step];
+    while (goBack(s).status === 'ok') visited.push(s.step);
+    expect(visited).toEqual([
+      WizardStep.TITLE,
+      WizardStep.OIL_VOLUME_CUSTOM,
+      WizardStep.OIL_VOLUME,
+      WizardStep.OIL_TYPE,
+      WizardStep.OIL_VISCOSITY_CUSTOM,
+      WizardStep.OIL_VISCOSITY,
+      WizardStep.OTHER_CATEGORY,
+      WizardStep.BRAND,
+    ]);
+  });
+
+  it('OTHER_CATEGORY never appears in the spare-parts flow', () => {
+    // It is a shared-prefix step gated on the branch actually being taken, so a
+    // spare-part seller must never walk back into the "Другое" menu.
+    const s = freshSession();
+    selectBrand(s, 0);
+    selectModel(s, 0);
+    selectCategory(s, 0);
+    inputTitle(s, 'Фильтр масляный');
+    inputDescription(s, 'Новый');
+    choosePartNumberType(s, 'OEM');
+    inputPartNumber(s, '96535062');
+
+    const visited: WizardStep[] = [s.step];
+    while (goBack(s).status === 'ok') visited.push(s.step);
+    expect(visited).not.toContain(WizardStep.OTHER_CATEGORY);
+    expect(visited[visited.length - 1]).toBe(WizardStep.BRAND);
+  });
+});
+
+describe('callback payloads stay within Telegram limits', () => {
+  it('every rendered payload is unique per step and under 64 bytes', () => {
+    const s = sessionAtViscosity();
+    const steps = [
+      WizardStep.OTHER_CATEGORY,
+      WizardStep.OIL_VISCOSITY,
+      WizardStep.OIL_TYPE,
+      WizardStep.OIL_VOLUME,
+    ];
+    for (const step of steps) {
+      s.step = step;
+      const prompt = stepPrompt(s);
+      const payloads = (prompt.keyboard?.reply_markup.inline_keyboard ?? [])
+        .flat()
+        .map((b) => (b as { callback_data: string }).callback_data);
+      // Telegram rejects callback_data over 64 BYTES (not characters).
+      for (const p of payloads) {
+        expect(Buffer.byteLength(p, 'utf8')).toBeLessThanOrEqual(64);
+      }
+      // A duplicate payload within one keyboard would make two buttons act alike.
+      expect(new Set(payloads).size).toBe(payloads.length);
+    }
+  });
+
+  it('no keyboard exceeds Telegram’s 8-buttons-per-row limit', () => {
+    const s = sessionAtViscosity();
+    for (const step of [WizardStep.OIL_VISCOSITY, WizardStep.OIL_VOLUME]) {
+      s.step = step;
+      const rows = stepPrompt(s).keyboard?.reply_markup.inline_keyboard ?? [];
+      for (const row of rows) expect(row.length).toBeLessThanOrEqual(8);
+    }
   });
 });

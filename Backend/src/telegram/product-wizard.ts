@@ -104,7 +104,6 @@ const FLOWS: Record<ProductKind, WizardStep[]> = {
     WizardStep.PRICE,
   ],
   [ProductKind.MOTOR_OIL]: [
-    WizardStep.OTHER_CATEGORY,
     WizardStep.OIL_VISCOSITY,
     WizardStep.OIL_TYPE,
     WizardStep.OIL_VOLUME,
@@ -139,7 +138,20 @@ export function isUniversalKind(kind: ProductKind): boolean {
  *     while the seller is on (or came through) the "Другое" branch.
  */
 function flowSteps(session: WizardSession): WizardStep[] {
+  // The shared PREFIX every flow walks before its own questions begin. BRAND is
+  // the branch point; OTHER_CATEGORY is the menu the "Другое" button opens, and
+  // it belongs here — NOT inside a kind's FLOWS entry — because it is the step
+  // that CHOOSES the kind, so it precedes the kind being known. Putting it in
+  // MOTOR_OIL's flow made it unreachable from the session that is standing on
+  // it (kind is still SPARE_PART at that moment), which left `previousStep`
+  // returning null and the step rendering with no "⬅️ Назад" button at all.
   const steps: WizardStep[] = [WizardStep.BRAND];
+  if (
+    session.step === WizardStep.OTHER_CATEGORY ||
+    session.kind !== ProductKind.SPARE_PART
+  ) {
+    steps.push(WizardStep.OTHER_CATEGORY);
+  }
   for (const step of FLOWS[session.kind]) {
     steps.push(step);
     if (
