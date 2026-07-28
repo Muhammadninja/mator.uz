@@ -24,25 +24,41 @@ export class SearchService {
     if (q) where.title = { contains: q, mode: 'insensitive' };
     if (categories.length) where.categoryId = { in: categories };
 
-    const [total, items, catGroup, under200k, between, highRated] = await Promise.all([
-      this.prisma.catalogPart.count({ where }),
-      this.prisma.catalogPart.findMany({
-        where,
-        include: { category: true },
-        orderBy: { createdAt: 'desc' },
-        take: limit,
-      }),
-      this.prisma.catalogPart.groupBy({ by: ['categoryId'], where, _count: { _all: true } }),
-      this.prisma.catalogPart.count({ where: { ...where, priceUzs: { lt: 200_000 } } }),
-      this.prisma.catalogPart.count({ where: { ...where, priceUzs: { gte: 200_000, lte: 500_000 } } }),
-      this.prisma.catalogPart.count({ where: { ...where, seller: { ratingAvg: { gte: 4 } } } }),
-    ]);
+    const [total, items, catGroup, under200k, between, highRated] =
+      await Promise.all([
+        this.prisma.catalogPart.count({ where }),
+        this.prisma.catalogPart.findMany({
+          where,
+          include: { category: true },
+          orderBy: { createdAt: 'desc' },
+          take: limit,
+        }),
+        this.prisma.catalogPart.groupBy({
+          by: ['categoryId'],
+          where,
+          _count: { _all: true },
+        }),
+        this.prisma.catalogPart.count({
+          where: { ...where, priceUzs: { lt: 200_000 } },
+        }),
+        this.prisma.catalogPart.count({
+          where: { ...where, priceUzs: { gte: 200_000, lte: 500_000 } },
+        }),
+        this.prisma.catalogPart.count({
+          where: { ...where, seller: { ratingAvg: { gte: 4 } } },
+        }),
+      ]);
 
     const catIds = catGroup.map((g) => g.categoryId);
-    const cats = await this.prisma.partCategory.findMany({ where: { id: { in: catIds } } });
+    const cats = await this.prisma.partCategory.findMany({
+      where: { id: { in: catIds } },
+    });
     const catNames = new Map(cats.map((c) => [c.id, c.name]));
     const categoriesFacet = Object.fromEntries(
-      catGroup.map((g) => [catNames.get(g.categoryId) ?? g.categoryId, g._count._all]),
+      catGroup.map((g) => [
+        catNames.get(g.categoryId) ?? g.categoryId,
+        g._count._all,
+      ]),
     );
 
     return {
@@ -71,7 +87,11 @@ export class SearchService {
   async typeahead(q: string, limit = 6) {
     const safeLimit = clampLimit(limit, 6, MAX_TYPEAHEAD_LIMIT);
     const term = q.trim();
-    const suggestions: Array<{ text: string; type: string; deeplink?: string }> = [];
+    const suggestions: Array<{
+      text: string;
+      type: string;
+      deeplink?: string;
+    }> = [];
     if (term) suggestions.push({ text: term, type: 'query' });
 
     if (term) {
@@ -103,7 +123,9 @@ export class SearchService {
     });
 
     const ids = grouped.map((g) => g.brandId).filter((x): x is string => !!x);
-    const brands = await this.prisma.partBrand.findMany({ where: { id: { in: ids } } });
+    const brands = await this.prisma.partBrand.findMany({
+      where: { id: { in: ids } },
+    });
     const brandMap = new Map(brands.map((b) => [b.id, b]));
 
     const items = grouped
@@ -121,7 +143,10 @@ export class SearchService {
         };
       });
 
-    return { items, snapshotVersion: `qf-${new Date().toISOString().slice(0, 10)}-v1` };
+    return {
+      items,
+      snapshotVersion: `qf-${new Date().toISOString().slice(0, 10)}-v1`,
+    };
   }
 
   private slugify(s: string): string {

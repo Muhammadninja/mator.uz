@@ -3,9 +3,11 @@ import {
   DraftImageStatus,
   DraftStatus,
   ImageProcessingStage,
+  OilType,
   PartVehicleCategory,
   PartNumberType,
   Prisma,
+  ProductKind,
   type ProductDraft,
   type ProductDraftImage,
 } from '@prisma/client';
@@ -34,6 +36,8 @@ export type DraftWithImages = ProductDraft & { images: ProductDraftImage[] };
  *  single call can patch just the step that changed, plus the advanced formStep. */
 export interface DraftFormPatch {
   formStep?: string;
+  /** Which questionnaire the draft is running (see ProductKind). */
+  kind?: ProductKind;
   brand?: string | null;
   model?: string | null;
   category?: PartVehicleCategory | null;
@@ -41,6 +45,10 @@ export interface DraftFormPatch {
   description?: string | null;
   partNumberType?: PartNumberType;
   partNumber?: string | null;
+  // MOTOR_OIL attributes — null in every other flow.
+  oilViscosity?: string | null;
+  oilType?: OilType | null;
+  oilVolumeMl?: number | null;
   priceUzs?: Prisma.Decimal | number | null;
 }
 
@@ -143,7 +151,10 @@ export class ProductDraftService {
           status: DraftStatus.CREATING,
           formStep: params.formStep,
           expiresAt: params.expiresAt,
-          // Every answered field carries over; images deliberately do NOT.
+          // Every answered field carries over; images deliberately do NOT. That
+          // includes `kind`, so replacing an oil's photos resumes the OIL
+          // questionnaire rather than dropping back to the spare-parts one.
+          kind: source.kind,
           brand: source.brand,
           model: source.model,
           category: source.category,
@@ -151,6 +162,9 @@ export class ProductDraftService {
           description: source.description,
           partNumberType: source.partNumberType,
           partNumber: source.partNumber,
+          oilViscosity: source.oilViscosity,
+          oilType: source.oilType,
+          oilVolumeMl: source.oilVolumeMl,
           priceUzs: source.priceUzs,
         },
       });
@@ -249,6 +263,7 @@ export class ProductDraftService {
       where: { id: draftId },
       data: {
         formStep: patch.formStep,
+        kind: patch.kind,
         brand: patch.brand,
         model: patch.model,
         category: patch.category,
@@ -256,6 +271,9 @@ export class ProductDraftService {
         description: patch.description,
         partNumberType: patch.partNumberType,
         partNumber: patch.partNumber,
+        oilViscosity: patch.oilViscosity,
+        oilType: patch.oilType,
+        oilVolumeMl: patch.oilVolumeMl,
         priceUzs: patch.priceUzs ?? undefined,
       },
     });

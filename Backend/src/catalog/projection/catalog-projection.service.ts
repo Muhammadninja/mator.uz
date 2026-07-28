@@ -138,7 +138,9 @@ export class CatalogProjectionService {
    * transaction.
    */
   buildProjectionOps(
-    stock: Prisma.StockGetPayload<{ include: typeof CatalogProjectionService.stockInclude }>,
+    stock: Prisma.StockGetPayload<{
+      include: typeof CatalogProjectionService.stockInclude;
+    }>,
   ): Prisma.PrismaPromise<unknown>[] {
     const ops: Prisma.PrismaPromise<unknown>[] = [];
     const product = stock.product;
@@ -149,7 +151,10 @@ export class CatalogProjectionService {
       this.prisma.partCategory.upsert({
         where: { id: CatalogProjectionService.UNCATEGORIZED_ID },
         update: {},
-        create: { id: CatalogProjectionService.UNCATEGORIZED_ID, name: 'Uncategorized' },
+        create: {
+          id: CatalogProjectionService.UNCATEGORIZED_ID,
+          name: 'Uncategorized',
+        },
       }),
     );
 
@@ -176,12 +181,18 @@ export class CatalogProjectionService {
     // Parent seller (required FK).
     const sellerId = CatalogProjectionService.catalogSellerId(stock.sellerId);
     const sellerName =
-      stock.seller.storeName ?? stock.seller.marketName ?? `Seller ${stock.sellerId}`;
+      stock.seller.storeName ??
+      stock.seller.marketName ??
+      `Seller ${stock.sellerId}`;
     ops.push(
       this.prisma.catalogSeller.upsert({
         where: { id: sellerId },
         update: { name: sellerName, internalSellerId: stock.sellerId },
-        create: { id: sellerId, name: sellerName, internalSellerId: stock.sellerId },
+        create: {
+          id: sellerId,
+          name: sellerName,
+          internalSellerId: stock.sellerId,
+        },
       }),
     );
 
@@ -202,11 +213,12 @@ export class CatalogProjectionService {
     // to BOTH searches (its true type is unknown). Synthetic idempotency keys
     // (tg_…, produced when a listing carried no number) are never real numbers,
     // so they are excluded from both arrays.
-    const { gmNumbers, oemNumbers } = CatalogProjectionService.numberSearchArrays(
-      product.gmNumber,
-      product.oemNumber,
-      product.partNumberType,
-    );
+    const { gmNumbers, oemNumbers } =
+      CatalogProjectionService.numberSearchArrays(
+        product.gmNumber,
+        product.oemNumber,
+        product.partNumberType,
+      );
 
     const partData = {
       title: product.title,
@@ -231,6 +243,13 @@ export class CatalogProjectionService {
       isOem: product.isOem,
       isGm: product.isGm,
       isUniversal: product.isUniversal,
+      // Listing kind + its kind-specific attributes, projected verbatim so the
+      // buyer side can render an oil card without joining back to the supply
+      // domain. Non-oil kinds project nulls, which is what they hold.
+      kind: product.kind,
+      oilViscosity: product.oilViscosity,
+      oilType: product.oilType,
+      oilVolumeMl: product.oilVolumeMl,
     };
 
     ops.push(
@@ -249,7 +268,12 @@ export class CatalogProjectionService {
     ops.push(this.prisma.catalogPartFit.deleteMany({ where: { partId } }));
     const fitRows = this.buildFitRows(partId, product.partModels);
     if (fitRows.length > 0) {
-      ops.push(this.prisma.catalogPartFit.createMany({ data: fitRows, skipDuplicates: true }));
+      ops.push(
+        this.prisma.catalogPartFit.createMany({
+          data: fitRows,
+          skipDuplicates: true,
+        }),
+      );
     }
 
     // Trim/engine-level PartCompatibility is still intentionally NOT projected:
@@ -280,10 +304,22 @@ export class CatalogProjectionService {
   private buildFitRows(
     partId: string,
     partModels: Array<{ model: { name: string; brand: { name: string } } }>,
-  ): { partId: string; makeSlug: string; modelSlug: string; makeName: string; modelName: string }[] {
+  ): {
+    partId: string;
+    makeSlug: string;
+    modelSlug: string;
+    makeName: string;
+    modelName: string;
+  }[] {
     const byModelSlug = new Map<
       string,
-      { partId: string; makeSlug: string; modelSlug: string; makeName: string; modelName: string }
+      {
+        partId: string;
+        makeSlug: string;
+        modelSlug: string;
+        makeName: string;
+        modelName: string;
+      }
     >();
     for (const pm of partModels) {
       const makeName = pm.model.brand.name;
@@ -291,7 +327,13 @@ export class CatalogProjectionService {
       const makeSlug = `make_${CatalogProjectionService.slugify(makeName)}`;
       const modelSlug = `model_${CatalogProjectionService.slugify(makeName)}_${CatalogProjectionService.slugify(modelName)}`;
       if (!byModelSlug.has(modelSlug)) {
-        byModelSlug.set(modelSlug, { partId, makeSlug, modelSlug, makeName, modelName });
+        byModelSlug.set(modelSlug, {
+          partId,
+          makeSlug,
+          modelSlug,
+          makeName,
+          modelName,
+        });
       }
     }
     return [...byModelSlug.values()];

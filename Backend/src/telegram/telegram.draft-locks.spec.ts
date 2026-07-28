@@ -31,6 +31,7 @@ function draftRow(over: Record<string, unknown> = {}) {
     version: 3,
     previewSentAt: null,
     formStep: WizardStep.QUESTIONNAIRE_DONE,
+    kind: 'SPARE_PART',
     brand: 'Chevrolet',
     model: 'Nexia 3',
     category: 'SEDAN',
@@ -38,6 +39,9 @@ function draftRow(over: Record<string, unknown> = {}) {
     description: null,
     partNumberType: 'UNKNOWN',
     partNumber: null,
+    oilViscosity: null,
+    oilType: null,
+    oilVolumeMl: null,
     priceUzs: new Decimal(450000),
     images: [
       {

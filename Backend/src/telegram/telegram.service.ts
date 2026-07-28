@@ -6,7 +6,14 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { OnEvent } from '@nestjs/event-emitter';
-import { DraftStatus, PartVehicleCategory, SellerStatus } from '@prisma/client';
+import {
+  DraftStatus,
+  OilType,
+  PartMainCategory,
+  PartVehicleCategory,
+  ProductKind,
+  SellerStatus,
+} from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
 import { Context, Markup, Telegraf } from 'telegraf';
 import { message } from 'telegraf/filters';
@@ -34,6 +41,10 @@ import {
   type DraftReadyForPreviewEvent,
 } from './draft-events';
 import {
+  SellerEvent,
+  type SellerApprovedEvent,
+} from '../sellers/seller-events';
+import {
   WizardSessionStore,
   WizardSession,
   WizardStep,
@@ -43,13 +54,25 @@ import {
   WIZ_CATEGORY_ACTION,
   WIZ_DESCRIPTION_SKIP,
   WIZ_PART_NUMBER_TYPE_ACTION,
+  WIZ_OTHER_BRAND_ACTION,
+  WIZ_OTHER_CATEGORY_ACTION,
+  WIZ_OIL_VISCOSITY_ACTION,
+  WIZ_OIL_TYPE_ACTION,
+  WIZ_OIL_VOLUME_ACTION,
   WIZ_BACK_ACTION,
   WIZ_ANY_ACTION,
   isStaleCatalogPayload,
   STALE_CATALOG_MESSAGE,
   selectBrand,
+  selectOtherBrand,
+  selectOtherCategory,
   selectModel,
   selectCategory,
+  selectOilViscosity,
+  inputOilViscosity,
+  selectOilType,
+  selectOilVolume,
+  inputOilVolume,
   inputTitle,
   inputDescription,
   skipDescription,
@@ -59,7 +82,10 @@ import {
   beginQuestionnaire,
   goBack,
   stepPrompt,
+  previewLines,
+  isUniversalKind,
 } from './product-wizard';
+import { OIL_VISCOSITIES, OIL_VOLUMES } from './motor-oil-catalog';
 import { WIZARD_CATEGORIES } from './wizard-catalog';
 
 // Telegram delivers an album as N separate photo updates sharing a
@@ -137,6 +163,13 @@ const DRAFT_CANCEL = 'draft:cancel';
 // Nudge shown to anyone interacting outside an active wizard session.
 const START_HINT = '👋 Чтобы добавить товар, нажмите /start';
 
+// Sent unprompted the moment an administrator approves a seller, so they learn
+// their account is live without having to poll the bot with /start.
+export const SELLER_APPROVED_MESSAGE =
+  '✅ Ваша заявка успешно одобрена!\n\n' +
+  'Теперь вы можете публиковать товары в Mator.\n\n' +
+  'Нажмите /start, чтобы открыть меню и начать добавление товаров.';
+
 // Russian label for a stored PartVehicleCategory, from the wizard catalog (the
 // single source of truth for these labels). Used in the preview so the seller
 // sees the category they picked.
@@ -158,6 +191,8 @@ const HELP_MESSAGE =
   '7️⃣ Тип номера: OEM, GM или пропустить\n' +
   '8️⃣ Номер детали (если выбрали OEM/GM)\n' +
   '9️⃣ Цена в сумах\n\n' +
+  '🛢 Продаёте не запчасть, а моторное масло? На шаге выбора марки нажмите «Другое» → «Моторные масла»:\n' +
+  'бот спросит вязкость, тип и объём вместо марки, модели и номера детали.\n\n' +
   '⚡ Фото обрабатываются в фоне, пока вы заполняете информацию — ждать не нужно.\n' +
   '✅ Когда всё готово, бот покажет предпросмотр — проверьте и нажмите «Добавить товар».\n\n' +
   '💡 Марку и модель выбирайте только кнопками — вводить их вручную не нужно.\n' +
@@ -175,11 +210,19 @@ interface PendingProduct {
   sellerId: number;
   tgUserId: number;
   metadata: ParseOutcome;
+  /** Which questionnaire produced this listing — selects the preview layout and
+   *  which attribute columns the commit writes. */
+  kind: ProductKind;
   /** Validated non-null title (guaranteed by the wizard's TITLE step). */
   title: string;
   /** The wizard's explicit category choice — written to Product.vehicleCategory
-   *  verbatim (never overridden by the keyword classifier). */
-  vehicleCategory: PartVehicleCategory;
+   *  verbatim (never overridden by the keyword classifier). Null for kinds whose
+   *  flow does not ask for a vehicle category (motor oils). */
+  vehicleCategory: PartVehicleCategory | null;
+  /** MOTOR_OIL attributes; null for every other kind. */
+  oilViscosity: string | null;
+  oilType: OilType | null;
+  oilVolumeMl: number | null;
   processedUrls: string[];
   /** Cloudinary public_ids of the uploaded preview assets, for cleanup on
    *  cancel/expiry/replacement (kept on successful confirmation). */
@@ -224,6 +267,47 @@ export function formatVehicleLine(metadata: ParseOutcome): string {
   return '—';
 }
 
+/** The draft fields the completeness check reads (a structural subset). */
+interface DraftFormFields {
+  kind: ProductKind;
+  brand: string | null;
+  model: string | null;
+  category: PartVehicleCategory | null;
+  title: string | null;
+  oilViscosity: string | null;
+  oilType: OilType | null;
+  oilVolumeMl: number | null;
+  priceUzs: Decimal | null;
+}
+
+/**
+ * Whether a draft carries every field ITS KIND requires to be previewed and
+ * committed — i.e. the questionnaire that ran actually filled in what it asks
+ * for. Kept as one table keyed by kind so the rule lives beside the flow it
+ * mirrors (FLOWS in product-wizard.ts) rather than being duplicated at each of
+ * the two call sites that gate on it.
+ *
+ * A spare part needs its vehicle (brand + model) and category; a motor oil needs
+ * its viscosity, type and volume and must NOT be required to have a vehicle —
+ * that is exactly the distinction the branch exists for. Title and price are
+ * required by every flow.
+ */
+export function isDraftComplete(draft: DraftFormFields): boolean {
+  if (draft.title === null || draft.priceUzs === null) return false;
+  switch (draft.kind) {
+    case ProductKind.MOTOR_OIL:
+      return (
+        draft.oilViscosity !== null &&
+        draft.oilType !== null &&
+        draft.oilVolumeMl !== null
+      );
+    case ProductKind.SPARE_PART:
+      return (
+        draft.brand !== null && draft.model !== null && draft.category !== null
+      );
+  }
+}
+
 /**
  * Rebuild the wizard's conversational state from a draft, positioning the dialogue
  * at `step`. Used by /start resume and by the preview's "⬅️ Назад" edit — the draft
@@ -233,6 +317,7 @@ export function formatVehicleLine(metadata: ParseOutcome): string {
 export function buildSessionFromDraft(
   draft: {
     id: string;
+    kind: ProductKind;
     brand: string | null;
     model: string | null;
     category: PartVehicleCategory | null;
@@ -240,6 +325,9 @@ export function buildSessionFromDraft(
     description: string | null;
     partNumberType: ParseOutcome['part_number_type'];
     partNumber: string | null;
+    oilViscosity: string | null;
+    oilType: OilType | null;
+    oilVolumeMl: number | null;
     priceUzs: Decimal | null;
   },
   step: WizardStep,
@@ -247,6 +335,7 @@ export function buildSessionFromDraft(
   return {
     step,
     draftId: draft.id,
+    kind: draft.kind,
     brand: draft.brand,
     model: draft.model,
     category: draft.category,
@@ -254,6 +343,20 @@ export function buildSessionFromDraft(
     description: draft.description,
     partNumberType: draft.partNumberType ?? 'UNKNOWN',
     partNumber: draft.partNumber,
+    oilViscosity: draft.oilViscosity,
+    oilType: draft.oilType,
+    oilVolumeMl: draft.oilVolumeMl,
+    // Whether the seller reached a value through the "Другое" free-text branch is
+    // NOT persisted: it only shapes the back-navigation path, and a stored value
+    // that isn't a preset is exactly what the custom branch produces. Recomputing
+    // it from the value keeps a resumed dialogue walking back the same way it
+    // walked forward, without a column whose only job is to remember a keystroke.
+    viscosityIsCustom:
+      draft.oilViscosity !== null &&
+      !OIL_VISCOSITIES.includes(draft.oilViscosity),
+    volumeIsCustom:
+      draft.oilVolumeMl !== null &&
+      !OIL_VOLUMES.some((v) => v.value === draft.oilVolumeMl),
     // Decimal → number: the wizard collects price as an integer sum, so the
     // draft's Decimal has no fractional part.
     price: draft.priceUzs ? draft.priceUzs.toNumber() : null,
@@ -406,6 +509,48 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       );
     });
 
+    // ── "Другое": leave the spare-parts flow and pick another category ───────
+    this.bot.action(WIZ_OTHER_BRAND_ACTION, async (ctx) => {
+      await this.handleWizardAction(ctx, (session) =>
+        selectOtherBrand(session),
+      );
+    });
+
+    this.bot.action(WIZ_OTHER_CATEGORY_ACTION, async (ctx) => {
+      await this.handleWizardAction(ctx, (session) =>
+        selectOtherCategory(session, Number(ctx.match[1])),
+      );
+    });
+
+    // ── Motor-oil steps ─────────────────────────────────────────────────────
+    // Viscosity and volume carry either an index or the literal "custom" (the
+    // "Другое" escape hatch → a free-text step).
+    this.bot.action(WIZ_OIL_VISCOSITY_ACTION, async (ctx) => {
+      const choice = ctx.match[1];
+      await this.handleWizardAction(ctx, (session) =>
+        selectOilViscosity(
+          session,
+          choice === 'custom' ? 'custom' : Number(choice),
+        ),
+      );
+    });
+
+    this.bot.action(WIZ_OIL_TYPE_ACTION, async (ctx) => {
+      await this.handleWizardAction(ctx, (session) =>
+        selectOilType(session, Number(ctx.match[1])),
+      );
+    });
+
+    this.bot.action(WIZ_OIL_VOLUME_ACTION, async (ctx) => {
+      const choice = ctx.match[1];
+      await this.handleWizardAction(ctx, (session) =>
+        selectOilVolume(
+          session,
+          choice === 'custom' ? 'custom' : Number(choice),
+        ),
+      );
+    });
+
     this.bot.action(WIZ_DESCRIPTION_SKIP, async (ctx) => {
       await this.handleWizardAction(ctx, (session) => skipDescription(session));
     });
@@ -458,6 +603,12 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
           break;
         case WizardStep.PART_NUMBER:
           result = inputPartNumber(session, msg.text);
+          break;
+        case WizardStep.OIL_VISCOSITY_CUSTOM:
+          result = inputOilViscosity(session, msg.text);
+          break;
+        case WizardStep.OIL_VOLUME_CUSTOM:
+          result = inputOilVolume(session, msg.text);
           break;
         case WizardStep.PRICE:
           result = inputPrice(session, msg.text);
@@ -763,6 +914,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     // Persist the current field snapshot (idempotent; cheap).
     await this.drafts.updateForm(session.draftId, {
       formStep: session.step,
+      kind: session.kind,
       brand: session.brand,
       model: session.model,
       category: session.category,
@@ -770,6 +922,9 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       description: session.description,
       partNumberType: session.partNumberType,
       partNumber: session.partNumber,
+      oilViscosity: session.oilViscosity,
+      oilType: session.oilType,
+      oilVolumeMl: session.oilVolumeMl,
       priceUzs: session.price ?? undefined,
     });
 
@@ -823,6 +978,33 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * An administrator approved a seller: tell them straight away, in their chat,
+   * without waiting for them to send anything. The bot is the only place the
+   * seller has an identity we can reach (tgId IS the chat id), which is why this
+   * lives here rather than in the admin module.
+   *
+   * Delivery is BEST-EFFORT by contract: the approval has already been committed
+   * by the emitter, so every failure mode here — the seller blocked the bot, never
+   * opened a chat with it, Telegram is down, the bot has not launched — is logged
+   * and swallowed. Nothing in this method can undo or fail the approval. The
+   * seller still learns they are active the next time they send /start, which is
+   * exactly the behaviour that existed before this notification.
+   */
+  @OnEvent(SellerEvent.APPROVED)
+  async onSellerApproved(event: SellerApprovedEvent): Promise<void> {
+    try {
+      await this.bot.telegram.sendMessage(
+        Number(event.tgId),
+        SELLER_APPROVED_MESSAGE,
+      );
+    } catch (err) {
+      this.logger.error(
+        `Failed to notify seller #${event.sellerId} of approval: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
    * At least one image failed after retries (draft stays CREATING, form data kept).
    * Offer the seller retry (re-enqueue only the failed photos) or cancel. Replacing
    * photos is done by starting over (/start), so no separate button is needed.
@@ -860,9 +1042,8 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     // the claim. `claimPreviewSend` remains the authority — it is the only thing
     // that decides who sends — so a lock that is unavailable, expired or failed
     // open changes nothing: the loser of the CAS still bails without sending.
-    await this.locks.withLock(
-      RedisKeys.lockDraftPreview(draftId),
-      () => this.deliverDraftPreview(draftId, chatId),
+    await this.locks.withLock(RedisKeys.lockDraftPreview(draftId), () =>
+      this.deliverDraftPreview(draftId, chatId),
     );
   }
 
@@ -882,14 +1063,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       .filter((img) => img.processedPublicId)
       .map((img) => img.processedPublicId as string);
 
-    if (
-      processedUrls.length === 0 ||
-      draft.title === null ||
-      draft.brand === null ||
-      draft.model === null ||
-      draft.category === null ||
-      draft.priceUzs === null
-    ) {
+    if (processedUrls.length === 0 || !isDraftComplete(draft)) {
       this.logger.error(
         `Draft ${draftId} reached preview with incomplete data — skipping.`,
       );
@@ -904,31 +1078,54 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     const claimed = await this.drafts.claimPreviewSend(draftId);
     if (!claimed) return;
 
-    const metadata = this.buildMetadataFromDraft(draft);
-    const price = new Decimal(draft.priceUzs);
-
-    this.storePending({
-      sellerId: draft.sellerId,
-      tgUserId: chatId,
-      metadata,
-      title: draft.title,
-      vehicleCategory: draft.category,
+    const pending = this.buildPendingFromDraft(draft, chatId, {
       processedUrls,
       publicIds,
-      price,
-      draftId: draft.id,
       // claimPreviewSend incremented the version, so the row is now at read+1.
       // The "⬅️ Назад" edit uses this to take the optimistic lock without a re-read.
       draftVersion: draft.version + 1,
     });
 
-    await this.sendPreviewToChat(
-      chatId,
-      metadata,
-      draft.category,
-      processedUrls,
-      price,
-    );
+    this.storePending(pending);
+    await this.sendPreviewToChat(chatId, pending, processedUrls);
+  }
+
+  /**
+   * Assemble the confirmation record for a draft that has already been checked
+   * COMPLETE for its kind ({@link isDraftComplete}). Shared by the first preview
+   * send and by {@link rebuildPendingFromDraft}, so the two can never derive a
+   * different record from the same row — the reason a rebuilt pending is as good
+   * as the original.
+   *
+   * The non-null assertions on title/priceUzs are discharged by the caller's
+   * completeness check; every kind requires both, so no flow can reach here
+   * without them.
+   */
+  private buildPendingFromDraft(
+    draft: DraftWithImages,
+    tgUserId: number,
+    delivery: {
+      processedUrls: string[];
+      publicIds: string[];
+      draftVersion: number;
+    },
+  ): Omit<PendingProduct, 'expiry'> {
+    return {
+      sellerId: draft.sellerId,
+      tgUserId,
+      metadata: this.buildMetadataFromDraft(draft),
+      kind: draft.kind,
+      title: draft.title as string,
+      vehicleCategory: draft.category,
+      oilViscosity: draft.oilViscosity,
+      oilType: draft.oilType,
+      oilVolumeMl: draft.oilVolumeMl,
+      processedUrls: delivery.processedUrls,
+      publicIds: delivery.publicIds,
+      price: new Decimal(draft.priceUzs as Decimal),
+      draftId: draft.id,
+      draftVersion: delivery.draftVersion,
+    };
   }
 
   /**
@@ -961,8 +1158,26 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  /** Map a draft's collected fields into the ParseOutcome the preview/commit use. */
+  /**
+   * Map a draft's collected fields into the ParseOutcome the preview/commit use.
+   *
+   * A draft with NO vehicle (every non-spare-part kind — its questionnaire never
+   * asks for one) yields EMPTY vehicles/models rather than a `{brand: '', model:
+   * ''}` placeholder. That matters beyond cosmetics: `persistVehicleLinks` walks
+   * `vehicles` to create brand/car_model rows, so a blank pair would mint junk
+   * catalog entries.
+   *
+   * `isUniversal` is DERIVED FROM THE KIND, never asked: a motor oil fits every
+   * vehicle by design, so it is always universal, while a spare part's fitment is
+   * whatever its questionnaire collected. Deriving it here — rather than at the
+   * product write — is what makes the rule hold everywhere at once, because this
+   * one value is what the preview line, the Product column and
+   * `persistVehicleLinks` all read. Universal + empty vehicles is exactly the
+   * combination that means "fits everything, so no per-vehicle links": see
+   * vehicle-links.ts, which returns before creating any row.
+   */
   private buildMetadataFromDraft(draft: {
+    kind: ProductKind;
     brand: string | null;
     model: string | null;
     title: string | null;
@@ -971,15 +1186,16 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     partNumberType: ParseOutcome['part_number_type'];
     priceUzs: Decimal | null;
   }): ParseOutcome {
-    const brand = draft.brand ?? '';
-    const model = draft.model ?? '';
+    const hasVehicle = draft.brand !== null && draft.model !== null;
     return {
       title: draft.title ?? '',
       description: draft.description,
-      brand,
-      models: [model],
-      vehicles: [{ brand, model }],
-      isUniversal: false,
+      brand: draft.brand,
+      models: hasVehicle ? [draft.model as string] : [],
+      vehicles: hasVehicle
+        ? [{ brand: draft.brand, model: draft.model as string }]
+        : [],
+      isUniversal: isUniversalKind(draft.kind),
       gm_number: draft.partNumber,
       part_number_type: draft.partNumberType,
       price: draft.priceUzs ? draft.priceUzs.toNumber() : 0,
@@ -1211,34 +1427,20 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       .filter((img) => img.processedPublicId)
       .map((img) => img.processedPublicId as string);
 
-    if (
-      processedUrls.length === 0 ||
-      draft.title === null ||
-      draft.brand === null ||
-      draft.model === null ||
-      draft.category === null ||
-      draft.priceUzs === null
-    ) {
+    if (processedUrls.length === 0 || !isDraftComplete(draft)) {
       this.logger.error(
         `Draft ${draft.id} cannot be rebuilt for confirmation — incomplete data.`,
       );
       return null;
     }
 
-    return {
-      sellerId: draft.sellerId,
-      tgUserId,
-      metadata: this.buildMetadataFromDraft(draft),
-      title: draft.title,
-      vehicleCategory: draft.category,
+    return this.buildPendingFromDraft(draft, tgUserId, {
       processedUrls,
       publicIds,
-      price: new Decimal(draft.priceUzs),
-      draftId: draft.id,
       // The row's CURRENT version — the preview send already bumped it, so this is
       // the value an optimistic transition must present.
       draftVersion: draft.version,
-    };
+    });
   }
 
   /**
@@ -1649,16 +1851,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
    */
   private async sendPreviewToChat(
     chatId: number,
-    metadata: ParseOutcome,
-    vehicleCategory: PartVehicleCategory,
+    listing: Omit<PendingProduct, 'expiry'>,
     processedUrls: string[],
-    price: Decimal,
   ): Promise<void> {
-    const { caption, buttons } = this.buildPreview(
-      metadata,
-      vehicleCategory,
-      price,
-    );
+    const { caption, buttons } = this.buildPreview(listing);
     try {
       if (processedUrls.length === 1) {
         await this.bot.telegram.sendPhoto(chatId, processedUrls[0], {
@@ -1687,14 +1883,18 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  /** Build the preview caption + confirmation keyboard (shared by both senders). */
-  private buildPreview(
-    metadata: ParseOutcome,
-    vehicleCategory: PartVehicleCategory,
-    price: Decimal,
-  ): { caption: string; buttons: ReturnType<typeof Markup.inlineKeyboard> } {
-    const vehicle = formatVehicleLine(metadata);
-    const categoryLabel = CATEGORY_LABELS.get(vehicleCategory) ?? '—';
+  /**
+   * Build the preview caption + confirmation keyboard (shared by both senders).
+   * The shared lines (title, description, price) are rendered here; the lines
+   * peculiar to the listing's KIND come from `previewLines`, so a motor oil shows
+   * viscosity / type / volume where a spare part shows vehicle / category /
+   * number, and neither kind renders the other's fields.
+   */
+  private buildPreview(listing: Omit<PendingProduct, 'expiry'>): {
+    caption: string;
+    buttons: ReturnType<typeof Markup.inlineKeyboard>;
+  } {
+    const { metadata, price } = listing;
     // Label the number by how the seller marked it — never guess. An unlabeled
     // number shows the neutral "OEM/GM №" so we don't claim a type we don't know.
     const numberLabel =
@@ -1704,14 +1904,28 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
           ? 'OEM №'
           : 'OEM/GM №';
 
-    const caption =
-      `📋 *Проверьте товар перед добавлением.*\n\n` +
-      `🔩 *Название:* ${metadata.title}\n` +
-      `📝 *Описание:* ${metadata.description ?? '—'}\n` +
-      `🚗 *Автомобиль:* ${vehicle}\n` +
-      `🗂 *Категория:* ${categoryLabel}\n` +
-      `🔢 *${numberLabel}:* ${metadata.gm_number ?? '—'}\n` +
-      `💰 *Цена:* ${price.toFixed(0)} UZS`;
+    const kindLines = previewLines(
+      {
+        kind: listing.kind,
+        vehicleCategoryLabel: listing.vehicleCategory
+          ? (CATEGORY_LABELS.get(listing.vehicleCategory) ?? '—')
+          : '—',
+        partNumberLabel: numberLabel,
+        partNumber: metadata.gm_number,
+        oilViscosity: listing.oilViscosity,
+        oilType: listing.oilType,
+        oilVolumeMl: listing.oilVolumeMl,
+      },
+      formatVehicleLine(metadata),
+    );
+
+    const caption = [
+      `📋 *Проверьте товар перед добавлением.*\n`,
+      `🔩 *Название:* ${metadata.title}`,
+      `📝 *Описание:* ${metadata.description ?? '—'}`,
+      ...kindLines,
+      `💰 *Цена:* ${price.toFixed(0)} UZS`,
+    ].join('\n');
 
     const buttons = Markup.inlineKeyboard([
       [
@@ -1821,6 +2035,13 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         partNumberType,
       };
 
+      // Attributes owned by the listing's KIND. A motor oil's taxonomy is not a
+      // guess to be classified — the seller told us what it is by choosing the
+      // category — so the two category columns are set from the kind and the
+      // classifier's inference for them is deliberately overridden. Every other
+      // classified field (region, part brand) still applies.
+      const kindFields = this.buildKindFields(session);
+
       const product = await this.prisma.product.upsert({
         where: { gmNumber: gmKey },
         update: {
@@ -1829,6 +2050,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
           imageUrl: primaryUrl,
           isUniversal: metadata.isUniversal,
           ...classifiedFields,
+          ...kindFields,
         },
         create: {
           gmNumber: metadata.gm_number,
@@ -1837,6 +2059,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
           imageUrl: primaryUrl,
           isUniversal: metadata.isUniversal,
           ...classifiedFields,
+          ...kindFields,
         },
       });
 
@@ -1897,6 +2120,51 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         `⚠️ Произошла ошибка при добавлении товара.\n\`${errMsg}\``,
         { parse_mode: 'Markdown' },
       );
+    }
+  }
+
+  /**
+   * The Product columns owned by a listing's KIND — written on both the create
+   * and the update branch of the commit upsert, AFTER the classified fields, so
+   * an explicit choice always beats an inference.
+   *
+   * Each kind returns the same column set (its own attributes filled, the other
+   * kinds' nulled) so a re-listing that CHANGES kind — the same part number
+   * re-published as an oil, or vice versa — leaves no stale attribute behind.
+   * That is the reason for the explicit nulls rather than simply omitting them:
+   * the upsert's update branch would otherwise preserve the old kind's values.
+   *
+   * A new kind adds one case; nothing else in the commit path changes.
+   */
+  private buildKindFields(listing: Omit<PendingProduct, 'expiry'>): {
+    kind: ProductKind;
+    oilViscosity: string | null;
+    oilType: OilType | null;
+    oilVolumeMl: number | null;
+    mainCategory?: PartMainCategory;
+    vehicleCategory?: PartVehicleCategory;
+  } {
+    switch (listing.kind) {
+      case ProductKind.MOTOR_OIL:
+        return {
+          kind: ProductKind.MOTOR_OIL,
+          oilViscosity: listing.oilViscosity,
+          oilType: listing.oilType,
+          oilVolumeMl: listing.oilVolumeMl,
+          // A motor oil's taxonomy is known from the kind itself, so both
+          // category columns are stated rather than classified — this is what
+          // makes an oil filterable in the buyer catalog even though its
+          // questionnaire never asked a category question.
+          mainCategory: PartMainCategory.OIL_AND_FLUIDS,
+          vehicleCategory: PartVehicleCategory.MAINTENANCE_AND_FLUIDS,
+        };
+      case ProductKind.SPARE_PART:
+        return {
+          kind: ProductKind.SPARE_PART,
+          oilViscosity: null,
+          oilType: null,
+          oilVolumeMl: null,
+        };
     }
   }
 

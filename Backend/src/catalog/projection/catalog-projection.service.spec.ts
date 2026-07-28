@@ -41,6 +41,10 @@ function buildStock(over: Partial<any> = {}): StockRow {
       originRegion: 'USA',
       isOem: true,
       isGm: true,
+      kind: 'SPARE_PART',
+      oilViscosity: null,
+      oilType: null,
+      oilVolumeMl: null,
       images: [
         { url: 'https://cdn/img0.webp', sortOrder: 0 },
         { url: 'https://cdn/img1.webp', sortOrder: 1 },
@@ -213,6 +217,44 @@ describe('CatalogProjectionService — mapping', () => {
       svc.buildProjectionOps(buildStock({ quantity: 0 }));
       const part = upsertArg(prisma, 'catalogPart').create;
       expect(part.inStock).toBe(false);
+    });
+
+    it('projects the listing kind and a motor oil’s attributes verbatim', () => {
+      // The buyer catalog must be able to render an oil card without joining
+      // back to the supply domain, so these travel across the boundary as-is.
+      svc.buildProjectionOps(
+        buildStock({
+          product: {
+            ...buildStock().product,
+            kind: 'MOTOR_OIL',
+            title: 'Mobil 1 ESP 5W-30 4L',
+            oilViscosity: '5W-30',
+            oilType: 'SYNTHETIC',
+            oilVolumeMl: 4000,
+          },
+        }),
+      );
+      const upsert = upsertArg(prisma, 'catalogPart');
+      // Written on BOTH branches, so a re-projection converges.
+      for (const data of [upsert.create, upsert.update]) {
+        expect(data).toMatchObject({
+          kind: 'MOTOR_OIL',
+          oilViscosity: '5W-30',
+          oilType: 'SYNTHETIC',
+          oilVolumeMl: 4000,
+        });
+      }
+    });
+
+    it('projects a spare part as SPARE_PART with null oil attributes', () => {
+      svc.buildProjectionOps(buildStock());
+      const part = upsertArg(prisma, 'catalogPart').create;
+      expect(part).toMatchObject({
+        kind: 'SPARE_PART',
+        oilViscosity: null,
+        oilType: null,
+        oilVolumeMl: null,
+      });
     });
   });
 

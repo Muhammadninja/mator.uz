@@ -6,7 +6,9 @@
 
 import { presentPartItem, PartWithRelations } from './part.presenter';
 
-function fit(over: Partial<PartWithRelations['fits'][number]> = {}): PartWithRelations['fits'][number] {
+function fit(
+  over: Partial<PartWithRelations['fits'][number]> = {},
+): PartWithRelations['fits'][number] {
   return {
     partId: 'part-1',
     makeSlug: 'make_chevrolet',
@@ -14,7 +16,7 @@ function fit(over: Partial<PartWithRelations['fits'][number]> = {}): PartWithRel
     makeName: 'Chevrolet',
     modelName: 'Cobalt',
     ...over,
-  } as PartWithRelations['fits'][number];
+  };
 }
 
 function part(over: Partial<PartWithRelations> = {}): PartWithRelations {
@@ -41,8 +43,12 @@ function part(over: Partial<PartWithRelations> = {}): PartWithRelations {
     isOem: false,
     isGm: false,
     isUniversal: false,
-    createdAt: new Date() as never,
-    updatedAt: new Date() as never,
+    kind: 'SPARE_PART',
+    oilViscosity: null,
+    oilType: null,
+    oilVolumeMl: null,
+    createdAt: new Date(),
+    updatedAt: new Date(),
     brand: null,
     category: { id: 'cat-1', name: 'Filters' } as never,
     seller: {
@@ -54,7 +60,7 @@ function part(over: Partial<PartWithRelations> = {}): PartWithRelations {
     compatibilities: [],
     fits: [],
     ...over,
-  } as PartWithRelations;
+  };
 }
 
 describe('presentPartItem — fits[]', () => {
@@ -130,5 +136,126 @@ describe('presentPartItem — seller', () => {
   it('reports certified:false for an uncertified seller, never null', () => {
     const out = presentPartItem(part(), null);
     expect(out.seller.certified).toBe(false);
+  });
+});
+
+describe('presentPartItem — kind attributes', () => {
+  it('exposes a motor oil’s attributes with raw values AND display labels', () => {
+    const out = presentPartItem(
+      part({
+        kind: 'MOTOR_OIL',
+        title: 'Mobil 1 ESP 5W-30 4L',
+        oilViscosity: '5W-30',
+        oilType: 'SYNTHETIC',
+        oilVolumeMl: 4000,
+      } as never),
+      null,
+    );
+    expect(out.kind).toBe('MOTOR_OIL');
+    expect(out.motor_oil).toEqual({
+      viscosity: '5W-30',
+      oil_type: 'SYNTHETIC',
+      oil_type_label: 'Синтетическое',
+      volume_ml: 4000,
+      volume_label: '4 л',
+    });
+  });
+
+  it('formats a non-preset volume from millilitres', () => {
+    const out = presentPartItem(
+      part({
+        kind: 'MOTOR_OIL',
+        oilViscosity: '0W-16',
+        oilType: 'MINERAL',
+        oilVolumeMl: 3500,
+      } as never),
+      null,
+    );
+    expect(out.motor_oil?.volume_label).toBe('3.5 л');
+  });
+
+  it('reports no kind attributes for a spare part (the default kind)', () => {
+    const out = presentPartItem(part(), null);
+    expect(out.kind).toBe('SPARE_PART');
+    expect(out.motor_oil).toBeNull();
+  });
+
+  it('keeps every spare-part field unchanged when the kind is added', () => {
+    // Regression: the kind fields are ADDITIVE — nothing existing moved or was
+    // renamed by them.
+    const out = presentPartItem(part(), null);
+    expect(out).toMatchObject({
+      id: 'part-1',
+      title: 'Oil filter',
+      price_uzs: 25000,
+      in_stock: true,
+      is_universal: false,
+      part_number_type: 'UNKNOWN',
+    });
+  });
+});
+
+describe('presentPartItem — a motor oil card hides spare-part concepts', () => {
+  const oil = () =>
+    part({
+      kind: 'MOTOR_OIL',
+      title: 'Mobil 1 ESP 5W-30 4L',
+      oilViscosity: '5W-30',
+      oilType: 'SYNTHETIC',
+      oilVolumeMl: 4000,
+      isUniversal: true,
+    } as never);
+
+  it('reports NO part-number type (never a misleading "UNKNOWN")', () => {
+    // "UNKNOWN" would read as "this oil's number is unlabeled", inviting a UI to
+    // render an empty OEM/GM row for a product that can never have one.
+    const out = presentPartItem(oil(), null);
+    expect(out.part_number_type).toBeNull();
+    expect(out.oem_numbers).toEqual([]);
+    expect(out.gm_numbers).toEqual([]);
+    expect(out.is_oem).toBe(false);
+    expect(out.is_gm).toBe(false);
+  });
+
+  it('reports NO compatibility, even with a garage vehicle selected', () => {
+    // The generic path would answer {status:'maybe'} — actively wrong, since an
+    // oil fits every car.
+    const out = presentPartItem(oil(), {
+      trimId: 'trim_1',
+      engineId: null,
+      year: 2020,
+    });
+    expect(out.compatibility).toBeNull();
+  });
+
+  it('carries no vehicle fitment rows', () => {
+    expect(presentPartItem(oil(), null).fits).toEqual([]);
+  });
+
+  it('still exposes the oil’s own attributes and the shared fields', () => {
+    const out = presentPartItem(oil(), null);
+    expect(out.motor_oil).toMatchObject({
+      viscosity: '5W-30',
+      oil_type_label: 'Синтетическое',
+      volume_label: '4 л',
+    });
+    expect(out.title).toBe('Mobil 1 ESP 5W-30 4L');
+    expect(out.price_uzs).toBe(25000);
+    expect(out.is_universal).toBe(true);
+  });
+
+  it('a SPARE PART keeps its part number and compatibility (regression)', () => {
+    const out = presentPartItem(
+      part({ partNumberType: 'OEM', oemNumbers: ['96535062'] } as never),
+      { trimId: 'trim_1', engineId: null, year: 2020 },
+    );
+    expect(out.part_number_type).toBe('OEM');
+    expect(out.oem_numbers).toEqual(['96535062']);
+    // No compatibility rows → "maybe", the long-standing behaviour for parts.
+    expect(out.compatibility).toEqual({
+      status: 'maybe',
+      confidence: 0,
+      notes: null,
+    });
   });
 });

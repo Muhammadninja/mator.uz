@@ -1,15 +1,32 @@
 // src/telegram/product-wizard.ts
 //
-// Finite-state machine for the step-by-step, photos-FIRST product-creation wizard:
+// Finite-state machine for the step-by-step, photos-FIRST product-creation wizard.
+// Photos are ALWAYS first and always identical across kinds; after the BRAND step
+// the dialogue BRANCHES on what the seller is listing:
 //
-//   PHOTOS_FIRST → BRAND → MODEL → CATEGORY → TITLE → DESCRIPTION
-//     → PART_NUMBER_TYPE → [PART_NUMBER] → PRICE → QUESTIONNAIRE_DONE
+//   PHOTOS_FIRST → BRAND ─┬─ (a car brand)  → MODEL → CATEGORY → TITLE
+//                         │                    → DESCRIPTION → PART_NUMBER_TYPE
+//                         │                    → [PART_NUMBER] → PRICE → DONE
+//                         │
+//                         └─ ("Другое")     → OTHER_CATEGORY ─ (Моторные масла)
+//                                              → OIL_VISCOSITY → OIL_TYPE
+//                                              → OIL_VOLUME → TITLE
+//                                              → DESCRIPTION → PRICE → DONE
 //
-// Photos come first and are processed in the BACKGROUND (BullMQ) while the seller
-// answers the questionnaire; the preview appears when both tracks meet (see
-// DraftCoordinator). Brand, model, category and part-number type come ONLY from
-// inline buttons (the seller never types them); title / part number / price are
-// validated text inputs; description is text or an explicit Skip.
+// Photos are processed in the BACKGROUND (BullMQ) while the seller answers the
+// questionnaire; the preview appears when both tracks meet (see DraftCoordinator).
+//
+// ── How branching is modelled (and why there are no if/else chains) ──────────
+// Each ProductKind owns a FLOW: an ORDERED LIST of the steps its questionnaire
+// asks, declared once in FLOWS below. Everything that is "shaped like the flow"
+// derives from that list instead of switching on the kind:
+//   • forward motion  — each transition advances to `nextStep(session)`,
+//   • "⬅️ Назад"      — `previousStep` is the list index minus one,
+//   • step validity   — a step not in the session's flow is simply not reachable.
+// Adding a kind (Антифриз, Аккумуляторы, …) therefore means: add its steps to
+// WizardStep, add its prompt/keyboard cases, and add ONE FLOWS entry — no
+// existing kind's code path is touched. Steps shared between kinds (TITLE,
+// DESCRIPTION, PRICE) are written once and simply appear in several flows.
 //
 // This module is pure state + validation + prompt/keyboard builders (no Telegraf
 // handlers, no I/O) so the whole FSM is unit-testable. A session holds only
@@ -17,11 +34,25 @@
 // ProductDraft that owns the business data. It never holds uploaded assets: the
 // draft (Postgres) is the single source of truth for those.
 
-import { PartVehicleCategory } from '@prisma/client';
+import { OilType, PartVehicleCategory, ProductKind } from '@prisma/client';
 import { Markup } from 'telegraf';
 import type { PartNumberType } from '../ai/part-parser.types';
 import { parsePrice } from '../ai/price-parser';
-import { WIZARD_BRANDS, WIZARD_CATEGORIES } from './wizard-catalog';
+import {
+  OIL_TYPES,
+  OIL_TYPE_LABELS,
+  OIL_VISCOSITIES,
+  OIL_VOLUMES,
+  formatVolume,
+  normalizeViscosity,
+  parseVolumeLitres,
+} from './motor-oil-catalog';
+import {
+  OTHER_BRAND_LABEL,
+  WIZARD_BRANDS,
+  WIZARD_CATEGORIES,
+  WIZARD_OTHER_CATEGORIES,
+} from './wizard-catalog';
 
 export enum WizardStep {
   /** Entry state: the very first thing the seller does is upload photos. Once they
@@ -31,6 +62,18 @@ export enum WizardStep {
   BRAND = 'BRAND',
   MODEL = 'MODEL',
   CATEGORY = 'CATEGORY',
+  /** The "Другое" menu: pick a NON-spare-part category (Моторные масла, …). Only
+   *  reachable from BRAND via the "Другое" button. */
+  OTHER_CATEGORY = 'OTHER_CATEGORY',
+  // ── Motor-oil steps ───────────────────────────────────────────────────────
+  OIL_VISCOSITY = 'OIL_VISCOSITY',
+  /** Free-text viscosity, reached only from OIL_VISCOSITY's "Другое" button. */
+  OIL_VISCOSITY_CUSTOM = 'OIL_VISCOSITY_CUSTOM',
+  OIL_TYPE = 'OIL_TYPE',
+  OIL_VOLUME = 'OIL_VOLUME',
+  /** Free-text volume, reached only from OIL_VOLUME's "Другое" button. */
+  OIL_VOLUME_CUSTOM = 'OIL_VOLUME_CUSTOM',
+  // ── Steps shared by every kind ────────────────────────────────────────────
   TITLE = 'TITLE',
   DESCRIPTION = 'DESCRIPTION',
   PART_NUMBER_TYPE = 'PART_NUMBER_TYPE',
@@ -40,6 +83,98 @@ export enum WizardStep {
    *  done; the draft coordinator now owns the rendezvous with image processing and
    *  decides when to show the preview. Terminal for the FSM. */
   QUESTIONNAIRE_DONE = 'QUESTIONNAIRE_DONE',
+}
+
+/**
+ * The ordered questionnaire of each kind — the ONE place a flow's shape is
+ * declared. Steps that are conditional within a flow (PART_NUMBER, and the two
+ * "Другое" free-text steps) are NOT listed: they are optional detours whose
+ * inclusion depends on session state, resolved by {@link flowSteps}.
+ *
+ * PHOTOS_FIRST and BRAND precede every flow (photos then the branch point), and
+ * QUESTIONNAIRE_DONE terminates it — none of them are listed here.
+ */
+const FLOWS: Record<ProductKind, WizardStep[]> = {
+  [ProductKind.SPARE_PART]: [
+    WizardStep.MODEL,
+    WizardStep.CATEGORY,
+    WizardStep.TITLE,
+    WizardStep.DESCRIPTION,
+    WizardStep.PART_NUMBER_TYPE,
+    WizardStep.PRICE,
+  ],
+  [ProductKind.MOTOR_OIL]: [
+    WizardStep.OTHER_CATEGORY,
+    WizardStep.OIL_VISCOSITY,
+    WizardStep.OIL_TYPE,
+    WizardStep.OIL_VOLUME,
+    WizardStep.TITLE,
+    WizardStep.DESCRIPTION,
+    WizardStep.PRICE,
+  ],
+};
+
+/**
+ * Whether a kind's products fit EVERY vehicle by design, so `isUniversal` is a
+ * property of the kind rather than a question to ask. A motor oil is universal:
+ * its questionnaire deliberately has no compatibility step, so there is nothing
+ * to derive fitment from and nothing for the seller to answer.
+ *
+ * Defined here, next to FLOWS, because it is the same statement from the other
+ * side: a kind is universal exactly when its flow asks no compatibility question.
+ * A new kind declares both together — a flow with MODEL/CATEGORY steps is not
+ * universal; one without them is.
+ */
+export function isUniversalKind(kind: ProductKind): boolean {
+  return kind === ProductKind.MOTOR_OIL;
+}
+
+/**
+ * The session's flow as ACTUALLY walked, with the conditional detours spliced in
+ * where the session's state says they were taken. This is what both forward
+ * motion and "⬅️ Назад" read, so the two can never disagree about the path:
+ *   • PART_NUMBER follows PART_NUMBER_TYPE only when a number was requested
+ *     (type OEM/GM — a skipped number goes straight to PRICE);
+ *   • OIL_VISCOSITY_CUSTOM / OIL_VOLUME_CUSTOM follow their button step only
+ *     while the seller is on (or came through) the "Другое" branch.
+ */
+function flowSteps(session: WizardSession): WizardStep[] {
+  const steps: WizardStep[] = [WizardStep.BRAND];
+  for (const step of FLOWS[session.kind]) {
+    steps.push(step);
+    if (
+      step === WizardStep.PART_NUMBER_TYPE &&
+      session.partNumberType !== 'UNKNOWN'
+    ) {
+      steps.push(WizardStep.PART_NUMBER);
+    }
+    if (step === WizardStep.OIL_VISCOSITY && session.viscosityIsCustom) {
+      steps.push(WizardStep.OIL_VISCOSITY_CUSTOM);
+    }
+    if (step === WizardStep.OIL_VOLUME && session.volumeIsCustom) {
+      steps.push(WizardStep.OIL_VOLUME_CUSTOM);
+    }
+  }
+  return steps;
+}
+
+/**
+ * The step that FOLLOWS the session's current one in its flow, or
+ * QUESTIONNAIRE_DONE when the flow is exhausted. Every forward transition ends
+ * with `advance(session)`, so no transition hardcodes its successor and a step
+ * inserted into FLOWS is picked up everywhere at once.
+ */
+function nextStep(session: WizardSession): WizardStep {
+  const steps = flowSteps(session);
+  const i = steps.indexOf(session.step);
+  if (i === -1 || i === steps.length - 1) return WizardStep.QUESTIONNAIRE_DONE;
+  return steps[i + 1];
+}
+
+/** Move the session to the next step of its flow. */
+function advance(session: WizardSession): WizardResult {
+  session.step = nextStep(session);
+  return OK;
 }
 
 /**
@@ -53,6 +188,9 @@ export interface WizardSession {
   /** The DB draft backing this session. Set once photos are accepted (or straight
    *  away when resuming/reopening an existing draft); null before that. */
   draftId: string | null;
+  /** Which questionnaire this session runs. SPARE_PART until the seller taps
+   *  "Другое" at the BRAND step and picks a category from the "Другое" menu. */
+  kind: ProductKind;
   brand: string | null;
   model: string | null;
   category: PartVehicleCategory | null;
@@ -61,6 +199,17 @@ export interface WizardSession {
   /** 'UNKNOWN' until the seller picks OEM/GM; Skip keeps it 'UNKNOWN'. */
   partNumberType: PartNumberType;
   partNumber: string | null;
+  // ── MOTOR_OIL fields (null in every other flow) ───────────────────────────
+  /** SAE grade as displayed, e.g. "5W-30" — a preset or a normalized typed one. */
+  oilViscosity: string | null;
+  oilType: OilType | null;
+  /** Package volume in millilitres (see motor-oil-catalog). */
+  oilVolumeMl: number | null;
+  /** The seller chose "Другое" at the viscosity step, so the free-text step is
+   *  part of their path (it must be re-visited when walking back). */
+  viscosityIsCustom: boolean;
+  /** Ditto for the volume step. */
+  volumeIsCustom: boolean;
   price: number | null;
 }
 
@@ -94,8 +243,17 @@ const invalid = (message: string): WizardResult => ({
 // matching the current-version handlers; such taps are then caught by
 // WIZ_STALE_ACTION and answered with a "catalog updated, start again" notice
 // instead of resolving to the wrong item. Bump it whenever WIZARD_BRANDS
-// order/content changes; wizard-catalog.spec.ts reminds you to.
-export const CATALOG_VERSION = 1;
+// order/content changes; wizard-catalog.spec.ts reminds you to. The same applies
+// to the motor-oil option lists (OIL_VISCOSITIES / OIL_TYPES / OIL_VOLUMES),
+// which are index-addressed in exactly the same way.
+//
+// Bumped to 2 for the "Другое" branch. Brand indexes did NOT shift ("Другое" is
+// its own payload kind, appended after the brand grid), so this bump is not
+// about a misresolving index — it retires the in-flight buttons of a wizard whose
+// session shape changed (sessions gained `kind` and the oil fields). A tap on a
+// version-1 keyboard therefore lands on the "catalog updated, start again"
+// notice instead of a session the new transitions would read differently.
+export const CATALOG_VERSION = 2;
 
 /** Build a versioned callback payload, e.g. buildAction('b', 5) → "wiz:1:b:5". */
 export function buildAction(kind: string, arg: string | number): string {
@@ -111,6 +269,20 @@ export const WIZ_CATEGORY_ACTION = new RegExp(`^wiz:${V}:c:(\\d{1,2})$`);
 export const WIZ_DESCRIPTION_SKIP = buildAction('d', 'skip');
 export const WIZ_PART_NUMBER_TYPE_ACTION = new RegExp(
   `^wiz:${V}:t:(OEM|GM|SKIP)$`,
+);
+// "Другое" on the brand keyboard → leave the spare-parts flow.
+export const WIZ_OTHER_BRAND_ACTION = buildAction('ob', '');
+// A pick from the "Другое" menu — index into WIZARD_OTHER_CATEGORIES.
+export const WIZ_OTHER_CATEGORY_ACTION = new RegExp(`^wiz:${V}:oc:(\\d{1,2})$`);
+// Motor-oil option picks. Each carries either an index into its catalog or the
+// literal "custom" for the "Другое" escape hatch (viscosity and volume only —
+// oil TYPE is a closed set with no free-text branch).
+export const WIZ_OIL_VISCOSITY_ACTION = new RegExp(
+  `^wiz:${V}:ov:(\\d{1,2}|custom)$`,
+);
+export const WIZ_OIL_TYPE_ACTION = new RegExp(`^wiz:${V}:ot:(\\d{1,2})$`);
+export const WIZ_OIL_VOLUME_ACTION = new RegExp(
+  `^wiz:${V}:ol:(\\d{1,2}|custom)$`,
 );
 // "⬅️ Назад" — return to the previous wizard step. Versioned like every other
 // payload so a Back tap on a message from an outdated catalog is treated as
@@ -167,6 +339,8 @@ export class WizardSessionStore {
     const session: WizardSession = {
       step: WizardStep.PHOTOS_FIRST,
       draftId: null,
+      // Every session begins on the spare-parts flow; "Другое" switches it.
+      kind: ProductKind.SPARE_PART,
       brand: null,
       model: null,
       category: null,
@@ -174,6 +348,11 @@ export class WizardSessionStore {
       description: null,
       partNumberType: 'UNKNOWN',
       partNumber: null,
+      oilViscosity: null,
+      oilType: null,
+      oilVolumeMl: null,
+      viscosityIsCustom: false,
+      volumeIsCustom: false,
       price: null,
     };
     this.sessions.set(tgUserId, session);
@@ -215,6 +394,11 @@ export class WizardSessionStore {
 }
 
 // ── Transitions ─────────────────────────────────────────────────────────────
+// Every transition follows the same contract: reject anything that isn't the
+// session's current step (a stale/forged tap), record the answer, then hand the
+// step pointer to `advance` so the flow definition — not the transition —
+// decides what comes next.
+
 export function selectBrand(
   session: WizardSession,
   brandIndex: number,
@@ -222,9 +406,48 @@ export function selectBrand(
   if (session.step !== WizardStep.BRAND) return STALE;
   const brand = WIZARD_BRANDS[brandIndex];
   if (!brand) return STALE;
+  // A real car brand keeps (or returns) the session on the spare-parts flow —
+  // "returns" matters when the seller walked back from the "Другое" menu.
+  session.kind = ProductKind.SPARE_PART;
   session.brand = brand.name;
-  session.step = WizardStep.MODEL;
+  return advance(session);
+}
+
+/**
+ * "Другое" at the BRAND step: this listing is not a spare part for a specific
+ * car. The vehicle fields are cleared (a previous brand pick must not survive
+ * into a non-vehicle listing) and the "Другое" menu is shown. The KIND is not
+ * decided yet — {@link selectOtherCategory} does that.
+ */
+export function selectOtherBrand(session: WizardSession): WizardResult {
+  if (session.step !== WizardStep.BRAND) return STALE;
+  session.brand = null;
+  session.model = null;
+  session.category = null;
+  session.step = WizardStep.OTHER_CATEGORY;
   return OK;
+}
+
+/**
+ * A pick from the "Другое" menu — this is where the session's KIND is set, and
+ * therefore where it adopts that kind's questionnaire. Spare-part-only fields
+ * are cleared so a seller who backtracked out of the parts flow cannot carry a
+ * part number or vehicle category into, say, a motor oil.
+ */
+export function selectOtherCategory(
+  session: WizardSession,
+  categoryIndex: number,
+): WizardResult {
+  if (session.step !== WizardStep.OTHER_CATEGORY) return STALE;
+  const chosen = WIZARD_OTHER_CATEGORIES[categoryIndex];
+  if (!chosen) return STALE;
+  session.kind = chosen.kind;
+  session.brand = null;
+  session.model = null;
+  session.category = null;
+  session.partNumberType = 'UNKNOWN';
+  session.partNumber = null;
+  return advance(session);
 }
 
 export function selectModel(
@@ -237,8 +460,7 @@ export function selectModel(
   const model = models[modelIndex];
   if (!model) return STALE;
   session.model = model;
-  session.step = WizardStep.CATEGORY;
-  return OK;
+  return advance(session);
 }
 
 export function selectCategory(
@@ -249,8 +471,91 @@ export function selectCategory(
   const category = WIZARD_CATEGORIES[categoryIndex];
   if (!category) return STALE;
   session.category = category.value;
-  session.step = WizardStep.TITLE;
-  return OK;
+  return advance(session);
+}
+
+// ── Motor-oil transitions ───────────────────────────────────────────────────
+/**
+ * Viscosity from a preset button, or 'custom' for the "Другое" escape hatch
+ * (which routes to the free-text step instead of answering the question).
+ */
+export function selectOilViscosity(
+  session: WizardSession,
+  choice: number | 'custom',
+): WizardResult {
+  if (session.step !== WizardStep.OIL_VISCOSITY) return STALE;
+  if (choice === 'custom') {
+    // Splice the free-text step into the flow, then advance ONTO it.
+    session.viscosityIsCustom = true;
+    session.oilViscosity = null;
+    return advance(session);
+  }
+  const viscosity = OIL_VISCOSITIES[choice];
+  if (!viscosity) return STALE;
+  // A preset answer removes the free-text detour (the seller may have taken it
+  // before walking back), so the path forward matches the answer given.
+  session.viscosityIsCustom = false;
+  session.oilViscosity = viscosity;
+  return advance(session);
+}
+
+export function inputOilViscosity(
+  session: WizardSession,
+  raw: string,
+): WizardResult {
+  if (session.step !== WizardStep.OIL_VISCOSITY_CUSTOM) return STALE;
+  const viscosity = normalizeViscosity(raw);
+  if (viscosity === null) {
+    return invalid(
+      '❌ Не удалось распознать вязкость. Введите её в формате 5W-30 (например: 0W-16 или 20W-50).',
+    );
+  }
+  session.oilViscosity = viscosity;
+  return advance(session);
+}
+
+export function selectOilType(
+  session: WizardSession,
+  typeIndex: number,
+): WizardResult {
+  if (session.step !== WizardStep.OIL_TYPE) return STALE;
+  const type = OIL_TYPES[typeIndex];
+  if (!type) return STALE;
+  session.oilType = type.value;
+  return advance(session);
+}
+
+/** Volume from a preset button, or 'custom' → the free-text litres step. */
+export function selectOilVolume(
+  session: WizardSession,
+  choice: number | 'custom',
+): WizardResult {
+  if (session.step !== WizardStep.OIL_VOLUME) return STALE;
+  if (choice === 'custom') {
+    session.volumeIsCustom = true;
+    session.oilVolumeMl = null;
+    return advance(session);
+  }
+  const volume = OIL_VOLUMES[choice];
+  if (!volume) return STALE;
+  session.volumeIsCustom = false;
+  session.oilVolumeMl = volume.value;
+  return advance(session);
+}
+
+export function inputOilVolume(
+  session: WizardSession,
+  raw: string,
+): WizardResult {
+  if (session.step !== WizardStep.OIL_VOLUME_CUSTOM) return STALE;
+  const ml = parseVolumeLitres(raw);
+  if (ml === null) {
+    return invalid(
+      '❌ Не удалось распознать объём. Введите его в литрах, например: 3 или 0,5',
+    );
+  }
+  session.oilVolumeMl = ml;
+  return advance(session);
 }
 
 export function inputTitle(session: WizardSession, raw: string): WizardResult {
@@ -274,8 +579,7 @@ export function inputTitle(session: WizardSession, raw: string): WizardResult {
     );
   }
   session.title = title;
-  session.step = WizardStep.DESCRIPTION;
-  return OK;
+  return advance(session);
 }
 
 export function inputDescription(
@@ -295,15 +599,13 @@ export function inputDescription(
     );
   }
   session.description = description;
-  session.step = WizardStep.PART_NUMBER_TYPE;
-  return OK;
+  return advance(session);
 }
 
 export function skipDescription(session: WizardSession): WizardResult {
   if (session.step !== WizardStep.DESCRIPTION) return STALE;
   session.description = null;
-  session.step = WizardStep.PART_NUMBER_TYPE;
-  return OK;
+  return advance(session);
 }
 
 export function choosePartNumberType(
@@ -312,15 +614,14 @@ export function choosePartNumberType(
 ): WizardResult {
   if (session.step !== WizardStep.PART_NUMBER_TYPE) return STALE;
   if (choice === 'SKIP') {
-    // No number at all: type stays UNKNOWN and the number step is skipped.
+    // No number at all: the type stays UNKNOWN, which is exactly what keeps
+    // PART_NUMBER out of the flow (see flowSteps) — so `advance` skips it.
     session.partNumberType = 'UNKNOWN';
     session.partNumber = null;
-    session.step = WizardStep.PRICE;
-    return OK;
+    return advance(session);
   }
   session.partNumberType = choice;
-  session.step = WizardStep.PART_NUMBER;
-  return OK;
+  return advance(session);
 }
 
 export function inputPartNumber(
@@ -342,8 +643,7 @@ export function inputPartNumber(
     );
   }
   session.partNumber = number;
-  session.step = WizardStep.PRICE;
-  return OK;
+  return advance(session);
 }
 
 export function inputPrice(session: WizardSession, raw: string): WizardResult {
@@ -361,11 +661,11 @@ export function inputPrice(session: WizardSession, raw: string): WizardResult {
     );
   }
   session.price = price;
-  // PRICE is the last QUESTION: the form is now complete. Photos were uploaded
-  // first and are already processing — the coordinator handles the rendezvous and
-  // decides when the preview appears.
-  session.step = WizardStep.QUESTIONNAIRE_DONE;
-  return OK;
+  // PRICE is the last QUESTION of every flow, so `advance` lands on
+  // QUESTIONNAIRE_DONE: the form is complete. Photos were uploaded first and are
+  // already processing — the coordinator handles the rendezvous and decides when
+  // the preview appears.
+  return advance(session);
 }
 
 /**
@@ -383,39 +683,22 @@ export function beginQuestionnaire(session: WizardSession): WizardResult {
  * The step the "⬅️ Назад" button returns to from the CURRENT step, or `null`
  * when there is nowhere to go back.
  *
- * Derived from session STATE, not just the step, so the OEM/GM branch resolves
- * correctly: PRICE goes back to PART_NUMBER only when a number was actually
- * asked for (partNumberType is OEM/GM); when the seller skipped the number,
- * PRICE goes back to PART_NUMBER_TYPE, mirroring the forward path exactly.
+ * Read straight off the session's own flow ({@link flowSteps}) — the SAME list
+ * forward motion uses — so back and forward can never disagree about the path.
+ * Because that list is built from session STATE, the conditional detours resolve
+ * correctly for free: PRICE goes back to PART_NUMBER only when a number was
+ * actually asked for (OEM/GM), and to PART_NUMBER_TYPE when the seller skipped
+ * it; TITLE goes back to CATEGORY for a spare part but to OIL_VOLUME for an oil.
+ *
+ * Null for: the first step of a flow (BRAND — photos precede it but are not a
+ * question), PHOTOS_FIRST, and QUESTIONNAIRE_DONE (terminal; the coordinator
+ * owns the flow from there).
  */
 export function previousStep(session: WizardSession): WizardStep | null {
-  switch (session.step) {
-    case WizardStep.MODEL:
-      return WizardStep.BRAND;
-    case WizardStep.CATEGORY:
-      return WizardStep.MODEL;
-    case WizardStep.TITLE:
-      return WizardStep.CATEGORY;
-    case WizardStep.DESCRIPTION:
-      return WizardStep.TITLE;
-    case WizardStep.PART_NUMBER_TYPE:
-      return WizardStep.DESCRIPTION;
-    case WizardStep.PART_NUMBER:
-      return WizardStep.PART_NUMBER_TYPE;
-    case WizardStep.PRICE:
-      // Only OEM/GM listings passed through the PART_NUMBER step; a skipped
-      // number came straight from PART_NUMBER_TYPE.
-      return session.partNumberType === 'UNKNOWN'
-        ? WizardStep.PART_NUMBER_TYPE
-        : WizardStep.PART_NUMBER;
-    // No previous step: BRAND (first question — photos precede it but are not a
-    // question to go back to), PHOTOS_FIRST (the very first step) and
-    // QUESTIONNAIRE_DONE (terminal; the coordinator owns the flow now).
-    case WizardStep.BRAND:
-    case WizardStep.PHOTOS_FIRST:
-    case WizardStep.QUESTIONNAIRE_DONE:
-      return null;
-  }
+  const steps = flowSteps(session);
+  const i = steps.indexOf(session.step);
+  if (i <= 0) return null;
+  return steps[i - 1];
 }
 
 /**
@@ -462,11 +745,58 @@ function grid<T>(items: T[], perRow: number): T[][] {
   return rows;
 }
 
+/**
+ * The car brands, two per row, followed by a full-width "Другое" row that leaves
+ * the spare-parts flow. "Другое" is its own payload kind (not a brand index), so
+ * adding it shifts no existing brand index.
+ */
 export function brandKeyboard(session: WizardSession): InlineKeyboard {
   const buttons = WIZARD_BRANDS.map((b, i) =>
     Markup.button.callback(b.name, buildAction('b', i)),
   );
-  return withBack(session, grid(buttons, 2));
+  return withBack(session, [
+    ...grid(buttons, 2),
+    [Markup.button.callback(OTHER_BRAND_LABEL, WIZ_OTHER_BRAND_ACTION)],
+  ]);
+}
+
+/** The "Другое" menu: one button per non-spare-part category. */
+export function otherCategoryKeyboard(session: WizardSession): InlineKeyboard {
+  const buttons = WIZARD_OTHER_CATEGORIES.map((c, i) =>
+    Markup.button.callback(c.label, buildAction('oc', i)),
+  );
+  return withBack(session, grid(buttons, 1));
+}
+
+// ── Motor-oil keyboards ─────────────────────────────────────────────────────
+/** Viscosity presets (three per row) plus the "Другое" free-text escape hatch. */
+export function oilViscosityKeyboard(session: WizardSession): InlineKeyboard {
+  const buttons = OIL_VISCOSITIES.map((v, i) =>
+    Markup.button.callback(v, buildAction('ov', i)),
+  );
+  return withBack(session, [
+    ...grid(buttons, 3),
+    [Markup.button.callback(OTHER_BRAND_LABEL, buildAction('ov', 'custom'))],
+  ]);
+}
+
+/** Oil type — a closed set, so one button per row and no free-text option. */
+export function oilTypeKeyboard(session: WizardSession): InlineKeyboard {
+  const buttons = OIL_TYPES.map((t, i) =>
+    Markup.button.callback(t.label, buildAction('ot', i)),
+  );
+  return withBack(session, grid(buttons, 1));
+}
+
+/** Volume presets (two per row) plus the "Другое" free-text escape hatch. */
+export function oilVolumeKeyboard(session: WizardSession): InlineKeyboard {
+  const buttons = OIL_VOLUMES.map((v, i) =>
+    Markup.button.callback(v.label, buildAction('ol', i)),
+  );
+  return withBack(session, [
+    ...grid(buttons, 2),
+    [Markup.button.callback(OTHER_BRAND_LABEL, buildAction('ol', 'custom'))],
+  ]);
 }
 
 export function modelKeyboard(
@@ -517,6 +847,22 @@ export interface StepPrompt {
   keyboard?: InlineKeyboard;
 }
 
+/**
+ * The TITLE step is shared by every flow but its EXAMPLE is kind-specific — a
+ * seller listing oil should not be shown "Передний амортизатор". Kept as a table
+ * so a new kind supplies its example here instead of branching in stepPrompt.
+ */
+const TITLE_PROMPTS: Record<ProductKind, string> = {
+  [ProductKind.SPARE_PART]:
+    '✏️ Введите название товара.\nПример: Передний амортизатор',
+  [ProductKind.MOTOR_OIL]:
+    '✏️ Введите название товара.\n' +
+    'Примеры:\n' +
+    '• Mobil 1 ESP 5W-30 4L\n' +
+    '• Shell Helix Ultra 5W-40\n' +
+    '• ZIC X9 5W-30',
+};
+
 /** The message (and inline keyboard, if any) that asks for the current step. */
 export function stepPrompt(session: WizardSession): StepPrompt {
   switch (session.step) {
@@ -536,9 +882,39 @@ export function stepPrompt(session: WizardSession): StepPrompt {
         text: '🗂 Выберите категорию запчасти:',
         keyboard: categoryKeyboard(session),
       };
+    case WizardStep.OTHER_CATEGORY:
+      return {
+        text: '🗂 Выберите категорию товара:',
+        keyboard: otherCategoryKeyboard(session),
+      };
+    case WizardStep.OIL_VISCOSITY:
+      return {
+        text: '🛢 Выберите вязкость масла:',
+        keyboard: oilViscosityKeyboard(session),
+      };
+    case WizardStep.OIL_VISCOSITY_CUSTOM:
+      return {
+        text: '🛢 Введите вязкость масла.\nПример: 0W-16',
+        keyboard: backOnlyKeyboard(session),
+      };
+    case WizardStep.OIL_TYPE:
+      return {
+        text: '🛢 Выберите тип масла:',
+        keyboard: oilTypeKeyboard(session),
+      };
+    case WizardStep.OIL_VOLUME:
+      return {
+        text: '🛢 Выберите объём:',
+        keyboard: oilVolumeKeyboard(session),
+      };
+    case WizardStep.OIL_VOLUME_CUSTOM:
+      return {
+        text: '🛢 Введите объём в литрах.\nПример: 3',
+        keyboard: backOnlyKeyboard(session),
+      };
     case WizardStep.TITLE:
       return {
-        text: '✏️ Введите название товара.\nПример: Передний амортизатор',
+        text: TITLE_PROMPTS[session.kind],
         keyboard: backOnlyKeyboard(session),
       };
     case WizardStep.DESCRIPTION:
@@ -573,4 +949,43 @@ export function stepPrompt(session: WizardSession): StepPrompt {
       // ready. This holding message only appears if processing is still running.
       return { text: '⏳ Завершаем обработку фото…' };
   }
+}
+
+// ── Preview rendering ───────────────────────────────────────────────────────
+/**
+ * The KIND-SPECIFIC lines of a listing's preview caption, in display order. The
+ * shared lines (title, description, price) are rendered by the caller around
+ * these, so each kind declares only what is peculiar to it and a new kind adds a
+ * branch here rather than editing the caption builder.
+ *
+ * `formatVehicle` is injected because the vehicle line is assembled from parse
+ * metadata that lives in the telegram service — this module stays I/O- and
+ * metadata-free.
+ */
+export function previewLines(
+  listing: {
+    kind: ProductKind;
+    vehicleCategoryLabel: string;
+    partNumberLabel: string;
+    partNumber: string | null;
+    oilViscosity: string | null;
+    oilType: OilType | null;
+    oilVolumeMl: number | null;
+  },
+  vehicleLine: string,
+): string[] {
+  if (listing.kind === ProductKind.MOTOR_OIL) {
+    // Deliberately NO vehicle, category or part-number lines: those concepts
+    // belong to spare parts only.
+    return [
+      `🛢 *Вязкость:* ${listing.oilViscosity ?? '—'}`,
+      `🧪 *Тип масла:* ${listing.oilType ? OIL_TYPE_LABELS[listing.oilType] : '—'}`,
+      `🧴 *Объём:* ${listing.oilVolumeMl !== null ? formatVolume(listing.oilVolumeMl) : '—'}`,
+    ];
+  }
+  return [
+    `🚗 *Автомобиль:* ${vehicleLine}`,
+    `🗂 *Категория:* ${listing.vehicleCategoryLabel}`,
+    `🔢 *${listing.partNumberLabel}:* ${listing.partNumber ?? '—'}`,
+  ];
 }

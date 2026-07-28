@@ -14,7 +14,7 @@
 // model therefore forces you to add the same canonical name (plus its aliases)
 // to VEHICLE_CATALOG, or the app won't start.
 
-import { PartVehicleCategory } from '@prisma/client';
+import { PartVehicleCategory, ProductKind } from '@prisma/client';
 import { VEHICLE_CATALOG } from '../ai/vehicle-catalog';
 
 export interface WizardBrand {
@@ -242,6 +242,34 @@ export const WIZARD_CATEGORIES: WizardCategory[] = [
     value: PartVehicleCategory.TUNING_AND_ACCESSORIES,
     label: 'Тюнинг и Стайлинг',
   },
+];
+
+// ── The "Другое" branch: listings that are NOT spare parts ──────────────────
+//
+// The brand step ends with a "Другое" button. It does not select a vehicle — it
+// leaves the spare-parts flow entirely and opens the menu below, whose entries
+// each map to a ProductKind with its OWN questionnaire (see product-wizard.ts's
+// flow definitions). Nothing about the spare-parts path changes.
+//
+// TO ADD A CATEGORY (Антифриз, Тормозная жидкость, Аккумуляторы, …):
+//   1. add a ProductKind value + its attribute columns in schema.prisma,
+//   2. add its steps and a FLOW entry in product-wizard.ts,
+//   3. append one row here,
+//   4. bump CATALOG_VERSION (this list is index-addressed, like WIZARD_BRANDS).
+// No existing kind is touched by any of those steps.
+
+/** The brand-step button that leaves the spare-parts flow. */
+export const OTHER_BRAND_LABEL = 'Другое';
+
+export interface WizardOtherCategory {
+  /** The kind of listing this category creates — picks the questionnaire. */
+  kind: ProductKind;
+  /** Russian button label (the bot speaks Russian). */
+  label: string;
+}
+
+export const WIZARD_OTHER_CATEGORIES: WizardOtherCategory[] = [
+  { kind: ProductKind.MOTOR_OIL, label: 'Моторные масла' },
 ];
 
 /**

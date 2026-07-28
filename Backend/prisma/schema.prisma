@@ -146,6 +146,26 @@ enum PartMainCategory {
   EXTERIOR
 }
 
+// What KIND of thing a listing is. The Telegram wizard runs a different
+// questionnaire per kind, and each kind owns its own attribute columns:
+//   SPARE_PART → vehicle fitment + GM/OEM part numbers (the original flow)
+//   MOTOR_OIL  → viscosity / oil type / volume; NO fitment, NO part numbers
+// Additive by design: a new "Другое" category (antifreeze, brake fluid, …)
+// becomes a new value here plus its own attribute columns, without touching
+// any existing kind. SPARE_PART is the default so every pre-existing row keeps
+// its current meaning.
+enum ProductKind {
+  SPARE_PART
+  MOTOR_OIL
+}
+
+// Base composition of a motor oil, as chosen by the seller (never inferred).
+enum OilType {
+  SYNTHETIC
+  SEMI_SYNTHETIC
+  MINERAL
+}
+
 enum PartVehicleCategory {
   BRAKE_SYSTEM
   MAINTENANCE_AND_FLUIDS
@@ -329,6 +349,10 @@ model CarModel {
 
 model Product {
   id              Int                  @id @default(autoincrement())
+  // Which questionnaire produced this listing and which attribute columns are
+  // meaningful for it. SPARE_PART (the default) keeps every existing row — and
+  // every existing query — behaving exactly as before.
+  kind            ProductKind          @default(SPARE_PART)
   // Raw part number as written by the seller. Kept as the unique idempotency key
   // for the Telegram upsert (a synthetic key is used when the listing has none).
   // The AUTHORITATIVE OEM value lives in `oemNumber`; this column is NOT copied
@@ -356,6 +380,18 @@ model Product {
   originRegion    PartOriginRegion?    @map("origin_region")
   isOem           Boolean              @default(false) @map("is_oem")
   isGm            Boolean              @default(false) @map("is_gm")
+  // ── MOTOR_OIL attributes (null for every other kind) ──────────────────────
+  // Nullable rather than a separate table: these are a handful of scalar
+  // attributes on the same listing, read on every product page, and each kind
+  // owns a disjoint set of them. A future kind adds its own nullable columns
+  // here in the same way, gated by `kind`.
+  // SAE grade as displayed, e.g. "5W-30". Free-form (the wizard offers a preset
+  // list plus "Другое"), so it is a string, not an enum.
+  oilViscosity    String?              @map("oil_viscosity") @db.VarChar(20)
+  oilType         OilType?             @map("oil_type")
+  // Package volume in MILLILITRES (integer) — stored as a number, not "4 л", so
+  // it sorts and filters correctly; the display label is derived at render time.
+  oilVolumeMl     Int?                 @map("oil_volume_ml")
   createdAt       DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt       DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
   partModels      PartModel[]
@@ -364,6 +400,7 @@ model Product {
 
   @@index([mainCategory])
   @@index([vehicleCategory])
+  @@index([kind])
   @@map("products")
 }
 
@@ -443,6 +480,9 @@ model ProductDraft {
   status         DraftStatus          @default(CREATING)
   version        Int                  @default(0) // optimistic lock: bumped on every status transition
   formStep       String               @map("form_step") // WizardStep name → resumable FSM
+  // Which questionnaire this draft is running. Chosen at the BRAND step ("Другое"
+  // → a non-spare-part category) and carried into the published Product.
+  kind           ProductKind          @default(SPARE_PART)
   brand          String?
   model          String?
   category       PartVehicleCategory?
@@ -450,6 +490,11 @@ model ProductDraft {
   description    String?              @db.Text
   partNumberType PartNumberType       @default(UNKNOWN) @map("part_number_type")
   partNumber     String?              @map("part_number") @db.VarChar(50)
+  // MOTOR_OIL attributes — mirror the Product columns (see there); null for
+  // every other kind. The draft holds them so a resumed/edited flow loses nothing.
+  oilViscosity   String?              @map("oil_viscosity") @db.VarChar(20)
+  oilType        OilType?             @map("oil_type")
+  oilVolumeMl    Int?                 @map("oil_volume_ml")
   priceUzs       Decimal?             @map("price_uzs") @db.Decimal(14, 2)
   createdAt      DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt      DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
@@ -1077,6 +1122,13 @@ model CatalogPart {
   isOem              Boolean              @default(false) @map("is_oem")
   isGm               Boolean              @default(false) @map("is_gm")
   isUniversal        Boolean              @default(false) @map("is_universal")
+  // Listing kind + the kind-specific attributes, projected verbatim from the
+  // supply-side Product so the buyer side can render an oil card (viscosity /
+  // type / volume) without joining back to the seller domain.
+  kind               ProductKind          @default(SPARE_PART)
+  oilViscosity       String?              @map("oil_viscosity") @db.VarChar(20)
+  oilType            OilType?             @map("oil_type")
+  oilVolumeMl        Int?                 @map("oil_volume_ml")
   createdAt          DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt          DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
   brand              PartBrand?           @relation(fields: [brandId], references: [id], onDelete: SetNull)
@@ -1094,6 +1146,7 @@ model CatalogPart {
   @@index([originRegion])
   @@index([isGm])
   @@index([isOem])
+  @@index([kind])
   @@map("catalog_parts")
 }
 

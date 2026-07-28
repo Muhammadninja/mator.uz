@@ -1,5 +1,12 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsString, IsOptional, IsInt, IsObject, Min, Max } from 'class-validator';
+import {
+  IsString,
+  IsOptional,
+  IsInt,
+  IsObject,
+  Min,
+  Max,
+} from 'class-validator';
 import { Type } from 'class-transformer';
 
 export class SearchDto {
@@ -15,13 +22,21 @@ export class SearchDto {
   limit?: number;
 
   // Opaque cursor from a previous response; `null` on the first page.
-  @ApiPropertyOptional({ type: String, nullable: true, description: 'Opaque pagination cursor from the previous response.' })
+  @ApiPropertyOptional({
+    type: String,
+    nullable: true,
+    description: 'Opaque pagination cursor from the previous response.',
+  })
   @IsOptional()
   @IsString()
   pageToken?: string | null;
 
   // Free-form facet map (e.g. { brand_ids: ['brand_gates'], condition: 'new' }).
-  @ApiPropertyOptional({ type: 'object', additionalProperties: true, description: 'Free-form facet filters.' })
+  @ApiPropertyOptional({
+    type: 'object',
+    additionalProperties: true,
+    description: 'Free-form facet filters.',
+  })
   @IsOptional()
   @IsObject()
   filters?: Record<string, unknown>;
@@ -39,7 +54,11 @@ export class SearchDto {
   locale?: string;
 
   // Selected vehicle used to bias results (make/model/year, etc.).
-  @ApiPropertyOptional({ type: 'object', additionalProperties: true, description: 'Vehicle context used to bias results.' })
+  @ApiPropertyOptional({
+    type: 'object',
+    additionalProperties: true,
+    description: 'Vehicle context used to bias results.',
+  })
   @IsOptional()
   @IsObject()
   vehicleContext?: Record<string, unknown>;

@@ -5,10 +5,15 @@
 // The bot itself is never launched here; we construct the service with stub
 // dependencies and drive the private confirmation helpers directly.
 
-import { PartVehicleCategory } from '@prisma/client';
+import { OilType, PartVehicleCategory, ProductKind } from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
 import type { ParseOutcome } from '../ai/part-parser.types';
-import { buildSessionFromDraft, TelegramService } from './telegram.service';
+import {
+  buildSessionFromDraft,
+  isDraftComplete,
+  SELLER_APPROVED_MESSAGE,
+  TelegramService,
+} from './telegram.service';
 import { WizardSessionStore, WizardStep } from './product-wizard';
 import { makeFakeLock } from './draft-lock.test-util';
 
@@ -27,12 +32,14 @@ interface AnyService {
   replaceDraftPhotos: (ctx: unknown, tgUserId: number) => Promise<void>;
   sendPreviewToChat: (
     chatId: number,
-    metadata: unknown,
-    vehicleCategory: unknown,
+    listing: unknown,
     processedUrls: string[],
-    price: unknown,
   ) => Promise<void>;
   answerStaleCallback: (ctx: unknown) => Promise<void>;
+  onSellerApproved: (event: {
+    sellerId: number;
+    tgId: bigint;
+  }) => Promise<void>;
 }
 
 // Records the stock ids the live catalog projection was asked to project. The
@@ -63,21 +70,55 @@ const metadata: ParseOutcome = {
   confidence: 1,
 };
 
-function draft(tgUserId: number, publicIds = ['mator/products/abc']) {
+function draft(
+  tgUserId: number,
+  publicIds = ['mator/products/abc'],
+  over: Record<string, unknown> = {},
+) {
   return {
     sellerId: 7,
     tgUserId,
     metadata,
+    kind: ProductKind.SPARE_PART,
     title: metadata.title as string,
     // The wizard's explicit category choice, written verbatim on commit.
     vehicleCategory: PartVehicleCategory.ELECTRICAL_AND_LIGHTING,
+    oilViscosity: null,
+    oilType: null,
+    oilVolumeMl: null,
     processedUrls: publicIds.map((_, i) => `https://cdn/img${i}.webp`),
     publicIds,
     price: new Decimal(450000),
     // Every preview is backed by a draft (the source of truth).
     draftId: `draft_${tgUserId}`,
     draftVersion: 3,
+    ...over,
   };
+}
+
+/**
+ * A pending MOTOR_OIL confirmation, shaped exactly as `buildPendingFromDraft`
+ * derives one from an oil draft: no vehicle, no part number, and metadata whose
+ * `isUniversal` is already true because the kind — not a question — decides it.
+ */
+function oilPending(tgUserId: number) {
+  return draft(tgUserId, ['mator/products/oil'], {
+    kind: ProductKind.MOTOR_OIL,
+    vehicleCategory: null,
+    oilViscosity: '5W-30',
+    oilType: OilType.SYNTHETIC,
+    oilVolumeMl: 4_000,
+    title: 'Mobil 1 ESP 5W-30 4L',
+    metadata: {
+      ...metadata,
+      title: 'Mobil 1 ESP 5W-30 4L',
+      brand: null,
+      models: [],
+      vehicles: [],
+      gm_number: null,
+      isUniversal: true,
+    },
+  });
 }
 
 /** A READY_FOR_PREVIEW draft row as `drafts.findWithImages` would return it. */
@@ -89,6 +130,7 @@ function draftRow(over: Record<string, unknown> = {}) {
     status: 'READY_FOR_PREVIEW',
     version: 3,
     formStep: WizardStep.QUESTIONNAIRE_DONE,
+    kind: 'SPARE_PART',
     brand: 'Chevrolet',
     model: 'Nexia 3',
     category: PartVehicleCategory.ELECTRICAL_AND_LIGHTING,
@@ -96,6 +138,9 @@ function draftRow(over: Record<string, unknown> = {}) {
     description: 'Производство Корея, новая',
     partNumberType: 'UNKNOWN',
     partNumber: '96234567',
+    oilViscosity: null,
+    oilType: null,
+    oilVolumeMl: null,
     priceUzs: new Decimal(450000),
     previewSentAt: new Date(),
     images: [
@@ -142,14 +187,21 @@ function makeQueue() {
 }
 
 // Minimal Prisma stub recording the writes commitPending performs.
+// `calls` keeps the ORDER of the writes; `args` keeps the last payload per write
+// name, for assertions about what was actually persisted.
 function makePrisma() {
   const calls: string[] = [];
-  const upsert = (name: string, ret: unknown) => async () => {
-    calls.push(name);
-    return ret;
-  };
+  const args: Record<string, unknown> = {};
+  const upsert =
+    (name: string, ret: unknown) =>
+    async (arg?: unknown) => {
+      calls.push(name);
+      args[name] = arg;
+      return ret;
+    };
   return {
     calls,
+    args,
     brand: { upsert: upsert('brand', { id: 1 }) },
     carModel: { upsert: upsert('carModel', { id: 2 }) },
     product: { upsert: upsert('product', { id: 100 }) },
@@ -306,6 +358,49 @@ describe('TelegramService — confirmation session', () => {
     expect(ctx.replies.some((r) => r.includes('Название'))).toBe(false);
     expect(ctx.replies.some((r) => r.includes('OEM'))).toBe(false);
     expect(ctx.replies.some((r) => r.includes('Product ID'))).toBe(false);
+  });
+
+  it('a MOTOR_OIL commit stores the product as UNIVERSAL and creates NO compatibility rows', async () => {
+    // Motor oils fit every vehicle by design: isUniversal is derived from the
+    // kind with no seller interaction, and no vehicle link is ever written.
+    const prisma = makePrisma();
+    const svc = makeService(prisma, makeCloudinary());
+    const ctx = makeCtx();
+    svc.storePending(oilPending(1));
+
+    await svc.commitPending(ctx, 1);
+
+    const upsert = prisma.args['product'] as {
+      create: { isUniversal: boolean; kind: string };
+      update: { isUniversal: boolean; kind: string };
+    };
+    // Universal on BOTH branches, so a re-listing converges on it too.
+    expect(upsert.create.isUniversal).toBe(true);
+    expect(upsert.update.isUniversal).toBe(true);
+    expect(upsert.create.kind).toBe(ProductKind.MOTOR_OIL);
+
+    // The fitment reconcile still runs (it clears anything stale), but NOTHING is
+    // recreated: no brand, no car model, no part_models row.
+    expect(prisma.calls).toContain('partModel.deleteMany');
+    expect(prisma.calls).not.toContain('partModel');
+    expect(prisma.calls).not.toContain('brand');
+    expect(prisma.calls).not.toContain('carModel');
+  });
+
+  it('a spare-part commit is still NOT universal and still writes its vehicle links', async () => {
+    // Regression guard: making oils universal must not universalize spare parts.
+    const prisma = makePrisma();
+    const svc = makeService(prisma, makeCloudinary());
+    svc.storePending(draft(1));
+
+    await svc.commitPending(makeCtx(), 1);
+
+    const upsert = prisma.args['product'] as {
+      create: { isUniversal: boolean; kind: string };
+    };
+    expect(upsert.create.isUniversal).toBe(false);
+    expect(upsert.create.kind).toBe(ProductKind.SPARE_PART);
+    expect(prisma.calls).toContain('partModel');
   });
 
   it('commit projects the written stock into the buyer catalog (live read model)', async () => {
@@ -552,6 +647,49 @@ describe('TelegramService — stale-catalog callback', () => {
   });
 });
 
+describe('isDraftComplete (per-kind completeness)', () => {
+  /** The oil equivalent of `draftRow` — no vehicle, no part number. */
+  const oilDraft = (over: Record<string, unknown> = {}) =>
+    draftRow({
+      kind: ProductKind.MOTOR_OIL,
+      brand: null,
+      model: null,
+      category: null,
+      partNumber: null,
+      oilViscosity: '5W-30',
+      oilType: OilType.SYNTHETIC,
+      oilVolumeMl: 4_000,
+      ...over,
+    }) as never;
+
+  it('accepts a filled spare part', () => {
+    expect(isDraftComplete(draftRow() as never)).toBe(true);
+  });
+
+  it('accepts an oil that has NO vehicle — the flow never asks for one', () => {
+    expect(isDraftComplete(oilDraft())).toBe(true);
+  });
+
+  it('rejects a spare part missing its vehicle or category', () => {
+    expect(isDraftComplete(draftRow({ brand: null }) as never)).toBe(false);
+    expect(isDraftComplete(draftRow({ model: null }) as never)).toBe(false);
+    expect(isDraftComplete(draftRow({ category: null }) as never)).toBe(false);
+  });
+
+  it('rejects an oil missing any of its own attributes', () => {
+    expect(isDraftComplete(oilDraft({ oilViscosity: null }))).toBe(false);
+    expect(isDraftComplete(oilDraft({ oilType: null }))).toBe(false);
+    expect(isDraftComplete(oilDraft({ oilVolumeMl: null }))).toBe(false);
+  });
+
+  it('requires title and price from every kind', () => {
+    expect(isDraftComplete(draftRow({ title: null }) as never)).toBe(false);
+    expect(isDraftComplete(draftRow({ priceUzs: null }) as never)).toBe(false);
+    expect(isDraftComplete(oilDraft({ title: null }))).toBe(false);
+    expect(isDraftComplete(oilDraft({ priceUzs: null }))).toBe(false);
+  });
+});
+
 describe('buildSessionFromDraft', () => {
   it('reconstructs every wizard field from the draft, positioned at the given step', () => {
     const session = buildSessionFromDraft(
@@ -561,6 +699,7 @@ describe('buildSessionFromDraft', () => {
     expect(session).toEqual({
       step: WizardStep.PRICE,
       draftId: 'draft_1',
+      kind: ProductKind.SPARE_PART,
       brand: 'Chevrolet',
       model: 'Nexia 3',
       category: PartVehicleCategory.ELECTRICAL_AND_LIGHTING,
@@ -568,11 +707,58 @@ describe('buildSessionFromDraft', () => {
       description: 'Производство Корея, новая',
       partNumberType: 'UNKNOWN',
       partNumber: '96234567',
+      // A spare part carries no oil attributes, and neither "Другое" free-text
+      // branch was taken (both are derived from the stored values).
+      oilViscosity: null,
+      oilType: null,
+      oilVolumeMl: null,
+      viscosityIsCustom: false,
+      volumeIsCustom: false,
       price: 450000,
     });
     // The session carries NO image state — the draft's rows own that.
     expect(session).not.toHaveProperty('processedUrls');
     expect(session).not.toHaveProperty('publicIds');
+  });
+
+  it('restores an oil draft with its kind and attributes', () => {
+    const session = buildSessionFromDraft(
+      draftRow({
+        kind: ProductKind.MOTOR_OIL,
+        brand: null,
+        model: null,
+        category: null,
+        oilViscosity: '5W-30',
+        oilType: OilType.SYNTHETIC,
+        oilVolumeMl: 4_000,
+      }) as never,
+      WizardStep.PRICE,
+    );
+    expect(session).toMatchObject({
+      kind: ProductKind.MOTOR_OIL,
+      oilViscosity: '5W-30',
+      oilType: OilType.SYNTHETIC,
+      oilVolumeMl: 4_000,
+      // Both values are presets, so neither "Другое" branch is on the path.
+      viscosityIsCustom: false,
+      volumeIsCustom: false,
+    });
+  });
+
+  it('re-derives the "Другое" branches from non-preset stored values', () => {
+    // A resumed draft must walk BACK the same way it walked forward, even though
+    // the free-text detours are not persisted — they are recomputed here.
+    const session = buildSessionFromDraft(
+      draftRow({
+        kind: ProductKind.MOTOR_OIL,
+        oilViscosity: '0W-16', // not in the preset list
+        oilType: OilType.MINERAL,
+        oilVolumeMl: 3_500, // not a preset volume
+      }) as never,
+      WizardStep.PRICE,
+    );
+    expect(session.viscosityIsCustom).toBe(true);
+    expect(session.volumeIsCustom).toBe(true);
   });
 
   it('tolerates an unfilled draft (fresh clone at PHOTOS_FIRST)', () => {
@@ -799,7 +985,8 @@ describe('TelegramService — "🖼 Изменить фото" (clone → PHOTOS
 });
 
 describe('TelegramService — preview caption', () => {
-  it('includes the seller-chosen category (Russian label, not the enum)', async () => {
+  /** A service whose bot records whatever caption/text it is asked to send. */
+  function makeCaptureService() {
     const sent: { chatId: number; caption?: string }[] = [];
     const svc = makeService(makePrisma(), makeCloudinary(), makeProjection(), {
       bot: {
@@ -820,13 +1007,18 @@ describe('TelegramService — preview caption', () => {
         },
       },
     });
+    return { svc, sent };
+  }
+
+  it('includes the seller-chosen category (Russian label, not the enum)', async () => {
+    const { svc, sent } = makeCaptureService();
 
     await svc.sendPreviewToChat(
       1,
-      metadata,
-      PartVehicleCategory.SUSPENSION_AND_STEERING,
+      draft(1, ['a'], {
+        vehicleCategory: PartVehicleCategory.SUSPENSION_AND_STEERING,
+      }),
       ['https://cdn/img0.webp'], // single photo → caption on sendPhoto
-      new Decimal(450000),
     );
 
     const caption = sent.find((s) => s.caption?.includes('Категория'))?.caption;
@@ -836,5 +1028,110 @@ describe('TelegramService — preview caption', () => {
     // The full listing detail lines are still present.
     expect(caption).toContain('Название');
     expect(caption).toContain('Цена');
+  });
+
+  it('renders a MOTOR_OIL listing with its own attributes and NO spare-part lines', async () => {
+    const { svc, sent } = makeCaptureService();
+
+    await svc.sendPreviewToChat(
+      1,
+      draft(1, ['a'], {
+        kind: ProductKind.MOTOR_OIL,
+        vehicleCategory: null,
+        oilViscosity: '5W-30',
+        oilType: OilType.SYNTHETIC,
+        oilVolumeMl: 4000,
+        metadata: {
+          ...metadata,
+          title: 'Mobil 1 ESP 5W-30 4L',
+          brand: null,
+          models: [],
+          vehicles: [],
+          gm_number: null,
+        },
+      }),
+      ['https://cdn/img0.webp'],
+    );
+
+    const caption = sent[0]?.caption;
+    expect(caption).toBeDefined();
+    // The oil's own attributes, in Russian.
+    expect(caption).toContain('Вязкость');
+    expect(caption).toContain('5W-30');
+    expect(caption).toContain('Синтетическое');
+    expect(caption).toContain('4 л');
+    // Shared lines still render.
+    expect(caption).toContain('Mobil 1 ESP 5W-30 4L');
+    expect(caption).toContain('Цена');
+    // Spare-part concepts must NOT appear on an oil.
+    expect(caption).not.toContain('Автомобиль');
+    expect(caption).not.toContain('Категория');
+    expect(caption).not.toContain('OEM');
+    expect(caption).not.toContain('GM');
+  });
+});
+
+describe('TelegramService — seller approval notification', () => {
+  /** A service whose bot records every message it is asked to send. */
+  function makeNotifyService(sendMessage?: jest.Mock) {
+    const sent: { chatId: number; text: string }[] = [];
+    const svc = makeService(makePrisma(), makeCloudinary(), makeProjection(), {
+      bot: {
+        telegram: {
+          sendMessage:
+            sendMessage ??
+            (async (chatId: number, text: string) => {
+              sent.push({ chatId, text });
+              return {} as unknown;
+            }),
+        },
+      },
+    });
+    return { svc, sent };
+  }
+
+  it('sends the approval message to the seller’s chat, unprompted', async () => {
+    const { svc, sent } = makeNotifyService();
+
+    await svc.onSellerApproved({ sellerId: 7, tgId: BigInt(123456) });
+
+    expect(sent).toHaveLength(1);
+    // tgId IS the chat id — the seller needs to have done nothing at all.
+    expect(sent[0].chatId).toBe(123456);
+    expect(sent[0].text).toBe(SELLER_APPROVED_MESSAGE);
+  });
+
+  it('the message is the exact approved Russian copy', async () => {
+    const { svc, sent } = makeNotifyService();
+
+    await svc.onSellerApproved({ sellerId: 7, tgId: BigInt(1) });
+
+    expect(sent[0].text).toBe(
+      '✅ Ваша заявка успешно одобрена!\n\n' +
+        'Теперь вы можете публиковать товары в Mator.\n\n' +
+        'Нажмите /start, чтобы открыть меню и начать добавление товаров.',
+    );
+  });
+
+  it('swallows a delivery failure — approval must never depend on the notice', async () => {
+    // The seller blocked the bot / never opened a chat / Telegram is down. The
+    // approval is already committed, so this can only be logged.
+    const failing = jest.fn().mockRejectedValue(new Error('bot was blocked'));
+    const { svc } = makeNotifyService(failing);
+
+    await expect(
+      svc.onSellerApproved({ sellerId: 7, tgId: BigInt(123456) }),
+    ).resolves.toBeUndefined();
+    expect(failing).toHaveBeenCalledTimes(1);
+  });
+
+  it('swallows a bot that never launched (no telegram client at all)', async () => {
+    const svc = makeService(makePrisma(), makeCloudinary(), makeProjection(), {
+      bot: undefined,
+    });
+
+    await expect(
+      svc.onSellerApproved({ sellerId: 7, tgId: BigInt(1) }),
+    ).resolves.toBeUndefined();
   });
 });

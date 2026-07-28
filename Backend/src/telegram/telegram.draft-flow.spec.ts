@@ -104,6 +104,7 @@ function readyDraft(over: Record<string, unknown> = {}) {
     sellerId: 1,
     status: 'READY_FOR_PREVIEW',
     version: 3,
+    kind: 'SPARE_PART',
     title: 'Фара левая',
     description: null,
     brand: 'Chevrolet',
@@ -111,6 +112,9 @@ function readyDraft(over: Record<string, unknown> = {}) {
     category: 'SEDAN',
     partNumber: '96littleendian',
     partNumberType: 'UNKNOWN',
+    oilViscosity: null,
+    oilType: null,
+    oilVolumeMl: null,
     priceUzs: new Decimal(250000),
     formStep: 'QUESTIONNAIRE_DONE',
     images: [
@@ -269,6 +273,7 @@ describe('TelegramService — draft flow (photos-first)', () => {
         id: 'draft_1',
         sellerId: 1,
         status: 'READY_FOR_PREVIEW',
+        kind: 'SPARE_PART',
         title: 'Фильтр',
         brand: 'Chevrolet',
         model: 'Cobalt',
@@ -276,6 +281,9 @@ describe('TelegramService — draft flow (photos-first)', () => {
         description: null,
         partNumber: '96535062',
         partNumberType: 'OEM',
+        oilViscosity: null,
+        oilType: null,
+        oilVolumeMl: null,
         priceUzs: new Decimal(250000),
         images: [
           {
@@ -335,6 +343,7 @@ describe('TelegramService — draft flow (photos-first)', () => {
         id: 'draft_1',
         sellerId: 1,
         status: 'READY_FOR_PREVIEW',
+        kind: 'SPARE_PART',
         title: 'Фильтр',
         brand: 'Chevrolet',
         model: 'Cobalt',
@@ -342,6 +351,9 @@ describe('TelegramService — draft flow (photos-first)', () => {
         description: null,
         partNumber: null,
         partNumberType: 'UNKNOWN',
+        oilViscosity: null,
+        oilType: null,
+        oilVolumeMl: null,
         priceUzs: new Decimal(250000),
         images: [
           {
@@ -456,6 +468,7 @@ describe('TelegramService — draft flow (photos-first)', () => {
       const reopened = {
         id: 'draft_1',
         formStep: WizardStep.PRICE,
+        kind: 'SPARE_PART',
         brand: 'Chevrolet',
         model: 'Cobalt',
         category: 'ENGINE',
@@ -463,6 +476,9 @@ describe('TelegramService — draft flow (photos-first)', () => {
         description: null,
         partNumberType: 'UNKNOWN',
         partNumber: null,
+        oilViscosity: null,
+        oilType: null,
+        oilVolumeMl: null,
         priceUzs: new Decimal(250000),
         images: [
           { id: 'a', status: 'READY', processedUrl: 'u1', jobId: 'j1' },

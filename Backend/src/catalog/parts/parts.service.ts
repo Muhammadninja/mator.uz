@@ -1,14 +1,20 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import {
   Prisma,
-  PartCondition,
   PartMainCategory,
   PartVehicleCategory,
   PartOriginRegion,
+  ProductKind,
+  OilType,
 } from '@prisma/client';
+import { OIL_TYPE_LABELS, formatVolume } from '../../common/motor-oil.util';
 import { PrismaService } from '../../prisma/prisma.service';
 import { clampLimit } from '../../common/pagination.util';
-import { ListPartsQueryDto } from './dto/list-parts.query.dto';
+import {
+  ListPartsQueryDto,
+  KIND_BY_WIRE,
+  OIL_TYPE_BY_WIRE,
+} from './dto/list-parts.query.dto';
 import {
   PART_INCLUDE,
   presentPartItem,
@@ -46,7 +52,11 @@ export class PartsService {
     const vehicle = await this.loadVehicle(query.vehicle_id);
     const where = this.buildWhere(query, vehicle);
     const page = query.page ?? 1;
-    const pageSize = clampLimit(query.page_size, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE);
+    const pageSize = clampLimit(
+      query.page_size,
+      DEFAULT_PAGE_SIZE,
+      MAX_PAGE_SIZE,
+    );
 
     const [total, items, brandFacet, priceAgg] = await Promise.all([
       this.prisma.catalogPart.count({ where }),
@@ -57,8 +67,16 @@ export class PartsService {
         skip: (page - 1) * pageSize,
         take: pageSize,
       }),
-      this.prisma.catalogPart.groupBy({ by: ['brandId'], where, _count: { _all: true } }),
-      this.prisma.catalogPart.aggregate({ where, _min: { priceUzs: true }, _max: { priceUzs: true } }),
+      this.prisma.catalogPart.groupBy({
+        by: ['brandId'],
+        where,
+        _count: { _all: true },
+      }),
+      this.prisma.catalogPart.aggregate({
+        where,
+        _min: { priceUzs: true },
+        _max: { priceUzs: true },
+      }),
     ]);
 
     return {
@@ -69,7 +87,12 @@ export class PartsService {
           min: Number(priceAgg._min.priceUzs ?? 0),
           max: Number(priceAgg._max.priceUzs ?? 0),
         },
-        compatibility: vehicle ? await this.compatibilityFacet(where, vehicle) : null,
+        compatibility: vehicle
+          ? await this.compatibilityFacet(where, vehicle)
+          : null,
+        // Oil filter chips, present only when the result set can contain oils
+        // (null otherwise) — a spare-part listing pays nothing for them.
+        motor_oil: await this.motorOilFacet(query, where),
       },
       page,
       page_size: pageSize,
@@ -98,6 +121,22 @@ export class PartsService {
     const vehicle = await this.loadVehicle(vehicleId);
     const result = computeCompatibility(part.compatibilities, vehicle);
 
+    // A universal product fits every vehicle by definition, so answer `fits`
+    // outright rather than falling through to the "maybe" default. Motor oils
+    // are the case that made this matter: they carry no compatibility rows at
+    // all, so the generic path would tell a buyer their oil MIGHT not fit.
+    if (part.isUniversal) {
+      return {
+        part_id: partId,
+        vehicle_id: vehicleId,
+        status: 'fits',
+        confidence: 1,
+        matched_trims: [],
+        matched_engines: [],
+        source: 'universal',
+      };
+    }
+
     return {
       part_id: partId,
       vehicle_id: vehicleId,
@@ -107,7 +146,11 @@ export class PartsService {
         .filter((c) => c.trimId)
         .map((c) => ({ trim_id: c.trimId, years: c.years })),
       matched_engines: [
-        ...new Set(part.compatibilities.filter((c) => c.engineId).map((c) => c.engineId as string)),
+        ...new Set(
+          part.compatibilities
+            .filter((c) => c.engineId)
+            .map((c) => c.engineId as string),
+        ),
       ],
       source: part.compatibilities[0]?.source ?? null,
     };
@@ -154,7 +197,14 @@ export class PartsService {
     if (vehicle) and.push(this.vehicleWhere(vehicle));
 
     if (q.brand) {
-      and.push({ brandId: { in: q.brand.split(',').map((s) => s.trim()).filter(Boolean) } });
+      and.push({
+        brandId: {
+          in: q.brand
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean),
+        },
+      });
     }
     if (q.region && q.region.length > 0) {
       const regions = q.region.map((r) => REGION_BY_WIRE[r]).filter(Boolean);
@@ -165,7 +215,74 @@ export class PartsService {
     if (q.in_stock_only === 'true') and.push({ inStock: true });
     if (q.q) and.push({ title: { contains: q.q, mode: 'insensitive' } });
 
+    // Listing kind + the kind-specific attribute filters (motor oils).
+    for (const cond of this.kindWhere(q)) and.push(cond);
+
     return and.length > 0 ? { AND: and } : {};
+  }
+
+  /**
+   * The `kind` filter plus the motor-oil attribute filters.
+   *
+   * Two rules worth stating explicitly, because they decide what a buyer sees:
+   *
+   * 1. NO `kind` param means NO kind predicate — every kind is returned, exactly
+   *    as before `ProductKind` existed. Spare-part queries therefore keep their
+   *    historical result set; nothing silently narrows.
+   *
+   * 2. An oil-attribute filter (viscosity / oil_type / volume) IMPLIES
+   *    `kind = MOTOR_OIL`. Those attributes are null on every other kind, so the
+   *    rows returned would be oils regardless — but stating it makes the intent
+   *    explicit rather than incidental, and keeps the facet counts computed over
+   *    the set the buyer actually asked for.
+   *
+   * All attribute lists are OR-within / AND-across: `viscosity=5W-30&
+   * viscosity=0W-20&oil_type=synthetic` means "(5W-30 or 0W-20) and synthetic".
+   */
+  private kindWhere(q: ListPartsQueryDto): Prisma.CatalogPartWhereInput[] {
+    const conds: Prisma.CatalogPartWhereInput[] = [];
+
+    const viscosities = q.viscosity ?? [];
+    const oilTypes = (q.oil_type ?? [])
+      .map((t) => OIL_TYPE_BY_WIRE[t])
+      .filter(Boolean);
+    const volumes = q.volume_ml ?? [];
+    const hasVolumeRange =
+      q.volume_ml_min !== undefined || q.volume_ml_max !== undefined;
+    const usesOilFilter =
+      viscosities.length > 0 ||
+      oilTypes.length > 0 ||
+      volumes.length > 0 ||
+      hasVolumeRange;
+
+    const kinds = (q.kind ?? []).map((k) => KIND_BY_WIRE[k]).filter(Boolean);
+    if (kinds.length > 0) {
+      conds.push({ kind: { in: kinds } });
+    } else if (usesOilFilter) {
+      conds.push({ kind: ProductKind.MOTOR_OIL });
+    }
+
+    if (viscosities.length > 0) {
+      // Exact, case-insensitive match per value — never `contains`, which would
+      // make "5W-30" also match "15W-30" and quietly widen the filter.
+      conds.push({
+        OR: viscosities.map((v) => ({
+          oilViscosity: { equals: v, mode: 'insensitive' as const },
+        })),
+      });
+    }
+    if (oilTypes.length > 0) conds.push({ oilType: { in: oilTypes } });
+    if (volumes.length > 0) conds.push({ oilVolumeMl: { in: volumes } });
+    if (hasVolumeRange) {
+      conds.push({
+        oilVolumeMl: {
+          ...(q.volume_ml_min !== undefined ? { gte: q.volume_ml_min } : {}),
+          ...(q.volume_ml_max !== undefined ? { lte: q.volume_ml_max } : {}),
+        },
+      });
+    }
+
+    return conds;
   }
 
   /** Match universal parts OR parts whose fit rows reference the make. */
@@ -174,7 +291,16 @@ export class PartsService {
     return {
       OR: [
         { isUniversal: true },
-        { fits: { some: { OR: [{ makeSlug: value }, { makeName: { equals: value, mode: 'insensitive' } }] } } },
+        {
+          fits: {
+            some: {
+              OR: [
+                { makeSlug: value },
+                { makeName: { equals: value, mode: 'insensitive' } },
+              ],
+            },
+          },
+        },
       ],
     };
   }
@@ -185,7 +311,16 @@ export class PartsService {
     return {
       OR: [
         { isUniversal: true },
-        { fits: { some: { OR: [{ modelSlug: value }, { modelName: { equals: value, mode: 'insensitive' } }] } } },
+        {
+          fits: {
+            some: {
+              OR: [
+                { modelSlug: value },
+                { modelName: { equals: value, mode: 'insensitive' } },
+              ],
+            },
+          },
+        },
       ],
     };
   }
@@ -199,13 +334,21 @@ export class PartsService {
    * Parts with no fitment data at all are excluded (they can't be confirmed to
    * fit the selected vehicle).
    */
-  private vehicleWhere(vehicle: VehicleFilterContext): Prisma.CatalogPartWhereInput {
+  private vehicleWhere(
+    vehicle: VehicleFilterContext,
+  ): Prisma.CatalogPartWhereInput {
     const or: Prisma.CatalogPartWhereInput[] = [{ isUniversal: true }];
 
     if (vehicle.makeName || vehicle.modelName) {
       const fitConds: Prisma.CatalogPartFitWhereInput[] = [];
-      if (vehicle.modelName) fitConds.push({ modelName: { equals: vehicle.modelName, mode: 'insensitive' } });
-      if (vehicle.makeName) fitConds.push({ makeName: { equals: vehicle.makeName, mode: 'insensitive' } });
+      if (vehicle.modelName)
+        fitConds.push({
+          modelName: { equals: vehicle.modelName, mode: 'insensitive' },
+        });
+      if (vehicle.makeName)
+        fitConds.push({
+          makeName: { equals: vehicle.makeName, mode: 'insensitive' },
+        });
       or.push({ fits: { some: { AND: [{ OR: fitConds }] } } });
     }
 
@@ -215,7 +358,9 @@ export class PartsService {
       if (vehicle.engineId) compatOr.push({ engineId: vehicle.engineId });
       or.push({
         compatibilities: {
-          some: { AND: [{ OR: compatOr }, { NOT: { status: 'DOES_NOT_FIT' } }] },
+          some: {
+            AND: [{ OR: compatOr }, { NOT: { status: 'DOES_NOT_FIT' } }],
+          },
         },
       });
     }
@@ -223,13 +368,17 @@ export class PartsService {
     return { OR: or };
   }
 
-  private buildOrderBy(sort?: string): Prisma.CatalogPartOrderByWithRelationInput {
+  private buildOrderBy(
+    sort?: string,
+  ): Prisma.CatalogPartOrderByWithRelationInput {
     if (sort === 'price_asc') return { priceUzs: 'asc' };
     if (sort === 'price_desc') return { priceUzs: 'desc' };
     return { createdAt: 'desc' };
   }
 
-  private async loadVehicle(vehicleId?: string): Promise<VehicleFilterContext | null> {
+  private async loadVehicle(
+    vehicleId?: string,
+  ): Promise<VehicleFilterContext | null> {
     if (!vehicleId) return null;
     const v = await this.prisma.vehicle.findUnique({
       where: { id: vehicleId },
@@ -252,17 +401,106 @@ export class PartsService {
       : null;
   }
 
-  private async brandFacet(grouped: { brandId: string | null; _count: { _all: number } }[]) {
+  private async brandFacet(
+    grouped: { brandId: string | null; _count: { _all: number } }[],
+  ) {
     const ids = grouped.map((g) => g.brandId).filter((x): x is string => !!x);
-    const brands = await this.prisma.partBrand.findMany({ where: { id: { in: ids } } });
+    const brands = await this.prisma.partBrand.findMany({
+      where: { id: { in: ids } },
+    });
     const names = new Map(brands.map((b) => [b.id, b.name]));
     return grouped
       .filter((g) => g.brandId)
-      .map((g) => ({ id: g.brandId, name: names.get(g.brandId as string) ?? g.brandId, count: g._count._all }));
+      .map((g) => ({
+        id: g.brandId,
+        name: names.get(g.brandId as string) ?? g.brandId,
+        count: g._count._all,
+      }));
   }
 
-  private async compatibilityFacet(where: Prisma.CatalogPartWhereInput, vehicle: VehicleCompatContext) {
-    const all = await this.prisma.catalogPart.findMany({ where, select: { compatibilities: true } });
+  /**
+   * Available viscosity / oil-type / volume values within the CURRENT result set,
+   * with counts — the data a client needs to render oil filter chips that never
+   * lead to an empty page.
+   *
+   * Returns null (and runs no query) unless the request can actually contain
+   * oils, i.e. the caller asked for `kind=motor_oil` or used an oil attribute
+   * filter. A plain spare-part or unfiltered listing therefore costs exactly what
+   * it cost before oils existed — this is the reason the facet is conditional
+   * rather than always computed.
+   *
+   * Volumes are returned raw (millilitres, the stored unit) alongside a display
+   * label, so a client can filter by `volume_ml` and label the chip "4 л" without
+   * duplicating the formatting rule.
+   */
+  private async motorOilFacet(
+    q: ListPartsQueryDto,
+    where: Prisma.CatalogPartWhereInput,
+  ) {
+    const asksForOils =
+      (q.kind ?? []).includes('motor_oil') ||
+      (q.viscosity?.length ?? 0) > 0 ||
+      (q.oil_type?.length ?? 0) > 0 ||
+      (q.volume_ml?.length ?? 0) > 0 ||
+      q.volume_ml_min !== undefined ||
+      q.volume_ml_max !== undefined;
+    if (!asksForOils) return null;
+
+    const [byViscosity, byType, byVolume] = await Promise.all([
+      this.prisma.catalogPart.groupBy({
+        by: ['oilViscosity'],
+        where,
+        _count: { _all: true },
+      }),
+      this.prisma.catalogPart.groupBy({
+        by: ['oilType'],
+        where,
+        _count: { _all: true },
+      }),
+      this.prisma.catalogPart.groupBy({
+        by: ['oilVolumeMl'],
+        where,
+        _count: { _all: true },
+      }),
+    ]);
+
+    return {
+      // A null attribute is not a facet value — it means "this row is not an
+      // oil" (or the attribute is unset), so it is dropped rather than surfaced
+      // as an empty chip.
+      viscosity: byViscosity
+        .filter((g) => g.oilViscosity !== null)
+        .map((g) => ({
+          value: g.oilViscosity as string,
+          count: g._count._all,
+        }))
+        .sort((a, b) => a.value.localeCompare(b.value)),
+      oil_type: byType
+        .filter((g) => g.oilType !== null)
+        .map((g) => ({
+          value: g.oilType as OilType,
+          label: OIL_TYPE_LABELS[g.oilType as OilType],
+          count: g._count._all,
+        })),
+      volume: byVolume
+        .filter((g) => g.oilVolumeMl !== null)
+        .map((g) => ({
+          volume_ml: g.oilVolumeMl as number,
+          label: formatVolume(g.oilVolumeMl as number),
+          count: g._count._all,
+        }))
+        .sort((a, b) => a.volume_ml - b.volume_ml),
+    };
+  }
+
+  private async compatibilityFacet(
+    where: Prisma.CatalogPartWhereInput,
+    vehicle: VehicleCompatContext,
+  ) {
+    const all = await this.prisma.catalogPart.findMany({
+      where,
+      select: { compatibilities: true },
+    });
     let fits = 0;
     let maybe = 0;
     let doesNotFit = 0;

@@ -174,10 +174,14 @@ describe('brand / model / category selection (buttons only)', () => {
     expect(kb.map((b) => b.text).filter((t) => t !== '⬅️ Назад')).toEqual(
       WIZARD_CATEGORIES.map((c) => c.label),
     );
-    // BRAND is the first step → no "⬅️ Назад" button, so only the 13 brands.
-    expect(
-      brandKeyboard(freshSession()).reply_markup.inline_keyboard.flat(),
-    ).toHaveLength(13);
+    // BRAND is the first step → no "⬅️ Назад" button, so the keyboard is exactly
+    // the brands plus the trailing "Другое" escape from the spare-parts flow.
+    const brandButtons =
+      brandKeyboard(freshSession()).reply_markup.inline_keyboard.flat();
+    expect(brandButtons.map((b) => b.text)).toEqual([
+      ...WIZARD_BRANDS.map((b) => b.name),
+      'Другое',
+    ]);
   });
 });
 
@@ -531,17 +535,27 @@ describe('photos-first entry', () => {
     expect(stepPrompt(s).text).toContain('Завершаем обработку');
   });
 
-  it('the FSM has exactly the ten photos-first states (no legacy leftovers)', () => {
+  it('the FSM has exactly the photos-first states (no legacy leftovers)', () => {
     expect(Object.keys(WizardStep).sort()).toEqual(
       [
+        // Shared entry + branch point.
         'PHOTOS_FIRST',
         'BRAND',
+        // Spare-parts branch.
         'MODEL',
         'CATEGORY',
-        'TITLE',
-        'DESCRIPTION',
         'PART_NUMBER_TYPE',
         'PART_NUMBER',
+        // "Другое" branch: the menu, then the motor-oil questionnaire.
+        'OTHER_CATEGORY',
+        'OIL_VISCOSITY',
+        'OIL_VISCOSITY_CUSTOM',
+        'OIL_TYPE',
+        'OIL_VOLUME',
+        'OIL_VOLUME_CUSTOM',
+        // Shared tail.
+        'TITLE',
+        'DESCRIPTION',
         'PRICE',
         'QUESTIONNAIRE_DONE',
       ].sort(),
