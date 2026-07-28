@@ -1,32 +1,40 @@
 import { Injectable } from '@nestjs/common';
-import { CatalogSeller } from '@prisma/client';
+import { CatalogSeller, DealerStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
 /**
  * "MATOR Certified" dealer storefront (Phase 4C). Read-only over the seeded
- * CatalogSeller rows. Only CURATED dealer rows are returned, identified by the
- * explicit `isCurated` flag (set by the seed for d1–d4). Projected seller_<id>
- * rows from the Telegram pipeline default to `isCurated = false` and are
- * excluded even if they later acquire storefront fields, so this endpoint shows
- * exactly the certified dealers the frontend expects. No hardcoded arrays.
+ * CatalogSeller rows, and LIVE-DRIVEN by the admin dealer console: a dealer
+ * appears here only while it is curated, MATOR Certified, and ACTIVE. So when an
+ * operator un-certifies or suspends a dealer in /v1/admin/dealers it drops off
+ * this row, and re-certifying brings it back — the buyer-facing "MATOR Certified"
+ * section and the console can never disagree. The certified/lowestPrice flags are
+ * returned so the app renders each badge from real state, not a fixed default.
  */
 @Injectable()
 export class DealersService {
   constructor(private readonly prisma: PrismaService) {}
 
   async list() {
-    // A curated dealer is identified by the explicit `isCurated` flag — NOT by
-    // whether the storefront fields happen to be populated. A projected
-    // seller_<id> row that acquires an `initial` must never leak into this list.
+    // Curated (real storefront, not a projected seller_<id> row) AND currently
+    // certified AND active. Un-certifying (certified=false) or suspending
+    // (status≠ACTIVE, which also clears certified) removes the dealer from the
+    // public row — the whole point of "sync every action".
     const dealers = await this.prisma.catalogSeller.findMany({
-      where: { isCurated: true },
+      where: {
+        isCurated: true,
+        certified: true,
+        status: DealerStatus.ACTIVE,
+      },
       orderBy: { id: 'asc' },
     });
     return { items: dealers.map(presentDealer) };
   }
 }
 
-/** Map a curated CatalogSeller row to the frontend MatorDealer shape. */
+/** Map a curated CatalogSeller row to the frontend MatorDealer shape. Includes
+ *  the live badge flags so the app shows MATOR Certified / Lowest Price from real
+ *  state rather than a hardcoded default. */
 export function presentDealer(s: CatalogSeller) {
   return {
     id: s.id,
@@ -35,5 +43,7 @@ export function presentDealer(s: CatalogSeller) {
     color: s.color ?? '',
     orders: s.orders ?? '',
     years: s.years ?? 0,
+    certified: s.certified,
+    lowestPrice: s.lowestPrice,
   };
 }

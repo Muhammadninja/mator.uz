@@ -28,6 +28,7 @@ import { ShippingModule } from './shipping/shipping.module';
 import { ReferenceModule } from './reference/reference.module';
 import { AddressesModule } from './addresses/addresses.module';
 import { DealersModule } from './dealers/dealers.module';
+import { MobileConfigModule } from './mobile-config/mobile-config.module';
 import { OpsModule } from './ops/ops.module';
 import { MetricsModule } from './metrics/metrics.module';
 import { AlertingModule } from './alerting/alerting.module';
@@ -64,6 +65,7 @@ import { AlertingModule } from './alerting/alerting.module';
     NotificationsModule,
     RealtimeModule,
     HealthModule,
+    MobileConfigModule,
     UserModule,
     AccountModule,
     ShippingModule,

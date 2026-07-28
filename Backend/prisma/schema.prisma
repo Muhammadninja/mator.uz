@@ -1283,7 +1283,10 @@ model OrderStatusHistory {
   status    OrderStatus
   note      String?        @db.VarChar(500)
   actorType OrderActorType @default(SYSTEM) @map("actor_type")
-  actorId   String?        @map("actor_id") @db.Uuid
+  // Holds the id of whoever caused the transition — an app USER (uuid) OR an
+  // ADMIN operator (cuid, app_admins.id). Must therefore be a plain string, not
+  // uuid, or operator status writes fail casting the cuid to uuid. Not an FK.
+  actorId   String?        @map("actor_id") @db.VarChar(64)
   actorName String?        @map("actor_name") @db.VarChar(120)
   createdAt DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
   order     Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
