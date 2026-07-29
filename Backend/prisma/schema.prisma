@@ -1018,6 +1018,17 @@ model PartCategory {
   // Ordering among siblings in the admin tree (and any ordered listing). New
   // rows default to 0; the admin move endpoint sets an explicit value.
   sortOrder Int           @default(0) @map("sort_order")
+  // Accent color + icon key the buyer grid renders (mirrors the old hardcoded
+  // MAIN_CATEGORIES metadata now that PartCategory is the source of truth).
+  color    String?        @map("color") @db.VarChar(16)
+  iconKey  String?        @map("icon_key") @db.VarChar(48)
+  // Soft-delete / hide flag. The buyer grid only lists isActive rows; orphan
+  // legacy rows are deactivated (never deleted — FK Restrict) by the migration.
+  isActive Boolean        @default(true) @map("is_active")
+  // Which PartMainCategory enum this category mirrors (null = custom/vehicle
+  // category). The 12 canonical buyer rows carry it; it links bot classification
+  // (CatalogPart.mainCategory) → category on backfill + ingest.
+  mainCategory PartMainCategory? @map("main_category")
   createdAt DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
   parent   PartCategory?  @relation("PartCategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
@@ -1026,6 +1037,7 @@ model PartCategory {
 
   @@index([parentId])
   @@index([parentId, sortOrder])
+  @@index([mainCategory])
   @@map("part_categories")
 }
 

@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ListCategoriesQueryDto } from './dto/list-categories.query.dto';
-import { MAIN_CATEGORIES, VEHICLE_CATEGORIES } from './part-categories.catalog';
+import { VEHICLE_CATEGORIES } from './part-categories.catalog';
 
 /**
  * Serves the two-level part category hierarchy with LIVE per-category inventory
@@ -39,22 +39,42 @@ export class CategoriesService {
       };
     }
 
+    // Main scope is now served from PartCategory — the single editable source of
+    // truth (the 12 canonical rows, isActive + mainCategory NOT NULL), NOT the
+    // hardcoded MAIN_CATEGORIES. Counts are still LIVE: parts group by their
+    // category_id FK (kept in sync with main_category by backfill + ingest), and
+    // when a garage vehicle is supplied we scope to fitting parts. The wire shape
+    // (id, name, slug, count, iconKey, color) is unchanged; `id` is now the slug.
+    const categories = await this.prisma.partCategory.findMany({
+      where: { isActive: true, mainCategory: { not: null } },
+      orderBy: { sortOrder: 'asc' },
+      select: {
+        id: true,
+        name: true,
+        slug: true,
+        iconKey: true,
+        color: true,
+        mainCategory: true,
+      },
+    });
+
     const grouped = await this.prisma.catalogPart.groupBy({
-      by: ['mainCategory'],
+      by: ['categoryId'],
       where: vehicleWhere,
       _count: { _all: true },
     });
-    const counts = new Map(grouped.map((g) => [g.mainCategory, g._count._all]));
+    const counts = new Map(grouped.map((g) => [g.categoryId, g._count._all]));
+
     return {
-      items: MAIN_CATEGORIES.map((c) => ({
+      items: categories.map((c) => ({
         id: c.id,
         name: c.name,
-        slug: c.slug,
+        slug: c.slug ?? c.id,
         count: counts.get(c.id) ?? 0,
         iconKey: c.iconKey,
         color: c.color,
       })),
-      total: MAIN_CATEGORIES.length,
+      total: categories.length,
     };
   }
 

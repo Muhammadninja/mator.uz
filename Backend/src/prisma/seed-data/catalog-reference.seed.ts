@@ -21,9 +21,17 @@
  * them would require inventing tables, which the projection rules forbid.
  */
 
+import { PartMainCategory } from '@prisma/client';
+import { MAIN_CATEGORIES } from '../../catalog/categories/part-categories.catalog';
+
 export interface SeedCategory {
   id: string;
   name: string; // English label (schema PartCategory.name)
+  slug: string;
+  color: string;
+  iconKey: string;
+  mainCategory: PartMainCategory;
+  sortOrder: number;
 }
 
 export interface SeedDealer {
@@ -36,19 +44,22 @@ export interface SeedDealer {
   years: number;
 }
 
-// ── Categories (from CATALOG_SYSTEMS, order = array order) ────────────────────
-// id + English label copied verbatim. labelRu/categoryKey/iconKey are dropped
-// (no columns) — see DROPPED_FRONTEND_METADATA.
-export const SEED_CATEGORIES: SeedCategory[] = [
-  { id: 'brakes', name: 'Brake System' },
-  { id: 'maintenance', name: 'Maintenance & Fluids' },
-  { id: 'suspension', name: 'Suspension & Steering' },
-  { id: 'electrical', name: 'Electrical & Lighting' },
-  { id: 'engine', name: 'Engine' },
-  { id: 'transmission', name: 'Transmission' },
-  { id: 'climate', name: 'Heating & Cooling' },
-  { id: 'tuning', name: 'Tuning & Accessories' },
-];
+// ── Categories (the 12 canonical PartCategory rows = source of truth) ─────────
+// PartCategory is now the single source of truth for the buyer grid, so a fresh
+// database must be seeded with the SAME 12 canonical rows the migration upserts
+// (id = slug, main_category = the mirrored enum). Derived from MAIN_CATEGORIES so
+// the seed can never drift from the catalog metadata. The old 8-slug CATALOG_
+// SYSTEMS list was replaced — those ids ('maintenance','climate',…) are the
+// orphan rows the migration deactivates.
+export const SEED_CATEGORIES: SeedCategory[] = MAIN_CATEGORIES.map((c, i) => ({
+  id: c.slug,
+  name: c.name,
+  slug: c.slug,
+  color: c.color,
+  iconKey: c.iconKey,
+  mainCategory: c.id,
+  sortOrder: i,
+}));
 
 // ── Dealers ──────────────────────────────────────────────────────────────────
 // Intentionally empty. Real MATOR Certified dealers are now created by operators

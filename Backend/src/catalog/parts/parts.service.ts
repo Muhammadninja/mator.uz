@@ -163,9 +163,20 @@ export class PartsService {
   ): Prisma.CatalogPartWhereInput {
     const and: Prisma.CatalogPartWhereInput[] = [];
 
-    // Category: prefer the classified main-category enum (BRAKES, …). A vehicle-
-    // specific category enum (BRAKE_SYSTEM, …) is also accepted. Anything else is
-    // treated as a legacy PartCategory id/slug on the FK for back-compat.
+    // Category filter — three-way, unified around PartCategory being the source
+    // of truth while staying fully back-compatible:
+    //   1. Value is a PartMainCategory enum (e.g. build 31 sends "BRAKES") →
+    //      filter mainCategory. Parts keep their bot-assigned main_category, so
+    //      this path is untouched.
+    //   2. Value is a PartVehicleCategory enum (BRAKE_SYSTEM, …) → filter
+    //      vehicleCategory.
+    //   3. Anything else → treat as a PartCategory id/slug on the categoryId FK.
+    // The canonical category ids ARE the main-category slugs, so the new app can
+    // send either form and both resolve to the same parts: 'brakes' upshifts to
+    // enum BRAKES (path 1), while a non-enum slug like 'oil-and-fluids' falls to
+    // categoryId (path 3, correct because the migration backfilled category_id
+    // from main_category). A custom admin-created category id also lands on
+    // path 3. No value 404s.
     if (q.category) {
       const up = q.category.toUpperCase();
       if (MAIN_CATEGORY_VALUES.has(up as PartMainCategory)) {

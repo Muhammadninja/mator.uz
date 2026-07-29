@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Prisma, PartCondition, PartNumberType } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { MAIN_CATEGORY_TO_SLUG } from '../categories/category-map';
 
 /** Prefix of the synthetic Product.gmNumber key used when a listing has no real
  *  part number — such values must never be projected as searchable numbers. */
@@ -220,10 +221,19 @@ export class CatalogProjectionService {
         product.partNumberType,
       );
 
+    // Point the part at the canonical PartCategory that mirrors its bot-assigned
+    // main category (BRAKES → 'brakes', …). PartCategory is the source of truth
+    // for the buyer grid, so ingest classifies here rather than dumping every
+    // part into the fallback bucket. Unclassified parts keep 'cat_uncategorized'.
+    const categoryId = product.mainCategory
+      ? (MAIN_CATEGORY_TO_SLUG[product.mainCategory] ??
+        CatalogProjectionService.UNCATEGORIZED_ID)
+      : CatalogProjectionService.UNCATEGORIZED_ID;
+
     const partData = {
       title: product.title,
       brandId,
-      categoryId: CatalogProjectionService.UNCATEGORIZED_ID,
+      categoryId,
       sellerId,
       oemNumbers,
       gmNumbers,

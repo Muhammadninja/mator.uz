@@ -121,13 +121,45 @@ async function seedVehicleCatalog() {
 }
 
 async function seedCategories() {
+  // The 12 canonical rows (source of truth for the buyer grid) + the fallback
+  // 'cat_uncategorized' bucket. Matches the migration exactly so a fresh DB and
+  // a migrated DB converge.
   for (const c of SEED_CATEGORIES) {
     await prisma.partCategory.upsert({
       where: { id: c.id },
-      update: { name: c.name },
-      create: { id: c.id, name: c.name },
+      update: {
+        name: c.name,
+        slug: c.slug,
+        color: c.color,
+        iconKey: c.iconKey,
+        mainCategory: c.mainCategory,
+        sortOrder: c.sortOrder,
+        isActive: true,
+      },
+      create: {
+        id: c.id,
+        name: c.name,
+        slug: c.slug,
+        color: c.color,
+        iconKey: c.iconKey,
+        mainCategory: c.mainCategory,
+        sortOrder: c.sortOrder,
+        isActive: true,
+      },
     });
   }
+
+  await prisma.partCategory.upsert({
+    where: { id: 'cat_uncategorized' },
+    update: { isActive: true },
+    create: {
+      id: 'cat_uncategorized',
+      name: 'Uncategorized',
+      slug: 'uncategorized',
+      sortOrder: 999,
+      isActive: true,
+    },
+  });
 }
 
 async function seedDealers() {

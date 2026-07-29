@@ -1,4 +1,4 @@
-import { Prisma } from '@prisma/client';
+import { Prisma, PartMainCategory } from '@prisma/client';
 
 /**
  * Prisma `select` for a category node in the admin tree. `_count.parts` yields
@@ -11,6 +11,10 @@ export const ADMIN_CATEGORY_NODE_SELECT = {
   slug: true,
   parentId: true,
   sortOrder: true,
+  iconKey: true,
+  color: true,
+  isActive: true,
+  mainCategory: true,
   _count: { select: { parts: true } },
 } satisfies Prisma.PartCategorySelect;
 
@@ -25,11 +29,15 @@ export interface AdminCategoryTreeNode {
   slug: string | null;
   parentId: string | null;
   sortOrder: number;
+  iconKey: string | null;
+  color: string | null;
+  isActive: boolean;
+  mainCategory: PartMainCategory | null;
   productsCount: number;
   children: AdminCategoryTreeNode[];
 }
 
-/** Flat wire node (no children) — the shape returned by the move endpoint. */
+/** Flat wire node (no children) — the shape returned by the move/CRUD endpoints. */
 export function presentAdminCategoryNode(
   row: AdminCategoryNodeRow,
 ): Omit<AdminCategoryTreeNode, 'children'> {
@@ -39,6 +47,10 @@ export function presentAdminCategoryNode(
     slug: row.slug,
     parentId: row.parentId,
     sortOrder: row.sortOrder,
+    iconKey: row.iconKey,
+    color: row.color,
+    isActive: row.isActive,
+    mainCategory: row.mainCategory,
     productsCount: row._count.parts,
   };
 }
