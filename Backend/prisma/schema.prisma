@@ -725,10 +725,11 @@ model VehicleMake {
   name      String                  @db.VarChar(120)
   logoUrl   String?                 @map("logo_url")
   sortOrder Int                     @default(0) @map("sort_order")
-  country   String?                 @map("country") @db.VarChar(80)
-  isActive  Boolean                 @default(true) @map("is_active")
-  createdAt DateTime                @default(now()) @map("created_at")
-  updatedAt DateTime                @updatedAt @map("updated_at")
+  country    String?                @map("country") @db.VarChar(80)
+  isActive   Boolean                @default(true) @map("is_active")
+  comingSoon Boolean                @default(false) @map("coming_soon")
+  createdAt  DateTime               @default(now()) @map("created_at")
+  updatedAt  DateTime               @updatedAt @map("updated_at")
   models    VehicleModelRef[]
   vehicles  Vehicle[]
   providers ProviderSupportedMake[]

@@ -118,6 +118,7 @@ export class AdminBrandsService {
           logoUrl: dto.logoUrl ?? null,
           country: dto.country ?? null,
           isActive: dto.isActive ?? true,
+          comingSoon: dto.comingSoon ?? false,
           sortOrder,
         },
         select: ADMIN_BRAND_LIST_SELECT,
@@ -136,6 +137,7 @@ export class AdminBrandsService {
     if (dto.logoUrl !== undefined) data.logoUrl = dto.logoUrl ?? null;
     if (dto.country !== undefined) data.country = dto.country ?? null;
     if (dto.isActive !== undefined) data.isActive = dto.isActive;
+    if (dto.comingSoon !== undefined) data.comingSoon = dto.comingSoon;
 
     const brand = await this.withUniqueGuard('brand', () =>
       this.prisma.vehicleMake.update({

@@ -49,4 +49,13 @@ export class CreateAdminBrandDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Teaser flag — shown in the app dimmed with a "Soon" badge and not tappable.',
+    example: false,
+  })
+  @IsOptional()
+  @IsBoolean()
+  comingSoon?: boolean;
 }

@@ -37,10 +37,15 @@ export class ReferenceService {
       const makes = await this.prisma.vehicleMake.findMany({
         where: { isActive: true },
         orderBy: { sortOrder: 'asc' },
-        select: { id: true, name: true, logoUrl: true },
+        select: { id: true, name: true, logoUrl: true, comingSoon: true },
       });
       return {
-        items: makes.map((m) => ({ id: m.id, name: m.name, logo_url: m.logoUrl })),
+        items: makes.map((m) => ({
+          id: m.id,
+          name: m.name,
+          logo_url: m.logoUrl,
+          coming_soon: m.comingSoon,
+        })),
         total: makes.length,
       };
     });
