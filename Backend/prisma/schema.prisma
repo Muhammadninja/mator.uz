@@ -1009,13 +1009,23 @@ model BookingService {
 model PartCategory {
   id       String         @id @db.VarChar(64)
   name     String         @db.VarChar(160)
+  // URL/display slug for the admin category-tree console. Backfilled from `id`
+  // by the migration (ids are already slug-shaped), unique so a slug names one
+  // category. Nullable to keep the backfill safe on legacy rows.
+  slug     String?        @unique @db.VarChar(96)
   parentId String?        @map("parent_id") @db.VarChar(64)
   iconUrl  String?        @map("icon_url")
+  // Ordering among siblings in the admin tree (and any ordered listing). New
+  // rows default to 0; the admin move endpoint sets an explicit value.
+  sortOrder Int           @default(0) @map("sort_order")
+  createdAt DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
   parent   PartCategory?  @relation("PartCategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
   children PartCategory[] @relation("PartCategoryTree")
   parts    CatalogPart[]
 
   @@index([parentId])
+  @@index([parentId, sortOrder])
   @@map("part_categories")
 }
 
@@ -1116,10 +1126,22 @@ model CatalogPart {
   gmNumbers          String[]             @map("gm_numbers")
   // How the seller labeled the number (mirrors Product.partNumberType).
   partNumberType     PartNumberType       @default(UNKNOWN) @map("part_number_type")
+  // Retail (sell) price shown to buyers. Historically the only price on a part.
   priceUzs           Decimal              @map("price_uzs") @db.Decimal(14, 2)
+  // Wholesale/purchase cost the dealer paid, driving the Smart-Inventory margin
+  // view. Nullable: legacy rows have no known cost.
+  purchasePriceUzs   Decimal?             @map("purchase_price_uzs") @db.Decimal(14, 2)
+  // Cashback returned to the buyer as a percentage of the retail price (0–100).
+  cashbackPct        Decimal              @default(0) @map("cashback_pct") @db.Decimal(5, 2)
   currency           String               @default("UZS") @db.VarChar(3)
   condition          PartCondition        @default(NEW)
+  // Boolean availability flag GET /v1/... surfaces (kept for back-compat).
   inStock            Boolean              @default(true) @map("in_stock")
+  // On-hand unit count. The Smart-Inventory console reads/writes this; the
+  // stock-status derivation (out/low/in) compares it to lowStockThreshold.
+  stockQty           Int                  @default(0) @map("stock_qty")
+  // Per-row low-stock threshold. 0 < qty < threshold ⇒ "low_stock".
+  lowStockThreshold  Int                  @default(5) @map("low_stock_threshold")
   deliveryEtaDaysMin Int?                 @map("delivery_eta_days_min")
   deliveryEtaDaysMax Int?                 @map("delivery_eta_days_max")
   images             String[]
@@ -1157,6 +1179,7 @@ model CatalogPart {
   @@index([isGm])
   @@index([isOem])
   @@index([kind])
+  @@index([stockQty])
   @@map("catalog_parts")
 }
 

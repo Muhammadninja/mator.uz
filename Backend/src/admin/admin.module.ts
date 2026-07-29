@@ -11,6 +11,11 @@ import { AdminDealersController } from './dealers/admin-dealers.controller';
 import { AdminBrandsService } from './brands/admin-brands.service';
 import { AdminBrandsController } from './brands/admin-brands.controller';
 import { AdminModelsController } from './brands/admin-models.controller';
+import { AdminCategoriesService } from './categories/admin-categories.service';
+import { AdminCategoriesController } from './categories/admin-categories.controller';
+import { AdminProductsController } from './categories/admin-products.controller';
+import { AdminInventoryService } from './inventory/admin-inventory.service';
+import { AdminInventoryController } from './inventory/admin-inventory.controller';
 import { SellersModule } from '../sellers/sellers.module';
 import { AuthModule } from '../auth/auth.module';
 import { AdminAuthModule } from './auth/admin-auth.module';
@@ -36,6 +41,8 @@ import { AdminManagementModule } from './management/admin-management.module';
     AdminUsersService,
     AdminDealersService,
     AdminBrandsService,
+    AdminCategoriesService,
+    AdminInventoryService,
   ],
   controllers: [
     AdminController,
@@ -44,6 +51,9 @@ import { AdminManagementModule } from './management/admin-management.module';
     AdminDealersController,
     AdminBrandsController,
     AdminModelsController,
+    AdminCategoriesController,
+    AdminProductsController,
+    AdminInventoryController,
   ],
 })
 export class AdminModule {}
