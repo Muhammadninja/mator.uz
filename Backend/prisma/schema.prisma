@@ -725,6 +725,10 @@ model VehicleMake {
   name      String                  @db.VarChar(120)
   logoUrl   String?                 @map("logo_url")
   sortOrder Int                     @default(0) @map("sort_order")
+  country   String?                 @map("country") @db.VarChar(80)
+  isActive  Boolean                 @default(true) @map("is_active")
+  createdAt DateTime                @default(now()) @map("created_at")
+  updatedAt DateTime                @updatedAt @map("updated_at")
   models    VehicleModelRef[]
   vehicles  Vehicle[]
   providers ProviderSupportedMake[]
@@ -737,6 +741,11 @@ model VehicleModelRef {
   makeId    String        @map("make_id") @db.VarChar(64)
   name      String        @db.VarChar(120)
   sortOrder Int           @default(0) @map("sort_order")
+  yearFrom  Int?          @map("year_from")
+  yearTo    Int?          @map("year_to")
+  bodyType  String?       @map("body_type") @db.VarChar(60)
+  createdAt DateTime      @default(now()) @map("created_at")
+  updatedAt DateTime      @updatedAt @map("updated_at")
   make      VehicleMake   @relation(fields: [makeId], references: [id], onDelete: Cascade)
   trims     VehicleTrim[]
   vehicles  Vehicle[]
@@ -1509,6 +1518,11 @@ enum AdminAuditAction {
   CHANGE_PASSWORD
   RESET_PASSWORD
   DELETE_ADMIN
+  // Invite-only admin signup. INVITE_ADMIN is written when a SUPER_ADMIN issues
+  // an invite (target = the invited email); ACCEPT_INVITE when the invitee
+  // completes signup (target = the newly created admin account).
+  INVITE_ADMIN
+  ACCEPT_INVITE
   // Dealer moderation (/v1/admin/dealers). The target is a dealer, not an
   // administrator, so these entries carry targetEntity/targetEntityId rather
   // than targetAdminId — see AdminAudit.
@@ -1548,6 +1562,7 @@ model AppAdmin {
   refreshTokens AdminRefreshToken[]
   auditsPerformed AdminAudit[] @relation("AdminAuditActor")
   auditsReceived  AdminAudit[] @relation("AdminAuditTarget")
+  invitesSent     AdminInvite[] @relation("AdminInviteInviter")
 
   @@map("app_admins")
 }
@@ -1649,4 +1664,37 @@ model AdminRefreshToken {
   @@index([adminId])
   @@index([expiresAt])
   @@map("admin_refresh_tokens")
+}
+
+/// Invite-only admin signup. A SUPER_ADMIN invites a specific email; a one-time,
+/// expiring link is emailed; the invitee sets a password and their account is
+/// created. Mirrors the refresh-token security posture:
+///
+///   • Only the SHA-256 hash of the opaque token is stored — the raw token exists
+///     solely in the emailed link, so a leaked DB row cannot be turned back into
+///     a usable invite.
+///   • Single-use: `acceptedAt` is stamped on acceptance and a used invite is
+///     never honoured again.
+///   • Short-lived: `expiresAt` (48h) is checked on both preview and accept.
+///
+/// `invitedById` is ON DELETE SET NULL so removing the inviting admin never
+/// deletes the pending invite (or its record). Rows are safe to prune after
+/// expiry/acceptance but are not cascaded away with the inviter.
+model AdminInvite {
+  id          String    @id @default(cuid())
+  email       String    @db.VarChar(255)
+  // SHA-256 hex of the opaque token; the raw value lives only in the emailed link.
+  tokenHash   String    @map("token_hash") @db.VarChar(64)
+  role        AdminRole @default(OPERATOR)
+  invitedById String?   @map("invited_by_id")
+  expiresAt   DateTime  @map("expires_at") @db.Timestamptz(3)
+  // Stamped when the invitee sets their password; a used invite is never re-honoured.
+  acceptedAt  DateTime? @map("accepted_at") @db.Timestamptz(3)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  invitedBy AppAdmin? @relation("AdminInviteInviter", fields: [invitedById], references: [id], onDelete: SetNull)
+
+  @@index([tokenHash])
+  @@index([email])
+  @@map("admin_invites")
 }
