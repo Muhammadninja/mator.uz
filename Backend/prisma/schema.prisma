@@ -1698,3 +1698,95 @@ model AdminInvite {
   @@index([email])
   @@map("admin_invites")
 }
+
+// ── Sales (automatic discounts) ───────────────────────────────────────────────
+// Entirely separate from the promo-code system (Cart.promoCode / promo.util.ts):
+// a promo code is entered by the buyer and discounts a whole cart, whereas a
+// sale is created in the admin panel, applies automatically with no user input,
+// and discounts a PRODUCT. The two never share a table, a column or a code path.
+
+/// How a sale's discountValue is interpreted. PERCENT is a 0–100 percentage of
+/// the original price; FIXED is an absolute amount in the price's own currency
+/// (UZS), floored at zero so a discount can never produce a negative price.
+enum SaleDiscountType {
+  PERCENT
+  FIXED
+}
+
+/// What a sale applies to. ALL_PRODUCTS is the only self-contained value — the
+/// other three are resolved through SaleTarget rows, one per selected product,
+/// category or dealer.
+///
+/// Adding a scope later (a brand, a vehicle make, a price band) needs NO schema
+/// change beyond a new value here: SaleTarget.targetId is a plain id column with
+/// no FK precisely so a new kind of target needs no new table and no migration
+/// of existing rows. The service resolves scope through one table-driven map.
+enum SaleScopeType {
+  ALL_PRODUCTS
+  PRODUCTS
+  CATEGORIES
+  DEALERS
+}
+
+/// An automatic discount campaign. Applied by the backend, never computed by a
+/// mobile client. A sale is "active" when isActive is true and now falls inside
+/// [startAt, endAt] — endAt null meaning open-ended.
+model Sale {
+  id           String           @id @db.VarChar(64)
+  title        String           @db.VarChar(160)
+  description  String?          @db.VarChar(1000)
+  discountType SaleDiscountType @map("discount_type")
+  // PERCENT: 0 < value <= 100. FIXED: value > 0, in whole/fractional UZS.
+  // Decimal (not Float) so a percentage like 12.5 and a money amount are both
+  // exact — the same 14,2 shape CatalogPart.priceUzs uses for money.
+  discountValue Decimal         @map("discount_value") @db.Decimal(14, 2)
+  // Targeting. ALL_PRODUCTS ignores `targets`; every other scope reads them.
+  scopeType    SaleScopeType    @default(ALL_PRODUCTS) @map("scope_type")
+  startAt      DateTime         @map("start_at") @db.Timestamptz(3)
+  // Null = runs until switched off.
+  endAt        DateTime?        @map("end_at") @db.Timestamptz(3)
+  isActive     Boolean          @default(true) @map("is_active")
+  // Which sale wins when several apply to one product. Higher runs first; ties
+  // break on the deeper discount, then on id, so the choice is deterministic.
+  priority     Int              @default(0)
+  // Soft delete. DELETE /v1/admin/sales/:id stamps this instead of removing the
+  // row, so a campaign that ran — and the prices it produced — stays on file and
+  // auditable. A deleted sale is invisible to every list and never applies to a
+  // price; null means "not deleted", which is the state of every existing row.
+  //
+  // Distinct from isActive: isActive is an operational switch an admin flips back
+  // and forth, deletedAt is terminal.
+  deletedAt    DateTime?        @map("deleted_at") @db.Timestamptz(3)
+  createdAt    DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime         @updatedAt @map("updated_at") @db.Timestamptz(3)
+  targets      SaleTarget[]
+
+  // Covers the active-sale lookup: deletedAt and isActive first (most
+  // selective), then the window bounds both endpoints filter on.
+  @@index([deletedAt, isActive, startAt, endAt])
+  @@map("sales")
+}
+
+/// One selected target of a scoped sale — a product, a category or a dealer.
+/// `targetType` mirrors the parent sale's scopeType, so a single row is
+/// self-describing and a future scope kind slots in without a new table.
+///
+/// targetId is deliberately NOT a foreign key: the three target kinds live in
+/// three different tables (catalog_parts, part_categories, catalog_sellers) and
+/// no single FK can point at all of them. The service validates existence at
+/// write time; a target whose subject is later deleted simply stops matching.
+model SaleTarget {
+  id         String        @id @db.VarChar(64)
+  saleId     String        @map("sale_id") @db.VarChar(64)
+  targetType SaleScopeType @map("target_type")
+  targetId   String        @map("target_id") @db.VarChar(64)
+  createdAt  DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  sale       Sale          @relation(fields: [saleId], references: [id], onDelete: Cascade)
+
+  // The same subject cannot be attached to one sale twice.
+  @@unique([saleId, targetType, targetId])
+  @@index([saleId])
+  // "which sales target this product/category/dealer" — the discount lookup.
+  @@index([targetType, targetId])
+  @@map("sale_targets")
+}

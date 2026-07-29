@@ -29,6 +29,7 @@ import { ReferenceModule } from './reference/reference.module';
 import { AddressesModule } from './addresses/addresses.module';
 import { DealersModule } from './dealers/dealers.module';
 import { MobileConfigModule } from './mobile-config/mobile-config.module';
+import { SalesModule } from './sales/sales.module';
 import { OpsModule } from './ops/ops.module';
 import { MetricsModule } from './metrics/metrics.module';
 import { AlertingModule } from './alerting/alerting.module';
@@ -72,6 +73,10 @@ import { AlertingModule } from './alerting/alerting.module';
     ReferenceModule,
     AddressesModule,
     DealersModule,
+    // Admin-managed automatic discounts (/v1/admin/sales, /v1/sales). Exports
+    // DiscountService for products/cart/orders to inject; entirely separate
+    // from the promo-code system, which is untouched.
+    SalesModule,
     // Operations tooling (Bull Board, queue monitoring, alerts). Read-only with
     // respect to every existing flow — see ops.module.ts.
     OpsModule,
