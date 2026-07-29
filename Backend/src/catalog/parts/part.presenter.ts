@@ -173,6 +173,10 @@ export function presentPartItem(
       name: part.seller.name,
       rating_avg: Number(part.seller.ratingAvg),
       certified: part.seller.certified,
+      // Lowest-price badge (CatalogSeller.lowestPrice, toggled in the admin
+      // dealer console). The app maps `seller.lowest_price`; without this the
+      // badge never synced.
+      lowest_price: part.seller.lowestPrice,
     },
   };
 }
