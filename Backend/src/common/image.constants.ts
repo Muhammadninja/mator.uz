@@ -22,4 +22,5 @@ export const ALLOWED_IMAGE_MIME = [
 export const CloudinaryFolder = {
   PRODUCTS: 'mator/products',
   AVATARS: 'mator/avatars',
+  DEALER_LOGOS: 'mator/dealers',
 } as const;

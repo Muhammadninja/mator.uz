@@ -11,6 +11,8 @@ export const ADMIN_DEALER_LIST_SELECT = {
   city: true,
   brandColor: true,
   color: true,
+  logoUrl: true,
+  initial: true,
   gmvUzs: true,
   ordersCount: true,
   certified: true,
@@ -63,6 +65,8 @@ export function presentAdminDealerRow(d: AdminDealerListRow) {
     // The console's own accent, falling back to the legacy storefront `color`
     // so a curated dealer that predates brandColor still renders in brand.
     brandColor: d.brandColor ?? d.color ?? null,
+    logoUrl: d.logoUrl,
+    initial: d.initial,
     gmvUzs: gmvToNumber(d.gmvUzs),
     orders: d.ordersCount,
     skus: d._count.parts,

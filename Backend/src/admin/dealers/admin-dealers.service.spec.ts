@@ -28,6 +28,7 @@ function makePrismaMock() {
     findMany: jest.fn(),
     findUnique: jest.fn(),
     count: jest.fn(),
+    create: jest.fn(),
     update: jest.fn(),
   };
   const prisma: Record<string, unknown> = { catalogSeller };
@@ -112,6 +113,7 @@ describe('AdminDealersService', () => {
     service = new AdminDealersService(
       prisma as never,
       audit as never,
+      { uploadBuffer: jest.fn() } as never,
     );
   });
 
@@ -246,6 +248,60 @@ describe('AdminDealersService', () => {
 
       expect(res.meta.limit).toBe(100);
       expect(prisma.catalogSeller.findMany.mock.calls[0][0].take).toBe(100);
+    });
+  });
+
+  describe('create', () => {
+    it('creates a curated, ACTIVE, certified dealer that shows in the app', async () => {
+      // uniqueDealerId probes for a collision (none), then getOne re-reads the row.
+      prisma.catalogSeller.findUnique
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(detailRow());
+
+      await service.create(
+        { name: 'BYD Motors', brandColor: '#2A6FDB', logoUrl: 'https://res.cloudinary.com/mator/image/upload/x.png' },
+        CTX as never,
+      );
+
+      expect(prisma.catalogSeller.create).toHaveBeenCalledTimes(1);
+      const data = prisma.catalogSeller.create.mock.calls[0][0].data;
+      // Curated + ACTIVE + certified are exactly the three conditions
+      // GET /v1/dealers filters on, so the new dealer is live immediately.
+      expect(data).toMatchObject({
+        id: 'byd-motors',
+        name: 'BYD Motors',
+        isCurated: true,
+        status: DealerStatus.ACTIVE,
+        certified: true,
+        // brandColor and the legacy storefront `color` both set on create.
+        brandColor: '#2A6FDB',
+        color: '#2A6FDB',
+        // initial derived from the name when not supplied.
+        initial: 'B',
+        logoUrl: 'https://res.cloudinary.com/mator/image/upload/x.png',
+      });
+      expect(audit.record).toHaveBeenCalledWith(
+        expect.objectContaining({ action: AdminAuditAction.DEALER_CREATED }),
+        expect.anything(),
+      );
+    });
+
+    it('never certifies a dealer created in a non-active state', async () => {
+      prisma.catalogSeller.findUnique
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(detailRow());
+
+      await service.create(
+        { name: 'Pending Co', status: 'pending', certified: true },
+        CTX as never,
+      );
+
+      const data = prisma.catalogSeller.create.mock.calls[0][0].data;
+      expect(data).toMatchObject({
+        status: DealerStatus.PENDING,
+        certified: false,
+        lowestPrice: false,
+      });
     });
   });
 
@@ -595,20 +651,39 @@ describe('UpdateAdminDealerDto', () => {
     expect(validate({ reason: 'x'.repeat(501) })).not.toHaveLength(0);
   });
 
-  // Non-editable fields (name, gmvUzs, …) are absent from the class, so the
-  // global pipe's forbidNonWhitelisted rejects them before this DTO is built.
+  // Derived metrics (gmvUzs, orders, skus, joinedAt) stay absent from the class,
+  // so the global pipe's forbidNonWhitelisted rejects them; the editable set is
+  // the badges, the status, and the storefront presentation fields.
   it('declares only the editable fields', () => {
     const instance = plainToInstance(UpdateAdminDealerDto, {
+      name: 'BYD Motors',
+      city: 'Toshkent, UZ',
+      email: 'hi@byd.uz',
+      phone: '+998901234567',
+      brandColor: '#2A6FDB',
+      initial: 'B',
+      logoUrl: 'https://res.cloudinary.com/mator/image/upload/x.png',
+      orders: '18k+',
+      years: 12,
       certified: true,
       lowestPrice: false,
       status: 'active',
       reason: 'x',
     });
     expect(Object.keys(instance).sort()).toEqual([
+      'brandColor',
       'certified',
+      'city',
+      'email',
+      'initial',
+      'logoUrl',
       'lowestPrice',
+      'name',
+      'orders',
+      'phone',
       'reason',
       'status',
+      'years',
     ]);
   });
 });

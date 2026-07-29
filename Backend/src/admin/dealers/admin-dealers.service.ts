@@ -2,6 +2,8 @@ import {
   BadRequestException,
   Injectable,
   NotFoundException,
+  PayloadTooLargeException,
+  UnsupportedMediaTypeException,
 } from '@nestjs/common';
 import {
   AdminAuditAction,
@@ -11,6 +13,12 @@ import {
 } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { clampLimit } from '../../common/pagination.util';
+import { CloudinaryService } from '../../cloudinary/cloudinary.service';
+import {
+  ALLOWED_IMAGE_MIME,
+  CloudinaryFolder,
+  MAX_AVATAR_BYTES,
+} from '../../common/image.constants';
 import { AdminAuditContext } from '../auth/admin-auth.service';
 import { AdminAuditService } from '../auth/admin-audit.service';
 import {
@@ -19,12 +27,34 @@ import {
   presentAdminDealerDetail,
   presentAdminDealerRow,
 } from './admin-dealers.presenter';
+import { CreateAdminDealerDto } from './dto/create-admin-dealer.dto';
 import {
   AdminDealerSortField,
   AdminDealerStatusFilter,
   ListAdminDealersQueryDto,
 } from './dto/list-admin-dealers.query.dto';
 import { UpdateAdminDealerDto } from './dto/update-admin-dealer.dto';
+
+// A dealer logo reuses the shared 5 MB image ceiling and MIME allowlist.
+const MAX_DEALER_LOGO_BYTES = MAX_AVATAR_BYTES;
+
+/**
+ * The editable storefront presentation fields, mapped from the DTO name to the
+ * Prisma column. Kept as data so create() and update() agree on exactly which
+ * fields an operator owns, and update() can diff them generically.
+ */
+const PRESENTATION_COLUMN = {
+  name: 'name',
+  city: 'city',
+  email: 'email',
+  phone: 'phoneE164',
+  brandColor: 'brandColor',
+  initial: 'initial',
+  logoUrl: 'logoUrl',
+  orders: 'orders',
+  years: 'years',
+} as const;
+type PresentationField = keyof typeof PRESENTATION_COLUMN;
 
 const DEFAULT_ADMIN_DEALER_LIMIT = 20;
 const MAX_ADMIN_DEALER_LIMIT = 100;
@@ -89,7 +119,114 @@ export class AdminDealersService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AdminAuditService,
+    private readonly cloudinary: CloudinaryService,
   ) {}
+
+  /**
+   * Create a curated storefront from the console. A dealer added here is a real,
+   * operator-vetted business meant to go live, so unless the body says otherwise
+   * it lands ACTIVE + certified and is marked `isCurated` — the three conditions
+   * GET /v1/dealers filters on — so it appears in the app's MATOR Certified rail
+   * immediately. The id is a slug of the name, made unique with a numeric suffix.
+   */
+  async create(dto: CreateAdminDealerDto, ctx: AdminAuditContext) {
+    const name = dto.name.trim();
+    if (!name) throw new BadRequestException('Name is required');
+
+    const id = await this.uniqueDealerId(slugify(name));
+    const status = dto.status ? STATUS_BY_WIRE[dto.status] : DealerStatus.ACTIVE;
+    // Certification is only meaningful for a live dealer; a non-active one is
+    // never certified (the same invariant suspend enforces).
+    const certified =
+      status === DealerStatus.ACTIVE ? (dto.certified ?? true) : false;
+    const lowestPrice =
+      status === DealerStatus.ACTIVE ? (dto.lowestPrice ?? false) : false;
+    const color = dto.brandColor?.trim() || null;
+    const initial =
+      dto.initial?.trim() || name.charAt(0).toUpperCase() || null;
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.catalogSeller.create({
+        data: {
+          id,
+          name,
+          isCurated: true,
+          city: dto.city?.trim() || null,
+          email: dto.email?.trim() || null,
+          phoneE164: dto.phone?.trim() || null,
+          // brandColor is the console accent; `color` is the legacy storefront
+          // field GET /v1/dealers returns. Point both at the same value on
+          // create so neither surface renders a colourless tile.
+          brandColor: color,
+          color,
+          initial,
+          logoUrl: dto.logoUrl?.trim() || null,
+          orders: dto.orders?.trim() || null,
+          years: dto.years ?? null,
+          certified,
+          lowestPrice,
+          status,
+        },
+      });
+
+      await this.recordDealerAudit(tx, {
+        action: AdminAuditAction.DEALER_CREATED,
+        newValues: { id, name, status, certified, lowestPrice },
+        dealer: { id, name },
+        ctx,
+      });
+    });
+
+    return this.getOne(id);
+  }
+
+  /**
+   * Upload a dealer's brand logo and return its hosted URL. Reuses the shared
+   * Cloudinary image store (no new upload path), with the same type/size rules
+   * as avatars. The caller passes the returned URL back as `logoUrl` on create
+   * or update — storage and the row write stay separate so a failed DB write
+   * never strands a half-created dealer holding an orphan upload.
+   */
+  async uploadLogo(file?: {
+    buffer: Buffer;
+    mimetype: string;
+    size: number;
+  }): Promise<{ logoUrl: string }> {
+    if (!file || !file.buffer?.length) {
+      throw new UnsupportedMediaTypeException('An image file is required.');
+    }
+    if (!(ALLOWED_IMAGE_MIME as readonly string[]).includes(file.mimetype)) {
+      throw new UnsupportedMediaTypeException(
+        'Unsupported image type. Allowed: JPEG, PNG, WebP.',
+      );
+    }
+    if (file.size > MAX_DEALER_LOGO_BYTES) {
+      throw new PayloadTooLargeException('Image exceeds the 5 MB size limit.');
+    }
+    // CloudinaryService uploads with `format: 'png'`, so even an SVG/WebP source
+    // is stored and delivered as a PNG the React Native <Image> can render.
+    const uploaded = await this.cloudinary.uploadBuffer(
+      file.buffer,
+      CloudinaryFolder.DEALER_LOGOS,
+    );
+    return { logoUrl: uploaded.url };
+  }
+
+  /** A URL-safe, unique id for a new dealer, derived from its name. */
+  private async uniqueDealerId(base: string): Promise<string> {
+    const slug = (base || 'dealer').slice(0, 56);
+    let candidate = slug;
+    let n = 2;
+    while (
+      await this.prisma.catalogSeller.findUnique({
+        where: { id: candidate },
+        select: { id: true },
+      })
+    ) {
+      candidate = `${slug}-${n++}`;
+    }
+    return candidate;
+  }
 
   async list(query: ListAdminDealersQueryDto) {
     const page = query.page ?? 1;
@@ -158,7 +295,11 @@ export class AdminDealersService {
    * it already holds is not a change and is not audited.
    */
   async update(id: string, dto: UpdateAdminDealerDto, ctx: AdminAuditContext) {
+    const hasPresentation = (
+      Object.keys(PRESENTATION_COLUMN) as PresentationField[]
+    ).some((f) => dto[f] !== undefined);
     if (
+      !hasPresentation &&
       dto.certified === undefined &&
       dto.lowestPrice === undefined &&
       dto.status === undefined
@@ -203,6 +344,45 @@ export class AdminDealersService {
             newValues: { status: next },
           });
         }
+      }
+
+      // Storefront presentation edits (name, city, logo, …) are collected into a
+      // single DEALER_UPDATED entry: they are descriptive corrections, not the
+      // moderation actions the badge/status verbs describe. A field set to the
+      // value it already holds is skipped, so no no-op entry is written.
+      const presPrev: Record<string, unknown> = {};
+      const presNext: Record<string, unknown> = {};
+      for (const field of Object.keys(
+        PRESENTATION_COLUMN,
+      ) as PresentationField[]) {
+        const raw = dto[field];
+        if (raw === undefined) continue;
+        const column = PRESENTATION_COLUMN[field];
+        const next =
+          field === 'years'
+            ? ((raw as number | null) ?? null)
+            : (typeof raw === 'string' ? raw.trim() : '') || null;
+        if (field === 'name' && !next) {
+          throw new BadRequestException('Name cannot be empty');
+        }
+        const current =
+          (dealer as Record<string, unknown>)[column] ?? null;
+        if (next === current) continue;
+        (data as Record<string, unknown>)[column] = next;
+        // Keep the legacy storefront accent (`color`, returned by GET /v1/dealers)
+        // in step with the console accent so the app card repaints too.
+        if (field === 'brandColor') {
+          (data as Record<string, unknown>).color = next;
+        }
+        presPrev[field] = current;
+        presNext[field] = next;
+      }
+      if (Object.keys(presNext).length > 0) {
+        entries.push({
+          action: AdminAuditAction.DEALER_UPDATED,
+          previousValues: presPrev as Prisma.InputJsonValue,
+          newValues: presNext as Prisma.InputJsonValue,
+        });
       }
 
       // Every field arrived already holding the requested value: no write, and
@@ -322,6 +502,16 @@ export class AdminDealersService {
         status: true,
         certified: true,
         lowestPrice: true,
+        // Presentation columns, so update() can diff an edit against the current
+        // value and skip a no-op.
+        city: true,
+        email: true,
+        phoneE164: true,
+        brandColor: true,
+        initial: true,
+        logoUrl: true,
+        orders: true,
+        years: true,
       },
     });
     if (!dealer) throw new NotFoundException('Dealer not found');
@@ -333,7 +523,9 @@ export class AdminDealersService {
     tx: Prisma.TransactionClient,
     params: {
       action: AdminAuditAction;
-      previousValues: Prisma.InputJsonValue;
+      // Omitted on a creation — there is no prior state. The audit layer maps a
+      // missing previousValues to a DB null.
+      previousValues?: Prisma.InputJsonValue;
       newValues: Prisma.InputJsonValue;
       dealer: { id: string; name: string };
       ctx: AdminAuditContext;
@@ -410,4 +602,19 @@ function auditActionFor(
   return from === DealerStatus.SUSPENDED
     ? AdminAuditAction.DEALER_REACTIVATED
     : AdminAuditAction.DEALER_APPROVED;
+}
+
+/**
+ * Lowercase ASCII hyphen-slug for a new dealer id, e.g. "BYD Motors" → "byd-
+ * motors". Capped short so the numeric-suffix uniqueness step still fits inside
+ * the 64-char id column. Empty result (all-symbol names) falls back in the
+ * caller to "dealer".
+ */
+function slugify(name: string): string {
+  return name
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 56);
 }

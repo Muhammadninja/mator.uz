@@ -39,6 +39,9 @@ export function presentDealer(s: CatalogSeller) {
   return {
     id: s.id,
     name: s.name,
+    // The brand icon, when the operator uploaded one. The app renders it and
+    // falls back to the initial-on-color tile when null.
+    logoUrl: s.logoUrl ?? null,
     initial: s.initial ?? '',
     color: s.color ?? '',
     orders: s.orders ?? '',

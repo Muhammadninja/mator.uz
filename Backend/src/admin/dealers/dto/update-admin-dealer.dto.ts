@@ -2,9 +2,12 @@ import { ApiPropertyOptional } from '@nestjs/swagger';
 import {
   IsBoolean,
   IsIn,
+  IsInt,
   IsOptional,
   IsString,
+  Max,
   MaxLength,
+  Min,
 } from 'class-validator';
 import { ADMIN_DEALER_STATUSES } from './list-admin-dealers.query.dto';
 // `import type` is required: with isolatedModules + emitDecoratorMetadata, a
@@ -24,8 +27,68 @@ import type { AdminDealerStatusFilter } from './list-admin-dealers.query.dto';
  * `status` accepts the same lowercase vocabulary as the list filter. Setting it
  * here is the escape hatch for a correction; the approve/suspend/reactivate
  * endpoints are the normal, transition-checked path.
+ *
+ * The presentation fields (name, city, email, phone, brandColor, initial,
+ * logoUrl, orders, years) are editable so an operator can correct a dealer's
+ * storefront details after creating it. They are audited together as a single
+ * DEALER_UPDATED entry; certified / lowestPrice / status keep their own verbs.
  */
 export class UpdateAdminDealerDto {
+  @ApiPropertyOptional({ description: 'Storefront / dealer name.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(160)
+  name?: string;
+
+  @ApiPropertyOptional({ description: 'City + region.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  city?: string;
+
+  @ApiPropertyOptional({ description: 'Public contact email.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  email?: string;
+
+  @ApiPropertyOptional({ description: 'Public contact phone (E.164).' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  phone?: string;
+
+  @ApiPropertyOptional({ description: 'Brand accent hex (#RRGGBB[AA]).' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(9)
+  brandColor?: string;
+
+  @ApiPropertyOptional({ description: 'Monogram letter for the logo tile.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(4)
+  initial?: string;
+
+  @ApiPropertyOptional({ description: 'Brand logo image URL (from POST /v1/admin/dealers/logo).' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(512)
+  logoUrl?: string;
+
+  @ApiPropertyOptional({ description: 'Pre-formatted lifetime order count, e.g. "18k+".' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  orders?: string;
+
+  @ApiPropertyOptional({ description: 'Years in business.' })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(200)
+  years?: number;
+
   @ApiPropertyOptional({
     description: 'MATOR-certified badge.',
     example: true,

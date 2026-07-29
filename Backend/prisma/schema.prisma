@@ -1558,6 +1558,9 @@ enum AdminAuditAction {
   DEALER_SUSPENDED
   DEALER_REACTIVATED
   DEALER_UPDATED
+  // A dealer/storefront created from the admin console (POST /v1/admin/dealers).
+  // The target is the new dealer; newValues carries the initial row.
+  DEALER_CREATED
 }
 
 // What kind of thing an audit entry is about, for entries whose target is not

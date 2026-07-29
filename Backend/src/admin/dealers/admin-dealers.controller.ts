@@ -9,11 +9,17 @@ import {
   Post,
   Query,
   Req,
+  UploadedFiles,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
+import { AnyFilesInterceptor } from '@nestjs/platform-express';
 import {
   ApiBadRequestResponse,
   ApiBearerAuth,
+  ApiBody,
+  ApiConsumes,
+  ApiCreatedResponse,
   ApiForbiddenResponse,
   ApiNotFoundResponse,
   ApiOkResponse,
@@ -23,17 +29,23 @@ import {
 } from '@nestjs/swagger';
 import { AdminRole } from '@prisma/client';
 import type { Request } from 'express';
+import { MAX_AVATAR_BYTES } from '../../common/image.constants';
 import { AdminAuditContext } from '../auth/admin-auth.service';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { AdminJwtGuard } from '../auth/guards/admin-jwt.guard';
 import { AdminRoleGuard } from '../auth/guards/admin-role.guard';
 import { AuthenticatedAdmin } from '../auth/strategies/admin-jwt.strategy';
 import { AdminDealersService } from './admin-dealers.service';
+import { CreateAdminDealerDto } from './dto/create-admin-dealer.dto';
 import { ListAdminDealersQueryDto } from './dto/list-admin-dealers.query.dto';
 import {
   SuspendAdminDealerDto,
   UpdateAdminDealerDto,
 } from './dto/update-admin-dealer.dto';
+
+// Multipart field names accepted for the logo image, in priority order —
+// mirrors the avatar endpoint so a variety of clients work unchanged.
+const LOGO_FIELD_PRIORITY = ['logo', 'file', 'image'] as const;
 
 type AuthenticatedAdminRequest = Request & { user: AuthenticatedAdmin };
 
@@ -71,6 +83,69 @@ export class AdminDealersController {
       userAgent: req.get('user-agent'),
       // requestId is read from the ambient request context by the audit service.
     };
+  }
+
+  @Post()
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({
+    summary: 'Create a curated dealer/storefront (admin/operator)',
+    description:
+      'Only `name` is required. A dealer created here is a real, vetted storefront: ' +
+      'unless the body overrides it, it lands ACTIVE + certified and marked curated, ' +
+      'so it appears in the app’s MATOR Certified rail (GET /v1/dealers) immediately. ' +
+      'Upload the brand logo via POST /v1/admin/dealers/logo first and pass the ' +
+      'returned URL as `logoUrl`. Recorded as DEALER_CREATED.',
+  })
+  @ApiCreatedResponse({ description: 'The created dealer.' })
+  @ApiBadRequestResponse({ description: 'Invalid field or value.' })
+  create(
+    @Body() dto: CreateAdminDealerDto,
+    @Req() req: AuthenticatedAdminRequest,
+  ) {
+    return this.dealers.create(dto, this.auditContext(req));
+  }
+
+  @Post('logo')
+  @HttpCode(HttpStatus.OK)
+  @UseInterceptors(
+    AnyFilesInterceptor({ limits: { fileSize: MAX_AVATAR_BYTES, files: 1 } }),
+  )
+  @ApiOperation({
+    summary: 'Upload a dealer brand logo (multipart/form-data)',
+    description:
+      'Field: `logo` (aliases `file`, `image`). Image ≤ 5 MB (JPEG/PNG/WebP). ' +
+      'Stored on the shared Cloudinary image host and returned as `logoUrl` — pass ' +
+      'that back on create or PATCH. Delivered as PNG so the mobile app can render it.',
+  })
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        logo: {
+          type: 'string',
+          format: 'binary',
+          description: 'Image file (JPEG/PNG/WebP, ≤ 5 MB). Aliases: `file`, `image`.',
+        },
+      },
+      required: ['logo'],
+    },
+  })
+  @ApiOkResponse({ description: 'Uploaded. Returns the stored image URL as `logoUrl`.' })
+  uploadLogo(
+    @UploadedFiles()
+    files?: Array<{
+      fieldname: string;
+      buffer: Buffer;
+      mimetype: string;
+      size: number;
+    }>,
+  ) {
+    const file =
+      LOGO_FIELD_PRIORITY.map((name) =>
+        files?.find((f) => f.fieldname === name),
+      ).find(Boolean) ?? files?.[0];
+    return this.dealers.uploadLogo(file);
   }
 
   @Get()

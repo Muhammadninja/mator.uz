@@ -4,6 +4,8 @@
 // a stable id order, the presenter maps to the frontend MatorDealer shape with
 // safe fallbacks, and an empty result is handled cleanly.
 
+import { DealerStatus } from '@prisma/client';
+
 import { DealersService, presentDealer } from './dealers.service';
 
 function seller(over: Partial<Record<string, unknown>> = {}) {
@@ -11,6 +13,7 @@ function seller(over: Partial<Record<string, unknown>> = {}) {
     id: 'd1', name: 'AutoPro Parts', ratingAvg: 0, logoUrl: null,
     internalSellerId: null, isCurated: true,
     initial: 'A', color: '#2A6FDB', orders: '18k+', years: 12,
+    certified: true, lowestPrice: false,
     ...over,
   };
 }
@@ -28,11 +31,11 @@ describe('DealersService', () => {
     service = new DealersService(prisma as never);
   });
 
-  it('queries only curated dealers (isCurated = true), ordered by id', async () => {
+  it('queries only curated + certified + ACTIVE dealers, ordered by id', async () => {
     prisma.catalogSeller.findMany.mockResolvedValue([seller()]);
     await service.list();
     expect(prisma.catalogSeller.findMany).toHaveBeenCalledWith({
-      where: { isCurated: true },
+      where: { isCurated: true, certified: true, status: DealerStatus.ACTIVE },
       orderBy: { id: 'asc' },
     });
   });
@@ -40,11 +43,16 @@ describe('DealersService', () => {
   it('identifies dealers by the isCurated flag, NOT by storefront-field presence', async () => {
     // Regression guard for the leak found in Phase 4C smoke testing: a projected
     // seller_<id> row that acquires a non-empty `initial` must still be excluded.
-    // The service must never filter on field presence — only on the flag.
+    // The service must never filter on field presence — only on the flag (plus
+    // the live badge/status sync from the admin console).
     prisma.catalogSeller.findMany.mockResolvedValue([]);
     await service.list();
     const where = prisma.catalogSeller.findMany.mock.calls[0][0].where;
-    expect(where).toEqual({ isCurated: true });
+    expect(where).toEqual({
+      isCurated: true,
+      certified: true,
+      status: DealerStatus.ACTIVE,
+    });
     expect(where).not.toHaveProperty('initial');
   });
 
@@ -55,10 +63,10 @@ describe('DealersService', () => {
     ]);
     const res = await service.list();
     expect(res.items).toEqual([
-      { id: 'd1', name: 'AutoPro Parts', initial: 'A', color: '#2A6FDB', orders: '18k+', years: 12 },
-      { id: 'd2', name: 'Prime Motors Supply', initial: 'P', color: '#1F8A5B', orders: '9.4k+', years: 8 },
+      { id: 'd1', name: 'AutoPro Parts', logoUrl: null, initial: 'A', color: '#2A6FDB', orders: '18k+', years: 12, certified: true, lowestPrice: false },
+      { id: 'd2', name: 'Prime Motors Supply', logoUrl: null, initial: 'P', color: '#1F8A5B', orders: '9.4k+', years: 8, certified: true, lowestPrice: false },
     ]);
-    // ratingAvg / logoUrl / internalSellerId are NOT leaked into the dealer shape.
+    // ratingAvg / internalSellerId are NOT leaked into the dealer shape.
     expect(res.items[0]).not.toHaveProperty('ratingAvg');
   });
 
@@ -71,7 +79,7 @@ describe('DealersService', () => {
   describe('presentDealer', () => {
     it('falls back safely when optional fields are null', () => {
       const r = presentDealer(seller({ initial: null, color: null, orders: null, years: null }) as never);
-      expect(r).toEqual({ id: 'd1', name: 'AutoPro Parts', initial: '', color: '', orders: '', years: 0 });
+      expect(r).toEqual({ id: 'd1', name: 'AutoPro Parts', logoUrl: null, initial: '', color: '', orders: '', years: 0, certified: true, lowestPrice: false });
     });
   });
 });

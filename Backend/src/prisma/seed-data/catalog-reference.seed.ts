@@ -50,12 +50,11 @@ export const SEED_CATEGORIES: SeedCategory[] = [
   { id: 'tuning', name: 'Tuning & Accessories' },
 ];
 
-// ── Dealers (from MATOR_DEALERS) ─────────────────────────────────────────────
-// id/name/initial/color/orders/years copied verbatim from the frontend
-// MATOR_DEALERS. ratingAvg has no frontend source → schema default 0.
-export const SEED_DEALERS: SeedDealer[] = [
-  { id: 'd1', name: 'AutoPro Parts', ratingAvg: 0, initial: 'A', color: '#2A6FDB', orders: '18k+', years: 12 },
-  { id: 'd2', name: 'Prime Motors Supply', ratingAvg: 0, initial: 'P', color: '#1F8A5B', orders: '9.4k+', years: 8 },
-  { id: 'd3', name: 'Genuine OEM Depot', ratingAvg: 0, initial: 'G', color: '#D97757', orders: '5.1k+', years: 6 },
-  { id: 'd4', name: 'TorqueLine Auto', ratingAvg: 0, initial: 'T', color: '#7c4dff', orders: '7.8k+', years: 10 },
-];
+// ── Dealers ──────────────────────────────────────────────────────────────────
+// Intentionally empty. Real MATOR Certified dealers are now created by operators
+// in the admin console (POST /v1/admin/dealers) with their real name and brand
+// logo, so the app's certified rail shows genuine storefronts rather than the
+// old placeholder mocks (AutoPro / Prime Motors / …). Left as an empty seed —
+// not deleted — so `seedDealers()` stays a no-op rather than a missing import,
+// and a fresh database starts with no fake dealers.
+export const SEED_DEALERS: SeedDealer[] = [];
