@@ -35,6 +35,7 @@ export class ReferenceService {
   async listMakes() {
     return this.cache.remember(RedisKeys.cacheReferenceMakes(), REFERENCE_CACHE_TTL, async () => {
       const makes = await this.prisma.vehicleMake.findMany({
+        where: { isActive: true },
         orderBy: { sortOrder: 'asc' },
         select: { id: true, name: true, logoUrl: true },
       });
@@ -62,7 +63,9 @@ export class ReferenceService {
       REFERENCE_CACHE_TTL,
       async () => {
         const models = await this.prisma.vehicleModelRef.findMany({
-          where: { makeId },
+          // Hide every model of an inactive brand — models have no active flag
+          // of their own, so the parent make's isActive gates them.
+          where: { makeId, make: { isActive: true } },
           orderBy: { sortOrder: 'asc' },
           select: { id: true, makeId: true, name: true },
         });
