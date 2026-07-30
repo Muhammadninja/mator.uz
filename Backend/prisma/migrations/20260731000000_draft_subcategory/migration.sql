@@ -1,0 +1,11 @@
+-- The Telegram wizard's second-level category answer. After picking a main
+-- category the seller now picks a subcategory, for the main categories that
+-- have them (TRANSMISSION and HEATING_AND_COOLING have none, and those flows
+-- are unchanged). The value is a PartMainCategory — the same enum the buyer
+-- grid is built from — and is written verbatim to products.main_category on
+-- commit, replacing the keyword classifier's guess for those listings.
+--
+-- Nullable with no default: null means "the question was not asked" (a category
+-- without subcategories, or a kind that never asks a category at all), which is
+-- exactly the state of every pre-existing draft row.
+ALTER TABLE "product_drafts" ADD COLUMN "subcategory" "PartMainCategory";

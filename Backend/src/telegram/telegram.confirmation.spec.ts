@@ -5,7 +5,12 @@
 // The bot itself is never launched here; we construct the service with stub
 // dependencies and drive the private confirmation helpers directly.
 
-import { OilType, PartVehicleCategory, ProductKind } from '@prisma/client';
+import {
+  OilType,
+  PartMainCategory,
+  PartVehicleCategory,
+  ProductKind,
+} from '@prisma/client';
 import { Decimal } from '@prisma/client/runtime/library';
 import type { ParseOutcome } from '../ai/part-parser.types';
 import {
@@ -83,6 +88,8 @@ function draft(
     title: metadata.title as string,
     // The wizard's explicit category choice, written verbatim on commit.
     vehicleCategory: PartVehicleCategory.ELECTRICAL_AND_LIGHTING,
+    // The subcategory picked under it — a SEPARATE column, not a replacement.
+    subcategory: PartMainCategory.LIGHTING,
     oilViscosity: null,
     oilType: null,
     oilVolumeMl: null,
@@ -385,6 +392,65 @@ describe('TelegramService — confirmation session', () => {
     expect(prisma.calls).not.toContain('partModel');
     expect(prisma.calls).not.toContain('brand');
     expect(prisma.calls).not.toContain('carModel');
+  });
+
+  it('stores the main category AND the subcategory in their own columns', async () => {
+    // The two levels are SEPARATE columns and neither replaces the other:
+    //   vehicleCategory ← the vehicle-selected main category (BRAKE_SYSTEM)
+    //   mainCategory    ← the subcategory picked under it (BRAKES)
+    // The column NAMES are the confusing part (Product.mainCategory holds a
+    // PartMainCategory, which is the SUB level of this hierarchy), so this test
+    // pins the stored VALUES rather than trusting the names.
+    const prisma = makePrisma();
+    const svc = makeService(prisma, makeCloudinary());
+    svc.storePending(
+      draft(1, ['a'], {
+        vehicleCategory: PartVehicleCategory.BRAKE_SYSTEM,
+        subcategory: PartMainCategory.BRAKES,
+      }),
+    );
+
+    await svc.commitPending(makeCtx(), 1);
+
+    const upsert = prisma.args['product'] as {
+      create: { mainCategory: string; vehicleCategory: string };
+      update: { mainCategory: string; vehicleCategory: string };
+    };
+    // The main category survives the commit untouched — NOT overwritten by the
+    // subcategory (the regression this test exists to catch).
+    expect(upsert.create.vehicleCategory).toBe(
+      PartVehicleCategory.BRAKE_SYSTEM,
+    );
+    expect(upsert.create.mainCategory).toBe(PartMainCategory.BRAKES);
+    // Same on the update branch, so a re-listing converges on both values.
+    expect(upsert.update.vehicleCategory).toBe(
+      PartVehicleCategory.BRAKE_SYSTEM,
+    );
+    expect(upsert.update.mainCategory).toBe(PartMainCategory.BRAKES);
+  });
+
+  it('a category with no subcategory keeps its main category and classifies the rest', async () => {
+    // TRANSMISSION asks no subcategory, so `subcategory` is null and the
+    // classifier's guess still fills mainCategory — unchanged from before.
+    const prisma = makePrisma();
+    const svc = makeService(prisma, makeCloudinary());
+    svc.storePending(
+      draft(1, ['a'], {
+        vehicleCategory: PartVehicleCategory.TRANSMISSION,
+        subcategory: null,
+      }),
+    );
+
+    await svc.commitPending(makeCtx(), 1);
+
+    const upsert = prisma.args['product'] as {
+      create: { mainCategory: string; vehicleCategory: string };
+    };
+    expect(upsert.create.vehicleCategory).toBe(PartVehicleCategory.TRANSMISSION);
+    // Still populated (by the classifier), never null-ed out by the new step.
+    expect(Object.values(PartMainCategory)).toContain(
+      upsert.create.mainCategory,
+    );
   });
 
   it('a spare-part commit is still NOT universal and still writes its vehicle links', async () => {

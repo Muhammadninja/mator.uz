@@ -53,6 +53,7 @@ import {
   WIZ_BRAND_ACTION,
   WIZ_MODEL_ACTION,
   WIZ_CATEGORY_ACTION,
+  WIZ_SUBCATEGORY_ACTION,
   WIZ_DESCRIPTION_SKIP,
   WIZ_PART_NUMBER_TYPE_ACTION,
   WIZ_OTHER_BRAND_ACTION,
@@ -69,6 +70,7 @@ import {
   selectOtherCategory,
   selectModel,
   selectCategory,
+  selectSubcategory,
   selectOilViscosity,
   inputOilViscosity,
   selectOilType,
@@ -187,11 +189,12 @@ const HELP_MESSAGE =
   '2️⃣ Марка автомобиля (кнопка)\n' +
   '3️⃣ Модель (кнопка)\n' +
   '4️⃣ Категория запчасти (кнопка)\n' +
-  '5️⃣ Название товара (текст)\n' +
-  '6️⃣ Описание — можно пропустить\n' +
-  '7️⃣ Тип номера: OEM, GM или пропустить\n' +
-  '8️⃣ Номер детали (если выбрали OEM/GM)\n' +
-  '9️⃣ Цена в сумах\n\n' +
+  '5️⃣ Подкатегория (кнопка) — если у выбранной категории она есть\n' +
+  '6️⃣ Название товара (текст)\n' +
+  '7️⃣ Описание — можно пропустить\n' +
+  '8️⃣ Тип номера: OEM, GM или пропустить\n' +
+  '9️⃣ Номер детали (если выбрали OEM/GM)\n' +
+  '🔟 Цена в сумах\n\n' +
   '🛢 Продаёте не запчасть, а моторное масло? На шаге выбора марки нажмите «Другое» → «Моторные масла»:\n' +
   'бот спросит вязкость, тип и объём вместо марки, модели и номера детали.\n\n' +
   '⚡ Фото обрабатываются в фоне, пока вы заполняете информацию — ждать не нужно.\n' +
@@ -220,6 +223,11 @@ interface PendingProduct {
    *  verbatim (never overridden by the keyword classifier). Null for kinds whose
    *  flow does not ask for a vehicle category (motor oils). */
   vehicleCategory: PartVehicleCategory | null;
+  /** The wizard's explicit subcategory choice — written to Product.mainCategory
+   *  verbatim, beating the keyword classifier's guess. Null when the chosen
+   *  category has no subcategories, in which case the classifier's inference
+   *  stands as before. */
+  subcategory: PartMainCategory | null;
   /** MOTOR_OIL attributes; null for every other kind. */
   oilViscosity: string | null;
   oilType: OilType | null;
@@ -290,6 +298,7 @@ export function buildSessionFromDraft(
     brand: string | null;
     model: string | null;
     category: PartVehicleCategory | null;
+    subcategory: PartMainCategory | null;
     title: string | null;
     description: string | null;
     partNumberType: ParseOutcome['part_number_type'];
@@ -308,6 +317,7 @@ export function buildSessionFromDraft(
     brand: draft.brand,
     model: draft.model,
     category: draft.category,
+    subcategory: draft.subcategory,
     title: draft.title,
     description: draft.description,
     partNumberType: draft.partNumberType ?? 'UNKNOWN',
@@ -475,6 +485,12 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     this.bot.action(WIZ_CATEGORY_ACTION, async (ctx) => {
       await this.handleWizardAction(ctx, (session) =>
         selectCategory(session, Number(ctx.match[1])),
+      );
+    });
+
+    this.bot.action(WIZ_SUBCATEGORY_ACTION, async (ctx) => {
+      await this.handleWizardAction(ctx, (session) =>
+        selectSubcategory(session, Number(ctx.match[1])),
       );
     });
 
@@ -887,6 +903,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       brand: session.brand,
       model: session.model,
       category: session.category,
+      subcategory: session.subcategory,
       title: session.title,
       description: session.description,
       partNumberType: session.partNumberType,
@@ -1086,6 +1103,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       kind: draft.kind,
       title: draft.title as string,
       vehicleCategory: draft.category,
+      subcategory: draft.subcategory,
       oilViscosity: draft.oilViscosity,
       oilType: draft.oilType,
       oilVolumeMl: draft.oilVolumeMl,
@@ -1959,8 +1977,15 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     // present this one.
     const committingVersion = session.draftVersion + 1;
 
-    const { sellerId, metadata, title, vehicleCategory, processedUrls, price } =
-      session;
+    const {
+      sellerId,
+      metadata,
+      title,
+      vehicleCategory,
+      subcategory,
+      processedUrls,
+      price,
+    } = session;
 
     try {
       const primaryUrl = processedUrls[0];
@@ -1994,7 +2019,11 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         partNumberType,
       );
       const classifiedFields = {
-        mainCategory: classification.mainCategory,
+        // The seller's explicit subcategory wins over the keyword guess — the
+        // same rule the vehicle category already follows. Null (a category with
+        // no subcategories, so the question was never asked) falls back to the
+        // classifier's inference, leaving those listings exactly as before.
+        mainCategory: subcategory ?? classification.mainCategory,
         vehicleCategory,
         partBrand: classification.make,
         originRegion: classification.originRegion,

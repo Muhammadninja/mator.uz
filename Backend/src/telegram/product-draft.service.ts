@@ -4,6 +4,7 @@ import {
   DraftStatus,
   ImageProcessingStage,
   OilType,
+  PartMainCategory,
   PartVehicleCategory,
   PartNumberType,
   Prisma,
@@ -42,6 +43,7 @@ export interface DraftFormPatch {
   brand?: string | null;
   model?: string | null;
   category?: PartVehicleCategory | null;
+  subcategory?: PartMainCategory | null;
   title?: string | null;
   description?: string | null;
   partNumberType?: PartNumberType;
@@ -214,6 +216,7 @@ export class ProductDraftService {
           brand: source.brand,
           model: source.model,
           category: source.category,
+          subcategory: source.subcategory,
           title: source.title,
           description: source.description,
           partNumberType: source.partNumberType,
@@ -323,6 +326,7 @@ export class ProductDraftService {
         brand: patch.brand,
         model: patch.model,
         category: patch.category,
+        subcategory: patch.subcategory,
         title: patch.title,
         description: patch.description,
         partNumberType: patch.partNumberType,

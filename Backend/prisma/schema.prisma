@@ -486,6 +486,12 @@ model ProductDraft {
   brand          String?
   model          String?
   category       PartVehicleCategory?
+  // The subcategory chosen under `category`, for the main categories that have
+  // them. Null for a category with no subcategories (TRANSMISSION,
+  // HEATING_AND_COOLING) and for kinds that never ask a category — so it is NOT
+  // a completeness requirement on its own; the wizard flow enforces the answer
+  // where the question is asked.
+  subcategory    PartMainCategory?
   title          String?              @db.VarChar(255)
   description    String?              @db.Text
   partNumberType PartNumberType       @default(UNKNOWN) @map("part_number_type")

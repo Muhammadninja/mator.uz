@@ -24,6 +24,7 @@ import {
   inputPartNumber,
   choosePartNumberType,
   selectCategory,
+  selectSubcategory,
   selectModel,
   inputPrice,
   goBack,
@@ -327,6 +328,7 @@ describe('motor-oil prompts (Russian, oil-specific)', () => {
     selectBrand(part, 0);
     selectModel(part, 0);
     selectCategory(part, 0);
+    selectSubcategory(part, 0);
     expect(stepPrompt(part).text).toContain('амортизатор');
   });
 });
@@ -572,6 +574,7 @@ describe('rendered keyboards — every step the seller can reach', () => {
     selectBrand(s, 0);
     selectModel(s, 0);
     selectCategory(s, 0);
+    selectSubcategory(s, 0);
     inputTitle(s, 'Фильтр масляный');
     inputDescription(s, 'Новый');
     choosePartNumberType(s, 'OEM');
