@@ -14,7 +14,11 @@
 // model therefore forces you to add the same canonical name (plus its aliases)
 // to VEHICLE_CATALOG, or the app won't start.
 
-import { PartVehicleCategory, ProductKind } from '@prisma/client';
+import {
+  PartMainCategory,
+  PartVehicleCategory,
+  ProductKind,
+} from '@prisma/client';
 import { VEHICLE_CATALOG } from '../ai/vehicle-catalog';
 
 export interface WizardBrand {
@@ -243,6 +247,73 @@ export const WIZARD_CATEGORIES: WizardCategory[] = [
     label: 'Тюнинг и Стайлинг',
   },
 ];
+
+// ── Subcategories (the second level of the category step) ───────────────────
+//
+// A main category may narrow into PartMainCategory subcategories — the SAME enum
+// the buyer grid is built from (MAIN_CATEGORIES in
+// catalog/categories/part-categories.catalog.ts), so a bot-chosen subcategory is
+// exactly the value the classifier would otherwise have GUESSED from keywords.
+// Choosing it explicitly is what makes it authoritative.
+//
+// Not every main category is mapped yet: TRANSMISSION and HEATING_AND_COOLING
+// have no subcategories, and a main category absent from this table (or mapped
+// to an empty list) simply has no second step — the flow continues unchanged.
+// That "absent → no step" rule is what keeps the addition minimal: adding
+// subcategories to a main category later means adding one row here (plus a
+// CATALOG_VERSION bump, since this list is index-addressed).
+
+export interface WizardSubcategory {
+  /** Stored enum value — the wizard writes this to Product.mainCategory. */
+  value: PartMainCategory;
+  /** Russian button label (the bot speaks Russian). */
+  label: string;
+}
+
+const SUBCATEGORIES: Partial<
+  Record<PartVehicleCategory, WizardSubcategory[]>
+> = {
+  [PartVehicleCategory.BRAKE_SYSTEM]: [
+    { value: PartMainCategory.BRAKES, label: 'Тормоза' },
+  ],
+  [PartVehicleCategory.MAINTENANCE_AND_FLUIDS]: [
+    { value: PartMainCategory.FILTERS, label: 'Фильтры' },
+    { value: PartMainCategory.OIL_AND_FLUIDS, label: 'Масла и жидкости' },
+    { value: PartMainCategory.WIPERS, label: 'Дворники' },
+  ],
+  [PartVehicleCategory.SUSPENSION_AND_STEERING]: [
+    { value: PartMainCategory.SUSPENSION, label: 'Подвеска' },
+  ],
+  [PartVehicleCategory.ELECTRICAL_AND_LIGHTING]: [
+    { value: PartMainCategory.BATTERIES, label: 'Аккумуляторы' },
+    { value: PartMainCategory.ELECTRICAL_PARTS, label: 'Электрика' },
+    { value: PartMainCategory.IGNITION, label: 'Зажигание' },
+    { value: PartMainCategory.LIGHTING, label: 'Освещение' },
+  ],
+  [PartVehicleCategory.ENGINE]: [
+    { value: PartMainCategory.ENGINE, label: 'Двигатель' },
+    { value: PartMainCategory.BELTS_AND_HOSES, label: 'Ремни и патрубки' },
+  ],
+  [PartVehicleCategory.TUNING_AND_ACCESSORIES]: [
+    { value: PartMainCategory.EXTERIOR, label: 'Внешний вид' },
+  ],
+};
+
+/**
+ * The subcategories offered for a main category, in display order — empty when
+ * that category has none (TRANSMISSION, HEATING_AND_COOLING), which is the
+ * signal that the subcategory step is skipped entirely.
+ */
+export function subcategoriesOf(
+  category: PartVehicleCategory,
+): WizardSubcategory[] {
+  return SUBCATEGORIES[category] ?? [];
+}
+
+/** Whether the seller must pick a subcategory after choosing this category. */
+export function hasSubcategories(category: PartVehicleCategory): boolean {
+  return subcategoriesOf(category).length > 0;
+}
 
 // ── The "Другое" branch: listings that are NOT spare parts ──────────────────
 //

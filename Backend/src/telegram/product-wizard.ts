@@ -34,7 +34,12 @@
 // ProductDraft that owns the business data. It never holds uploaded assets: the
 // draft (Postgres) is the single source of truth for those.
 
-import { OilType, PartVehicleCategory, ProductKind } from '@prisma/client';
+import {
+  OilType,
+  PartMainCategory,
+  PartVehicleCategory,
+  ProductKind,
+} from '@prisma/client';
 import { Markup } from 'telegraf';
 import type { PartNumberType } from '../ai/part-parser.types';
 import { parsePrice } from '../ai/price-parser';
@@ -53,6 +58,8 @@ import {
   WIZARD_BRANDS,
   WIZARD_CATEGORIES,
   WIZARD_OTHER_CATEGORIES,
+  hasSubcategories,
+  subcategoriesOf,
 } from './wizard-catalog';
 
 export enum WizardStep {
@@ -63,6 +70,11 @@ export enum WizardStep {
   BRAND = 'BRAND',
   MODEL = 'MODEL',
   CATEGORY = 'CATEGORY',
+  /** Narrow the chosen category down to one of its subcategories. Conditional:
+   *  only reachable when the picked CATEGORY actually has subcategories (see
+   *  `hasSubcategories`), so it is spliced into the flow by {@link flowSteps}
+   *  rather than listed in FLOWS. */
+  SUBCATEGORY = 'SUBCATEGORY',
   /** The "Другое" menu: pick a NON-spare-part category (Моторные масла, …). Only
    *  reachable from BRAND via the "Другое" button. */
   OTHER_CATEGORY = 'OTHER_CATEGORY',
@@ -125,6 +137,8 @@ export { isUniversalKind };
  * The session's flow as ACTUALLY walked, with the conditional detours spliced in
  * where the session's state says they were taken. This is what both forward
  * motion and "⬅️ Назад" read, so the two can never disagree about the path:
+ *   • SUBCATEGORY follows CATEGORY only when the chosen category HAS
+ *     subcategories (TRANSMISSION / HEATING_AND_COOLING go straight to TITLE);
  *   • PART_NUMBER follows PART_NUMBER_TYPE only when a number was requested
  *     (type OEM/GM — a skipped number goes straight to PRICE);
  *   • OIL_VISCOSITY_CUSTOM / OIL_VOLUME_CUSTOM follow their button step only
@@ -152,6 +166,17 @@ function flowSteps(session: WizardSession): WizardStep[] {
   }
   for (const step of FLOWS[session.kind]) {
     steps.push(step);
+    // The subcategory question exists only for a category that HAS
+    // subcategories, so it is spliced in from the answer itself: a category
+    // with none (TRANSMISSION, HEATING_AND_COOLING) never grows the step, and
+    // the flow continues exactly as it did before.
+    if (
+      step === WizardStep.CATEGORY &&
+      session.category !== null &&
+      hasSubcategories(session.category)
+    ) {
+      steps.push(WizardStep.SUBCATEGORY);
+    }
     if (
       step === WizardStep.PART_NUMBER_TYPE &&
       session.partNumberType !== 'UNKNOWN'
@@ -204,6 +229,9 @@ export interface WizardSession {
   brand: string | null;
   model: string | null;
   category: PartVehicleCategory | null;
+  /** The chosen subcategory, for a category that has them; null otherwise (and
+   *  for kinds whose flow never asks a category at all). */
+  subcategory: PartMainCategory | null;
   title: string | null;
   description: string | null;
   /** 'UNKNOWN' until the seller picks OEM/GM; Skip keeps it 'UNKNOWN'. */
@@ -263,7 +291,12 @@ const invalid = (message: string): WizardResult => ({
 // session shape changed (sessions gained `kind` and the oil fields). A tap on a
 // version-1 keyboard therefore lands on the "catalog updated, start again"
 // notice instead of a session the new transitions would read differently.
-export const CATALOG_VERSION = 2;
+//
+// Bumped to 3 for the subcategory step. No existing index shifted either, but a
+// version-2 session has no `subcategory` field and its CATEGORY answer was the
+// last word on taxonomy — resuming such a dialogue under the new flow would drop
+// the seller onto a question their in-flight keyboard cannot answer.
+export const CATALOG_VERSION = 3;
 
 /** Build a versioned callback payload, e.g. buildAction('b', 5) → "wiz:1:b:5". */
 export function buildAction(kind: string, arg: string | number): string {
@@ -276,6 +309,8 @@ const V = CATALOG_VERSION;
 export const WIZ_BRAND_ACTION = new RegExp(`^wiz:${V}:b:(\\d{1,2})$`);
 export const WIZ_MODEL_ACTION = new RegExp(`^wiz:${V}:m:(\\d{1,2})$`);
 export const WIZ_CATEGORY_ACTION = new RegExp(`^wiz:${V}:c:(\\d{1,2})$`);
+// A pick from the subcategory menu — index into the CURRENT category's list.
+export const WIZ_SUBCATEGORY_ACTION = new RegExp(`^wiz:${V}:sc:(\\d{1,2})$`);
 export const WIZ_DESCRIPTION_SKIP = buildAction('d', 'skip');
 export const WIZ_PART_NUMBER_TYPE_ACTION = new RegExp(
   `^wiz:${V}:t:(OEM|GM|SKIP)$`,
@@ -354,6 +389,7 @@ export class WizardSessionStore {
       brand: null,
       model: null,
       category: null,
+      subcategory: null,
       title: null,
       description: null,
       partNumberType: 'UNKNOWN',
@@ -434,6 +470,7 @@ export function selectOtherBrand(session: WizardSession): WizardResult {
   session.brand = null;
   session.model = null;
   session.category = null;
+  session.subcategory = null;
   session.step = WizardStep.OTHER_CATEGORY;
   return OK;
 }
@@ -455,6 +492,7 @@ export function selectOtherCategory(
   session.brand = null;
   session.model = null;
   session.category = null;
+  session.subcategory = null;
   session.partNumberType = 'UNKNOWN';
   session.partNumber = null;
   return advance(session);
@@ -480,7 +518,28 @@ export function selectCategory(
   if (session.step !== WizardStep.CATEGORY) return STALE;
   const category = WIZARD_CATEGORIES[categoryIndex];
   if (!category) return STALE;
+  // A subcategory belongs to the category it was picked under, so re-answering
+  // this step drops it: the seller may have walked back and chosen a DIFFERENT
+  // category, whose subcategory list this value is not part of. `advance` then
+  // lands on SUBCATEGORY (when the new category has any) or on the step that
+  // followed CATEGORY before this step existed.
   session.category = category.value;
+  session.subcategory = null;
+  return advance(session);
+}
+
+/** A pick from the subcategory menu of the category chosen one step earlier. */
+export function selectSubcategory(
+  session: WizardSession,
+  subcategoryIndex: number,
+): WizardResult {
+  if (session.step !== WizardStep.SUBCATEGORY || session.category === null)
+    return STALE;
+  // Resolved against the CURRENT category's own list, so an index from another
+  // category's (stale) keyboard cannot select a foreign subcategory.
+  const subcategory = subcategoriesOf(session.category)[subcategoryIndex];
+  if (!subcategory) return STALE;
+  session.subcategory = subcategory.value;
   return advance(session);
 }
 
@@ -827,6 +886,19 @@ export function categoryKeyboard(session: WizardSession): InlineKeyboard {
   return withBack(session, grid(buttons, 2));
 }
 
+/**
+ * The subcategories of the category chosen at the previous step, two per row.
+ * Empty (Back only) when there is no category — unreachable in practice, since
+ * the step is only spliced into the flow once a category with subcategories has
+ * been picked.
+ */
+export function subcategoryKeyboard(session: WizardSession): InlineKeyboard {
+  const buttons = (
+    session.category !== null ? subcategoriesOf(session.category) : []
+  ).map((s, i) => Markup.button.callback(s.label, buildAction('sc', i)));
+  return withBack(session, grid(buttons, 2));
+}
+
 export function descriptionKeyboard(session: WizardSession): InlineKeyboard {
   return withBack(session, [
     [Markup.button.callback('⏭ Пропустить', WIZ_DESCRIPTION_SKIP)],
@@ -891,6 +963,11 @@ export function stepPrompt(session: WizardSession): StepPrompt {
       return {
         text: '🗂 Выберите категорию запчасти:',
         keyboard: categoryKeyboard(session),
+      };
+    case WizardStep.SUBCATEGORY:
+      return {
+        text: '🗂 Выберите подкатегорию:',
+        keyboard: subcategoryKeyboard(session),
       };
     case WizardStep.OTHER_CATEGORY:
       return {

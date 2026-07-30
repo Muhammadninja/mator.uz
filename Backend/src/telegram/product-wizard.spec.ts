@@ -3,7 +3,7 @@
 // optional description and part-number branches, and stale-event protection.
 // Pure logic — no Telegraf, no I/O.
 
-import { PartVehicleCategory } from '@prisma/client';
+import { PartMainCategory, PartVehicleCategory } from '@prisma/client';
 import {
   WizardSessionStore,
   WizardSession,
@@ -11,6 +11,7 @@ import {
   selectBrand,
   selectModel,
   selectCategory,
+  selectSubcategory,
   inputTitle,
   inputDescription,
   skipDescription,
@@ -24,6 +25,7 @@ import {
   brandKeyboard,
   modelKeyboard,
   categoryKeyboard,
+  subcategoryKeyboard,
   buildAction,
   CATALOG_VERSION,
   WIZ_BRAND_ACTION,
@@ -33,7 +35,11 @@ import {
   WIZ_ANY_ACTION,
   isStaleCatalogPayload,
 } from './product-wizard';
-import { WIZARD_BRANDS, WIZARD_CATEGORIES } from './wizard-catalog';
+import {
+  WIZARD_BRANDS,
+  WIZARD_CATEGORIES,
+  subcategoriesOf,
+} from './wizard-catalog';
 
 const CHEVROLET = 0; // index in WIZARD_BRANDS
 const COBALT = 0; // index in Chevrolet's model list
@@ -50,7 +56,8 @@ function sessionAtTitle(): WizardSession {
   const s = freshSession();
   selectBrand(s, CHEVROLET);
   selectModel(s, COBALT);
-  selectCategory(s, 0); // Тормозная система
+  selectCategory(s, 0); // Тормозная система — has subcategories, so one more step
+  selectSubcategory(s, 0); // Тормоза
   return s;
 }
 
@@ -182,6 +189,100 @@ describe('brand / model / category selection (buttons only)', () => {
       ...WIZARD_BRANDS.map((b) => b.name),
       'Другое',
     ]);
+  });
+});
+
+describe('subcategory step (mandatory only where subcategories exist)', () => {
+  /** A session sitting at CATEGORY, ready to pick one. */
+  const atCategory = (): WizardSession => {
+    const s = freshSession();
+    selectBrand(s, CHEVROLET);
+    selectModel(s, COBALT);
+    return s;
+  };
+
+  /** Index of a main category in the wizard's category list. */
+  const categoryIndex = (value: PartVehicleCategory): number =>
+    WIZARD_CATEGORIES.findIndex((c) => c.value === value);
+
+  it('a category WITH subcategories asks for one before continuing', () => {
+    const s = atCategory();
+    selectCategory(s, categoryIndex(PartVehicleCategory.BRAKE_SYSTEM));
+    expect(s.step).toBe(WizardStep.SUBCATEGORY);
+    expect(s.subcategory).toBeNull(); // not answered yet
+
+    expect(selectSubcategory(s, 0).status).toBe('ok');
+    expect(s.subcategory).toBe(PartMainCategory.BRAKES);
+    expect(s.step).toBe(WizardStep.TITLE); // the existing flow resumes
+  });
+
+  // The two unmapped categories must behave EXACTLY as they did before the
+  // step existed — this is the guarantee the change is minimal.
+  it.each([
+    ['TRANSMISSION', PartVehicleCategory.TRANSMISSION],
+    ['HEATING_AND_COOLING', PartVehicleCategory.HEATING_AND_COOLING],
+  ])('%s has no subcategories and goes straight to TITLE', (_name, value) => {
+    const s = atCategory();
+    selectCategory(s, categoryIndex(value));
+    expect(s.step).toBe(WizardStep.TITLE);
+    expect(s.subcategory).toBeNull();
+    // Back from TITLE returns to CATEGORY, not through a phantom step.
+    expect(goBack(s).status).toBe('ok');
+    expect(s.step).toBe(WizardStep.CATEGORY);
+  });
+
+  it('offers exactly the subcategories mapped to the chosen category', () => {
+    const s = atCategory();
+    selectCategory(s, categoryIndex(PartVehicleCategory.ENGINE));
+    const labels = subcategoryKeyboard(s)
+      .reply_markup.inline_keyboard.flat()
+      .map((b) => b.text)
+      .filter((t) => t !== '⬅️ Назад');
+    expect(labels).toEqual(
+      subcategoriesOf(PartVehicleCategory.ENGINE).map((sc) => sc.label),
+    );
+  });
+
+  it('re-picking a different category drops the earlier subcategory', () => {
+    const s = atCategory();
+    selectCategory(s, categoryIndex(PartVehicleCategory.BRAKE_SYSTEM));
+    selectSubcategory(s, 0);
+    expect(s.subcategory).toBe(PartMainCategory.BRAKES);
+
+    // Walk back to the category question and choose one with a DIFFERENT list.
+    goBack(s); // → SUBCATEGORY
+    goBack(s); // → CATEGORY
+    selectCategory(s, categoryIndex(PartVehicleCategory.ENGINE));
+    // The brakes answer must not survive into an engine listing.
+    expect(s.subcategory).toBeNull();
+    expect(s.step).toBe(WizardStep.SUBCATEGORY);
+    selectSubcategory(s, 1);
+    expect(s.subcategory).toBe(PartMainCategory.BELTS_AND_HOSES);
+  });
+
+  it('rejects an out-of-range index and a pick at the wrong step as stale', () => {
+    const s = atCategory();
+    // Before the category is chosen there is no subcategory question at all.
+    expect(selectSubcategory(s, 0).status).toBe('stale');
+    selectCategory(s, categoryIndex(PartVehicleCategory.BRAKE_SYSTEM));
+    // BRAKE_SYSTEM maps to a single subcategory, so index 1 is out of range —
+    // and must not resolve against some other category's list.
+    expect(selectSubcategory(s, 1).status).toBe('stale');
+    expect(s.subcategory).toBeNull();
+    expect(s.step).toBe(WizardStep.SUBCATEGORY); // still waiting for an answer
+  });
+
+  it('every mapped subcategory is a real PartMainCategory, uniquely owned', () => {
+    // A subcategory listed under two main categories would make the seller's
+    // answer ambiguous for the buyer grid, which keys on this enum.
+    const seen = new Set<PartMainCategory>();
+    for (const category of WIZARD_CATEGORIES) {
+      for (const sub of subcategoriesOf(category.value)) {
+        expect(Object.values(PartMainCategory)).toContain(sub.value);
+        expect(seen.has(sub.value)).toBe(false);
+        seen.add(sub.value);
+      }
+    }
   });
 });
 
@@ -376,7 +477,7 @@ describe('back navigation ("⬅️ Назад")', () => {
   });
 
   it('walks back through the linear steps in reverse order', () => {
-    const s = sessionAtTitle(); // at TITLE (BRAND→MODEL→CATEGORY done)
+    const s = sessionAtTitle(); // at TITLE (BRAND→MODEL→CATEGORY→SUBCATEGORY done)
     inputTitle(s, 'Фильтр масляный'); // → DESCRIPTION
     inputDescription(s, 'Оригинал'); // → PART_NUMBER_TYPE
 
@@ -384,6 +485,8 @@ describe('back navigation ("⬅️ Назад")', () => {
     expect(s.step).toBe(WizardStep.DESCRIPTION);
     expect(goBack(s).status).toBe('ok');
     expect(s.step).toBe(WizardStep.TITLE);
+    expect(goBack(s).status).toBe('ok');
+    expect(s.step).toBe(WizardStep.SUBCATEGORY);
     expect(goBack(s).status).toBe('ok');
     expect(s.step).toBe(WizardStep.CATEGORY);
     expect(goBack(s).status).toBe('ok');
@@ -470,6 +573,8 @@ describe('stepPrompt', () => {
     selectModel(s, COBALT);
     expect(labels(s)).toContain('⬅️ Назад'); // CATEGORY
     selectCategory(s, 0);
+    expect(labels(s)).toContain('⬅️ Назад'); // SUBCATEGORY
+    selectSubcategory(s, 0);
     expect(labels(s)).toContain('⬅️ Назад'); // TITLE (was keyboard-less before)
     inputTitle(s, 'Фильтр масляный');
     expect(labels(s)).toContain('⬅️ Назад'); // DESCRIPTION (Skip + Back)
@@ -519,9 +624,12 @@ describe('photos-first entry', () => {
     selectBrand(s, CHEVROLET);
     selectModel(s, COBALT);
     selectCategory(s, 0);
+    selectSubcategory(s, 0);
     inputTitle(s, 'Амортизатор'); // → DESCRIPTION
     expect(goBack(s).status).toBe('ok');
     expect(s.step).toBe(WizardStep.TITLE);
+    expect(goBack(s).status).toBe('ok');
+    expect(s.step).toBe(WizardStep.SUBCATEGORY);
     expect(goBack(s).status).toBe('ok');
     expect(s.step).toBe(WizardStep.CATEGORY);
     // Data preserved.
@@ -544,6 +652,7 @@ describe('photos-first entry', () => {
         // Spare-parts branch.
         'MODEL',
         'CATEGORY',
+        'SUBCATEGORY',
         'PART_NUMBER_TYPE',
         'PART_NUMBER',
         // "Другое" branch: the menu, then the motor-oil questionnaire.
