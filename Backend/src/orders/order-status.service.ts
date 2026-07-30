@@ -4,6 +4,13 @@ import { PrismaService } from '../prisma/prisma.service';
 import { prefixedId, IdPrefix } from '../common/ulid.util';
 
 /**
+ * Provider transaction state meaning "created, awaiting confirmation" — Payme
+ * state 1 (Click's prepare stage uses the same value). An order carrying one is
+ * reserved and must not be expired out from under the provider.
+ */
+const ACTIVE_PROVIDER_STATE = 1;
+
+/**
  * The acting user behind a status change — a subset of `req.user` (AppUser).
  * A missing actor is recorded as a SYSTEM transition (webhooks, cron, creation).
  */
@@ -50,7 +57,9 @@ export class OrderStatusService {
     status: OrderStatus = OrderStatus.PENDING_PAYMENT,
     note = 'Order created',
   ): Promise<void> {
-    await tx.orderStatusHistory.create({ data: this.historyData(orderId, status, undefined, note) });
+    await tx.orderStatusHistory.create({
+      data: this.historyData(orderId, status, undefined, note),
+    });
   }
 
   /**
@@ -60,7 +69,11 @@ export class OrderStatusService {
    * opened here. Callers must guard against no-op transitions (from === to) to
    * avoid duplicate history rows — this writer does not re-read to check.
    */
-  async transition(orderId: string, status: OrderStatus, opts: TransitionOptions = {}): Promise<void> {
+  async transition(
+    orderId: string,
+    status: OrderStatus,
+    opts: TransitionOptions = {},
+  ): Promise<void> {
     const run = async (client: Prisma.TransactionClient) => {
       await client.order.update({ where: { id: orderId }, data: { status } });
       await client.orderStatusHistory.create({
@@ -83,22 +96,45 @@ export class OrderStatusService {
    */
   async expireOverdue(now: Date): Promise<number> {
     const overdue = await this.prisma.order.findMany({
-      where: { status: OrderStatus.PENDING_PAYMENT, expiresAt: { lt: now } },
+      where: {
+        status: OrderStatus.PENDING_PAYMENT,
+        expiresAt: { lt: now },
+        // An order with a payment provider transaction still in the "created"
+        // state is RESERVED: Payme guarantees the customer 12 hours to confirm
+        // it, and expiring the order underneath would leave a live transaction
+        // pointing at a dead order (and a PerformTransaction that pays for
+        // something already cancelled). Our own 30-minute payment window is
+        // therefore suspended for as long as such a transaction exists; when it
+        // is performed, cancelled or times out, the order becomes eligible again
+        // on a later sweep.
+        payments: { none: { providerState: ACTIVE_PROVIDER_STATE } },
+      },
       select: { id: true },
     });
 
     let expired = 0;
     for (const { id } of overdue) {
       await this.prisma.$transaction(async (tx) => {
-        // Conditional flip: only transitions rows still PENDING_PAYMENT, so a row
-        // paid since the scan is skipped (count 0) and gets no history entry.
+        // Conditional flip: only transitions rows still PENDING_PAYMENT and
+        // still free of an active provider transaction, so an order that was
+        // paid — or that acquired a Payme transaction — between the scan and
+        // this write is skipped (count 0) and gets no history entry.
         const res = await tx.order.updateMany({
-          where: { id, status: OrderStatus.PENDING_PAYMENT },
+          where: {
+            id,
+            status: OrderStatus.PENDING_PAYMENT,
+            payments: { none: { providerState: ACTIVE_PROVIDER_STATE } },
+          },
           data: { status: OrderStatus.EXPIRED },
         });
         if (res.count === 1) {
           await tx.orderStatusHistory.create({
-            data: this.historyData(id, OrderStatus.EXPIRED, undefined, 'Expired: payment window elapsed'),
+            data: this.historyData(
+              id,
+              OrderStatus.EXPIRED,
+              undefined,
+              'Expired: payment window elapsed',
+            ),
           });
           expired += 1;
         }
@@ -139,7 +175,8 @@ export class OrderStatusService {
   } {
     if (!actor) return { type: OrderActorType.SYSTEM, id: null, name: null };
     const role = (actor.role ?? '').toUpperCase();
-    const type = role === 'ADMIN' ? OrderActorType.ADMIN : OrderActorType.OPERATOR;
+    const type =
+      role === 'ADMIN' ? OrderActorType.ADMIN : OrderActorType.OPERATOR;
     const name =
       actor.displayName?.trim() ||
       [actor.firstName, actor.lastName].filter(Boolean).join(' ').trim() ||

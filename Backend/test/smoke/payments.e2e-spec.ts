@@ -13,8 +13,11 @@ describe('Payments + webhooks smoke', () => {
   });
 
   describe('Invoices', () => {
-    it('builds a Payme invoice with deep link + tiyin amount', async () => {
-      const svc = new PaymentsService(prisma, fakeConfig());
+    it('builds a Payme invoice with the official checkout link + tiyin amount', async () => {
+      const svc = new PaymentsService(
+        prisma,
+        fakeConfig({ PAYME_MERCHANT_ID: 'merchant-1', PAYME_ACCOUNT_FIELD: 'order_id' }),
+      );
       prisma.order.findUnique.mockResolvedValue(
         buildOrder({ id: 'ord_1', userId: 'usr_1', status: 'PENDING_PAYMENT', totalUzs: 215000 }),
       );
@@ -23,7 +26,11 @@ describe('Payments + webhooks smoke', () => {
       const res = await svc.createPaymeInvoice('usr_1', { order_id: 'ord_1' } as any);
       expect(res.payment_id).toBe('pay_1');
       expect(res.amount_tiyin).toBe(21_500_000);
-      expect(res.deep_link).toContain('payme://merchant/ord_1');
+
+      // Official format: <checkout host>/base64(m=…;ac.order_id=…;a=<tiyin>).
+      expect(res.deep_link.startsWith('https://checkout.paycom.uz/')).toBe(true);
+      const decoded = Buffer.from(res.deep_link.split('/').pop() as string, 'base64').toString('utf8');
+      expect(decoded).toBe('m=merchant-1;ac.order_id=ord_1;a=21500000');
     });
 
     it('refuses to invoice an order that is not awaiting payment', async () => {
@@ -68,7 +75,10 @@ describe('Payments + webhooks smoke', () => {
 
     it('CreateTransaction then PerformTransaction settles the payment (state 1 → 2)', async () => {
       const svc = new PaymeService(prisma, config, settlement as any);
-      // CreateTransaction: no existing/active/bindable payment -> create fresh.
+      // CreateTransaction: no existing transaction (findUnique, keyed on the
+      // (provider, providerTransactionId) unique index), no active/bindable
+      // payment -> create fresh.
+      prisma.payment.findUnique.mockResolvedValue(null);
       prisma.payment.findFirst.mockResolvedValue(null);
       prisma.order.findUnique.mockResolvedValue(buildOrder({ id: 'ord_1', status: 'PENDING_PAYMENT', totalUzs: 215000 }));
       prisma.payment.create.mockResolvedValue({ id: 'pay_1' });
@@ -80,10 +90,21 @@ describe('Payments + webhooks smoke', () => {
       });
       expect(created.result).toEqual(expect.objectContaining({ transaction: 'pay_1', state: 1 }));
 
-      // PerformTransaction: payment found in state 1 -> markPaid + state 2.
-      prisma.payment.findFirst.mockResolvedValue({ id: 'pay_1', providerState: 1 });
+      // PerformTransaction: the transaction is found in state 1 and settled; the
+      // reply then re-reads the row so it carries the STORED perform_time.
+      const createdNow = BigInt(Date.now());
+      prisma.payment.findUnique
+        .mockResolvedValueOnce({ id: 'pay_1', providerState: 1, providerCreateTime: createdNow })
+        .mockResolvedValueOnce({
+          id: 'pay_1',
+          providerState: 2,
+          providerCreateTime: createdNow,
+          providerPerformTime: BigInt(1_700_000_111_000),
+        });
       const performed: any = await svc.handle(auth, { id: 2, method: 'PerformTransaction', params: { id: 'pmt-xyz' } });
-      expect(performed.result).toEqual(expect.objectContaining({ transaction: 'pay_1', state: 2 }));
+      expect(performed.result).toEqual(
+        expect.objectContaining({ transaction: 'pay_1', state: 2, perform_time: 1_700_000_111_000 }),
+      );
       expect(settlement.markPaid).toHaveBeenCalledWith('pay_1', expect.any(Number));
     });
   });

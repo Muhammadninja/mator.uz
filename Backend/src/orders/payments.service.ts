@@ -1,9 +1,15 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { OrderStatus, PaymentProvider, PaymentStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { prefixedId, IdPrefix } from '../common/ulid.util';
 import { CreateInvoiceDto } from './dto/create-invoice.dto';
+import { readPaymeConfig } from './webhooks/payme.config';
+import { buildPaymeCheckoutUrl } from './webhooks/payme-checkout.util';
 
 @Injectable()
 export class PaymentsService {
@@ -16,9 +22,19 @@ export class PaymentsService {
     const order = await this.loadPayableOrder(userId, dto.order_id);
     const amountUzs = Number(order.totalUzs);
     const tiyin = Math.round(amountUzs * 100);
-    const checkoutBase = this.config.get<string>('PAYME_CHECKOUT_URL') ?? 'https://checkout.paycom.uz';
-    const deepLink = `payme://merchant/${order.id}?amount=${tiyin}`;
-    const httpsFallback = `${checkoutBase}/c${order.id}`;
+    const payme = readPaymeConfig((key) => this.config.get<string>(key));
+    const checkoutUrl = buildPaymeCheckoutUrl({
+      merchantId: payme.merchantId,
+      accountField: payme.accountField,
+      orderId: order.id,
+      amountTiyin: tiyin,
+      checkoutBaseUrl: payme.checkoutUrl,
+      returnUrl: dto.return_url,
+    });
+    // Both fields carry the same official checkout link. The app opens it
+    // directly; Payme's own page hands off to the installed Payme app.
+    const deepLink = checkoutUrl;
+    const httpsFallback = checkoutUrl;
 
     const payment = await this.prisma.payment.create({
       data: {
@@ -96,14 +112,19 @@ export class PaymentsService {
         order_id: payment.orderId,
         status: payment.order.status.toLowerCase(),
         next_screen:
-          payment.order.status === OrderStatus.PAID ? 'OrderConfirmationScreen' : null,
+          payment.order.status === OrderStatus.PAID
+            ? 'OrderConfirmationScreen'
+            : null,
       },
     };
   }
 
   private async loadPayableOrder(userId: string, orderId: string) {
-    const order = await this.prisma.order.findUnique({ where: { id: orderId } });
-    if (!order || order.userId !== userId) throw new NotFoundException('Order not found');
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+    });
+    if (!order || order.userId !== userId)
+      throw new NotFoundException('Order not found');
     if (order.status !== OrderStatus.PENDING_PAYMENT) {
       throw new BadRequestException('Order is not awaiting payment');
     }
