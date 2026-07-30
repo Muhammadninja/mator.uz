@@ -1,11 +1,11 @@
 import { Controller, Get, Post, UseGuards } from '@nestjs/common';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ApiExcludeController } from '@nestjs/swagger';
 import { BlueprintTokenGuard } from './blueprint-token.guard';
 import { mintTicket } from './blueprint-auth';
-import { parseSchema } from '../../scripts/parse-schema';
-import type { BlueprintGraph } from '../../scripts/parse-schema';
+import { buildBlueprint } from './schema-blueprint';
+import type { BlueprintPayload } from './schema-blueprint';
 
 /**
  * Operator-only HTTP surface for the 3D blueprint. Every route requires the
@@ -19,27 +19,42 @@ import type { BlueprintGraph } from '../../scripts/parse-schema';
 export class BlueprintController {
   // Parsing the 1.9k-line schema is cheap but pointless to repeat per request;
   // it only changes on deploy, so cache the first parse for the process's life.
-  private graphCache: BlueprintGraph | null = null;
+  private payloadCache: BlueprintPayload | null = null;
 
-  /** The node/edge/module graph the frontend renders. */
+  /** Domains + tables (with columns) + relations the 3D scene renders. */
   @Get('graph')
-  getGraph(): BlueprintGraph {
-    if (!this.graphCache) {
+  getGraph(): BlueprintPayload {
+    if (!this.payloadCache) {
       const schemaPath = join(process.cwd(), 'prisma', 'schema.prisma');
-      const graph = parseSchema(readFileSync(schemaPath, 'utf8'));
-      graph.generatedAt = new Date().toISOString();
-      this.graphCache = graph;
+      const payload = buildBlueprint(readFileSync(schemaPath, 'utf8'));
+      payload.generatedAt = new Date().toISOString();
+      payload.migrationVersion = latestMigration();
+      this.payloadCache = payload;
     }
-    return this.graphCache;
+    return this.payloadCache;
   }
 
   /**
-   * Mint a short-lived WS ticket. The admin server calls this (with the
-   * operator token), then hands the opaque ticket to the browser, which uses it
-   * in the `/blueprint?ticket=…` WebSocket URL. See {@link mintTicket}.
+   * Mint a short-lived WS ticket. Retained for the (optional) live-telemetry
+   * layer; the schema view itself needs only {@link getGraph}. See
+   * {@link mintTicket}.
    */
   @Post('ticket')
   getTicket(): { ticket: string; expiresAt: number } {
     return mintTicket();
+  }
+}
+
+/** Newest `prisma/migrations/<timestamp>_name` folder, for the header meta. */
+function latestMigration(): string | null {
+  try {
+    const dir = join(process.cwd(), 'prisma', 'migrations');
+    const names = readdirSync(dir, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name)
+      .sort();
+    return names.length ? names[names.length - 1] : null;
+  } catch {
+    return null;
   }
 }

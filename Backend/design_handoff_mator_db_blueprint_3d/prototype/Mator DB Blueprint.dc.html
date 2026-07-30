@@ -1,0 +1,791 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+<style>
+  html, body { margin:0; padding:0; }
+  * { box-sizing:border-box; }
+  a { color:inherit; text-decoration:none; }
+  a:hover { opacity:.7; }
+  ::-webkit-scrollbar { width:10px; height:10px; }
+  ::-webkit-scrollbar-track { background:transparent; }
+  ::-webkit-scrollbar-thumb { background:#8f8f8f55; border-radius:8px; }
+  input::placeholder { color:#9a9a9a; }
+</style>
+</helmet>
+<div style="{{ pageStyle }}">
+
+  <header style="{{ headerStyle }}">
+    <div style="display:flex; align-items:center; gap:11px; padding-right:20px;">
+      <div style="{{ wheelStyle }}"><div style="{{ wheelDotStyle }}"></div></div>
+      <div style="display:flex; flex-direction:column; line-height:1;">
+        <span style="font-family:Raleway, Figtree, sans-serif; font-weight:800; letter-spacing:.22em; font-size:14px;">MATOR</span>
+        <span style="{{ eyebrowStyle }}">DATABASE BLUEPRINT</span>
+      </div>
+    </div>
+
+    <div style="{{ metaRowStyle }}">
+      <sc-for list="{{ meta }}" as="m" hint-placeholder-count="4">
+        <div style="display:flex; flex-direction:column; gap:3px;">
+          <span style="{{ m.labelStyle }}">{{ m.label }}</span>
+          <span style="{{ m.valueStyle }}">{{ m.value }}</span>
+        </div>
+      </sc-for>
+    </div>
+
+    <div style="margin-left:auto; display:flex; align-items:center; gap:10px;">
+      <div style="{{ searchWrapStyle }}">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" style="flex:none; opacity:.5;"><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.6-3.6" /></svg>
+        <input value="{{ query }}" onChange="{{ onQuery }}" placeholder="Find table or column" style="{{ inputStyle }}" />
+      </div>
+      <button onClick="{{ onToggleTypes }}" style="{{ typesBtnStyle }}">{{ typesBtnLabel }}</button>
+      <button onClick="{{ onToggleTheme }}" style="{{ themeBtnStyle }}">{{ themeBtnLabel }}</button>
+    </div>
+  </header>
+
+  <div style="display:flex; align-items:flex-start; min-height:0;">
+
+    <nav style="{{ navStyle }}">
+      <span style="{{ navTitleStyle }}">DOMAINS</span>
+      <sc-for list="{{ domainNav }}" as="d" hint-placeholder-count="6">
+        <button onClick="{{ d.act }}" style="{{ d.style }}">
+          <span style="{{ d.dotStyle }}"></span>
+          <span style="flex:1; text-align:left; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ d.label }}</span>
+          <span style="{{ d.countStyle }}">{{ d.count }}</span>
+        </button>
+      </sc-for>
+
+      <span style="{{ navTitleStyle }}">JUMP TO</span>
+      <a href="#enums" style="{{ navLinkStyle }}">Enum reference</a>
+      <a href="#relations" style="{{ navLinkStyle }}">Relationship map</a>
+      <a href="#conventions" style="{{ navLinkStyle }}">Conventions &amp; indexes</a>
+
+      <span style="{{ navTitleStyle }}">LEGEND</span>
+      <sc-for list="{{ legend }}" as="l" hint-placeholder-count="5">
+        <div style="display:flex; align-items:center; gap:9px; padding:5px 2px;">
+          <span style="{{ l.badgeStyle }}">{{ l.key }}</span>
+          <span style="{{ l.textStyle }}">{{ l.text }}</span>
+        </div>
+      </sc-for>
+    </nav>
+
+    <main style="flex:1; min-width:0; padding:26px 28px 60px; display:flex; flex-direction:column; gap:34px;">
+
+      <section style="display:flex; flex-direction:column; gap:14px;">
+        <div style="display:flex; align-items:baseline; gap:12px; flex-wrap:wrap;">
+          <h1 style="{{ h1Style }}">Schema blueprint</h1>
+          <span style="{{ subtitleStyle }}">{{ subtitle }}</span>
+        </div>
+        <div style="{{ statRowStyle }}">
+          <sc-for list="{{ stats }}" as="s" hint-placeholder-count="4">
+            <div style="{{ s.cardStyle }}">
+              <span style="{{ s.valueStyle }}">{{ s.value }}</span>
+              <span style="{{ s.labelStyle }}">{{ s.label }}</span>
+            </div>
+          </sc-for>
+        </div>
+      </section>
+
+      <sc-for list="{{ domains }}" as="d" hint-placeholder-count="3">
+        <section id="{{ d.id }}" style="display:flex; flex-direction:column; gap:14px;">
+          <div style="{{ d.headStyle }}">
+            <span style="{{ d.dotStyle }}"></span>
+            <h2 style="{{ d.titleStyle }}">{{ d.label }}</h2>
+            <span style="{{ d.countPillStyle }}">{{ d.countLabel }}</span>
+            <span style="{{ d.noteStyle }}">{{ d.note }}</span>
+          </div>
+          <div style="{{ d.gridStyle }}">
+            <sc-for list="{{ d.tables }}" as="t" hint-placeholder-count="4">
+              <article style="{{ t.cardStyle }}">
+                <div style="{{ t.headStyle }}">
+                  <span style="{{ t.nameStyle }}">{{ t.name }}</span>
+                  <span style="{{ t.colCountStyle }}">{{ t.colCount }}</span>
+                </div>
+                <p style="{{ t.descStyle }}">{{ t.desc }}</p>
+                <div style="display:flex; flex-direction:column;">
+                  <sc-for list="{{ t.columns }}" as="c" hint-placeholder-count="5">
+                    <div style="{{ c.rowStyle }}">
+                      <span style="{{ c.keyStyle }}">{{ c.key }}</span>
+                      <span style="{{ c.nameStyle }}">{{ c.name }}</span>
+                      <span style="{{ c.typeStyle }}">{{ c.type }}</span>
+                      <span style="{{ c.noteStyle }}">{{ c.note }}</span>
+                    </div>
+                  </sc-for>
+                </div>
+                <sc-if value="{{ t.hasRefs }}" hint-placeholder-val="{{ false }}">
+                  <div style="{{ t.refsWrapStyle }}">
+                    <sc-for list="{{ t.refs }}" as="r" hint-placeholder-count="2">
+                      <span style="{{ r.style }}">{{ r.text }}</span>
+                    </sc-for>
+                  </div>
+                </sc-if>
+              </article>
+            </sc-for>
+          </div>
+        </section>
+      </sc-for>
+
+      <sc-if value="{{ isEmpty }}" hint-placeholder-val="{{ false }}">
+        <div style="{{ emptyStyle }}">No table or column matches “{{ query }}”.</div>
+      </sc-if>
+
+      <section id="enums" style="display:flex; flex-direction:column; gap:14px;">
+        <div style="{{ plainHeadStyle }}">
+          <h2 style="{{ plainTitleStyle }}">Enum reference</h2>
+          <span style="{{ plainNoteStyle }}">Stored as Postgres enums; the UI maps every value to a status tone.</span>
+        </div>
+        <div style="{{ enumGridStyle }}">
+          <sc-for list="{{ enums }}" as="e" hint-placeholder-count="6">
+            <div style="{{ e.cardStyle }}">
+              <span style="{{ e.nameStyle }}">{{ e.name }}</span>
+              <div style="display:flex; flex-wrap:wrap; gap:6px;">
+                <sc-for list="{{ e.values }}" as="v" hint-placeholder-count="4">
+                  <span style="{{ v.style }}">{{ v.label }}</span>
+                </sc-for>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+      </section>
+
+      <section id="relations" style="display:flex; flex-direction:column; gap:14px;">
+        <div style="{{ plainHeadStyle }}">
+          <h2 style="{{ plainTitleStyle }}">Relationship map</h2>
+          <span style="{{ plainNoteStyle }}">Every foreign key in the schema, with cardinality and delete behaviour.</span>
+        </div>
+        <div style="{{ relTableStyle }}">
+          <div style="{{ relHeadRowStyle }}">
+            <span>Parent</span><span>Card.</span><span>Child</span><span>Foreign key</span><span>On delete</span>
+          </div>
+          <sc-for list="{{ relations }}" as="r" hint-placeholder-count="8">
+            <div style="{{ r.rowStyle }}">
+              <span style="{{ r.monoStyle }}">{{ r.parent }}</span>
+              <span style="{{ r.cardStyle }}">{{ r.card }}</span>
+              <span style="{{ r.monoStyle }}">{{ r.child }}</span>
+              <span style="{{ r.fkStyle }}">{{ r.fk }}</span>
+              <span style="{{ r.onDeleteStyle }}">{{ r.onDelete }}</span>
+            </div>
+          </sc-for>
+        </div>
+      </section>
+
+      <section id="conventions" style="display:flex; flex-direction:column; gap:14px;">
+        <div style="{{ plainHeadStyle }}">
+          <h2 style="{{ plainTitleStyle }}">Conventions, indexes &amp; rules</h2>
+          <span style="{{ plainNoteStyle }}">Read this before adding a table.</span>
+        </div>
+        <div style="{{ noteGridStyle }}">
+          <sc-for list="{{ notes }}" as="n" hint-placeholder-count="6">
+            <div style="{{ n.cardStyle }}">
+              <span style="{{ n.titleStyle }}">{{ n.title }}</span>
+              <ul style="{{ n.listStyle }}">
+                <sc-for list="{{ n.items }}" as="i" hint-placeholder-count="3">
+                  <li style="{{ i.style }}">{{ i.text }}</li>
+                </sc-for>
+              </ul>
+            </div>
+          </sc-for>
+        </div>
+      </section>
+
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1560,&quot;height&quot;:1000},&quot;theme&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;dark&quot;,&quot;light&quot;],&quot;default&quot;:&quot;dark&quot;,&quot;tsType&quot;:&quot;'dark'|'light'&quot;,&quot;section&quot;:&quot;Appearance&quot;}}">
+class Component extends DCLogic {
+  state = { theme: null, query: "", showTypes: true, domain: "all" };
+
+  T = {
+    light: { bg: "#ffffff", bg2: "#f3f3f3", card: "#fafafa", panel: "#ffffff", text: "#050505", muted: "#707070", faint: "#9a9a9a", border: "#d6d6d6", divider: "#ececec", chip: "#f0f0f0" },
+    dark:  { bg: "#050505", bg2: "#141414", card: "#111111", panel: "#0b0b0b", text: "#ffffff", muted: "#8f8f8f", faint: "#6a6a6a", border: "#2a2a2a", divider: "#1f1f1f", chip: "#1a1a1a" }
+  };
+
+  DOMAINS = [
+    { id: "identity", label: "Identity & Garage", color: "#3b82f6", note: "Who is buying, where they ship, what they drive." },
+    { id: "catalog", label: "Catalog & Inventory", color: "#8b5cf6", note: "Master parts, dealer listings, stock and media." },
+    { id: "fitment", label: "Vehicle & Fitment", color: "#06b6d4", note: "Powers the 3D Fitment Studio and “Check if it fits”." },
+    { id: "commerce", label: "Commerce", color: "#22c55e", note: "Cart → order → payment → shipment → refund." },
+    { id: "engagement", label: "Engagement", color: "#f59e0b", note: "Reviews, favorites, AI chat, promotions." },
+    { id: "platform", label: "Platform & Audit", color: "#ef4444", note: "Staff accounts, permissions, settings, audit trail." }
+  ];
+
+  TABLES = [
+    { d: "identity", name: "users", desc: "Buyer account. Guest-first: a row is created lazily on first auth.", cols: [
+      ["PK", "id", "uuid", "gen_random_uuid()"],
+      ["", "phone", "text", "unique, E.164 (+998…)"],
+      ["", "email", "text", "nullable, unique"],
+      ["", "full_name", "text", "nullable"],
+      ["", "locale", "locale_code", "ru | en | uz"],
+      ["", "status", "user_status", "active | blocked"],
+      ["", "created_at", "timestamptz", "now()"],
+      ["", "last_seen_at", "timestamptz", "nullable"]
+    ]},
+    { d: "identity", name: "user_sessions", desc: "Refresh tokens per device; revoked on logout.", cols: [
+      ["PK", "id", "uuid", ""],
+      ["FK", "user_id", "uuid", "→ users.id"],
+      ["", "device", "text", "UA fingerprint"],
+      ["", "refresh_token_hash", "text", "sha256"],
+      ["", "expires_at", "timestamptz", ""],
+      ["", "revoked_at", "timestamptz", "nullable"]
+    ]},
+    { d: "identity", name: "addresses", desc: "Shipping addresses reused at checkout.", cols: [
+      ["PK", "id", "uuid", ""],
+      ["FK", "user_id", "uuid", "→ users.id"],
+      ["", "label", "text", "Home / Work"],
+      ["", "region", "text", "Tashkent, Samarqand…"],
+      ["", "line1", "text", ""],
+      ["", "landmark", "text", "nullable"],
+      ["", "geo", "point", "nullable, courier hint"],
+      ["", "is_default", "boolean", "false"]
+    ]},
+    { d: "identity", name: "garage_vehicles", desc: "A user's saved cars. Drives fitment checks across the app.", cols: [
+      ["PK", "id", "uuid", ""],
+      ["FK", "user_id", "uuid", "→ users.id"],
+      ["FK", "trim_id", "uuid", "→ vehicle_trims.id"],
+      ["", "nickname", "text", "“Oq Lacetti”"],
+      ["", "vin", "char(17)", "nullable, unique per user"],
+      ["", "plate", "text", "nullable"],
+      ["", "year", "smallint", "check 1980–2030"],
+      ["", "mileage_km", "integer", "nullable"],
+      ["", "is_primary", "boolean", "one true per user"]
+    ]},
+
+    { d: "catalog", name: "dealers", desc: "Seller storefront. MATOR Certified is a flag here.", cols: [
+      ["PK", "id", "uuid", ""],
+      ["", "name", "text", ""],
+      ["", "slug", "text", "unique"],
+      ["", "region", "text", ""],
+      ["", "status", "dealer_status", "pending | active | suspended"],
+      ["", "is_certified", "boolean", "false"],
+      ["", "has_lowest_price", "boolean", "false"],
+      ["", "commission_bps", "smallint", "default 700 (7%)"],
+      ["", "gmv_cents", "bigint", "materialized nightly"],
+      ["", "joined_at", "timestamptz", ""]
+    ]},
+    { d: "catalog", name: "categories", desc: "Self-referencing tree behind the colorful category grid.", cols: [
+      ["PK", "id", "uuid", ""],
+      ["FK", "parent_id", "uuid", "→ categories.id, nullable"],
+      ["", "slug", "text", "unique"],
+      ["", "name_i18n", "jsonb", "{ ru, en, uz }"],
+      ["", "icon_key", "text", "SVG asset key"],
+      ["", "accent_hex", "char(7)", "grid tile color"],
+      ["", "sort_order", "smallint", ""]
+    ]},
+    { d: "catalog", name: "brands", desc: "Part manufacturers: BOSCH, Sangsin, ACDelco…", cols: [
+      ["PK", "id", "uuid", ""],
+      ["", "name", "text", "unique"],
+      ["", "country", "char(2)", "nullable"],
+      ["", "tier", "brand_tier", "oem | aftermarket"],
+      ["", "logo_url", "text", "nullable"]
+    ]},
+    { d: "catalog", name: "parts", desc: "Master SKU — brand-level truth, independent of any dealer.", cols: [
+      ["PK", "id", "uuid", ""],
+      ["FK", "brand_id", "uuid", "→ brands.id"],
+      ["FK", "category_id", "uuid", "→ categories.id"],
+      ["", "sku", "text", "unique per brand"],
+      ["", "name_i18n", "jsonb", "{ ru, en, uz }"],
+      ["", "spec", "jsonb", "dimensions, material…"],
+      ["", "is_universal", "boolean", "skips fitment checks"],
+      ["", "status", "part_status", "draft | live | archived"]
+    ]},
+    { d: "catalog", name: "part_media", desc: "Ordered images per master part.", cols: [
+      ["PK", "id", "uuid", ""],
+      ["FK", "part_id", "uuid", "→ parts.id"],
+      ["", "url", "text", ""],
+      ["", "kind", "media_kind", "photo | diagram | box"],
+      ["", "sort_order", "smallint", ""]
+    ]},
+    { d: "catalog", name: "listings", desc: "A dealer's offer of a part: price, stock, moderation state.", cols: [
+      ["PK", "id", "uuid", ""],
+      ["FK", "part_id", "uuid", "→ parts.id"],
+      ["FK", "dealer_id", "uuid", "→ dealers.id"],
+      ["", "price_cents", "bigint", "UZS, integer only"],
+      ["", "compare_at_cents", "bigint", "nullable → savings badge"],
+      ["", "condition", "listing_condition", "new | refurbished | used"],
+      ["", "warranty_months", "smallint", "0"],
+      ["", "status", "listing_status", "pending | live | rejected | paused"],
+      ["", "UQ", "(part_id, dealer_id)", "one offer per dealer"]
+    ]},
+    { d: "catalog", name: "inventory", desc: "Stock per listing per warehouse; reserved on checkout.", cols: [
+      ["PK", "id", "uuid", ""],
+      ["FK", "listing_id", "uuid", "→ listings.id"],
+      ["", "warehouse", "text", "Tashkent-1"],
+      ["", "on_hand", "integer", "check ≥ 0"],
+      ["", "reserved", "integer", "check ≥ 0"],
+      ["", "restock_eta", "date", "nullable"]
+    ]},
+
+    { d: "fitment", name: "vehicle_makes", desc: "Chevrolet, Ravon, Daewoo… seeds the Shop-by-vehicle row.", cols: [
+      ["PK", "id", "uuid", ""],
+      ["", "name", "text", "unique"],
+      ["", "logo_url", "text", "nullable"],
+      ["", "popularity", "smallint", "UZ market ordering"]
+    ]},
+    { d: "fitment", name: "vehicle_models", desc: "Lacetti, Cobalt, Gentra, Tracker, Damas, Nexia…", cols: [
+      ["PK", "id", "uuid", ""],
+      ["FK", "make_id", "uuid", "→ vehicle_makes.id"],
+      ["", "name", "text", ""],
+      ["", "body_type", "body_type", "sedan | hatch | suv | van"],
+      ["", "silhouette_key", "text", "SVG/GLB asset key"],
+      ["", "UQ", "(make_id, name)", ""]
+    ]},
+    { d: "fitment", name: "vehicle_trims", desc: "The bindable unit: engine + platform + year range (“1.5L J200 2013–2024”).", cols: [
+      ["PK", "id", "uuid", ""],
+      ["FK", "model_id", "uuid", "→ vehicle_models.id"],
+      ["", "engine_code", "text", "J200 / T250"],
+      ["", "displacement_l", "numeric(2,1)", "1.5"],
+      ["", "year_from", "smallint", ""],
+      ["", "year_to", "smallint", "nullable = present"],
+      ["", "gearbox", "gearbox_type", "mt | at | cvt"],
+      ["", "model_glb_url", "text", "3D mesh for the studio"]
+    ]},
+    { d: "fitment", name: "anatomy_nodes", desc: "The 7 hotspots on the 3D car. World-space coords live here.", cols: [
+      ["PK", "id", "uuid", ""],
+      ["", "key", "node_key", "engine | front_brakes | …"],
+      ["", "label_i18n", "jsonb", "{ ru, en, uz }"],
+      ["FK", "category_id", "uuid", "→ categories.id, default filter"],
+      ["", "pos_x", "numeric(4,2)", "-0.86"],
+      ["", "pos_y", "numeric(4,2)", "0.34"],
+      ["", "pos_z", "numeric(4,2)", "1.30"],
+      ["", "sort_order", "smallint", ""]
+    ]},
+    { d: "fitment", name: "trim_node_state", desc: "Per-trim mapping progress → node color and the fitment % bar.", cols: [
+      ["PK", "id", "uuid", ""],
+      ["FK", "trim_id", "uuid", "→ vehicle_trims.id"],
+      ["FK", "node_id", "uuid", "→ anatomy_nodes.id"],
+      ["", "verified", "boolean", "false → yellow"],
+      ["", "verified_source", "verify_source", "vin | universal | import"],
+      ["FK", "verified_by", "uuid", "→ admin_users.id, nullable"],
+      ["", "UQ", "(trim_id, node_id)", ""]
+    ]},
+    { d: "fitment", name: "fitment_links", desc: "Part ⇄ trim ⇄ node. The core many-to-many of the whole platform.", cols: [
+      ["PK", "id", "uuid", ""],
+      ["FK", "part_id", "uuid", "→ parts.id"],
+      ["FK", "trim_id", "uuid", "→ vehicle_trims.id"],
+      ["FK", "node_id", "uuid", "→ anatomy_nodes.id"],
+      ["", "position", "fit_position", "front | rear | left | right | any"],
+      ["", "confidence", "fit_confidence", "confirmed | probable | unverified"],
+      ["", "source", "fit_source", "manual | copy | ai | import"],
+      ["FK", "created_by", "uuid", "→ admin_users.id"],
+      ["", "UQ", "(part_id, trim_id, node_id, position)", ""]
+    ]},
+    { d: "fitment", name: "oem_cross_refs", desc: "OEM number graph feeding the AI cross-reference banner.", cols: [
+      ["PK", "id", "uuid", ""],
+      ["FK", "part_id", "uuid", "→ parts.id"],
+      ["", "oem_number", "text", "GM 96484900"],
+      ["", "oem_brand", "text", "GM / Daewoo"],
+      ["", "confidence", "numeric(3,2)", "0.00–1.00"],
+      ["", "IDX", "oem_number", "trigram + btree"]
+    ]},
+    { d: "fitment", name: "fitment_imports", desc: "CSV/TecDoc batch runs, kept for rollback.", cols: [
+      ["PK", "id", "uuid", ""],
+      ["FK", "uploaded_by", "uuid", "→ admin_users.id"],
+      ["", "filename", "text", ""],
+      ["", "rows_total", "integer", ""],
+      ["", "rows_applied", "integer", ""],
+      ["", "status", "import_status", "queued | running | done | failed"],
+      ["", "error_log", "jsonb", "nullable"]
+    ]},
+
+    { d: "commerce", name: "carts", desc: "One open cart per user; guests get a device-scoped cart.", cols: [
+      ["PK", "id", "uuid", ""],
+      ["FK", "user_id", "uuid", "→ users.id, nullable (guest)"],
+      ["", "device_key", "text", "nullable, guest merge key"],
+      ["FK", "vehicle_id", "uuid", "→ garage_vehicles.id, fit context"],
+      ["", "status", "cart_status", "open | converted | abandoned"]
+    ]},
+    { d: "commerce", name: "cart_items", desc: "Price is re-validated at checkout, never trusted from the client.", cols: [
+      ["PK", "id", "uuid", ""],
+      ["FK", "cart_id", "uuid", "→ carts.id"],
+      ["FK", "listing_id", "uuid", "→ listings.id"],
+      ["", "qty", "smallint", "check > 0"],
+      ["", "fit_state", "fit_state", "fits | unknown | does_not_fit"],
+      ["", "UQ", "(cart_id, listing_id)", ""]
+    ]},
+    { d: "commerce", name: "orders", desc: "Immutable header. Money is stored in integer UZS cents.", cols: [
+      ["PK", "id", "uuid", ""],
+      ["", "number", "text", "unique, MTR-24-000142"],
+      ["FK", "user_id", "uuid", "→ users.id"],
+      ["FK", "address_id", "uuid", "→ addresses.id"],
+      ["", "status", "order_status", "processing → delivered"],
+      ["", "subtotal_cents", "bigint", ""],
+      ["", "delivery_cents", "bigint", ""],
+      ["", "discount_cents", "bigint", "0"],
+      ["", "total_cents", "bigint", "generated"],
+      ["", "placed_at", "timestamptz", ""]
+    ]},
+    { d: "commerce", name: "order_items", desc: "Snapshot of the listing at purchase time — never joins for price.", cols: [
+      ["PK", "id", "uuid", ""],
+      ["FK", "order_id", "uuid", "→ orders.id"],
+      ["FK", "listing_id", "uuid", "→ listings.id, nullable"],
+      ["FK", "dealer_id", "uuid", "→ dealers.id"],
+      ["", "part_name", "text", "frozen copy"],
+      ["", "sku", "text", "frozen copy"],
+      ["", "unit_price_cents", "bigint", "frozen"],
+      ["", "qty", "smallint", ""],
+      ["", "commission_cents", "bigint", "at order time"]
+    ]},
+    { d: "commerce", name: "payments", desc: "Payme / Click / Uzum / cash-on-delivery attempts.", cols: [
+      ["PK", "id", "uuid", ""],
+      ["FK", "order_id", "uuid", "→ orders.id"],
+      ["", "provider", "payment_provider", "payme | click | uzum | cod"],
+      ["", "provider_ref", "text", "nullable, unique"],
+      ["", "amount_cents", "bigint", ""],
+      ["", "status", "payment_status", "pending | paid | failed"],
+      ["", "paid_at", "timestamptz", "nullable"]
+    ]},
+    { d: "commerce", name: "shipments", desc: "One per dealer per order — split shipments are normal.", cols: [
+      ["PK", "id", "uuid", ""],
+      ["FK", "order_id", "uuid", "→ orders.id"],
+      ["FK", "dealer_id", "uuid", "→ dealers.id"],
+      ["", "carrier", "text", "nullable"],
+      ["", "tracking_code", "text", "nullable"],
+      ["", "status", "shipment_status", "packing → delivered"],
+      ["", "eta", "date", "nullable"]
+    ]},
+    { d: "commerce", name: "shipment_events", desc: "Append-only timeline powering the tracking screen.", cols: [
+      ["PK", "id", "uuid", ""],
+      ["FK", "shipment_id", "uuid", "→ shipments.id"],
+      ["", "state", "shipment_status", ""],
+      ["", "note_i18n", "jsonb", "nullable"],
+      ["", "occurred_at", "timestamptz", ""]
+    ]},
+    { d: "commerce", name: "refunds", desc: "Partial refunds allowed; sum is checked against the order total.", cols: [
+      ["PK", "id", "uuid", ""],
+      ["FK", "order_id", "uuid", "→ orders.id"],
+      ["FK", "issued_by", "uuid", "→ admin_users.id"],
+      ["", "amount_cents", "bigint", ""],
+      ["", "reason", "refund_reason", "wrong_fit | damaged | late | other"],
+      ["", "status", "refund_status", "requested | approved | paid | denied"]
+    ]},
+
+    { d: "engagement", name: "reviews", desc: "One review per user per order item; drives the row rating.", cols: [
+      ["PK", "id", "uuid", ""],
+      ["FK", "user_id", "uuid", "→ users.id"],
+      ["FK", "part_id", "uuid", "→ parts.id"],
+      ["FK", "order_item_id", "uuid", "→ order_items.id, verified badge"],
+      ["", "rating", "smallint", "check 1–5"],
+      ["", "body", "text", "nullable"],
+      ["", "status", "moderation_status", "pending | published | hidden"],
+      ["", "UQ", "(user_id, order_item_id)", ""]
+    ]},
+    { d: "engagement", name: "favorites", desc: "Saved parts. Composite PK, no surrogate id.", cols: [
+      ["PK", "user_id", "uuid", "→ users.id"],
+      ["PK", "part_id", "uuid", "→ parts.id"],
+      ["", "created_at", "timestamptz", "now()"]
+    ]},
+    { d: "engagement", name: "chat_threads", desc: "AI assistant conversations, optionally scoped to a car.", cols: [
+      ["PK", "id", "uuid", ""],
+      ["FK", "user_id", "uuid", "→ users.id"],
+      ["FK", "vehicle_id", "uuid", "→ garage_vehicles.id, nullable"],
+      ["", "title", "text", "auto-summarized"],
+      ["", "last_message_at", "timestamptz", ""]
+    ]},
+    { d: "engagement", name: "chat_messages", desc: "Role-tagged turns; tool calls stored as jsonb.", cols: [
+      ["PK", "id", "uuid", ""],
+      ["FK", "thread_id", "uuid", "→ chat_threads.id"],
+      ["", "role", "chat_role", "user | assistant | system"],
+      ["", "content", "text", ""],
+      ["", "tool_payload", "jsonb", "nullable"],
+      ["", "created_at", "timestamptz", ""]
+    ]},
+    { d: "engagement", name: "promotions", desc: "Campaign + code. Scope is a jsonb rule set.", cols: [
+      ["PK", "id", "uuid", ""],
+      ["", "code", "text", "unique, nullable (auto promo)"],
+      ["", "kind", "promo_kind", "percent | fixed | free_delivery"],
+      ["", "value", "integer", "bps or cents"],
+      ["", "scope", "jsonb", "{ categories[], dealers[] }"],
+      ["", "starts_at", "timestamptz", ""],
+      ["", "ends_at", "timestamptz", ""]
+    ]},
+
+    { d: "platform", name: "admin_users", desc: "Staff logins for the admin panel and Fitment Studio.", cols: [
+      ["PK", "id", "uuid", ""],
+      ["", "email", "text", "unique"],
+      ["", "full_name", "text", ""],
+      ["FK", "dealer_id", "uuid", "→ dealers.id, nullable (dealer staff)"],
+      ["", "status", "admin_status", "active | invited | disabled"],
+      ["", "last_login_at", "timestamptz", "nullable"]
+    ]},
+    { d: "platform", name: "admin_roles", desc: "super_admin, ops, catalog, read_only. Permissions as jsonb.", cols: [
+      ["PK", "id", "uuid", ""],
+      ["", "key", "admin_role", "unique"],
+      ["", "permissions", "jsonb", "{ orders:'rw', settings:'r' }"]
+    ]},
+    { d: "platform", name: "admin_user_roles", desc: "Join table — a user may hold several roles.", cols: [
+      ["PK", "admin_user_id", "uuid", "→ admin_users.id"],
+      ["PK", "role_id", "uuid", "→ admin_roles.id"],
+      ["", "granted_at", "timestamptz", "now()"]
+    ]},
+    { d: "platform", name: "audit_log", desc: "Every mutating admin action. Never updated, never deleted.", cols: [
+      ["PK", "id", "bigserial", ""],
+      ["FK", "actor_id", "uuid", "→ admin_users.id"],
+      ["", "action", "text", "fitment.bind"],
+      ["", "entity", "text", "fitment_links"],
+      ["", "entity_id", "uuid", "nullable"],
+      ["", "diff", "jsonb", "before / after"],
+      ["", "ip", "inet", ""],
+      ["", "created_at", "timestamptz", "now(), IDX brin"]
+    ]},
+    { d: "platform", name: "settings", desc: "Single-row-per-key config: commission, moderation rules, feature flags.", cols: [
+      ["PK", "key", "text", ""],
+      ["", "value", "jsonb", ""],
+      ["FK", "updated_by", "uuid", "→ admin_users.id"],
+      ["", "updated_at", "timestamptz", ""]
+    ]}
+  ];
+
+  ENUMS = [
+    { name: "order_status", vals: [["processing", "info"], ["shipped", "info"], ["delivered", "good"], ["refunded", "bad"], ["cancelled", "bad"]] },
+    { name: "listing_status", vals: [["pending", "warn"], ["live", "good"], ["rejected", "bad"], ["paused", "mute"]] },
+    { name: "dealer_status", vals: [["pending", "warn"], ["active", "good"], ["suspended", "bad"]] },
+    { name: "fit_confidence", vals: [["confirmed", "good"], ["probable", "warn"], ["unverified", "bad"]] },
+    { name: "fit_state", vals: [["fits", "good"], ["unknown", "warn"], ["does_not_fit", "bad"]] },
+    { name: "payment_status", vals: [["pending", "warn"], ["paid", "good"], ["failed", "bad"]] },
+    { name: "shipment_status", vals: [["packing", "mute"], ["in_transit", "info"], ["out_for_delivery", "info"], ["delivered", "good"], ["returned", "bad"]] },
+    { name: "node_key", vals: [["engine", "mute"], ["front_brakes", "mute"], ["rear_brakes", "mute"], ["suspension", "mute"], ["transmission", "mute"], ["electrical", "mute"], ["exhaust", "mute"]] },
+    { name: "admin_role", vals: [["super_admin", "info"], ["ops", "info"], ["catalog", "info"], ["read_only", "mute"]] },
+    { name: "locale_code", vals: [["ru", "mute"], ["en", "mute"], ["uz", "mute"]] }
+  ];
+
+  RELATIONS = [
+    ["users", "1 : N", "garage_vehicles", "user_id", "cascade"],
+    ["users", "1 : N", "addresses", "user_id", "cascade"],
+    ["users", "1 : N", "orders", "user_id", "restrict"],
+    ["vehicle_makes", "1 : N", "vehicle_models", "make_id", "restrict"],
+    ["vehicle_models", "1 : N", "vehicle_trims", "model_id", "restrict"],
+    ["vehicle_trims", "1 : N", "garage_vehicles", "trim_id", "restrict"],
+    ["vehicle_trims", "1 : N", "trim_node_state", "trim_id", "cascade"],
+    ["anatomy_nodes", "1 : N", "trim_node_state", "node_id", "restrict"],
+    ["parts", "N : M", "vehicle_trims", "fitment_links", "cascade"],
+    ["anatomy_nodes", "1 : N", "fitment_links", "node_id", "restrict"],
+    ["parts", "1 : N", "oem_cross_refs", "part_id", "cascade"],
+    ["brands", "1 : N", "parts", "brand_id", "restrict"],
+    ["categories", "1 : N", "categories", "parent_id", "restrict"],
+    ["categories", "1 : N", "parts", "category_id", "restrict"],
+    ["parts", "1 : N", "listings", "part_id", "cascade"],
+    ["dealers", "1 : N", "listings", "dealer_id", "restrict"],
+    ["listings", "1 : 1", "inventory", "listing_id", "cascade"],
+    ["carts", "1 : N", "cart_items", "cart_id", "cascade"],
+    ["orders", "1 : N", "order_items", "order_id", "restrict"],
+    ["orders", "1 : N", "payments", "order_id", "restrict"],
+    ["orders", "1 : N", "shipments", "order_id", "restrict"],
+    ["shipments", "1 : N", "shipment_events", "shipment_id", "cascade"],
+    ["orders", "1 : N", "refunds", "order_id", "restrict"],
+    ["order_items", "1 : 1", "reviews", "order_item_id", "set null"],
+    ["users", "N : M", "parts", "favorites", "cascade"],
+    ["users", "1 : N", "chat_threads", "user_id", "cascade"],
+    ["chat_threads", "1 : N", "chat_messages", "thread_id", "cascade"],
+    ["admin_users", "N : M", "admin_roles", "admin_user_roles", "cascade"],
+    ["admin_users", "1 : N", "audit_log", "actor_id", "restrict"]
+  ];
+
+  NOTES = [
+    { title: "Naming", items: [
+      "snake_case tables, plural; columns singular.",
+      "Primary key is always `id uuid default gen_random_uuid()`, except join tables (composite PK).",
+      "Foreign keys are `<singular_parent>_id`. No abbreviations.",
+      "Every table carries `created_at` / `updated_at timestamptz`; `updated_at` is set by trigger."
+    ]},
+    { title: "Money & i18n", items: [
+      "All money is `bigint` minor units of UZS — never float, never numeric.",
+      "Display formatting (`248 000 so'm`) happens in the client only.",
+      "User-facing strings are `jsonb` `{ ru, en, uz }`; `ru` is required, others fall back."
+    ]},
+    { title: "Soft state", items: [
+      "Nothing user-generated is hard-deleted: use `status` enums or `deleted_at`.",
+      "`order_items` freeze name / sku / price — reads must never join to `listings` for historic money.",
+      "`audit_log` is append-only; revoke UPDATE and DELETE at the role level."
+    ]},
+    { title: "Hot indexes", items: [
+      "`fitment_links (trim_id, node_id)` — the Fitment Studio's main read.",
+      "`fitment_links (part_id)` — “Check if it fits” on the product row.",
+      "`listings (part_id, status) INCLUDE (price_cents)` — cheapest live offer.",
+      "`oem_cross_refs (oem_number gin_trgm_ops)` — AI cross-reference search.",
+      "`orders (user_id, placed_at DESC)` and `orders (status, placed_at DESC)`."
+    ]},
+    { title: "Derived / cached", items: [
+      "Fitment % per trim = Σ node score ÷ node count (red 0, yellow .5, green 1) — computed, not stored.",
+      "`dealers.gmv_cents` and category coverage are materialized views refreshed nightly.",
+      "Part rating + review count are a materialized view, refreshed on review publish."
+    ]},
+    { title: "Integrity rules", items: [
+      "`UNIQUE (part_id, dealer_id)` on listings — one offer per dealer per part.",
+      "`UNIQUE (part_id, trim_id, node_id, position)` on fitment_links prevents duplicate binds.",
+      "`CHECK (reserved <= on_hand)` on inventory; reservation is a transactional decrement.",
+      "One `is_primary` garage vehicle per user, enforced by a partial unique index."
+    ]}
+  ];
+
+  tone(t, k) {
+    return { good: "#22c55e", info: "#3b82f6", warn: "#f59e0b", bad: "#ef4444", mute: t.muted }[k] || t.muted;
+  }
+
+  renderVals() {
+    const s = this.state;
+    const mode = s.theme || this.props.theme || "dark";
+    const t = this.T[mode] || this.T.dark;
+    const mono = "'JetBrains Mono', monospace";
+    const q = s.query.trim().toLowerCase();
+
+    const label = (v, sz) => "font-size:" + (sz || 9) + "px; letter-spacing:.18em; font-weight:800; text-transform:uppercase; color:" + t.faint + ";";
+    const card = "background:" + t.card + "; border:1px solid " + t.border + "; border-radius:14px;";
+
+    const domainOf = id => this.DOMAINS.find(d => d.id === id);
+    let tables = this.TABLES;
+    if (s.domain !== "all") tables = tables.filter(x => x.d === s.domain);
+    if (q) tables = tables.filter(x => (x.name + " " + x.desc + " " + x.cols.map(c => c[1] + c[3]).join(" ")).toLowerCase().includes(q));
+
+    const totalCols = this.TABLES.reduce((a, x) => a + x.cols.length, 0);
+    const fkCount = this.RELATIONS.length;
+
+    const badge = (k, color) => "min-width:26px; text-align:center; padding:2px 5px; border-radius:5px; font-family:" + mono + "; font-size:8.5px; font-weight:700; letter-spacing:.06em; color:" + color + "; background:" + color + "1f;";
+
+    return {
+      pageStyle: "min-height:100vh; background:" + t.bg + "; color:" + t.text + "; font-family:Figtree, sans-serif; -webkit-font-smoothing:antialiased;",
+      headerStyle: "position:sticky; top:0; z-index:30; display:flex; align-items:center; gap:22px; flex-wrap:wrap; padding:14px 28px; background:" + t.bg + "f2; backdrop-filter:blur(12px); border-bottom:1px solid " + t.border + ";",
+      wheelStyle: "width:26px; height:26px; border-radius:50%; border:3px solid " + t.text + "; display:grid; place-items:center;",
+      wheelDotStyle: "width:6px; height:6px; border-radius:50%; background:" + t.text + ";",
+      eyebrowStyle: label(8.5) + " margin-top:4px; letter-spacing:.26em;",
+
+      metaRowStyle: "display:flex; align-items:center; gap:22px; padding-left:22px; border-left:1px solid " + t.divider + ";",
+      meta: [
+        { label: "Engine", value: "PostgreSQL 16" },
+        { label: "Schema", value: "public · v1.0" },
+        { label: "Tables", value: String(this.TABLES.length) },
+        { label: "Owner", value: "platform@mator.uz" }
+      ].map(m => ({ ...m, labelStyle: label(8), valueStyle: "font-family:" + mono + "; font-size:12px; font-weight:600; color:" + t.text + ";" })),
+
+      query: s.query,
+      onQuery: e => this.setState({ query: e.target.value }),
+      searchWrapStyle: "display:flex; align-items:center; gap:8px; width:230px; padding:8px 12px; border-radius:9px; background:" + t.bg2 + "; border:1px solid " + t.border + "; color:" + t.muted + ";",
+      inputStyle: "flex:1; min-width:0; border:0; outline:0; background:transparent; color:" + t.text + "; font-size:12.5px; font-family:Figtree, sans-serif;",
+      typesBtnLabel: s.showTypes ? "Types on" : "Types off",
+      typesBtnStyle: "padding:9px 13px; border-radius:9px; cursor:pointer; font-size:12px; font-weight:700; font-family:Figtree, sans-serif; white-space:nowrap; border:1px solid " + t.border + "; background:" + (s.showTypes ? t.text : "transparent") + "; color:" + (s.showTypes ? t.bg : t.muted) + ";",
+      onToggleTypes: () => this.setState({ showTypes: !s.showTypes }),
+      themeBtnLabel: mode === "dark" ? "Light" : "Dark",
+      themeBtnStyle: "padding:9px 13px; border-radius:9px; cursor:pointer; font-size:12px; font-weight:700; font-family:Figtree, sans-serif; white-space:nowrap; border:1px solid " + t.border + "; background:transparent; color:" + t.muted + ";",
+      onToggleTheme: () => this.setState({ theme: mode === "dark" ? "light" : "dark" }),
+
+      navStyle: "position:sticky; top:65px; flex:none; width:232px; max-height:calc(100vh - 65px); overflow-y:auto; padding:22px 16px 30px; display:flex; flex-direction:column; gap:4px; border-right:1px solid " + t.border + ";",
+      navTitleStyle: label(8.5) + " padding:14px 8px 6px;",
+      navLinkStyle: "display:block; padding:8px 10px; border-radius:8px; font-size:12.5px; font-weight:600; color:" + t.muted + ";",
+      domainNav: [{ id: "all", label: "All domains", color: t.text, count: this.TABLES.length }].concat(
+        this.DOMAINS.map(d => ({ id: d.id, label: d.label, color: d.color, count: this.TABLES.filter(x => x.d === d.id).length }))
+      ).map(d => ({
+        label: d.label, count: d.count,
+        act: () => this.setState({ domain: d.id, query: "" }),
+        style: "display:flex; align-items:center; gap:9px; width:100%; padding:9px 10px; border-radius:9px; cursor:pointer; font-family:Figtree, sans-serif; font-size:12.5px; font-weight:600; text-align:left; border:1px solid " + (s.domain === d.id ? t.border : "transparent") + "; background:" + (s.domain === d.id ? t.bg2 : "transparent") + "; color:" + (s.domain === d.id ? t.text : t.muted) + ";",
+        dotStyle: "width:8px; height:8px; border-radius:3px; flex:none; background:" + d.color + ";",
+        countStyle: "font-family:" + mono + "; font-size:10.5px; color:" + t.faint + ";"
+      })),
+
+      legend: [
+        { key: "PK", color: "#f59e0b", text: "Primary key" },
+        { key: "FK", color: "#3b82f6", text: "Foreign key" },
+        { key: "UQ", color: "#8b5cf6", text: "Unique constraint" },
+        { key: "IDX", color: "#22c55e", text: "Indexed column" },
+        { key: "→", color: t.muted, text: "References table" }
+      ].map(l => ({ key: l.key, text: l.text, badgeStyle: badge(l.key, l.color), textStyle: "font-size:11.5px; color:" + t.muted + ";" })),
+
+      h1Style: "margin:0; font-size:30px; font-weight:800; letter-spacing:-.02em;",
+      subtitleStyle: "font-size:13.5px; color:" + t.muted + ";",
+      subtitle: "Marketplace, fitment graph and back-office in one Postgres schema.",
+      statRowStyle: "display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:10px;",
+      stats: [
+        { value: String(this.TABLES.length), label: "Tables" },
+        { value: String(totalCols), label: "Columns" },
+        { value: String(fkCount), label: "Relationships" },
+        { value: String(this.ENUMS.length), label: "Enum types" },
+        { value: "6", label: "Domains" }
+      ].map(x => ({ ...x, cardStyle: card + " padding:14px 16px; display:flex; flex-direction:column; gap:5px;", valueStyle: "font-family:" + mono + "; font-size:24px; font-weight:700; letter-spacing:-.02em;", labelStyle: label(8.5) })),
+
+      isEmpty: tables.length === 0,
+      domains: this.DOMAINS.filter(d => tables.some(x => x.d === d.id)).map(d => ({
+        id: d.id, label: d.label, note: d.note,
+        countLabel: tables.filter(x => x.d === d.id).length + " tables",
+        headStyle: "display:flex; align-items:center; gap:11px; flex-wrap:wrap; padding-bottom:10px; border-bottom:1px solid " + t.divider + ";",
+        dotStyle: "width:10px; height:10px; border-radius:3px; background:" + d.color + ";",
+        titleStyle: "margin:0; font-size:17px; font-weight:700; letter-spacing:-.01em;",
+        countPillStyle: "font-family:" + mono + "; font-size:10.5px; padding:3px 8px; border-radius:6px; color:" + d.color + "; background:" + d.color + "1f;",
+        noteStyle: "font-size:12.5px; color:" + t.muted + ";",
+        gridStyle: "display:grid; grid-template-columns:repeat(auto-fill, minmax(330px, 1fr)); gap:14px; align-items:start;",
+        tables: tables.filter(x => x.d === d.id).map(x => {
+          const refs = x.cols.filter(c => c[3].indexOf("→") === 0 || c[3].indexOf("→") > -1).map(c => c[3].slice(c[3].indexOf("→")).split(",")[0].trim());
+          return {
+            name: x.name, desc: x.desc, colCount: x.cols.length + " cols",
+            cardStyle: card + " padding:0; overflow:hidden; display:flex; flex-direction:column;",
+            headStyle: "display:flex; align-items:center; justify-content:space-between; gap:10px; padding:13px 15px; background:" + t.bg2 + "; border-bottom:1px solid " + t.border + "; border-left:3px solid " + d.color + ";",
+            nameStyle: "font-family:" + mono + "; font-size:13.5px; font-weight:700; letter-spacing:-.01em;",
+            colCountStyle: "font-family:" + mono + "; font-size:10px; color:" + t.faint + "; white-space:nowrap;",
+            descStyle: "margin:0; padding:11px 15px 9px; font-size:12px; line-height:1.5; color:" + t.muted + "; text-wrap:pretty;",
+            columns: x.cols.map((c, i) => {
+              const kind = c[0];
+              const kc = { PK: "#f59e0b", FK: "#3b82f6", UQ: "#8b5cf6", IDX: "#22c55e" }[kind];
+              return {
+                key: kind || "",
+                name: c[1], type: s.showTypes ? c[2] : "", note: c[3],
+                rowStyle: "display:grid; grid-template-columns:34px minmax(0,1.25fr) " + (s.showTypes ? "minmax(0,.95fr) " : "") + "minmax(0,1.35fr); align-items:center; gap:9px; padding:7px 15px; border-top:1px solid " + t.divider + "; background:" + (kind === "PK" ? "#f59e0b0a" : "transparent") + ";",
+                keyStyle: kind ? badge(kind, kc) : "font-size:8px;",
+                nameStyle: "font-family:" + mono + "; font-size:11.5px; font-weight:" + (kind ? 700 : 500) + "; color:" + t.text + "; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;",
+                typeStyle: "font-family:" + mono + "; font-size:10.5px; color:" + t.muted + "; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;",
+                noteStyle: "font-size:10.5px; color:" + t.faint + "; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"
+              };
+            }),
+            hasRefs: refs.length > 0,
+            refsWrapStyle: "display:flex; flex-wrap:wrap; gap:6px; padding:11px 15px 13px; border-top:1px solid " + t.divider + "; background:" + t.bg2 + "80;",
+            refs: refs.map(r => ({ text: r, style: "font-family:" + mono + "; font-size:9.5px; padding:3px 7px; border-radius:5px; color:#3b82f6; background:#3b82f61f; white-space:nowrap;" }))
+          };
+        })
+      })),
+
+      emptyStyle: card + " padding:40px; text-align:center; font-size:13px; color:" + t.muted + ";",
+
+      plainHeadStyle: "display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; padding-bottom:10px; border-bottom:1px solid " + t.divider + ";",
+      plainTitleStyle: "margin:0; font-size:17px; font-weight:700;",
+      plainNoteStyle: "font-size:12.5px; color:" + t.muted + ";",
+
+      enumGridStyle: "display:grid; grid-template-columns:repeat(auto-fill, minmax(290px, 1fr)); gap:12px;",
+      enums: this.ENUMS.map(e => ({
+        name: e.name,
+        cardStyle: card + " padding:14px 15px; display:flex; flex-direction:column; gap:10px;",
+        nameStyle: "font-family:" + mono + "; font-size:12.5px; font-weight:700;",
+        values: e.vals.map(v => {
+          const c = this.tone(t, v[1]);
+          return { label: v[0], style: "font-family:" + mono + "; font-size:10.5px; padding:4px 8px; border-radius:6px; color:" + c + "; background:" + c + "1f; border:1px solid " + c + "33; white-space:nowrap;" };
+        })
+      })),
+
+      relTableStyle: card + " overflow:hidden;",
+      relHeadRowStyle: "display:grid; grid-template-columns:1.2fr .5fr 1.2fr 1.4fr .7fr; gap:12px; padding:11px 16px; background:" + t.bg2 + "; " + label(8.5),
+      relations: this.RELATIONS.map((r, i) => ({
+        parent: r[0], card: r[1], child: r[2], fk: r[3], onDelete: r[4],
+        rowStyle: "display:grid; grid-template-columns:1.2fr .5fr 1.2fr 1.4fr .7fr; gap:12px; align-items:center; padding:9px 16px; border-top:1px solid " + t.divider + ";",
+        monoStyle: "font-family:" + mono + "; font-size:11.5px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;",
+        cardStyle: "font-family:" + mono + "; font-size:10.5px; color:" + (r[1] === "N : M" ? "#8b5cf6" : t.muted) + "; white-space:nowrap;",
+        fkStyle: "font-family:" + mono + "; font-size:10.5px; color:" + t.muted + "; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;",
+        onDeleteStyle: "font-family:" + mono + "; font-size:10px; padding:3px 7px; border-radius:5px; justify-self:start; white-space:nowrap; color:" + (r[4] === "cascade" ? "#ef4444" : r[4] === "restrict" ? "#3b82f6" : "#f59e0b") + "; background:" + (r[4] === "cascade" ? "#ef4444" : r[4] === "restrict" ? "#3b82f6" : "#f59e0b") + "1f;"
+      })),
+
+      noteGridStyle: "display:grid; grid-template-columns:repeat(auto-fill, minmax(320px, 1fr)); gap:12px; align-items:start;",
+      notes: this.NOTES.map(n => ({
+        title: n.title,
+        cardStyle: card + " padding:15px 17px; display:flex; flex-direction:column; gap:10px;",
+        titleStyle: "font-size:13.5px; font-weight:700;",
+        listStyle: "margin:0; padding-left:17px; display:flex; flex-direction:column; gap:7px;",
+        items: n.items.map(x => ({ text: x, style: "font-size:12px; line-height:1.55; color:" + t.muted + "; text-wrap:pretty;" }))
+      }))
+    };
+  }
+}
+</script>
+</body>
+</html>

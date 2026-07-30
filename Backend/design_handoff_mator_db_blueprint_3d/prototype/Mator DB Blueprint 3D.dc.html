@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+<script type="importmap">{"imports":{"three":"https://esm.sh/three@0.166.0","three/addons/":"https://esm.sh/three@0.166.0/examples/jsm/"}}</script>
+<script type="module" src="./dbgraph3d.js"></script>
+<style>
+  html, body { margin:0; padding:0; background:#050505; overflow:auto; }
+  * { box-sizing:border-box; }
+  a { color:#ffffff; text-decoration:none; }
+  a:hover { opacity:.7; }
+  ::-webkit-scrollbar { width:8px; height:8px; }
+  ::-webkit-scrollbar-track { background:transparent; }
+  ::-webkit-scrollbar-thumb { background:#2a2a2a; border-radius:8px; }
+  input::placeholder { color:#6a6a6a; }
+  @keyframes dbLive { 0%,100% { opacity:.35; } 50% { opacity:1; } }
+</style>
+</helmet>
+<div style="position:relative; width:100%; height:100vh; min-height:720px; min-width:1200px; overflow:hidden; background:#050505; color:#ffffff; font-family:Figtree, sans-serif;">
+
+  <x-import component-from-global-scope="dbgraph-stage" selected="{{ selected }}" domain-filter="{{ domain }}" query="{{ query }}" edges-mode="{{ edgesMode }}" hint-size="100%,100%" style="position:absolute; inset:0;"></x-import>
+
+  <div style="position:absolute; inset:0; pointer-events:none; background:radial-gradient(120% 90% at 50% 45%, transparent 52%, rgba(0,0,0,.78) 100%);"></div>
+
+  <header style="position:absolute; top:14px; left:14px; right:14px; z-index:20; display:flex; align-items:center; gap:12px;">
+    <div style="display:flex; align-items:center; gap:11px; padding:10px 16px; border-radius:13px; background:rgba(11,11,11,.86); backdrop-filter:blur(16px); border:1px solid #2a2a2a;">
+      <div style="width:24px; height:24px; border-radius:50%; border:3px solid #ffffff; display:grid; place-items:center;">
+        <div style="width:5px; height:5px; border-radius:50%; background:#ffffff;"></div>
+      </div>
+      <div style="display:flex; flex-direction:column; line-height:1;">
+        <span style="font-family:Raleway, Figtree, sans-serif; font-weight:800; letter-spacing:.22em; font-size:14px;">MATOR</span>
+        <span style="font-size:8.5px; letter-spacing:.26em; color:#6a6a6a; font-weight:700; margin-top:3px;">DATABASE BLUEPRINT · 3D</span>
+      </div>
+    </div>
+
+    <div style="display:flex; align-items:center; gap:20px; padding:10px 18px; border-radius:13px; background:rgba(11,11,11,.86); backdrop-filter:blur(16px); border:1px solid #2a2a2a;">
+      <sc-for list="{{ meta }}" as="m" hint-placeholder-count="4">
+        <div style="display:flex; flex-direction:column; gap:3px; white-space:nowrap;">
+          <span style="font-size:8px; letter-spacing:.18em; font-weight:800; text-transform:uppercase; color:#6a6a6a;">{{ m.label }}</span>
+          <span style="font-family:'JetBrains Mono', monospace; font-size:12px; font-weight:600;">{{ m.value }}</span>
+        </div>
+      </sc-for>
+    </div>
+
+    <div style="margin-left:auto; display:flex; align-items:center; gap:10px;">
+      <div style="display:flex; align-items:center; gap:8px; width:230px; padding:9px 13px; border-radius:11px; background:rgba(11,11,11,.86); backdrop-filter:blur(16px); border:1px solid #2a2a2a; color:#8f8f8f;">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" style="flex:none;"><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.6-3.6" /></svg>
+        <input value="{{ query }}" onChange="{{ onQuery }}" placeholder="Find table" style="flex:1; min-width:0; border:0; outline:0; background:transparent; color:#ffffff; font-size:12.5px; font-family:Figtree, sans-serif;" />
+      </div>
+      <div style="display:flex; align-items:center; gap:9px; padding:11px 14px; border-radius:11px; background:rgba(11,11,11,.86); backdrop-filter:blur(16px); border:1px solid #2a2a2a; white-space:nowrap;">
+        <span style="width:7px; height:7px; border-radius:50%; background:#22c55e; animation:dbLive 1.6s ease-in-out infinite;"></span>
+        <span style="font-size:10px; letter-spacing:.14em; font-weight:800; color:#22c55e;">GRAPH LIVE</span>
+        <span style="font-family:'JetBrains Mono', monospace; font-size:11.5px; color:#6a6a6a;">{{ fpsLabel }}</span>
+      </div>
+    </div>
+  </header>
+
+  <aside style="position:absolute; left:14px; top:92px; bottom:16px; z-index:15; width:250px; display:flex; flex-direction:column; gap:10px;">
+    <div style="flex:none; display:flex; flex-direction:column; padding:13px 12px; border-radius:14px; background:rgba(11,11,11,.86); backdrop-filter:blur(16px); border:1px solid #2a2a2a;">
+      <span style="font-size:8.5px; letter-spacing:.2em; font-weight:800; color:#6a6a6a; padding:2px 6px 8px;">DOMAIN TOWERS</span>
+      <sc-for list="{{ domainNav }}" as="d" hint-placeholder-count="7">
+        <button onClick="{{ d.act }}" style="{{ d.style }}">
+          <span style="{{ d.dotStyle }}"></span>
+          <span style="flex:1; text-align:left; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ d.label }}</span>
+          <span style="font-family:'JetBrains Mono', monospace; font-size:10.5px; color:#6a6a6a;">{{ d.count }}</span>
+        </button>
+      </sc-for>
+    </div>
+
+    <div style="flex:none; display:flex; flex-direction:column; gap:9px; padding:13px 14px; border-radius:14px; background:rgba(11,11,11,.86); backdrop-filter:blur(16px); border:1px solid #2a2a2a;">
+      <span style="font-size:8.5px; letter-spacing:.2em; font-weight:800; color:#6a6a6a;">CONNECTIONS</span>
+      <div style="display:flex; gap:6px;">
+        <sc-for list="{{ edgeModes }}" as="e" hint-placeholder-count="3">
+          <button onClick="{{ e.act }}" style="{{ e.style }}">{{ e.label }}</button>
+        </sc-for>
+      </div>
+      <sc-for list="{{ edgeLegend }}" as="l" hint-placeholder-count="3">
+        <div style="display:flex; align-items:center; gap:9px;">
+          <span style="{{ l.lineStyle }}"></span>
+          <span style="font-size:11px; color:#8f8f8f; line-height:1.35;">{{ l.text }}</span>
+        </div>
+      </sc-for>
+    </div>
+
+    <div style="flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; padding:13px 12px; border-radius:14px; background:rgba(11,11,11,.86); backdrop-filter:blur(16px); border:1px solid #2a2a2a;">
+      <span style="font-size:8.5px; letter-spacing:.2em; font-weight:800; color:#6a6a6a; padding:2px 6px 8px;">MOST CONNECTED</span>
+      <sc-for list="{{ hubs }}" as="h" hint-placeholder-count="6">
+        <button onClick="{{ h.act }}" style="{{ h.style }}">
+          <span style="{{ h.dotStyle }}"></span>
+          <span style="flex:1; text-align:left; font-family:'JetBrains Mono', monospace; font-size:11.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ h.name }}</span>
+          <span style="{{ h.countStyle }}">{{ h.count }}</span>
+        </button>
+      </sc-for>
+    </div>
+  </aside>
+
+  <div style="position:absolute; left:278px; bottom:16px; z-index:15; display:flex; gap:6px; flex-wrap:wrap;">
+    <button onClick="{{ onReset }}" style="padding:9px 13px; border-radius:10px; border:1px solid #2a2a2a; background:rgba(11,11,11,.86); backdrop-filter:blur(12px); color:#8f8f8f; font-size:11.5px; font-weight:700; cursor:pointer; font-family:Figtree, sans-serif; white-space:nowrap;" style-hover="color:#ffffff;">Reset view</button>
+    <button onClick="{{ onClear }}" style="padding:9px 13px; border-radius:10px; border:1px solid #2a2a2a; background:rgba(11,11,11,.86); backdrop-filter:blur(12px); color:#8f8f8f; font-size:11.5px; font-weight:700; cursor:pointer; font-family:Figtree, sans-serif; white-space:nowrap;" style-hover="color:#ffffff;">Clear selection</button>
+    <span style="padding:9px 13px; border-radius:10px; border:1px solid #2a2a2a; background:rgba(11,11,11,.6); color:#6a6a6a; font-size:11px; font-family:'JetBrains Mono', monospace; white-space:nowrap;">drag orbit · scroll zoom · hover to trace keys · F focus · R reset · Esc clear</span>
+    <sc-if value="{{ hasHover }}" hint-placeholder-val="{{ false }}">
+      <span style="padding:9px 13px; border-radius:10px; border:1px solid #4a4a4a; background:rgba(11,11,11,.9); color:#ffffff; font-size:11px; font-family:'JetBrains Mono', monospace; white-space:nowrap;">tracing {{ hoverLabel }}</span>
+    </sc-if>
+  </div>
+
+  <aside style="position:absolute; right:14px; top:92px; bottom:16px; z-index:15; width:392px; display:flex; flex-direction:column; gap:10px;">
+    <sc-if value="{{ hasSelection }}" hint-placeholder-val="{{ false }}">
+      <div style="{{ detailCardStyle }}">
+        <div style="display:flex; align-items:center; gap:10px; padding:14px 16px; border-bottom:1px solid #1f1f1f; background:#141414; border-left:3px solid {{ selColor }};">
+          <span style="font-family:'JetBrains Mono', monospace; font-size:14px; font-weight:700;">{{ selName }}</span>
+          <span style="{{ selPillStyle }}">{{ selDomain }}</span>
+          <span style="margin-left:auto; font-family:'JetBrains Mono', monospace; font-size:10.5px; color:#6a6a6a; white-space:nowrap;">{{ selColCount }}</span>
+        </div>
+        <p style="margin:0; padding:11px 16px 10px; font-size:12px; line-height:1.5; color:#8f8f8f; text-wrap:pretty;">{{ selDesc }}</p>
+
+        <div style="flex:1; min-height:0; overflow-y:auto;">
+          <div style="padding:6px 16px 4px; font-size:8.5px; letter-spacing:.2em; font-weight:800; color:#6a6a6a;">COLUMNS</div>
+          <sc-for list="{{ selCols }}" as="c" hint-placeholder-count="6">
+            <div style="{{ c.rowStyle }}">
+              <span style="{{ c.keyStyle }}">{{ c.key }}</span>
+              <span style="font-family:'JetBrains Mono', monospace; font-size:11.5px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ c.name }}</span>
+              <span style="font-family:'JetBrains Mono', monospace; font-size:10.5px; color:#8f8f8f; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ c.type }}</span>
+              <span style="font-size:10.5px; color:#6a6a6a; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ c.note }}</span>
+            </div>
+          </sc-for>
+
+          <div style="padding:14px 16px 4px; font-size:8.5px; letter-spacing:.2em; font-weight:800; color:#6a6a6a;">{{ relHeading }}</div>
+          <sc-for list="{{ selRels }}" as="r" hint-placeholder-count="4">
+            <button onClick="{{ r.act }}" style="{{ r.rowStyle }}" style-hover="background:#141414;">
+              <span style="{{ r.dirStyle }}">{{ r.dir }}</span>
+              <span style="flex:1; text-align:left; font-family:'JetBrains Mono', monospace; font-size:11.5px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ r.other }}</span>
+              <span style="font-family:'JetBrains Mono', monospace; font-size:10px; color:#8f8f8f; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:120px;">{{ r.fk }}</span>
+              <span style="{{ r.delStyle }}">{{ r.onDelete }}</span>
+            </button>
+          </sc-for>
+        </div>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ noSelection }}" hint-placeholder-val="{{ true }}">
+      <div style="{{ emptyCardStyle }}">
+        <span style="font-size:15px; font-weight:700;">37 tables · 51 foreign keys</span>
+        <p style="margin:0; font-size:12.5px; line-height:1.6; color:#8f8f8f; text-wrap:pretty;">Each tower is one domain; every panel is a table, and the most connected tables sit at the bottom of their tower. The arcs are foreign keys — arrowheads point parent → child, and each panel shows its column and key counts.</p>
+        <p style="margin:0; font-size:12.5px; line-height:1.6; color:#8f8f8f; text-wrap:pretty;">Hover or click a table to trace only its keys and read the full column list here. Use <strong style="color:#fff; font-weight:700;">Cross-domain</strong> to see just the joins that cross a boundary — that is where the schema's real coupling lives.</p>
+        <div style="display:flex; flex-direction:column; gap:8px; padding-top:2px;">
+          <sc-for list="{{ crossStats }}" as="c" hint-placeholder-count="4">
+            <div style="display:flex; align-items:center; gap:10px;">
+              <span style="{{ c.barWrapStyle }}"><span style="{{ c.barStyle }}"></span></span>
+              <span style="font-size:11.5px; color:#8f8f8f; white-space:nowrap;">{{ c.label }}</span>
+              <span style="margin-left:auto; font-family:'JetBrains Mono', monospace; font-size:11px; color:#ffffff;">{{ c.value }}</span>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+    </sc-if>
+  </aside>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1600,&quot;height&quot;:980}}">
+class Component extends DCLogic {
+  state = { selected: null, hover: null, domain: "all", query: "", edgesMode: "all", fps: 60, schema: null };
+
+  componentDidMount() {
+    import("./db-schema.js").then(m => this.setState({ schema: m }));
+    this._onSel = e => this.setState({ selected: e.detail.name });
+    this._onHover = e => { if (e.detail.name !== this.state.hover) this.setState({ hover: e.detail.name }); };
+    this._onStats = e => { if (e.detail.fps !== this.state.fps) this.setState({ fps: e.detail.fps }); };
+    this._onKey = e => {
+      if (e.target && /input|textarea/i.test(e.target.tagName)) return;
+      const st = this.stage();
+      if (e.key === "Escape") { this.setState({ selected: null }); if (st && st.resetView) st.resetView(); }
+      if (e.key === "r" || e.key === "R") { if (st && st.resetView) st.resetView(); }
+      if (e.key === "f" || e.key === "F") { if (st && st.focus && this.state.selected) st.focus(this.state.selected); }
+    };
+    document.addEventListener("table-select", this._onSel);
+    document.addEventListener("table-hover", this._onHover);
+    document.addEventListener("graph-stats", this._onStats);
+    window.addEventListener("keydown", this._onKey);
+  }
+  componentWillUnmount() {
+    document.removeEventListener("table-select", this._onSel);
+    document.removeEventListener("table-hover", this._onHover);
+    document.removeEventListener("graph-stats", this._onStats);
+    window.removeEventListener("keydown", this._onKey);
+  }
+  stage() { return document.querySelector("dbgraph-stage"); }
+
+  renderVals() {
+    const s = this.state, S = s.schema;
+    const mono = "'JetBrains Mono', monospace";
+    const TABLES = S ? S.TABLES : [];
+    const DOMAINS = S ? S.DOMAINS : [];
+    const RELATIONS = S ? S.RELATIONS : [];
+    const tbl = n => TABLES.find(t => t.name === n);
+    const domOf = n => { const t = tbl(n); return t ? DOMAINS.find(d => d.id === t.d) : null; };
+    const sel = s.selected ? tbl(s.selected) : null;
+    const selDom = sel ? DOMAINS.find(d => d.id === sel.d) : null;
+    const selColor = selDom ? selDom.color : "#ffffff";
+
+    const degree = {};
+    RELATIONS.forEach(r => { degree[r[0]] = (degree[r[0]] || 0) + 1; degree[r[2]] = (degree[r[2]] || 0) + 1; });
+    const hubs = Object.keys(degree).sort((a, b) => degree[b] - degree[a]).slice(0, 10);
+    const crossCount = RELATIONS.filter(r => { const a = tbl(r[0]), b = tbl(r[2]); return a && b && a.d !== b.d; }).length;
+
+    const panel = "border-radius:14px; background:rgba(11,11,11,.9); backdrop-filter:blur(16px); border:1px solid #2a2a2a; box-shadow:0 24px 48px rgba(0,0,0,.5);";
+    const btn = "padding:7px 10px; border-radius:8px; font-size:11px; font-weight:700; cursor:pointer; font-family:Figtree, sans-serif; white-space:nowrap; flex:1;";
+    const delColor = d => d === "cascade" ? "#ef4444" : d === "restrict" ? "#3b82f6" : "#f59e0b";
+    const keyColor = k => ({ PK: "#f59e0b", FK: "#3b82f6", UQ: "#8b5cf6", IDX: "#22c55e" })[k];
+
+    const pick = name => {
+      this.setState({ selected: name });
+      const st = this.stage();
+      if (st && st.focus) st.focus(name);
+    };
+
+    return {
+      selected: s.selected || "",
+      domain: s.domain,
+      query: s.query,
+      edgesMode: s.edgesMode,
+      fpsLabel: s.fps + " FPS",
+      onQuery: e => this.setState({ query: e.target.value }),
+
+      meta: [
+        { label: "Engine", value: "PostgreSQL 16" },
+        { label: "Tables", value: String(TABLES.length) },
+        { label: "Foreign keys", value: String(RELATIONS.length) },
+        { label: "Cross-domain", value: String(crossCount) }
+      ],
+
+      domainNav: [{ id: "all", label: "All domains", color: "#ffffff", count: TABLES.length }].concat(
+        DOMAINS.map(d => ({ id: d.id, label: d.label, color: d.color, count: TABLES.filter(t => t.d === d.id).length }))
+      ).map(d => ({
+        label: d.label, count: d.count,
+        act: () => this.setState({ domain: d.id }),
+        style: "display:flex; align-items:center; gap:9px; width:100%; padding:8px 9px; border-radius:9px; cursor:pointer; font-family:Figtree, sans-serif; font-size:12px; font-weight:600; border:1px solid " + (s.domain === d.id ? "#2a2a2a" : "transparent") + "; background:" + (s.domain === d.id ? "#141414" : "transparent") + "; color:" + (s.domain === d.id ? "#ffffff" : "#8f8f8f") + ";",
+        dotStyle: "width:8px; height:8px; border-radius:3px; flex:none; background:" + d.color + ";"
+      })),
+
+      edgeModes: [
+        { id: "all", label: "All keys" },
+        { id: "cross", label: "Cross-domain" },
+        { id: "selected", label: "Selected only" }
+      ].map(m => ({
+        label: m.label,
+        act: () => this.setState({ edgesMode: m.id }),
+        style: btn + (s.edgesMode === m.id ? "border:1px solid #ffffff; background:#ffffff; color:#050505;" : "border:1px solid #2a2a2a; background:transparent; color:#8f8f8f;")
+      })),
+
+      edgeLegend: [
+        { text: "White arc — key leaving this table (it is the parent)", color: "#ffffff", h: 3 },
+        { text: "Tinted arc — key arriving from another table", color: "#7dd3fc", h: 3 },
+        { text: "Idle arcs take the parent domain's color", color: "#8b5cf6", h: 2 },
+        { text: "Arrowhead + travelling dot run parent → child", color: "#8f8f8f", h: 2 }
+      ].map(l => ({ text: l.text, lineStyle: "width:22px; height:" + l.h + "px; border-radius:2px; flex:none; background:" + l.color + ";" })),
+
+      hoverLabel: s.hover || "",
+      hasHover: !!s.hover && s.hover !== s.selected,
+      hubs: hubs.map(n => {
+        const d = domOf(n);
+        const active = s.selected === n || s.hover === n;
+        return {
+          name: n, count: degree[n],
+          act: () => pick(n),
+          style: "display:flex; align-items:center; gap:9px; width:100%; padding:7px 9px; border-radius:8px; cursor:pointer; font-family:Figtree, sans-serif; border:1px solid " + (active ? "#2a2a2a" : "transparent") + "; background:" + (active ? "#141414" : "transparent") + "; color:" + (active ? "#ffffff" : "#8f8f8f") + ";",
+          dotStyle: "width:7px; height:7px; border-radius:2px; flex:none; background:" + (d ? d.color : "#6a6a6a") + ";",
+          countStyle: "font-family:" + mono + "; font-size:10px; padding:2px 6px; border-radius:5px; color:" + (d ? d.color : "#6a6a6a") + "; background:" + (d ? d.color : "#6a6a6a") + "1f;"
+        };
+      }),
+
+      onReset: () => { const st = this.stage(); if (st && st.resetView) st.resetView(); },
+      onClear: () => { this.setState({ selected: null, query: "", domain: "all" }); const st = this.stage(); if (st && st.resetView) st.resetView(); },
+
+      hasSelection: !!sel,
+      noSelection: !sel,
+      detailCardStyle: panel + " flex:1; min-height:0; display:flex; flex-direction:column; overflow:hidden;",
+      emptyCardStyle: panel + " padding:18px; display:flex; flex-direction:column; gap:12px;",
+      selName: sel ? sel.name : "",
+      selColor: selColor,
+      selDesc: sel ? sel.desc : "",
+      selDomain: selDom ? selDom.label : "",
+      selColCount: sel ? sel.cols.length + " columns" : "",
+      selPillStyle: "font-size:9.5px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; padding:3px 8px; border-radius:6px; white-space:nowrap; color:" + selColor + "; background:" + selColor + "1f;",
+      selCols: sel ? sel.cols.map(c => ({
+        key: c[0] || "", name: c[1], type: c[2], note: c[3],
+        rowStyle: "display:grid; grid-template-columns:34px minmax(0,1.15fr) minmax(0,.9fr) minmax(0,1.3fr); align-items:center; gap:9px; padding:7px 16px; border-top:1px solid #1f1f1f; background:" + (c[0] === "PK" ? "#f59e0b0a" : "transparent") + ";",
+        keyStyle: c[0] ? "min-width:26px; text-align:center; padding:2px 5px; border-radius:5px; font-family:" + mono + "; font-size:8.5px; font-weight:700; color:" + keyColor(c[0]) + "; background:" + keyColor(c[0]) + "1f;" : "font-size:8px;"
+      })) : [],
+      relHeading: sel ? "RELATIONSHIPS (" + RELATIONS.filter(r => r[0] === sel.name || r[2] === sel.name).length + ")" : "RELATIONSHIPS",
+      selRels: sel ? RELATIONS.filter(r => r[0] === sel.name || r[2] === sel.name).map(r => {
+        const isParent = r[0] === sel.name;
+        const other = isParent ? r[2] : r[0];
+        const d = domOf(other);
+        return {
+          other, fk: r[3], onDelete: r[4],
+          dir: isParent ? "1 : N →" : "← N : 1",
+          act: () => pick(other),
+          rowStyle: "display:flex; align-items:center; gap:9px; width:100%; padding:8px 16px; border-top:1px solid #1f1f1f; border-left:0; border-right:0; border-bottom:0; background:transparent; color:#ffffff; cursor:pointer; font-family:Figtree, sans-serif;",
+          dirStyle: "font-family:" + mono + "; font-size:9.5px; font-weight:700; white-space:nowrap; padding:2px 6px; border-radius:5px; color:" + (d ? d.color : "#8f8f8f") + "; background:" + (d ? d.color : "#8f8f8f") + "1f;",
+          delStyle: "font-family:" + mono + "; font-size:9.5px; padding:2px 6px; border-radius:5px; white-space:nowrap; color:" + delColor(r[4]) + "; background:" + delColor(r[4]) + "1f;"
+        };
+      }) : [],
+
+      crossStats: DOMAINS.map(d => {
+        const n = RELATIONS.filter(r => {
+          const a = tbl(r[0]), b = tbl(r[2]);
+          return a && b && a.d !== b.d && (a.d === d.id || b.d === d.id);
+        }).length;
+        return {
+          label: d.label, value: n,
+          barWrapStyle: "width:74px; height:5px; border-radius:99px; background:#1f1f1f; overflow:hidden; flex:none; display:block;",
+          barStyle: "display:block; height:100%; width:" + Math.round((n / 22) * 100) + "%; border-radius:99px; background:" + d.color + ";"
+        };
+      })
+    };
+  }
+}
+</script>
+</body>
+</html>
