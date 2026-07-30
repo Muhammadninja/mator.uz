@@ -33,6 +33,8 @@ import { SalesModule } from './sales/sales.module';
 import { OpsModule } from './ops/ops.module';
 import { MetricsModule } from './metrics/metrics.module';
 import { AlertingModule } from './alerting/alerting.module';
+import { BlueprintModule } from './blueprint/blueprint.module';
+import { isBlueprintEnabled } from './blueprint/blueprint-auth';
 
 @Module({
   imports: [
@@ -85,6 +87,10 @@ import { AlertingModule } from './alerting/alerting.module';
     // AlertService it bridges) and after MetricsModule (whose series the
     // latency/SMS rules read). Additive — see alerting.module.ts.
     AlertingModule,
+    // 3D DB Blueprint — operator-only real-time schema visualizer. Mounted only
+    // when enabled (off in production unless BLUEPRINT_ENABLED=true), so it adds
+    // no attack surface by default. Spread evaluates to [] when disabled.
+    ...(isBlueprintEnabled() ? [BlueprintModule] : []),
   ],
   // Bind ThrottlerGuard globally. Without this APP_GUARD registration the
   // ThrottlerModule config and every @Throttle/@SkipThrottle decorator across

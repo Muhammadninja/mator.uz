@@ -23,7 +23,8 @@
     "grafana:check": "npm run grafana:build && npm run grafana:test",
     "backfill:catalog": "ts-node --compiler-options '{\"module\":\"commonjs\"}' prisma/backfill-catalog.ts",
     "seed": "ts-node --compiler-options '{\"module\":\"commonjs\"}' src/prisma/seed.ts",
-    "admin:create": "ts-node --compiler-options '{\"module\":\"commonjs\"}' scripts/create-admin.ts"
+    "admin:create": "ts-node --compiler-options '{\"module\":\"commonjs\"}' scripts/create-admin.ts",
+    "blueprint:graph": "ts-node --compiler-options '{\"module\":\"commonjs\"}' scripts/parse-schema.ts"
   },
   "prisma": {
     "seed": "ts-node --compiler-options '{\"module\":\"commonjs\"}' src/prisma/seed.ts"

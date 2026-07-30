@@ -1,0 +1,966 @@
+{
+  "generatedAt": "2026-07-30T18:15:00.554Z",
+  "nodes": [
+    {
+      "id": "Seller",
+      "table": "sellers",
+      "group": "Catalog/Products",
+      "color": "#fb923c",
+      "fieldCount": 10,
+      "relationCount": 0
+    },
+    {
+      "id": "Brand",
+      "table": "brands",
+      "group": "Garage/Vehicles",
+      "color": "#a78bfa",
+      "fieldCount": 2,
+      "relationCount": 0
+    },
+    {
+      "id": "CarModel",
+      "table": "car_models",
+      "group": "Garage/Vehicles",
+      "color": "#a78bfa",
+      "fieldCount": 3,
+      "relationCount": 1
+    },
+    {
+      "id": "Product",
+      "table": "products",
+      "group": "Catalog/Products",
+      "color": "#fb923c",
+      "fieldCount": 20,
+      "relationCount": 0
+    },
+    {
+      "id": "ProductImage",
+      "table": "product_images",
+      "group": "Catalog/Products",
+      "color": "#fb923c",
+      "fieldCount": 6,
+      "relationCount": 1
+    },
+    {
+      "id": "PartModel",
+      "table": "part_models",
+      "group": "Catalog/Parts",
+      "color": "#facc15",
+      "fieldCount": 2,
+      "relationCount": 2
+    },
+    {
+      "id": "OemCompatibility",
+      "table": "oem_compatibility",
+      "group": "Catalog/Parts",
+      "color": "#facc15",
+      "fieldCount": 5,
+      "relationCount": 0
+    },
+    {
+      "id": "Stock",
+      "table": "stocks",
+      "group": "Catalog/Products",
+      "color": "#fb923c",
+      "fieldCount": 6,
+      "relationCount": 2
+    },
+    {
+      "id": "ProductDraft",
+      "table": "product_drafts",
+      "group": "Catalog/Products",
+      "color": "#fb923c",
+      "fieldCount": 22,
+      "relationCount": 0
+    },
+    {
+      "id": "ProductDraftImage",
+      "table": "product_draft_images",
+      "group": "Catalog/Products",
+      "color": "#fb923c",
+      "fieldCount": 13,
+      "relationCount": 1
+    },
+    {
+      "id": "AppUser",
+      "table": "app_users",
+      "group": "Users/Auth",
+      "color": "#38bdf8",
+      "fieldCount": 18,
+      "relationCount": 0
+    },
+    {
+      "id": "AuthIdentity",
+      "table": "auth_identities",
+      "group": "Users/Auth",
+      "color": "#38bdf8",
+      "fieldCount": 7,
+      "relationCount": 1
+    },
+    {
+      "id": "RefreshToken",
+      "table": "refresh_tokens",
+      "group": "Users/Auth",
+      "color": "#38bdf8",
+      "fieldCount": 8,
+      "relationCount": 2
+    },
+    {
+      "id": "EmailVerificationToken",
+      "table": "email_verification_tokens",
+      "group": "Users/Auth",
+      "color": "#38bdf8",
+      "fieldCount": 6,
+      "relationCount": 1
+    },
+    {
+      "id": "PhoneOtpRequest",
+      "table": "phone_otp_requests",
+      "group": "Users/Auth",
+      "color": "#38bdf8",
+      "fieldCount": 11,
+      "relationCount": 0
+    },
+    {
+      "id": "MyIdSession",
+      "table": "myid_sessions",
+      "group": "Users/Auth",
+      "color": "#38bdf8",
+      "fieldCount": 11,
+      "relationCount": 1
+    },
+    {
+      "id": "MyIdVerification",
+      "table": "myid_verifications",
+      "group": "Users/Auth",
+      "color": "#38bdf8",
+      "fieldCount": 19,
+      "relationCount": 1
+    },
+    {
+      "id": "Address",
+      "table": "addresses",
+      "group": "Users/Auth",
+      "color": "#38bdf8",
+      "fieldCount": 12,
+      "relationCount": 1
+    },
+    {
+      "id": "VehicleMake",
+      "table": "vehicle_makes",
+      "group": "Garage/Vehicles",
+      "color": "#a78bfa",
+      "fieldCount": 9,
+      "relationCount": 0
+    },
+    {
+      "id": "VehicleModelRef",
+      "table": "vehicle_models",
+      "group": "Garage/Vehicles",
+      "color": "#a78bfa",
+      "fieldCount": 9,
+      "relationCount": 1
+    },
+    {
+      "id": "VehicleTrim",
+      "table": "vehicle_trims",
+      "group": "Garage/Vehicles",
+      "color": "#a78bfa",
+      "fieldCount": 4,
+      "relationCount": 1
+    },
+    {
+      "id": "VehicleEngine",
+      "table": "vehicle_engines",
+      "group": "Garage/Vehicles",
+      "color": "#a78bfa",
+      "fieldCount": 5,
+      "relationCount": 0
+    },
+    {
+      "id": "Vehicle3dAsset",
+      "table": "vehicle_3d_assets",
+      "group": "Fitment/3D",
+      "color": "#22d3ee",
+      "fieldCount": 7,
+      "relationCount": 1
+    },
+    {
+      "id": "TuningVariant",
+      "table": "tuning_variants",
+      "group": "Fitment/3D",
+      "color": "#22d3ee",
+      "fieldCount": 4,
+      "relationCount": 1
+    },
+    {
+      "id": "Vehicle",
+      "table": "vehicles",
+      "group": "Garage/Vehicles",
+      "color": "#a78bfa",
+      "fieldCount": 21,
+      "relationCount": 6
+    },
+    {
+      "id": "VehicleStatusEvent",
+      "table": "vehicle_status_events",
+      "group": "Garage/Vehicles",
+      "color": "#a78bfa",
+      "fieldCount": 8,
+      "relationCount": 1
+    },
+    {
+      "id": "ServiceProvider",
+      "table": "service_providers",
+      "group": "Providers/Services",
+      "color": "#34d399",
+      "fieldCount": 21,
+      "relationCount": 0
+    },
+    {
+      "id": "ProviderSpecialization",
+      "table": "provider_specializations",
+      "group": "Providers/Services",
+      "color": "#34d399",
+      "fieldCount": 2,
+      "relationCount": 1
+    },
+    {
+      "id": "ProviderSupportedMake",
+      "table": "provider_supported_makes",
+      "group": "Providers/Services",
+      "color": "#34d399",
+      "fieldCount": 2,
+      "relationCount": 2
+    },
+    {
+      "id": "ProviderServiceOffering",
+      "table": "provider_service_offerings",
+      "group": "Providers/Services",
+      "color": "#34d399",
+      "fieldCount": 6,
+      "relationCount": 1
+    },
+    {
+      "id": "ProviderWorkingHours",
+      "table": "provider_working_hours",
+      "group": "Providers/Services",
+      "color": "#34d399",
+      "fieldCount": 5,
+      "relationCount": 1
+    },
+    {
+      "id": "ProviderCertification",
+      "table": "provider_certifications",
+      "group": "Providers/Services",
+      "color": "#34d399",
+      "fieldCount": 4,
+      "relationCount": 1
+    },
+    {
+      "id": "ProviderPortfolioItem",
+      "table": "provider_portfolio_items",
+      "group": "Providers/Services",
+      "color": "#34d399",
+      "fieldCount": 4,
+      "relationCount": 1
+    },
+    {
+      "id": "Booking",
+      "table": "bookings",
+      "group": "Providers/Services",
+      "color": "#34d399",
+      "fieldCount": 12,
+      "relationCount": 3
+    },
+    {
+      "id": "BookingService",
+      "table": "booking_services",
+      "group": "Providers/Services",
+      "color": "#34d399",
+      "fieldCount": 5,
+      "relationCount": 1
+    },
+    {
+      "id": "PartCategory",
+      "table": "part_categories",
+      "group": "Catalog/Parts",
+      "color": "#facc15",
+      "fieldCount": 12,
+      "relationCount": 1
+    },
+    {
+      "id": "PartBrand",
+      "table": "part_brands",
+      "group": "Garage/Vehicles",
+      "color": "#a78bfa",
+      "fieldCount": 3,
+      "relationCount": 0
+    },
+    {
+      "id": "CatalogSeller",
+      "table": "catalog_sellers",
+      "group": "Catalog/Parts",
+      "color": "#facc15",
+      "fieldCount": 22,
+      "relationCount": 0
+    },
+    {
+      "id": "CatalogPart",
+      "table": "catalog_parts",
+      "group": "Catalog/Parts",
+      "color": "#facc15",
+      "fieldCount": 32,
+      "relationCount": 3
+    },
+    {
+      "id": "CatalogPartFit",
+      "table": "catalog_part_fits",
+      "group": "Catalog/Parts",
+      "color": "#facc15",
+      "fieldCount": 5,
+      "relationCount": 1
+    },
+    {
+      "id": "PartCompatibility",
+      "table": "part_compatibilities",
+      "group": "Catalog/Parts",
+      "color": "#facc15",
+      "fieldCount": 8,
+      "relationCount": 3
+    },
+    {
+      "id": "Cart",
+      "table": "carts",
+      "group": "Commerce/Orders",
+      "color": "#f87171",
+      "fieldCount": 6,
+      "relationCount": 1
+    },
+    {
+      "id": "CartItem",
+      "table": "cart_items",
+      "group": "Commerce/Orders",
+      "color": "#f87171",
+      "fieldCount": 12,
+      "relationCount": 1
+    },
+    {
+      "id": "Order",
+      "table": "orders",
+      "group": "Commerce/Orders",
+      "color": "#f87171",
+      "fieldCount": 18,
+      "relationCount": 3
+    },
+    {
+      "id": "OrderItem",
+      "table": "order_items",
+      "group": "Commerce/Orders",
+      "color": "#f87171",
+      "fieldCount": 10,
+      "relationCount": 1
+    },
+    {
+      "id": "OrderStatusHistory",
+      "table": "order_status_history",
+      "group": "Commerce/Orders",
+      "color": "#f87171",
+      "fieldCount": 8,
+      "relationCount": 1
+    },
+    {
+      "id": "Payment",
+      "table": "payments",
+      "group": "Commerce/Orders",
+      "color": "#f87171",
+      "fieldCount": 19,
+      "relationCount": 1
+    },
+    {
+      "id": "Device",
+      "table": "devices",
+      "group": "Users/Auth",
+      "color": "#38bdf8",
+      "fieldCount": 16,
+      "relationCount": 1
+    },
+    {
+      "id": "NotificationPreference",
+      "table": "notification_preferences",
+      "group": "Messaging/AI",
+      "color": "#c084fc",
+      "fieldCount": 10,
+      "relationCount": 1
+    },
+    {
+      "id": "Notification",
+      "table": "notifications",
+      "group": "Messaging/AI",
+      "color": "#c084fc",
+      "fieldCount": 9,
+      "relationCount": 1
+    },
+    {
+      "id": "AiSession",
+      "table": "ai_sessions",
+      "group": "Messaging/AI",
+      "color": "#c084fc",
+      "fieldCount": 7,
+      "relationCount": 2
+    },
+    {
+      "id": "AiMessage",
+      "table": "ai_messages",
+      "group": "Messaging/AI",
+      "color": "#c084fc",
+      "fieldCount": 9,
+      "relationCount": 1
+    },
+    {
+      "id": "SmsOperator",
+      "table": "sms_operators",
+      "group": "Messaging/AI",
+      "color": "#c084fc",
+      "fieldCount": 7,
+      "relationCount": 0
+    },
+    {
+      "id": "SmsOperatorPrefix",
+      "table": "sms_operator_prefixes",
+      "group": "Messaging/AI",
+      "color": "#c084fc",
+      "fieldCount": 3,
+      "relationCount": 1
+    },
+    {
+      "id": "SmsMessage",
+      "table": "sms_messages",
+      "group": "Messaging/AI",
+      "color": "#c084fc",
+      "fieldCount": 15,
+      "relationCount": 1
+    },
+    {
+      "id": "AppAdmin",
+      "table": "app_admins",
+      "group": "Admin/Ops",
+      "color": "#f472b6",
+      "fieldCount": 10,
+      "relationCount": 0
+    },
+    {
+      "id": "AdminAudit",
+      "table": "admin_audits",
+      "group": "Admin/Ops",
+      "color": "#f472b6",
+      "fieldCount": 20,
+      "relationCount": 2
+    },
+    {
+      "id": "AdminRefreshToken",
+      "table": "admin_refresh_tokens",
+      "group": "Admin/Ops",
+      "color": "#f472b6",
+      "fieldCount": 12,
+      "relationCount": 1
+    },
+    {
+      "id": "AdminInvite",
+      "table": "admin_invites",
+      "group": "Admin/Ops",
+      "color": "#f472b6",
+      "fieldCount": 8,
+      "relationCount": 1
+    },
+    {
+      "id": "Sale",
+      "table": "sales",
+      "group": "Commerce/Orders",
+      "color": "#f87171",
+      "fieldCount": 13,
+      "relationCount": 0
+    },
+    {
+      "id": "SaleTarget",
+      "table": "sale_targets",
+      "group": "Commerce/Orders",
+      "color": "#f87171",
+      "fieldCount": 5,
+      "relationCount": 1
+    },
+    {
+      "id": "VehicleNode",
+      "table": "vehicle_nodes",
+      "group": "Fitment/3D",
+      "color": "#22d3ee",
+      "fieldCount": 6,
+      "relationCount": 0
+    },
+    {
+      "id": "FitmentBinding",
+      "table": "fitment_bindings",
+      "group": "Fitment/3D",
+      "color": "#22d3ee",
+      "fieldCount": 7,
+      "relationCount": 3
+    }
+  ],
+  "edges": [
+    {
+      "id": "CarModel->Brand:brand",
+      "source": "CarModel",
+      "target": "Brand",
+      "field": "brand"
+    },
+    {
+      "id": "ProductImage->Product:product",
+      "source": "ProductImage",
+      "target": "Product",
+      "field": "product"
+    },
+    {
+      "id": "PartModel->CarModel:model",
+      "source": "PartModel",
+      "target": "CarModel",
+      "field": "model"
+    },
+    {
+      "id": "PartModel->Product:part",
+      "source": "PartModel",
+      "target": "Product",
+      "field": "part"
+    },
+    {
+      "id": "Stock->Product:product",
+      "source": "Stock",
+      "target": "Product",
+      "field": "product"
+    },
+    {
+      "id": "Stock->Seller:seller",
+      "source": "Stock",
+      "target": "Seller",
+      "field": "seller"
+    },
+    {
+      "id": "ProductDraftImage->ProductDraft:draft",
+      "source": "ProductDraftImage",
+      "target": "ProductDraft",
+      "field": "draft"
+    },
+    {
+      "id": "AuthIdentity->AppUser:user",
+      "source": "AuthIdentity",
+      "target": "AppUser",
+      "field": "user"
+    },
+    {
+      "id": "RefreshToken->AppUser:user",
+      "source": "RefreshToken",
+      "target": "AppUser",
+      "field": "user"
+    },
+    {
+      "id": "RefreshToken->Device:device",
+      "source": "RefreshToken",
+      "target": "Device",
+      "field": "device"
+    },
+    {
+      "id": "EmailVerificationToken->AppUser:user",
+      "source": "EmailVerificationToken",
+      "target": "AppUser",
+      "field": "user"
+    },
+    {
+      "id": "MyIdSession->AppUser:user",
+      "source": "MyIdSession",
+      "target": "AppUser",
+      "field": "user"
+    },
+    {
+      "id": "MyIdVerification->AppUser:user",
+      "source": "MyIdVerification",
+      "target": "AppUser",
+      "field": "user"
+    },
+    {
+      "id": "Address->AppUser:user",
+      "source": "Address",
+      "target": "AppUser",
+      "field": "user"
+    },
+    {
+      "id": "VehicleModelRef->VehicleMake:make",
+      "source": "VehicleModelRef",
+      "target": "VehicleMake",
+      "field": "make"
+    },
+    {
+      "id": "VehicleTrim->VehicleModelRef:model",
+      "source": "VehicleTrim",
+      "target": "VehicleModelRef",
+      "field": "model"
+    },
+    {
+      "id": "Vehicle3dAsset->VehicleTrim:trim",
+      "source": "Vehicle3dAsset",
+      "target": "VehicleTrim",
+      "field": "trim"
+    },
+    {
+      "id": "TuningVariant->Vehicle3dAsset:asset",
+      "source": "TuningVariant",
+      "target": "Vehicle3dAsset",
+      "field": "asset"
+    },
+    {
+      "id": "Vehicle->AppUser:user",
+      "source": "Vehicle",
+      "target": "AppUser",
+      "field": "user"
+    },
+    {
+      "id": "Vehicle->VehicleMake:make",
+      "source": "Vehicle",
+      "target": "VehicleMake",
+      "field": "make"
+    },
+    {
+      "id": "Vehicle->VehicleModelRef:model",
+      "source": "Vehicle",
+      "target": "VehicleModelRef",
+      "field": "model"
+    },
+    {
+      "id": "Vehicle->VehicleTrim:trim",
+      "source": "Vehicle",
+      "target": "VehicleTrim",
+      "field": "trim"
+    },
+    {
+      "id": "Vehicle->VehicleEngine:engine",
+      "source": "Vehicle",
+      "target": "VehicleEngine",
+      "field": "engine"
+    },
+    {
+      "id": "Vehicle->Vehicle3dAsset:model3dAsset",
+      "source": "Vehicle",
+      "target": "Vehicle3dAsset",
+      "field": "model3dAsset"
+    },
+    {
+      "id": "VehicleStatusEvent->Vehicle:vehicle",
+      "source": "VehicleStatusEvent",
+      "target": "Vehicle",
+      "field": "vehicle"
+    },
+    {
+      "id": "ProviderSpecialization->ServiceProvider:provider",
+      "source": "ProviderSpecialization",
+      "target": "ServiceProvider",
+      "field": "provider"
+    },
+    {
+      "id": "ProviderSupportedMake->ServiceProvider:provider",
+      "source": "ProviderSupportedMake",
+      "target": "ServiceProvider",
+      "field": "provider"
+    },
+    {
+      "id": "ProviderSupportedMake->VehicleMake:make",
+      "source": "ProviderSupportedMake",
+      "target": "VehicleMake",
+      "field": "make"
+    },
+    {
+      "id": "ProviderServiceOffering->ServiceProvider:provider",
+      "source": "ProviderServiceOffering",
+      "target": "ServiceProvider",
+      "field": "provider"
+    },
+    {
+      "id": "ProviderWorkingHours->ServiceProvider:provider",
+      "source": "ProviderWorkingHours",
+      "target": "ServiceProvider",
+      "field": "provider"
+    },
+    {
+      "id": "ProviderCertification->ServiceProvider:provider",
+      "source": "ProviderCertification",
+      "target": "ServiceProvider",
+      "field": "provider"
+    },
+    {
+      "id": "ProviderPortfolioItem->ServiceProvider:provider",
+      "source": "ProviderPortfolioItem",
+      "target": "ServiceProvider",
+      "field": "provider"
+    },
+    {
+      "id": "Booking->AppUser:user",
+      "source": "Booking",
+      "target": "AppUser",
+      "field": "user"
+    },
+    {
+      "id": "Booking->ServiceProvider:provider",
+      "source": "Booking",
+      "target": "ServiceProvider",
+      "field": "provider"
+    },
+    {
+      "id": "Booking->Vehicle:vehicle",
+      "source": "Booking",
+      "target": "Vehicle",
+      "field": "vehicle"
+    },
+    {
+      "id": "BookingService->Booking:booking",
+      "source": "BookingService",
+      "target": "Booking",
+      "field": "booking"
+    },
+    {
+      "id": "PartCategory->PartCategory:parent",
+      "source": "PartCategory",
+      "target": "PartCategory",
+      "field": "parent"
+    },
+    {
+      "id": "CatalogPart->PartBrand:brand",
+      "source": "CatalogPart",
+      "target": "PartBrand",
+      "field": "brand"
+    },
+    {
+      "id": "CatalogPart->PartCategory:category",
+      "source": "CatalogPart",
+      "target": "PartCategory",
+      "field": "category"
+    },
+    {
+      "id": "CatalogPart->CatalogSeller:seller",
+      "source": "CatalogPart",
+      "target": "CatalogSeller",
+      "field": "seller"
+    },
+    {
+      "id": "CatalogPartFit->CatalogPart:part",
+      "source": "CatalogPartFit",
+      "target": "CatalogPart",
+      "field": "part"
+    },
+    {
+      "id": "PartCompatibility->CatalogPart:part",
+      "source": "PartCompatibility",
+      "target": "CatalogPart",
+      "field": "part"
+    },
+    {
+      "id": "PartCompatibility->VehicleTrim:trim",
+      "source": "PartCompatibility",
+      "target": "VehicleTrim",
+      "field": "trim"
+    },
+    {
+      "id": "PartCompatibility->VehicleEngine:engine",
+      "source": "PartCompatibility",
+      "target": "VehicleEngine",
+      "field": "engine"
+    },
+    {
+      "id": "Cart->AppUser:user",
+      "source": "Cart",
+      "target": "AppUser",
+      "field": "user"
+    },
+    {
+      "id": "CartItem->Cart:cart",
+      "source": "CartItem",
+      "target": "Cart",
+      "field": "cart"
+    },
+    {
+      "id": "Order->AppUser:user",
+      "source": "Order",
+      "target": "AppUser",
+      "field": "user"
+    },
+    {
+      "id": "Order->Vehicle:vehicle",
+      "source": "Order",
+      "target": "Vehicle",
+      "field": "vehicle"
+    },
+    {
+      "id": "Order->Address:deliveryAddress",
+      "source": "Order",
+      "target": "Address",
+      "field": "deliveryAddress"
+    },
+    {
+      "id": "OrderItem->Order:order",
+      "source": "OrderItem",
+      "target": "Order",
+      "field": "order"
+    },
+    {
+      "id": "OrderStatusHistory->Order:order",
+      "source": "OrderStatusHistory",
+      "target": "Order",
+      "field": "order"
+    },
+    {
+      "id": "Payment->Order:order",
+      "source": "Payment",
+      "target": "Order",
+      "field": "order"
+    },
+    {
+      "id": "Device->AppUser:user",
+      "source": "Device",
+      "target": "AppUser",
+      "field": "user"
+    },
+    {
+      "id": "NotificationPreference->AppUser:user",
+      "source": "NotificationPreference",
+      "target": "AppUser",
+      "field": "user"
+    },
+    {
+      "id": "Notification->AppUser:user",
+      "source": "Notification",
+      "target": "AppUser",
+      "field": "user"
+    },
+    {
+      "id": "AiSession->AppUser:user",
+      "source": "AiSession",
+      "target": "AppUser",
+      "field": "user"
+    },
+    {
+      "id": "AiSession->Vehicle:vehicle",
+      "source": "AiSession",
+      "target": "Vehicle",
+      "field": "vehicle"
+    },
+    {
+      "id": "AiMessage->AiSession:session",
+      "source": "AiMessage",
+      "target": "AiSession",
+      "field": "session"
+    },
+    {
+      "id": "SmsOperatorPrefix->SmsOperator:operator",
+      "source": "SmsOperatorPrefix",
+      "target": "SmsOperator",
+      "field": "operator"
+    },
+    {
+      "id": "SmsMessage->SmsOperator:operator",
+      "source": "SmsMessage",
+      "target": "SmsOperator",
+      "field": "operator"
+    },
+    {
+      "id": "AdminAudit->AppAdmin:actor",
+      "source": "AdminAudit",
+      "target": "AppAdmin",
+      "field": "actor"
+    },
+    {
+      "id": "AdminAudit->AppAdmin:target",
+      "source": "AdminAudit",
+      "target": "AppAdmin",
+      "field": "target"
+    },
+    {
+      "id": "AdminRefreshToken->AppAdmin:admin",
+      "source": "AdminRefreshToken",
+      "target": "AppAdmin",
+      "field": "admin"
+    },
+    {
+      "id": "AdminInvite->AppAdmin:invitedBy",
+      "source": "AdminInvite",
+      "target": "AppAdmin",
+      "field": "invitedBy"
+    },
+    {
+      "id": "SaleTarget->Sale:sale",
+      "source": "SaleTarget",
+      "target": "Sale",
+      "field": "sale"
+    },
+    {
+      "id": "FitmentBinding->CatalogPart:part",
+      "source": "FitmentBinding",
+      "target": "CatalogPart",
+      "field": "part"
+    },
+    {
+      "id": "FitmentBinding->VehicleModelRef:vehicleModel",
+      "source": "FitmentBinding",
+      "target": "VehicleModelRef",
+      "field": "vehicleModel"
+    },
+    {
+      "id": "FitmentBinding->VehicleNode:node",
+      "source": "FitmentBinding",
+      "target": "VehicleNode",
+      "field": "node"
+    }
+  ],
+  "modules": [
+    {
+      "group": "Garage/Vehicles",
+      "color": "#a78bfa",
+      "count": 9
+    },
+    {
+      "group": "Providers/Services",
+      "color": "#34d399",
+      "count": 9
+    },
+    {
+      "group": "Users/Auth",
+      "color": "#38bdf8",
+      "count": 9
+    },
+    {
+      "group": "Commerce/Orders",
+      "color": "#f87171",
+      "count": 8
+    },
+    {
+      "group": "Catalog/Parts",
+      "color": "#facc15",
+      "count": 7
+    },
+    {
+      "group": "Messaging/AI",
+      "color": "#c084fc",
+      "count": 7
+    },
+    {
+      "group": "Catalog/Products",
+      "color": "#fb923c",
+      "count": 6
+    },
+    {
+      "group": "Admin/Ops",
+      "color": "#f472b6",
+      "count": 4
+    },
+    {
+      "group": "Fitment/3D",
+      "color": "#22d3ee",
+      "count": 4
+    }
+  ]
+}

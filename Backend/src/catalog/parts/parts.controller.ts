@@ -1,7 +1,9 @@
 import {
+  Body,
   Controller,
   Get,
   Param,
+  Post,
   Query,
   HttpCode,
   HttpStatus,
@@ -9,6 +11,7 @@ import {
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { PartsService } from './parts.service';
 import { ListPartsQueryDto } from './dto/list-parts.query.dto';
+import { CheckCompatibilityDto } from './dto/check-compatibility.dto';
 
 @ApiTags('Catalog / Parts')
 @Controller('v1/catalog/parts')
@@ -41,5 +44,22 @@ export class PartsController {
     @Query('vehicle_id') vehicleId: string,
   ) {
     return this.parts.compatibility(id, vehicleId);
+  }
+
+  @Post(':id/check-compatibility')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Check part↔vehicle compatibility (app contract)',
+    description:
+      'Resolves the buyer vehicle by `vehicleId` or `vin` and returns the ' +
+      'app-facing status (EXACT_MATCH | UNIVERSAL | NOT_COMPATIBLE | UNCERTAIN) ' +
+      'with a ready-to-render badge. Universal parts always answer UNIVERSAL. ' +
+      'The legacy `GET :id/compatibility` remains for backwards compatibility.',
+  })
+  checkCompatibility(
+    @Param('id') id: string,
+    @Body() body: CheckCompatibilityDto,
+  ) {
+    return this.parts.checkCompatibility(id, body);
   }
 }
