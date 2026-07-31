@@ -48,9 +48,24 @@ function makePrisma() {
   };
 }
 
+/** A DiscountService stub that never discounts — these tests exercise
+ *  filtering/faceting, not pricing, so every part keeps its raw price. */
+function makeDiscounts() {
+  return {
+    loadActiveSales: jest.fn().mockResolvedValue([]),
+    calculateDiscount: (price: number) => ({
+      originalPrice: price,
+      finalPrice: price,
+      discountAmount: 0,
+      discountPercent: 0,
+      appliedSale: null,
+    }),
+  };
+}
+
 function makeService() {
   const prisma = makePrisma();
-  return { svc: new PartsService(prisma as never), prisma };
+  return { svc: new PartsService(prisma as never, makeDiscounts() as never), prisma };
 }
 
 /** Run `list` with a query and return the AND-predicates it built. */
@@ -226,7 +241,7 @@ describe('PartsService — the compatibility endpoint', () => {
       make: { name: 'Chevrolet' },
       model: { name: 'Cobalt' },
     });
-    return new PartsService(prisma as never);
+    return new PartsService(prisma as never, makeDiscounts() as never);
   }
 
   it('answers "fits" for a UNIVERSAL product instead of the "maybe" default', async () => {

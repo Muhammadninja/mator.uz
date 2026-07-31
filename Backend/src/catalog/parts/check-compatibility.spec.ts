@@ -45,7 +45,8 @@ function makeService(opts: {
       findFirst: jest.fn().mockResolvedValue(opts.vehicleByVin ?? null),
     },
   };
-  return { svc: new PartsService(prisma as never), prisma };
+  // Compatibility never prices a part, so a bare DiscountService stub suffices.
+  return { svc: new PartsService(prisma as never, {} as never), prisma };
 }
 
 const VEHICLE = {

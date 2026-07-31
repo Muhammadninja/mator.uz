@@ -17,10 +17,12 @@ import {
 } from './dto/list-parts.query.dto';
 import {
   PART_INCLUDE,
+  PartWithRelations,
   presentPartItem,
   computeCompatibility,
   VehicleCompatContext,
 } from './part.presenter';
+import { ActiveSale, DiscountResult, DiscountService } from '../../sales/discount.service';
 
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 100;
@@ -70,7 +72,22 @@ function mapVehicleContext(v: VehicleContextRow): VehicleFilterContext {
 
 @Injectable()
 export class PartsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly discounts: DiscountService,
+  ) {}
+
+  /** Price one part against a pre-loaded snapshot of the active sales. */
+  private discountFor(
+    part: PartWithRelations,
+    sales: ActiveSale[],
+  ): DiscountResult {
+    return this.discounts.calculateDiscount(
+      Number(part.priceUzs),
+      { id: part.id, categoryId: part.categoryId, sellerId: part.sellerId },
+      sales,
+    );
+  }
 
   async list(query: ListPartsQueryDto) {
     const vehicle = await this.loadVehicle(query.vehicle_id);
@@ -103,8 +120,11 @@ export class PartsService {
       }),
     ]);
 
+    // One active-sales query for the whole page; each part is priced against it.
+    const sales = items.length ? await this.discounts.loadActiveSales() : [];
+
     return {
-      items: items.map((p) => presentPartItem(p, vehicle)),
+      items: items.map((p) => presentPartItem(p, vehicle, this.discountFor(p, sales))),
       facets: {
         brands: await this.brandFacet(brandFacet),
         price_range_uzs: {
@@ -132,7 +152,8 @@ export class PartsService {
     });
     if (!part) throw new NotFoundException('Part not found');
     const vehicle = await this.loadVehicle(vehicleId);
-    return presentPartItem(part, vehicle);
+    const sales = await this.discounts.loadActiveSales();
+    return presentPartItem(part, vehicle, this.discountFor(part, sales));
   }
 
   async compatibility(partId: string, vehicleId: string) {

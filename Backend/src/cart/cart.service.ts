@@ -3,11 +3,27 @@ import { PrismaService } from '../prisma/prisma.service';
 import { prefixedId, IdPrefix } from '../common/ulid.util';
 import { AddCartItemDto, MAX_CART_ITEM_QUANTITY } from './dto/add-cart-item.dto';
 import { resolvePromo } from './promo.util';
-import { CART_INCLUDE, CartWithItems, cartSubtotal, presentCart } from './cart.presenter';
+import {
+  CART_INCLUDE,
+  CartLineDiscounts,
+  CartWithItems,
+  cartSubtotal,
+  presentCart,
+} from './cart.presenter';
+import { priceCartLines } from './cart-pricing.util';
+import { DiscountService } from '../sales/discount.service';
 
 @Injectable()
 export class CartService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly discounts: DiscountService,
+  ) {}
+
+  /** Active-sale result for each part line, keyed by cart-item id. */
+  private lineDiscounts(cart: CartWithItems): Promise<CartLineDiscounts> {
+    return priceCartLines(this.prisma, this.discounts, cart.items);
+  }
 
   private getOrCreate(userId: string): Promise<CartWithItems> {
     return this.prisma.cart.upsert({
@@ -18,10 +34,15 @@ export class CartService {
     });
   }
 
-  /** Always re-reads the cart and re-derives the promo discount from the live subtotal. */
+  /** Always re-reads the cart, applies active sales per line, and re-derives the
+   *  promo discount from the sale-adjusted subtotal. */
   async snapshot(userId: string) {
     const cart = await this.getOrCreate(userId);
-    return presentCart(await this.refreshPromo(cart));
+    const lineDiscounts = await this.lineDiscounts(cart);
+    const priced = await this.refreshPromo(cart, lineDiscounts);
+    // Item set (and their ids) is unchanged by refreshPromo, so the line
+    // discounts computed above still key correctly onto the refreshed cart.
+    return presentCart(priced, lineDiscounts);
   }
 
   async addItem(userId: string, dto: AddCartItemDto) {
@@ -109,10 +130,13 @@ export class CartService {
 
   async applyPromo(userId: string, code: string) {
     const cart = await this.getOrCreate(userId);
-    const result = resolvePromo(code, cartSubtotal(cart));
+    // Promo stacks on top of sales: validate/compute it against the sale-adjusted
+    // subtotal, never the raw one.
+    const lineDiscounts = await this.lineDiscounts(cart);
+    const result = resolvePromo(code, cartSubtotal(cart, lineDiscounts));
     if (!result.isValid) {
       // Preview only — do not persist an invalid code.
-      const snap = presentCart(cart);
+      const snap = presentCart(cart, lineDiscounts);
       return { ...snap, promo: { code, discountUzs: 0, isValid: false } };
     }
     await this.prisma.cart.update({
@@ -152,9 +176,12 @@ export class CartService {
     return item;
   }
 
-  private async refreshPromo(cart: CartWithItems): Promise<CartWithItems> {
+  private async refreshPromo(
+    cart: CartWithItems,
+    lineDiscounts?: CartLineDiscounts,
+  ): Promise<CartWithItems> {
     if (!cart.promoCode) return cart;
-    const result = resolvePromo(cart.promoCode, cartSubtotal(cart));
+    const result = resolvePromo(cart.promoCode, cartSubtotal(cart, lineDiscounts));
     if (!result.isValid) {
       return this.prisma.cart.update({
         where: { id: cart.id },
