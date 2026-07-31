@@ -106,6 +106,48 @@ describe('CatalogProjectionService — mapping', () => {
       expect(part.update).toMatchObject({ priceUzs: 185000, inStock: true });
     });
 
+    it('projects the SELLER-CHOSEN categoryId in preference to the enum', () => {
+      // The seller's explicit pick from the dynamic tree is authoritative. A
+      // legacy enum that disagrees (e.g. the admin re-parented the category
+      // after the classifier ran) must not win.
+      const base = buildStock() as any;
+      svc.buildProjectionOps({
+        ...base,
+        product: {
+          ...base.product,
+          mainCategory: 'BRAKES',
+          categoryId: 'brake-pads',
+        },
+      });
+      const part = upsertArg(prisma, 'catalogPart').create;
+      expect(part.categoryId).toBe('brake-pads');
+    });
+
+    it('projects an admin-created "Другое" category that mirrors NO enum', () => {
+      // The regression this guards: an OTHER-child oil has mainCategory = null,
+      // so deriving from the enum alone buried it in the fallback bucket and the
+      // buyer could never reach it with ?category=motorcycle-oil.
+      const base = buildStock() as any;
+      svc.buildProjectionOps({
+        ...base,
+        product: {
+          ...base.product,
+          kind: 'MOTOR_OIL',
+          mainCategory: null,
+          vehicleCategory: null,
+          categoryId: 'motorcycle-oil',
+          isUniversal: true,
+        },
+      });
+      const part = upsertArg(prisma, 'catalogPart').create;
+      expect(part.categoryId).toBe('motorcycle-oil');
+      expect(part.categoryId).not.toBe(
+        CatalogProjectionService.UNCATEGORIZED_ID,
+      );
+      // Universality is projected verbatim from the listing.
+      expect(part.isUniversal).toBe(true);
+    });
+
     it('falls back to the uncategorized bucket for an unclassified product', () => {
       const base = buildStock() as any;
       svc.buildProjectionOps({

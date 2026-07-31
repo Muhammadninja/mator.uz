@@ -221,14 +221,24 @@ export class CatalogProjectionService {
         product.partNumberType,
       );
 
-    // Point the part at the canonical PartCategory that mirrors its bot-assigned
-    // main category (BRAKES → 'brakes', …). PartCategory is the source of truth
-    // for the buyer grid, so ingest classifies here rather than dumping every
-    // part into the fallback bucket. Unclassified parts keep 'cat_uncategorized'.
-    const categoryId = product.mainCategory
-      ? (MAIN_CATEGORY_TO_SLUG[product.mainCategory] ??
-        CatalogProjectionService.UNCATEGORIZED_ID)
-      : CatalogProjectionService.UNCATEGORIZED_ID;
+    // Point the part at its PartCategory, in priority order:
+    //
+    //   1. the supply-side `categoryId` the seller actually CHOSE (the dynamic
+    //      tree). This is the authoritative answer and the only one that works
+    //      for a category with no enum equivalent — an admin-created "Другое"
+    //      child (Motorcycle Oil, …) has mainCategory = null, so deriving from
+    //      the enum alone would bury every such listing in the fallback bucket
+    //      and make it unreachable by ?category=<id>;
+    //   2. else the canonical category mirroring its bot-assigned main category
+    //      (BRAKES → 'brakes', …) — the pre-existing path, unchanged, which still
+    //      covers every legacy row and every classifier-only listing;
+    //   3. else the fallback bucket.
+    const categoryId =
+      product.categoryId ??
+      (product.mainCategory
+        ? (MAIN_CATEGORY_TO_SLUG[product.mainCategory] ??
+          CatalogProjectionService.UNCATEGORIZED_ID)
+        : CatalogProjectionService.UNCATEGORIZED_ID);
 
     const partData = {
       title: product.title,
