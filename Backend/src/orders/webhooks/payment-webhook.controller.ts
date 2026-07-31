@@ -1,4 +1,12 @@
-import { Controller, Post, Body, Headers, HttpCode, HttpStatus } from '@nestjs/common';
+import {
+  Controller,
+  Post,
+  Body,
+  Headers,
+  HttpCode,
+  HttpStatus,
+  Req,
+} from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { SkipThrottle } from '@nestjs/throttler';
 import { PaymeService } from './payme.service';
@@ -17,19 +25,28 @@ export class PaymentWebhookController {
     private readonly click: ClickService,
   ) {}
 
+  /**
+   * Payme Merchant API. Always answers HTTP 200 — the protocol carries success
+   * and failure alike inside the JSON-RPC envelope, and any other status is read
+   * by Payme as -32400. The body is taken from `req.body` rather than a `@Body()`
+   * DTO so an unparseable payload reaches {@link PaymeService.handleRaw}, which
+   * answers -32700, instead of being turned into an HTTP 400 upstream.
+   */
   @Post('payme/webhook')
   @HttpCode(HttpStatus.OK)
   paymeWebhook(
     @Headers('authorization') auth: string | undefined,
-    @Body() body: Record<string, any>,
+    @Req() req: { body?: unknown },
   ) {
-    return this.payme.handle(auth, body);
+    return this.payme.handleRaw(auth, req.body);
   }
 
   @Post('click/webhook')
   @HttpCode(HttpStatus.OK)
   clickWebhook(@Body() body: Record<string, any>) {
     // Click uses one endpoint with action: 0 = Prepare, 1 = Complete.
-    return Number(body.action) === 0 ? this.click.prepare(body) : this.click.complete(body);
+    return Number(body.action) === 0
+      ? this.click.prepare(body)
+      : this.click.complete(body);
   }
 }

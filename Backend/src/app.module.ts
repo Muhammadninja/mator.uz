@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { validatePaymeEnv } from './orders/webhooks/payme.config';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { ScheduleModule } from '@nestjs/schedule';
 import { EventEmitterModule } from '@nestjs/event-emitter';
@@ -38,7 +39,12 @@ import { isBlueprintEnabled } from './blueprint/blueprint-auth';
 
 @Module({
   imports: [
-    ConfigModule.forRoot({ isGlobal: true }),
+    // `validate` runs before any provider is constructed, so a Payme
+    // misconfiguration (missing merchant id/key, blank key, non-https checkout
+    // URL) aborts bootstrap instead of exposing a webhook whose Basic auth
+    // degrades to a publicly computable value. It also materialises the Payme
+    // defaults; no other environment variable is inspected.
+    ConfigModule.forRoot({ isGlobal: true, validate: validatePaymeEnv }),
     // Global baseline rate limit; sensitive auth routes tighten this further.
     ThrottlerModule.forRoot([{ ttl: 60 * 1000, limit: 100 }]),
     ScheduleModule.forRoot(),

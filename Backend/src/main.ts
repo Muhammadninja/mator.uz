@@ -12,6 +12,10 @@ import {
   createSwaggerAuthMiddleware,
   resolveSwaggerCredentials,
 } from './common/swagger-auth.middleware';
+import {
+  PAYME_WEBHOOK_PATH,
+  paymeRawBodyMiddleware,
+} from './orders/webhooks/payme-raw-body.middleware';
 
 /**
  * Parse a comma-separated CORS allowlist from CORS_ORIGINS. In production an
@@ -83,6 +87,14 @@ async function bootstrap() {
   // ones emitted by rejected requests — can carry it. Echoed back as
   // X-Request-Id and readable anywhere downstream via getRequestId().
   app.use(requestIdMiddleware);
+
+  // Payme requires HTTP 200 with a JSON-RPC error even for an unparseable body
+  // (-32700), but the global JSON parser answers a syntax error with HTTP 400 —
+  // which Payme reads as -32400. Capture the Payme webhook body as raw text
+  // BEFORE that parser sees it; PaymeService parses it and reports -32700
+  // itself. Scoped to the single Payme route, so every other endpoint keeps the
+  // standard parsing and validation.
+  app.use(PAYME_WEBHOOK_PATH, paymeRawBodyMiddleware);
 
   // Security headers. The API serves JSON (and SSE for the AI advisor), so the
   // restrictive CSP defaults don't apply; disable CSP to avoid breaking the

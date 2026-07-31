@@ -129,7 +129,13 @@ describe('OrderStatusService', () => {
 
       expect(expired).toBe(1);
       expect(prisma.order.updateMany).toHaveBeenCalledWith({
-        where: { id: 'ord_1', status: OrderStatus.PENDING_PAYMENT },
+        where: {
+          id: 'ord_1',
+          status: OrderStatus.PENDING_PAYMENT,
+          // Re-checked at write time: an order that acquired an active provider
+          // transaction since the scan is reserved and must not expire.
+          payments: { none: { providerState: 1 } },
+        },
         data: { status: OrderStatus.EXPIRED },
       });
       expect(prisma.orderStatusHistory.create).toHaveBeenCalledTimes(1);
@@ -144,6 +150,25 @@ describe('OrderStatusService', () => {
       expect(await service.expireOverdue(now)).toBe(0);
       expect(prisma.order.updateMany).not.toHaveBeenCalled();
       expect(prisma.orderStatusHistory.create).not.toHaveBeenCalled();
+    });
+
+    it('excludes orders reserved by an active provider transaction from the scan', async () => {
+      // Payme guarantees the customer 12 hours to confirm a created transaction,
+      // which outlives our own 30-minute payment window. Such an order must stay
+      // PENDING_PAYMENT, or PerformTransaction would pay for a dead order.
+      prisma.order.findMany.mockResolvedValue([]);
+
+      await service.expireOverdue(now);
+
+      expect(prisma.order.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            status: OrderStatus.PENDING_PAYMENT,
+            expiresAt: { lt: now },
+            payments: { none: { providerState: 1 } },
+          }),
+        }),
+      );
     });
   });
 });

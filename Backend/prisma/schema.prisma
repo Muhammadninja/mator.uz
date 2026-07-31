@@ -1371,9 +1371,10 @@ model Payment {
   updatedAt             DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
   order                 Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
+  @@unique([provider, providerTransactionId])
   @@index([orderId])
   @@index([status])
-  @@index([providerTransactionId])
+  @@index([provider, providerCreateTime])
   @@map("payments")
 }
 
