@@ -1160,6 +1160,9 @@ describe('TelegramService — preview caption', () => {
           brand: null,
           models: [],
           vehicles: [],
+          // A "Другое" oil: no vehicle was named, so it is universal and the
+          // preview shows no vehicle line.
+          isUniversal: true,
           gm_number: null,
         },
       }),

@@ -8,6 +8,7 @@ import {
 } from './seed-data/vehicle-catalog.seed';
 import {
   SEED_CATEGORIES,
+  SEED_OTHER_CATEGORIES,
   SEED_ROOT_CATEGORIES,
   SEED_DEALERS,
 } from './seed-data/catalog-reference.seed';
@@ -181,6 +182,31 @@ async function seedCategories() {
         sortOrder: c.sortOrder,
         parentId: c.parentId,
         level: c.level,
+        isActive: true,
+      },
+    });
+  }
+
+  // The admin-managed "Другое" catalogue (level 1, under the `other` root). A
+  // STARTING set only — the admin panel owns these from here on.
+  for (const c of SEED_OTHER_CATEGORIES) {
+    await prisma.partCategory.upsert({
+      where: { id: c.id },
+      update: {
+        name: c.name,
+        slug: c.id,
+        sortOrder: c.sortOrder,
+        parentId: 'other',
+        level: 1,
+        isActive: true,
+      },
+      create: {
+        id: c.id,
+        name: c.name,
+        slug: c.id,
+        sortOrder: c.sortOrder,
+        parentId: 'other',
+        level: 1,
         isActive: true,
       },
     });

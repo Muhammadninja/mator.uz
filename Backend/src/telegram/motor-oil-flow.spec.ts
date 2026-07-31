@@ -31,7 +31,7 @@ import {
   previousStep,
   stepPrompt,
   previewLines,
-  isUniversalKind,
+  isUniversalFor,
   oilViscosityKeyboard,
   oilTypeKeyboard,
   oilVolumeKeyboard,
@@ -44,11 +44,25 @@ import {
   normalizeViscosity,
   parseVolumeLitres,
 } from './motor-oil-catalog';
-import { WIZARD_BRANDS, WIZARD_OTHER_CATEGORIES } from './wizard-catalog';
+import { WIZARD_BRANDS } from './wizard-catalog';
 
-const MOTOR_OIL = WIZARD_OTHER_CATEGORIES.findIndex(
-  (c) => c.kind === ProductKind.MOTOR_OIL,
-);
+/**
+ * The "Другое" menu is now the ADMIN-MANAGED children of the `other` category,
+ * loaded by the caller. These stand in for what the bot would have fetched.
+ * 'motor-oil' is the anchor id that starts the oil questionnaire; the others are
+ * pure taxonomy that keep the same questionnaire.
+ */
+const OTHER_OPTIONS = [
+  { id: 'motor-oil', name: 'Моторные масла', kind: ProductKind.MOTOR_OIL },
+  { id: 'motorcycle-oil', name: 'Мотоциклетные масла' },
+];
+const MOTOR_OIL = 'motor-oil';
+
+/** Put a session on the OTHER_CATEGORY step with the menu rendered. */
+function withOtherOptions(s: WizardSession): WizardSession {
+  s.categoryOptions = OTHER_OPTIONS;
+  return s;
+}
 const FIVE_W_30 = OIL_VISCOSITIES.indexOf('5W-30');
 const SYNTHETIC = OIL_TYPES.findIndex((t) => t.value === OilType.SYNTHETIC);
 const FOUR_LITRES = OIL_VOLUMES.findIndex((v) => v.value === 4_000);
@@ -64,6 +78,7 @@ function freshSession(): WizardSession {
 function sessionAtViscosity(): WizardSession {
   const s = freshSession();
   selectOtherBrand(s);
+  withOtherOptions(s);
   selectOtherCategory(s, MOTOR_OIL);
   return s;
 }
@@ -92,26 +107,37 @@ describe('reaching the motor-oil flow', () => {
   it('"Моторные масла" sets the kind and starts the oil questionnaire', () => {
     const s = freshSession();
     selectOtherBrand(s);
+    withOtherOptions(s);
     expect(selectOtherCategory(s, MOTOR_OIL).status).toBe('ok');
     expect(s.kind).toBe(ProductKind.MOTOR_OIL);
     expect(s.step).toBe(WizardStep.OIL_VISCOSITY);
+    // "Другое" means NO specific vehicle, so the listing is universal and the
+    // chosen child is stored as its category.
+    expect(s.brand).toBeNull();
+    expect(s.model).toBeNull();
+    expect(s.categoryId).toBe('motor-oil');
   });
 
   it('the other-category menu offers exactly the registered categories', () => {
     const s = freshSession();
     selectOtherBrand(s);
+    withOtherOptions(s);
     const labels = otherCategoryKeyboard(s)
       .reply_markup.inline_keyboard.flat()
       .map((b) => b.text)
       .filter((t) => t !== '⬅️ Назад');
-    expect(labels).toEqual(WIZARD_OTHER_CATEGORIES.map((c) => c.label));
+    // Built from the ADMIN-MANAGED options the caller loaded, so an admin adding
+    // "Мотоциклетные масла" makes it appear with no redeploy.
+    expect(labels).toEqual(OTHER_OPTIONS.map((c) => c.name));
     expect(labels).toContain('Моторные масла');
   });
 
-  it('rejects an out-of-range category index (forged payload)', () => {
+  it('rejects a forged category id that was never offered', () => {
     const s = freshSession();
     selectOtherBrand(s);
-    expect(selectOtherCategory(s, 99).status).toBe('stale');
+    withOtherOptions(s);
+    // Resolved against the rendered options, so an arbitrary id matches nothing.
+    expect(selectOtherCategory(s, 'not-a-category').status).toBe('stale');
     expect(s.kind).toBe(ProductKind.SPARE_PART);
   });
 
@@ -346,7 +372,8 @@ describe('preview lines per kind', () => {
 
   it('an oil shows viscosity / type / volume and no spare-part lines', () => {
     const lines = previewLines(
-      { ...base, kind: ProductKind.MOTOR_OIL },
+      // A "Другое" oil: universal, so no vehicle line even though one is passed.
+      { ...base, kind: ProductKind.MOTOR_OIL, isUniversal: true },
       'Chevrolet Cobalt',
     ).join('\n');
     expect(lines).toContain('Вязкость');
@@ -375,6 +402,7 @@ describe('preview lines per kind', () => {
       {
         ...base,
         kind: ProductKind.MOTOR_OIL,
+        isUniversal: true,
         oilViscosity: null,
         oilType: null,
         oilVolumeMl: null,
@@ -387,9 +415,15 @@ describe('preview lines per kind', () => {
 });
 
 describe('motor oils are universal by kind', () => {
-  it('marks MOTOR_OIL universal and SPARE_PART not', () => {
-    expect(isUniversalKind(ProductKind.MOTOR_OIL)).toBe(true);
-    expect(isUniversalKind(ProductKind.SPARE_PART)).toBe(false);
+  it('marks a "Другое" oil universal and a vehicle-specific one NOT', () => {
+    const noVehicle = { brand: null, model: null };
+    const cobalt = { brand: 'Chevrolet', model: 'Cobalt' };
+    // Universality is a property of the LISTING, not of the kind.
+    expect(isUniversalFor(ProductKind.MOTOR_OIL, noVehicle)).toBe(true);
+    expect(isUniversalFor(ProductKind.MOTOR_OIL, cobalt)).toBe(false);
+    // SPARE_PART is unchanged: a vehicle is always collected, so it is never
+    // universal once answered.
+    expect(isUniversalFor(ProductKind.SPARE_PART, cobalt)).toBe(false);
   });
 
   it('the oil flow contains no compatibility step at all', () => {
@@ -476,7 +510,11 @@ describe('rendered keyboards — every step the seller can reach', () => {
     // way back to the brand list short of /start.
     const s = freshSession();
     selectOtherBrand(s);
-    expect(renderedButtons(s)).toEqual(['Моторные масла', '⬅️ Назад']);
+    withOtherOptions(s);
+    expect(renderedButtons(s)).toEqual([
+      ...OTHER_OPTIONS.map((c) => c.name),
+      '⬅️ Назад',
+    ]);
   });
 
   it('every oil step renders its full option set plus Back', () => {

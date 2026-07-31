@@ -232,6 +232,28 @@ describe('presentPartItem — a motor oil card hides spare-part concepts', () =>
     expect(presentPartItem(oil(), null).fits).toEqual([]);
   });
 
+  it('a VEHICLE-SPECIFIC oil DOES report compatibility (not suppressed)', () => {
+    // The card must key on the listing's own isUniversal, not on its kind: an
+    // oil sold FOR one car has a real "does this fit?" answer, and hiding it
+    // would be the mirror image of the "maybe" bug above.
+    const specificOil = part({
+      kind: 'MOTOR_OIL',
+      title: 'Масло для Cobalt',
+      oilViscosity: '5W-30',
+      oilType: 'SYNTHETIC',
+      oilVolumeMl: 4000,
+      isUniversal: false,
+    } as never);
+
+    const out = presentPartItem(specificOil, {
+      trimId: 'trim_1',
+      engineId: null,
+      year: 2020,
+    });
+    expect(out.compatibility).not.toBeNull();
+    expect(out.is_universal).toBe(false);
+  });
+
   it('still exposes the oil’s own attributes and the shared fields', () => {
     const out = presentPartItem(oil(), null);
     expect(out.motor_oil).toMatchObject({
@@ -306,7 +328,7 @@ describe('presentPartItem — sale pricing', () => {
       discountPercent: 0,
       appliedSale: null,
     };
-    const out = presentPartItem(part(), null, noSale as never);
+    const out = presentPartItem(part(), null, noSale);
     expect(out.price_uzs).toBe(25000);
     expect(out.original_price_uzs).toBeNull();
     expect(out.sale).toBeNull();

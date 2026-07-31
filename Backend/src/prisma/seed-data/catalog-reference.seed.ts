@@ -22,7 +22,10 @@
  */
 
 import { PartMainCategory } from '@prisma/client';
-import { VEHICLE_CATEGORY_TO_SLUG } from '../../catalog/categories/category-map';
+import {
+  CategoryAnchor,
+  VEHICLE_CATEGORY_TO_SLUG,
+} from '../../catalog/categories/category-map';
 import {
   MAIN_CATEGORIES,
   VEHICLE_CATEGORIES,
@@ -39,6 +42,13 @@ export interface SeedCategory {
   /** The root (vehicle) category this main category hangs under. */
   parentId: string;
   level: number;
+}
+
+/** A child of the "Другое" root — pure taxonomy, no enum mirror. */
+export interface SeedOtherCategory {
+  id: string;
+  name: string;
+  sortOrder: number;
 }
 
 /** A level-0 vehicle category. Carries no PartMainCategory mirror. */
@@ -120,7 +130,43 @@ export const SEED_ROOT_CATEGORIES: SeedRootCategory[] = VEHICLE_CATEGORIES.map(
     iconKey: c.iconKey,
     sortOrder: i,
   }),
-);
+).concat([
+  // The motor-oil category, offered at the CATEGORY step alongside the vehicle
+  // systems. Picking it AFTER a car was chosen starts the oil questionnaire and
+  // keeps that car → the listing is vehicle-specific, not universal.
+  {
+    id: CategoryAnchor.MOTOR_OIL,
+    name: 'Моторные масла',
+    slug: CategoryAnchor.MOTOR_OIL,
+    color: '#00ACC1',
+    iconKey: 'oil',
+    sortOrder: VEHICLE_CATEGORIES.length,
+  },
+  // The "Другое" root. Reached by its own button rather than the category grid
+  // (findRootCategories excludes it); its CHILDREN are the admin-managed
+  // catalogue the bot lists there.
+  {
+    id: CategoryAnchor.OTHER,
+    name: 'Другое',
+    slug: CategoryAnchor.OTHER,
+    color: '#5F6368',
+    iconKey: 'other',
+    sortOrder: 99,
+  },
+]);
+
+/**
+ * The STARTING children of "Другое" — not a fixed list. The admin panel adds,
+ * renames, reorders and deactivates these like any other category, and the bot
+ * picks the changes up on its next read with no redeploy. Nothing in the code
+ * refers to these ids.
+ */
+export const SEED_OTHER_CATEGORIES: SeedOtherCategory[] = [
+  { id: 'industrial-oil', name: 'Индустриальные масла', sortOrder: 0 },
+  { id: 'motorcycle-oil', name: 'Мотоциклетные масла', sortOrder: 1 },
+  { id: 'agricultural-machinery', name: 'Сельхозтехника', sortOrder: 2 },
+  { id: 'other-lubricants', name: 'Прочие смазочные материалы', sortOrder: 3 },
+];
 
 // ── Dealers ──────────────────────────────────────────────────────────────────
 // Intentionally empty. Real MATOR Certified dealers are now created by operators

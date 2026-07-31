@@ -1,4 +1,8 @@
-import { PartMainCategory, PartVehicleCategory } from '@prisma/client';
+import {
+  PartMainCategory,
+  PartVehicleCategory,
+  ProductKind,
+} from '@prisma/client';
 import { MAIN_CATEGORIES } from './part-categories.catalog';
 
 /**
@@ -20,6 +24,46 @@ export const MAIN_CATEGORY_TO_SLUG: Record<PartMainCategory, string> =
     },
     {} as Record<PartMainCategory, string>,
   );
+
+/**
+ * STABLE ANCHOR IDS — the few PartCategory rows the application must be able to
+ * find by identity rather than by position in the tree.
+ *
+ * Behaviour is keyed on these ids, NEVER on a category's name: an admin may
+ * rename "Моторные масла" freely and the oil questionnaire still starts. They
+ * are ordinary PartCategory rows in every other respect — the admin can rename,
+ * reorder, activate/deactivate them and manage their children through the normal
+ * CRUD. Only the id is load-bearing.
+ */
+export const CategoryAnchor = {
+  /**
+   * The oil category offered at the CATEGORY step, AFTER a vehicle was chosen.
+   * Picking it starts the oil questionnaire while keeping brand/model, which is
+   * what makes such a listing vehicle-specific (NOT universal).
+   */
+  MOTOR_OIL: 'motor-oil',
+  /**
+   * Root of the "Другое" subtree: the non-vehicle-specific catalogue (Industrial
+   * Oil, Motorcycle Oil, Agricultural Machinery, …). Its ACTIVE CHILDREN are what
+   * the bot lists after the seller taps "Другое", loaded live from the tree so an
+   * admin can add one with no redeploy. A listing under this subtree named no
+   * vehicle and is therefore universal.
+   */
+  OTHER: 'other',
+} as const;
+
+/**
+ * Category id → the questionnaire it starts. Only categories that CHANGE the
+ * kind appear here; everything else leaves the session's kind untouched.
+ *
+ * Keyed by id so a rename is harmless. Adding a genuinely new questionnaire
+ * still needs a ProductKind + its columns + a FLOWS entry (a code change); what
+ * needs NO code change is adding an admin-managed category under OTHER, which
+ * is pure taxonomy and keeps the oil questionnaire.
+ */
+export const CATEGORY_ID_TO_KIND: Readonly<Record<string, ProductKind>> = {
+  [CategoryAnchor.MOTOR_OIL]: ProductKind.MOTOR_OIL,
+};
 
 /**
  * PartVehicleCategory enum → its ROOT PartCategory id.

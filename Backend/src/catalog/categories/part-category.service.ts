@@ -6,6 +6,7 @@ import {
 import { PrismaService } from '../../prisma/prisma.service';
 import { CacheService } from '../../redis/cache.service';
 import { RedisKeys } from '../../redis/redis.keys';
+import { CategoryAnchor } from './category-map';
 
 /**
  * THE single place the dynamic PartCategory tree's rules live.
@@ -43,8 +44,27 @@ export class PartCategoryService {
     return this.cache.remember(
       RedisKeys.cacheReferenceCategories(),
       PartCategoryService.CACHE_TTL_SECONDS,
-      () => this.loadActive({ parentId: null, level: 0 }),
+      () =>
+        this.loadActive({
+          parentId: null,
+          level: 0,
+          // The "Другое" root is reached by its own button, not from the
+          // vehicle-category grid, so it is excluded here. It is otherwise an
+          // ordinary category — findChildren('other') serves its admin-managed
+          // children to the bot.
+          excludeIds: [CategoryAnchor.OTHER],
+        }),
     );
+  }
+
+  /**
+   * The active children of the "Другое" root — the admin-managed catalogue the
+   * bot lists when the seller leaves the spare-parts flow. Thin alias over
+   * {@link findChildren} so the anchor id lives in one place; it shares the same
+   * cache key and invalidation as any other parent's children.
+   */
+  async findOtherCategories(): Promise<CategoryNode[]> {
+    return this.findChildren(CategoryAnchor.OTHER);
   }
 
   /**
@@ -232,9 +252,15 @@ export class PartCategoryService {
   private async loadActive(where: {
     parentId: string | null;
     level?: number;
+    excludeIds?: string[];
   }): Promise<CategoryNode[]> {
+    const { excludeIds, ...scope } = where;
     const rows = await this.prisma.partCategory.findMany({
-      where: { ...where, isActive: true },
+      where: {
+        ...scope,
+        isActive: true,
+        ...(excludeIds?.length ? { id: { notIn: excludeIds } } : {}),
+      },
       orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
       select: CATEGORY_SELECT,
     });

@@ -116,7 +116,10 @@ function presentKindAttributes(part: PartWithRelations) {
  * order charge the same), so a client shows it as the price and, when a sale
  * applies, `original_price_uzs` as the struck-through was.
  */
-function presentPricing(part: PartWithRelations, discount?: DiscountResult | null) {
+function presentPricing(
+  part: PartWithRelations,
+  discount?: DiscountResult | null,
+) {
   const applied = discount?.appliedSale ? discount : null;
   const price = applied ? applied.finalPrice : Number(part.priceUzs);
   return {
@@ -175,10 +178,12 @@ export function presentPartItem(
     in_stock: part.inStock,
     delivery_eta_days_min: part.deliveryEtaDaysMin,
     delivery_eta_days_max: part.deliveryEtaDaysMax,
-    // Null for a kind with no compatibility concept. Without this a motor oil
-    // reported {status:'maybe'} — actively WRONG, since "maybe" tells the buyer
-    // it might not fit their car, when an oil fits every car by definition.
-    compatibility: hasCompatibility(part.kind)
+    // Null when this LISTING has no compatibility concept — a universal one.
+    // Without this a universal oil reported {status:'maybe'}, actively WRONG,
+    // since "maybe" tells the buyer it might not fit their car. Keyed on the
+    // listing's own isUniversal (not on the kind), so a motor oil sold FOR a
+    // specific car still reports its real compatibility.
+    compatibility: hasCompatibility(part.kind, part.isUniversal)
       ? computeCompatibility(part.compatibilities, vehicle)
       : null,
     // Static make/model fitment for this part, projected from the supply-side

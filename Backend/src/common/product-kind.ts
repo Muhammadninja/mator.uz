@@ -33,9 +33,16 @@ import { ProductKind } from '@prisma/client';
 /** What a kind of listing fundamentally is, and therefore how it behaves. */
 export interface KindCapabilities {
   /**
-   * The listing fits a SPECIFIC set of vehicles, so its questionnaire asks for
-   * them and its fitment is persisted as part_models rows. False means the kind
-   * fits everything by definition (see `isUniversalKind`).
+   * The listing MAY fit a specific set of vehicles, so its questionnaire can ask
+   * for them and its fitment is persisted as part_models rows. False means the
+   * kind fits everything by definition and no vehicle is ever collected.
+   *
+   * NOTE this is a capability, NOT the per-listing answer. Whether one listing
+   * is universal is a property of that listing's own data (did the seller pick a
+   * vehicle?), and lives in `Product.isUniversal` — see {@link isUniversalFor}.
+   * MOTOR_OIL is the case that forced the distinction: an oil sold FOR a
+   * Chevrolet Cobalt is vehicle-specific, while an oil listed under "Другое"
+   * fits everything, and both are the same kind.
    */
   readonly hasVehicleFitment: boolean;
   /**
@@ -72,10 +79,14 @@ export const KIND_CAPABILITIES: Record<ProductKind, KindCapabilities> = {
     requiredFields: ['brand', 'model', 'categoryId'],
   },
   [ProductKind.MOTOR_OIL]: {
-    // A motor oil fits every car, so it has no fitment to collect, no part
-    // number to label, and no vehicle category to choose — its taxonomy follows
-    // from being an oil.
-    hasVehicleFitment: false,
+    // An oil MAY be sold for a specific car ("масло для Cobalt") or as a general
+    // product listed under "Другое". So it CAN carry fitment — but never
+    // requires it, which is why brand/model are absent from requiredFields
+    // below. `isUniversal` is decided per listing from whether a vehicle was
+    // actually chosen, not from this flag.
+    hasVehicleFitment: true,
+    // Still no part number and no vehicle-part category question: those follow
+    // from being an oil regardless of which vehicle it targets.
     hasPartNumbers: false,
     hasVehicleCategory: false,
     requiredFields: ['oilViscosity', 'oilType', 'oilVolumeMl'],
@@ -88,24 +99,39 @@ export function capabilitiesOf(kind: ProductKind): KindCapabilities {
 }
 
 /**
- * Whether products of this kind fit EVERY vehicle by design — the value written
- * to `Product.isUniversal` and projected into the buyer catalog.
+ * Whether ONE listing fits every vehicle — the value written to
+ * `Product.isUniversal` and projected into the buyer catalog.
  *
- * Defined as the exact complement of `hasVehicleFitment` rather than as its own
- * list, so the two can never disagree: a kind that collects no fitment IS
- * universal, and a kind that collects fitment is not.
+ * This is a property of the LISTING, not of its kind. A kind that can never
+ * carry fitment (hasVehicleFitment: false) is universal by construction; for
+ * every other kind the answer is "did the seller actually name a vehicle?".
+ *
+ * That distinction is the whole point: a motor oil sold FOR a Chevrolet Cobalt
+ * must NOT be universal just because it is an oil, while an oil listed under
+ * "Другое" — where no vehicle is ever asked — must be. Deriving this from the
+ * kind alone is exactly the bug this replaces.
  */
-export function isUniversalKind(kind: ProductKind): boolean {
-  return !capabilitiesOf(kind).hasVehicleFitment;
+export function isUniversalFor(
+  kind: ProductKind,
+  vehicle: { brand: string | null; model: string | null },
+): boolean {
+  if (!capabilitiesOf(kind).hasVehicleFitment) return true;
+  return vehicle.brand === null || vehicle.model === null;
 }
 
 /**
- * Whether "does this fit my car?" is a meaningful question for this kind. A
- * universal kind carries no compatibility rows, so a generic compatibility check
- * would answer "maybe" — actively misleading for a product that always fits.
+ * Whether "does this fit my car?" is a meaningful question for this LISTING.
+ *
+ * A universal listing carries no compatibility rows, so a generic check would
+ * answer "maybe" — actively misleading for a product that always fits. A
+ * vehicle-specific listing (including an oil sold for one car) does have a
+ * meaningful answer, so it must not be suppressed.
  */
-export function hasCompatibility(kind: ProductKind): boolean {
-  return capabilitiesOf(kind).hasVehicleFitment;
+export function hasCompatibility(
+  kind: ProductKind,
+  isUniversal: boolean,
+): boolean {
+  return capabilitiesOf(kind).hasVehicleFitment && !isUniversal;
 }
 
 /** Whether this kind has GM / OEM part numbers at all. */

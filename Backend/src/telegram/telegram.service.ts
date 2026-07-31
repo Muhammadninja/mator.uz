@@ -87,10 +87,12 @@ import {
   goBack,
   stepPrompt,
   previewLines,
-  isUniversalKind,
+  isUniversalFor,
 } from './product-wizard';
 import type { CategoryOption } from './product-wizard';
 import {
+  CATEGORY_ID_TO_KIND,
+  CategoryAnchor,
   MAIN_CATEGORY_BY_SLUG,
   VEHICLE_CATEGORY_BY_SLUG,
 } from '../catalog/categories/category-map';
@@ -554,9 +556,17 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       );
     });
 
+    // A pick from the admin-managed "Другое" catalogue. Re-checked against the
+    // live tree first (same guard as every other category tap), so a child the
+    // admin deactivated or moved after the keyboard was sent is rejected.
     this.bot.action(WIZ_OTHER_CATEGORY_ACTION, async (ctx) => {
+      const categoryId = ctx.match[1];
+      if (!(await this.isSelectableCategory(categoryId, CategoryAnchor.OTHER))) {
+        await this.rejectStaleCategoryTap(ctx);
+        return;
+      }
       await this.handleWizardAction(ctx, (session) =>
-        selectOtherCategory(session, Number(ctx.match[1])),
+        selectOtherCategory(session, categoryId),
       );
     });
 
@@ -1211,14 +1221,17 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
    * `vehicles` to create brand/car_model rows, so a blank pair would mint junk
    * catalog entries.
    *
-   * `isUniversal` is DERIVED FROM THE KIND, never asked: a motor oil fits every
-   * vehicle by design, so it is always universal, while a spare part's fitment is
-   * whatever its questionnaire collected. Deriving it here — rather than at the
-   * product write — is what makes the rule hold everywhere at once, because this
-   * one value is what the preview line, the Product column and
-   * `persistVehicleLinks` all read. Universal + empty vehicles is exactly the
-   * combination that means "fits everything, so no per-vehicle links": see
-   * vehicle-links.ts, which returns before creating any row.
+   * `isUniversal` is DERIVED FROM THE LISTING'S OWN VEHICLE, never asked: a
+   * listing that named a brand+model is specific to it, and one that named none
+   * fits everything. It is NOT derived from the kind — a motor oil sold FOR a
+   * Chevrolet Cobalt is vehicle-specific, while an oil listed under "Другое"
+   * (where no vehicle is ever collected) is universal, and both are MOTOR_OIL.
+   *
+   * Deriving it here — rather than at the product write — is what makes the rule
+   * hold everywhere at once, because this one value is what the preview line, the
+   * Product column and `persistVehicleLinks` all read. Universal + empty vehicles
+   * is exactly the combination that means "fits everything, so no per-vehicle
+   * links": see vehicle-links.ts, which returns before creating any row.
    */
   private buildMetadataFromDraft(draft: {
     kind: ProductKind;
@@ -1239,7 +1252,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       vehicles: hasVehicle
         ? [{ brand: draft.brand, model: draft.model as string }]
         : [],
-      isUniversal: isUniversalKind(draft.kind),
+      isUniversal: isUniversalFor(draft.kind, {
+        brand: draft.brand,
+        model: draft.model,
+      }),
       gm_number: draft.partNumber,
       part_number_type: draft.partNumberType,
       price: draft.priceUzs ? draft.priceUzs.toNumber() : 0,
@@ -1809,8 +1825,19 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
    * sees the step with only "Назад" instead of the bot dying mid-dialogue.
    */
   private async ensureCategoryOptions(session: WizardSession): Promise<void> {
-    if (session.step !== WizardStep.CATEGORY) return;
-    session.categoryOptions = await this.loadCategoryOptions(null);
+    if (session.step === WizardStep.CATEGORY) {
+      session.categoryOptions = await this.loadCategoryOptions(null);
+      return;
+    }
+    // The "Другое" menu is the admin-managed children of the `other` root, so it
+    // is loaded from the same tree as every other category step rather than from
+    // a hardcoded list — an admin adding a category makes it appear here on the
+    // next render, with no redeploy.
+    if (session.step === WizardStep.OTHER_CATEGORY) {
+      session.categoryOptions = await this.loadCategoryOptions(
+        CategoryAnchor.OTHER,
+      );
+    }
   }
 
   /**
@@ -1878,6 +1905,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         name: row.name,
         vehicleCategoryEnum: VEHICLE_CATEGORY_BY_SLUG.get(row.id) ?? null,
         mainCategoryEnum: MAIN_CATEGORY_BY_SLUG.get(row.id) ?? null,
+        // Resolved from the category's STABLE ID, never its name, so renaming
+        // "Моторные масла" in the admin panel cannot change what it does.
+        // Undefined for an ordinary category, which leaves the kind untouched.
+        kind: CATEGORY_ID_TO_KIND[row.id],
       }));
     } catch (err) {
       this.logger.error(
@@ -2051,6 +2082,9 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         oilViscosity: listing.oilViscosity,
         oilType: listing.oilType,
         oilVolumeMl: listing.oilVolumeMl,
+        // The listing's own universality, so an oil sold for a specific car
+        // shows that car in the preview while a "Другое" oil shows none.
+        isUniversal: metadata.isUniversal,
       },
       formatVehicleLine(metadata),
     );

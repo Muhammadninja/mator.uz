@@ -43,7 +43,7 @@ import {
 import { Markup } from 'telegraf';
 import type { PartNumberType } from '../ai/part-parser.types';
 import { parsePrice } from '../ai/price-parser';
-import { capabilitiesOf, isUniversalKind } from '../common/product-kind';
+import { capabilitiesOf, isUniversalFor } from '../common/product-kind';
 import {
   OIL_TYPES,
   OIL_TYPE_LABELS,
@@ -53,11 +53,8 @@ import {
   normalizeViscosity,
   parseVolumeLitres,
 } from './motor-oil-catalog';
-import {
-  OTHER_BRAND_LABEL,
-  WIZARD_BRANDS,
-  WIZARD_OTHER_CATEGORIES,
-} from './wizard-catalog';
+import { CategoryAnchor } from '../catalog/categories/category-map';
+import { OTHER_BRAND_LABEL, WIZARD_BRANDS } from './wizard-catalog';
 
 export enum WizardStep {
   /** Entry state: the very first thing the seller does is upload photos. Once they
@@ -123,12 +120,48 @@ const FLOWS: Record<ProductKind, WizardStep[]> = {
   ],
 };
 
-// `isUniversalKind` is NOT defined here. Whether a kind fits every vehicle is a
-// domain fact shared with the buyer catalog and the projection, so it lives in
+/**
+ * MOTOR_OIL reached through the VEHICLE path (brand → model → category → "Моторные
+ * масла") rather than through the "Другое" menu.
+ *
+ * Same oil questions, but the vehicle steps the seller already answered stay on
+ * the path so "⬅️ Назад" can walk back into them. Declared as its own ordered
+ * list — not assembled with conditionals — so it reads exactly like every other
+ * flow. Which of the two MOTOR_OIL flows a session walks is decided by
+ * {@link flowFor} from whether a vehicle was chosen.
+ */
+const MOTOR_OIL_FOR_VEHICLE_FLOW: WizardStep[] = [
+  WizardStep.MODEL,
+  WizardStep.CATEGORY,
+  WizardStep.OIL_VISCOSITY,
+  WizardStep.OIL_TYPE,
+  WizardStep.OIL_VOLUME,
+  WizardStep.TITLE,
+  WizardStep.DESCRIPTION,
+  WizardStep.PRICE,
+];
+
+/**
+ * The ordered questionnaire this SESSION walks.
+ *
+ * Only MOTOR_OIL has two shapes: an oil sold for a specific car keeps its
+ * vehicle steps, an oil listed under "Другое" has none. The discriminator is the
+ * session's own `brand` — the same fact `isUniversalFor` reads — so the flow the
+ * seller walks and the universality the product gets can never disagree.
+ */
+function flowFor(session: WizardSession): WizardStep[] {
+  if (session.kind === ProductKind.MOTOR_OIL && session.brand !== null) {
+    return MOTOR_OIL_FOR_VEHICLE_FLOW;
+  }
+  return FLOWS[session.kind];
+}
+
+// `isUniversalFor` is NOT defined here. Whether a listing fits every vehicle is
+// a domain fact shared with the buyer catalog and the projection, so it lives in
 // the kind capability table (common/product-kind.ts) and is re-exported for the
 // wizard's callers. Defining it here as well is how the rule drifted before: the
 // bot said one thing and the catalog card another.
-export { isUniversalKind };
+export { isUniversalFor };
 
 /**
  * The session's flow as ACTUALLY walked, with the conditional detours spliced in
@@ -154,14 +187,18 @@ function flowSteps(session: WizardSession): WizardStep[] {
   // this dialogue go through the Другое menu", which is a fact about the SESSION's
   // path, not about what the kind is. SPARE_PART is the only kind reachable
   // without that menu, so it is the one excluded.
+  //
+  // A kind reached through the VEHICLE path never went through that menu, so it
+  // is excluded by the `brand === null` clause — otherwise an oil sold for a
+  // Cobalt would grow a phantom "Другое" step it never visited.
   const steps: WizardStep[] = [WizardStep.BRAND];
   if (
     session.step === WizardStep.OTHER_CATEGORY ||
-    session.kind !== ProductKind.SPARE_PART
+    (session.kind !== ProductKind.SPARE_PART && session.brand === null)
   ) {
     steps.push(WizardStep.OTHER_CATEGORY);
   }
-  for (const step of FLOWS[session.kind]) {
+  for (const step of flowFor(session)) {
     steps.push(step);
     // The subcategory question exists only for a category that HAS active
     // children, so it is spliced in from the answer itself: a leaf category
@@ -314,6 +351,17 @@ export interface CategoryOption {
    *  draft's compatibility columns; null for an admin-created category. */
   vehicleCategoryEnum?: PartVehicleCategory | null;
   mainCategoryEnum?: PartMainCategory | null;
+  /**
+   * The questionnaire this category starts, when it starts a different one from
+   * the session's current kind. Set for the oil category on the VEHICLE path, so
+   * picking "Моторные масла" after choosing a car switches the session to the
+   * oil questions while KEEPING the chosen brand/model (→ not universal).
+   *
+   * Resolved from the category's stable ID by the caller (never from its name),
+   * so renaming a category in the admin panel cannot change what it does.
+   * Undefined for an ordinary category, which leaves the kind untouched.
+   */
+  kind?: ProductKind;
 }
 
 // ── Inline-button callback payloads ─────────────────────────────────────────
@@ -394,7 +442,9 @@ export const WIZ_PART_NUMBER_TYPE_ACTION = new RegExp(
 // "Другое" on the brand keyboard → leave the spare-parts flow.
 export const WIZ_OTHER_BRAND_ACTION = buildAction('ob', '');
 // A pick from the "Другое" menu — index into WIZARD_OTHER_CATEGORIES.
-export const WIZ_OTHER_CATEGORY_ACTION = new RegExp(`^wiz:${V}:oc:(\\d{1,2})$`);
+export const WIZ_OTHER_CATEGORY_ACTION = new RegExp(
+  `^wiz:${V}:oc:([a-z0-9_-]{1,64})$`,
+);
 // Motor-oil option picks. Each carries either an index into its catalog or the
 // literal "custom" for the "Другое" escape hatch (viscosity and volume only —
 // oil TYPE is a closed set with no free-text branch).
@@ -573,16 +623,33 @@ export function selectOtherBrand(session: WizardSession): WizardResult {
  */
 export function selectOtherCategory(
   session: WizardSession,
-  categoryIndex: number,
+  categoryId: string,
 ): WizardResult {
   if (session.step !== WizardStep.OTHER_CATEGORY) return STALE;
-  const chosen = WIZARD_OTHER_CATEGORIES[categoryIndex];
+  // Resolved against the admin-managed options this session actually rendered,
+  // exactly like every other category step — a forged or stale id matches
+  // nothing and is rejected.
+  const chosen = session.categoryOptions.find((c) => c.id === categoryId);
   if (!chosen) return STALE;
-  session.kind = chosen.kind;
+
+  // Every "Другое" child runs the oil questionnaire; the child itself is pure
+  // TAXONOMY (Industrial / Motorcycle / Agricultural …), stored as categoryId.
+  // A category that declares its own kind wins, so a future non-oil branch is a
+  // mapping entry rather than a change here.
+  session.kind = chosen.kind ?? ProductKind.MOTOR_OIL;
+  // This branch means "no specific vehicle": the listing is universal, so any
+  // vehicle a previous path collected must be cleared. This is the ONLY place
+  // universality is chosen by the seller rather than derived.
   session.brand = null;
   session.model = null;
   session.category = null;
   session.subcategory = null;
+  // The chosen "Другое" child IS the listing's category. Its parent (`other`) is
+  // the root, so the pair stays coherent for the server-side lineage check.
+  session.vehicleCategoryId = CategoryAnchor.OTHER;
+  session.categoryId = chosen.id;
+  session.categoryOptions = [];
+  session.categoryStepPending = false;
   session.partNumberType = 'UNKNOWN';
   session.partNumber = null;
   return advance(session);
@@ -624,6 +691,16 @@ export function selectCategory(
   // itself the answer, so the product still carries a concrete categoryId.
   session.categoryId = category.id;
   session.category = category.vehicleCategoryEnum ?? null;
+  // A category may start a DIFFERENT questionnaire (the oil category does). The
+  // brand/model already answered are deliberately KEPT — that is what makes this
+  // an oil FOR a specific car, and therefore not universal.
+  if (category.kind !== undefined && category.kind !== session.kind) {
+    session.kind = category.kind;
+    // The new questionnaire owns its own attribute set; anything the previous
+    // flow collected that this one never asks must not survive into the draft.
+    session.partNumberType = 'UNKNOWN';
+    session.partNumber = null;
+  }
   // A deeper pick belongs to the category it was made under, so re-answering
   // this step drops it: the seller may have walked back and chosen a DIFFERENT
   // category, whose child list the old value is not part of.
@@ -957,9 +1034,15 @@ export function brandKeyboard(session: WizardSession): InlineKeyboard {
 }
 
 /** The "Другое" menu: one button per non-spare-part category. */
+/**
+ * The "Другое" menu, built from the ADMIN-MANAGED children of the `other`
+ * category that the caller loaded into `categoryOptions` — never from a
+ * hardcoded list. Adding "Мотоциклетные масла" in the admin panel therefore
+ * makes it appear here with no redeploy. Buttons carry the category ID.
+ */
 export function otherCategoryKeyboard(session: WizardSession): InlineKeyboard {
-  const buttons = WIZARD_OTHER_CATEGORIES.map((c, i) =>
-    Markup.button.callback(c.label, buildAction('oc', i)),
+  const buttons = session.categoryOptions.map((c) =>
+    Markup.button.callback(c.name, buildAction('oc', c.id)),
   );
   return withBack(session, grid(buttons, 1));
 }
@@ -1189,6 +1272,10 @@ export function previewLines(
     oilViscosity: string | null;
     oilType: OilType | null;
     oilVolumeMl: number | null;
+    /** Whether this LISTING fits every vehicle. A universal listing shows no
+     *  vehicle line; a vehicle-specific one does, whatever its kind. Optional so
+     *  callers that predate it keep the capability-only behaviour. */
+    isUniversal?: boolean;
   },
   vehicleLine: string,
 ): string[] {
@@ -1199,7 +1286,13 @@ export function previewLines(
   // local kind check — so a kind without fitment automatically shows no vehicle
   // line, and one without part numbers shows no number line. This is the same
   // table the buyer card and the commit path read.
-  if (caps.hasVehicleFitment) lines.push(`🚗 *Автомобиль:* ${vehicleLine}`);
+  //
+  // The vehicle line additionally respects the LISTING's own universality: an
+  // oil sold for a Cobalt shows its car, while the same kind listed under
+  // "Другое" shows none. Capability alone cannot express that, because both are
+  // MOTOR_OIL.
+  const showsVehicle = caps.hasVehicleFitment && listing.isUniversal !== true;
+  if (showsVehicle) lines.push(`🚗 *Автомобиль:* ${vehicleLine}`);
   if (caps.hasVehicleCategory) {
     lines.push(`🗂 *Категория:* ${listing.vehicleCategoryLabel}`);
   }

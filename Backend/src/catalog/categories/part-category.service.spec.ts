@@ -49,6 +49,10 @@ function makePrismaMock(rows: CategoryRow[] = TREE) {
             out = out.filter((r) => r.level === where.level);
           }
           if (where?.isActive === true) out = out.filter((r) => r.isActive);
+          const idFilter = where?.id as { notIn?: string[] } | undefined;
+          if (idFilter?.notIn) {
+            out = out.filter((r) => !idFilter.notIn!.includes(r.id));
+          }
           return Promise.resolve(out);
         },
       ),
@@ -103,6 +107,35 @@ describe('PartCategoryService reads', () => {
     const { service } = makeService(withBucket);
     const roots = await service.findRootCategories();
     expect(roots.map((r) => r.id)).not.toContain('cat_uncategorized');
+  });
+
+  it('excludes the "Другое" root from the vehicle-category step', async () => {
+    // It is reached by its own button, not from the category grid — but it IS an
+    // ordinary category whose children the bot loads separately.
+    const withOther = [...TREE, row({ id: 'other', level: 0 })];
+    const { service } = makeService(withOther);
+    const roots = await service.findRootCategories();
+    expect(roots.map((r) => r.id)).not.toContain('other');
+  });
+
+  it('serves the ADMIN-MANAGED children of "Другое" to the bot', async () => {
+    // Adding a category under `other` in the admin panel must reach the bot with
+    // no redeploy — this is the read that makes that true.
+    const withOther = [
+      ...TREE,
+      row({ id: 'other', level: 0 }),
+      row({ id: 'motorcycle-oil', parentId: 'other', level: 1 }),
+      row({ id: 'industrial-oil', parentId: 'other', level: 1 }),
+      row({ id: 'retired-oil', parentId: 'other', level: 1, isActive: false }),
+    ];
+    const { service } = makeService(withOther);
+    const children = await service.findOtherCategories();
+    expect(children.map((c) => c.id)).toEqual([
+      'motorcycle-oil',
+      'industrial-oil',
+    ]);
+    // A deactivated child never reaches the seller.
+    expect(children.map((c) => c.id)).not.toContain('retired-oil');
   });
 
   it('findChildren never returns an INACTIVE category to the seller bot', async () => {

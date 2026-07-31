@@ -8,7 +8,10 @@ import { BadRequestException } from '@nestjs/common';
 import { TelegramService } from './telegram.service';
 import { WizardSessionStore, WizardStep } from './product-wizard';
 
-type AnyService = TelegramService & Record<string, any>;
+// The private methods under test are reached through an index signature: these
+// are unit tests of TelegramService's own internals, exercised exactly as the
+// sibling draft-flow specs do, without widening the production API.
+type AnyService = Record<string, any>;
 
 function makeService(over: Partial<Record<string, unknown>> = {}): AnyService {
   const svc = Object.create(TelegramService.prototype) as AnyService;
@@ -30,7 +33,7 @@ function makeService(over: Partial<Record<string, unknown>> = {}): AnyService {
 
 describe('loadCategoryOptions (the bot reads the tree, never a hardcoded list)', () => {
   it('loads ROOT categories and attaches their legacy enum mirrors', async () => {
-    const svc = makeService();
+    const svc: AnyService = makeService();
     const options = await svc.loadCategoryOptions(null);
 
     expect(svc.categories.findRootCategories).toHaveBeenCalled();
@@ -53,7 +56,7 @@ describe('loadCategoryOptions (the bot reads the tree, never a hardcoded list)',
   });
 
   it("loads a category's children and mirrors their main-category enums", async () => {
-    const svc = makeService();
+    const svc: AnyService = makeService();
     svc.categories.findChildren.mockResolvedValue([
       { id: 'brakes', name: 'Brakes' },
     ]);
@@ -67,7 +70,7 @@ describe('loadCategoryOptions (the bot reads the tree, never a hardcoded list)',
   });
 
   it('surfaces an admin-created category with NO enum mirror', async () => {
-    const svc = makeService();
+    const svc: AnyService = makeService();
     svc.categories.findChildren.mockResolvedValue([
       { id: 'brake-pads', name: 'Тормозные колодки' },
     ]);
@@ -81,7 +84,7 @@ describe('loadCategoryOptions (the bot reads the tree, never a hardcoded list)',
 
   it('degrades to an empty list (not a crash) when the tree cannot be loaded', async () => {
     // A category-load failure must not kill the seller's dialogue mid-flow.
-    const svc = makeService();
+    const svc: AnyService = makeService();
     svc.categories.findRootCategories.mockRejectedValue(
       new Error('redis down'),
     );
@@ -91,7 +94,7 @@ describe('loadCategoryOptions (the bot reads the tree, never a hardcoded list)',
 
 describe('ensureCategoryOptions', () => {
   it('loads the roots when the session stands on the CATEGORY step', async () => {
-    const svc = makeService();
+    const svc: AnyService = makeService();
     const session = svc.wizard.start(1);
     session.step = WizardStep.CATEGORY;
 
@@ -104,7 +107,7 @@ describe('ensureCategoryOptions', () => {
   });
 
   it('does nothing on any other step', async () => {
-    const svc = makeService();
+    const svc: AnyService = makeService();
     const session = svc.wizard.start(1);
     session.step = WizardStep.TITLE;
 
@@ -128,8 +131,8 @@ describe('isSelectableCategory (stale-callback guard)', () => {
     ...over,
   });
 
-  function svcWith(found: Record<string, unknown> | null) {
-    const svc = makeService();
+  function svcWith(found: Record<string, unknown> | null): AnyService {
+    const svc: AnyService = makeService();
     svc.categories.findById = jest.fn().mockResolvedValue(found);
     return svc;
   }
@@ -184,7 +187,7 @@ describe('isSelectableCategory (stale-callback guard)', () => {
   });
 
   it('rejects (never silently accepts) when the lookup itself fails', async () => {
-    const svc = makeService();
+    const svc: AnyService = makeService();
     svc.categories.findById = jest.fn().mockRejectedValue(new Error('db down'));
     await expect(
       svc.isSelectableCategory('brakes', 'brake-system'),

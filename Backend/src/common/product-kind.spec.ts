@@ -14,7 +14,7 @@ import {
   hasCompatibility,
   hasPartNumbers,
   hasVehicleCategory,
-  isUniversalKind,
+  isUniversalFor,
 } from './product-kind';
 
 describe('ProductKind capability table', () => {
@@ -27,9 +27,11 @@ describe('ProductKind capability table', () => {
     });
   });
 
-  it('describes a motor oil as universal with no part numbers', () => {
+  it('describes a motor oil as OPTIONALLY vehicle-specific, with no part numbers', () => {
     expect(capabilitiesOf(ProductKind.MOTOR_OIL)).toEqual({
-      hasVehicleFitment: false,
+      // An oil MAY be sold for a specific car, so it CAN carry fitment — but
+      // never requires it (brand/model are absent from requiredFields).
+      hasVehicleFitment: true,
       hasPartNumbers: false,
       hasVehicleCategory: false,
       requiredFields: ['oilViscosity', 'oilType', 'oilVolumeMl'],
@@ -38,34 +40,46 @@ describe('ProductKind capability table', () => {
 });
 
 describe('derived predicates stay consistent with the table', () => {
-  it('universality is the exact complement of vehicle fitment', () => {
-    // These two must never disagree: a kind that collects no fitment IS
-    // universal. Deriving one from the other makes that structural.
+  it('a kind that can never carry fitment is universal whatever its data', () => {
     for (const kind of Object.values(ProductKind)) {
-      expect(isUniversalKind(kind)).toBe(
-        !capabilitiesOf(kind).hasVehicleFitment,
-      );
+      if (capabilitiesOf(kind).hasVehicleFitment) continue;
+      expect(
+        isUniversalFor(kind, { brand: 'Chevrolet', model: 'Cobalt' }),
+      ).toBe(true);
     }
   });
 
-  it('compatibility applies exactly when fitment is collected', () => {
+  it('for a fitment-capable kind, universality follows the LISTING', () => {
+    // The rule that replaced "universal by kind": the same kind is universal or
+    // not depending on whether the seller actually named a vehicle.
     for (const kind of Object.values(ProductKind)) {
-      expect(hasCompatibility(kind)).toBe(
-        capabilitiesOf(kind).hasVehicleFitment,
-      );
+      if (!capabilitiesOf(kind).hasVehicleFitment) continue;
+      expect(isUniversalFor(kind, { brand: null, model: null })).toBe(true);
+      expect(
+        isUniversalFor(kind, { brand: 'Chevrolet', model: 'Cobalt' }),
+      ).toBe(false);
     }
   });
 
-  it('a universal kind never has compatibility, and vice versa', () => {
+  it('a universal listing never has compatibility, and vice versa', () => {
     for (const kind of Object.values(ProductKind)) {
-      expect(isUniversalKind(kind)).toBe(!hasCompatibility(kind));
+      for (const isUniversal of [true, false]) {
+        if (!capabilitiesOf(kind).hasVehicleFitment) continue;
+        expect(hasCompatibility(kind, isUniversal)).toBe(!isUniversal);
+      }
     }
   });
 
   it('answers the concrete cases the product relies on', () => {
-    expect(isUniversalKind(ProductKind.MOTOR_OIL)).toBe(true);
-    expect(isUniversalKind(ProductKind.SPARE_PART)).toBe(false);
-    expect(hasCompatibility(ProductKind.MOTOR_OIL)).toBe(false);
+    const noVehicle = { brand: null, model: null };
+    const cobalt = { brand: 'Chevrolet', model: 'Cobalt' };
+    // A "Другое" oil is universal; an oil sold FOR a car is not.
+    expect(isUniversalFor(ProductKind.MOTOR_OIL, noVehicle)).toBe(true);
+    expect(isUniversalFor(ProductKind.MOTOR_OIL, cobalt)).toBe(false);
+    expect(isUniversalFor(ProductKind.SPARE_PART, cobalt)).toBe(false);
+    // A universal oil has no compatibility question; a vehicle-specific one does.
+    expect(hasCompatibility(ProductKind.MOTOR_OIL, true)).toBe(false);
+    expect(hasCompatibility(ProductKind.MOTOR_OIL, false)).toBe(true);
     expect(hasPartNumbers(ProductKind.MOTOR_OIL)).toBe(false);
     expect(hasPartNumbers(ProductKind.SPARE_PART)).toBe(true);
     expect(hasVehicleCategory(ProductKind.MOTOR_OIL)).toBe(false);
@@ -94,19 +108,24 @@ describe('the table covers every ProductKind (future-kind guard)', () => {
     }
   });
 
-  it('a kind that collects fitment requires brand and model', () => {
-    // Fitment cannot be persisted without them (persistVehicleLinks skips a pair
-    // with no brand), so the two facts must agree.
+  it('brand and model are required together, or not at all', () => {
+    // persistVehicleLinks skips a pair with no brand, and isUniversalFor treats a
+    // half-answered vehicle as universal, so requiring one without the other
+    // would be silently meaningless.
+    for (const kind of Object.values(ProductKind)) {
+      const required = capabilitiesOf(kind).requiredFields;
+      expect(required.includes('brand')).toBe(required.includes('model'));
+    }
+  });
+
+  it('a kind that requires a vehicle must be able to carry fitment', () => {
+    // The one-way implication that survives optional fitment: requiring a
+    // vehicle without being able to persist it would be a contradiction. The
+    // converse does NOT hold — MOTOR_OIL can carry fitment without requiring it.
     for (const kind of Object.values(ProductKind)) {
       const caps = capabilitiesOf(kind);
-      if (caps.hasVehicleFitment) {
-        expect(caps.requiredFields).toEqual(
-          expect.arrayContaining(['brand', 'model']),
-        );
-      } else {
-        expect(caps.requiredFields).not.toEqual(
-          expect.arrayContaining(['brand', 'model']),
-        );
+      if (caps.requiredFields.includes('brand')) {
+        expect(caps.hasVehicleFitment).toBe(true);
       }
     }
   });
