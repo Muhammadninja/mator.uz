@@ -20,6 +20,7 @@ import { SellersModule } from '../sellers/sellers.module';
 import { AuthModule } from '../auth/auth.module';
 import { AdminAuthModule } from './auth/admin-auth.module';
 import { AdminManagementModule } from './management/admin-management.module';
+import { FitmentStudioModule } from './fitment-studio/fitment-studio.module';
 
 @Module({
   // AdminAuthModule brings the admin-panel login stack (/v1/auth/admin/*) and
@@ -31,6 +32,7 @@ import { AdminManagementModule } from './management/admin-management.module';
     AuthModule,
     AdminAuthModule,
     AdminManagementModule,
+    FitmentStudioModule,
   ],
   // AdminDealersService takes AdminAuditService, which AdminAuthModule exports.
   // AdminBrandsService takes CacheService from the @Global RedisModule (no

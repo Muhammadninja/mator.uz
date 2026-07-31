@@ -6,6 +6,8 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
 import { prefixedId, IdPrefix } from '../common/ulid.util';
 import { resolvePromo } from '../cart/promo.util';
+import { priceCartLines } from '../cart/cart-pricing.util';
+import { DiscountService } from '../sales/discount.service';
 import { ORDER_INCLUDE, presentOrder } from './order.presenter';
 import { OrderStatusService, TransitionActor } from './order-status.service';
 import { CreateOrderDto } from './dto/create-order.dto';
@@ -45,6 +47,7 @@ export class OrdersService {
     private readonly notifications: NotificationsService,
     private readonly realtime: RealtimeGateway,
     private readonly orderStatus: OrderStatusService,
+    private readonly discounts: DiscountService,
   ) {}
 
   async createFromCart(userId: string, dto: CreateOrderDto) {
@@ -62,7 +65,16 @@ export class OrdersService {
     await this.assertOwnedVehicle(userId, dto.vehicle_id);
     await this.assertOwnedAddress(userId, dto.cart_snapshot?.delivery_address_id);
 
-    const subtotal = cart.items.reduce((s, i) => s + Number(i.priceUzsSnapshot) * i.quantity, 0);
+    // Apply active sales per line, so the order is charged the SAME discounted
+    // price the buyer saw in the catalog and cart. A line's charged unit price is
+    // its sale price when a campaign applies, else its snapshot price.
+    const lineDiscounts = await priceCartLines(this.prisma, this.discounts, cart.items);
+    const unitPriceOf = (i: (typeof cart.items)[number]): number => {
+      const d = lineDiscounts.get(i.id);
+      return d?.appliedSale ? d.finalPrice : Number(i.priceUzsSnapshot);
+    };
+
+    const subtotal = cart.items.reduce((s, i) => s + unitPriceOf(i) * i.quantity, 0);
     const snap = dto.cart_snapshot ?? {};
     const deliveryMethod =
       String(snap.delivery_method ?? 'courier').toUpperCase() === 'PICKUP'
@@ -101,17 +113,20 @@ export class OrdersService {
           promoCode: cart.promoCode ?? undefined,
           expiresAt,
           items: {
-            create: cart.items.map((i) => ({
-              id: prefixedId(IdPrefix.ORDER_ITEM),
-              partId: i.partId,
-              serviceId: i.serviceId,
-              providerId: i.providerId,
-              title: i.title,
-              quantity: i.quantity,
-              priceUzs: i.priceUzsSnapshot,
-              lineTotalUzs: Number(i.priceUzsSnapshot) * i.quantity,
-              scheduledAt: i.scheduledAt,
-            })),
+            create: cart.items.map((i) => {
+              const unit = unitPriceOf(i);
+              return {
+                id: prefixedId(IdPrefix.ORDER_ITEM),
+                partId: i.partId,
+                serviceId: i.serviceId,
+                providerId: i.providerId,
+                title: i.title,
+                quantity: i.quantity,
+                priceUzs: unit,
+                lineTotalUzs: unit * i.quantity,
+                scheduledAt: i.scheduledAt,
+              };
+            }),
           },
         },
         include: ORDER_INCLUDE,

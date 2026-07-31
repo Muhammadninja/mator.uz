@@ -259,3 +259,56 @@ describe('presentPartItem — a motor oil card hides spare-part concepts', () =>
     });
   });
 });
+
+describe('presentPartItem — sale pricing', () => {
+  it('leaves the price untouched and sale null when no discount is passed', () => {
+    const out = presentPartItem(part(), null);
+    expect(out.price_uzs).toBe(25000);
+    expect(out.price_label).toBe('UZS 25 000');
+    expect(out.original_price_uzs).toBeNull();
+    expect(out.sale).toBeNull();
+  });
+
+  it('surfaces the discounted price, original, and sale block when a sale applies', () => {
+    const discount = {
+      originalPrice: 25000,
+      finalPrice: 21250,
+      discountAmount: 3750,
+      discountPercent: 15,
+      appliedSale: {
+        id: 'sale_1',
+        title: 'Filters 15%',
+        discountType: 'PERCENT',
+        discountValue: 15,
+      },
+    };
+    const out = presentPartItem(part(), null, discount as never);
+    // price_uzs is the CHARGED price (what the cart bills), not the original.
+    expect(out.price_uzs).toBe(21250);
+    expect(out.price_label).toBe('UZS 21 250');
+    expect(out.original_price_uzs).toBe(25000);
+    expect(out.original_price_label).toBe('UZS 25 000');
+    expect(out.sale).toEqual({
+      id: 'sale_1',
+      title: 'Filters 15%',
+      discount_type: 'PERCENT',
+      discount_value: 15,
+      discount_percent: 15,
+      discount_amount_uzs: 3750,
+    });
+  });
+
+  it('ignores a discount result that applied no sale', () => {
+    const noSale = {
+      originalPrice: 25000,
+      finalPrice: 25000,
+      discountAmount: 0,
+      discountPercent: 0,
+      appliedSale: null,
+    };
+    const out = presentPartItem(part(), null, noSale as never);
+    expect(out.price_uzs).toBe(25000);
+    expect(out.original_price_uzs).toBeNull();
+    expect(out.sale).toBeNull();
+  });
+});

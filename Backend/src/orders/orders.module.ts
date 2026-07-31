@@ -4,6 +4,7 @@ import { AuthModule } from '../auth/auth.module';
 import { AdminAuthModule } from '../admin/auth/admin-auth.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { RealtimeModule } from '../realtime/realtime.module';
+import { SalesModule } from '../sales/sales.module';
 import { OrdersService } from './orders.service';
 import { OrderStatusService } from './order-status.service';
 import { OrdersController } from './orders.controller';
@@ -24,6 +25,8 @@ import { PaymentWebhookController } from './webhooks/payment-webhook.controller'
     AdminAuthModule,
     NotificationsModule,
     RealtimeModule,
+    // Exports DiscountService so an order charges the active sale price.
+    SalesModule,
   ],
   providers: [
     OrdersService,

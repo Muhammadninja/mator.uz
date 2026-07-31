@@ -727,35 +727,36 @@ model Address {
 
 // ── Vehicle catalog (buyer garage reference, slug IDs) ────────────────────────
 model VehicleMake {
-  id        String                  @id @db.VarChar(64)
-  name      String                  @db.VarChar(120)
-  logoUrl   String?                 @map("logo_url")
-  sortOrder Int                     @default(0) @map("sort_order")
-  country    String?                @map("country") @db.VarChar(80)
-  isActive   Boolean                @default(true) @map("is_active")
-  comingSoon Boolean                @default(false) @map("coming_soon")
-  createdAt  DateTime               @default(now()) @map("created_at")
-  updatedAt  DateTime               @updatedAt @map("updated_at")
-  models    VehicleModelRef[]
-  vehicles  Vehicle[]
-  providers ProviderSupportedMake[]
+  id         String                  @id @db.VarChar(64)
+  name       String                  @db.VarChar(120)
+  logoUrl    String?                 @map("logo_url")
+  sortOrder  Int                     @default(0) @map("sort_order")
+  country    String?                 @map("country") @db.VarChar(80)
+  isActive   Boolean                 @default(true) @map("is_active")
+  comingSoon Boolean                 @default(false) @map("coming_soon")
+  createdAt  DateTime                @default(now()) @map("created_at")
+  updatedAt  DateTime                @updatedAt @map("updated_at")
+  models     VehicleModelRef[]
+  vehicles   Vehicle[]
+  providers  ProviderSupportedMake[]
 
   @@map("vehicle_makes")
 }
 
 model VehicleModelRef {
-  id        String        @id @db.VarChar(64)
-  makeId    String        @map("make_id") @db.VarChar(64)
-  name      String        @db.VarChar(120)
-  sortOrder Int           @default(0) @map("sort_order")
-  yearFrom  Int?          @map("year_from")
-  yearTo    Int?          @map("year_to")
-  bodyType  String?       @map("body_type") @db.VarChar(60)
-  createdAt DateTime      @default(now()) @map("created_at")
-  updatedAt DateTime      @updatedAt @map("updated_at")
-  make      VehicleMake   @relation(fields: [makeId], references: [id], onDelete: Cascade)
-  trims     VehicleTrim[]
-  vehicles  Vehicle[]
+  id              String           @id @db.VarChar(64)
+  makeId          String           @map("make_id") @db.VarChar(64)
+  name            String           @db.VarChar(120)
+  sortOrder       Int              @default(0) @map("sort_order")
+  yearFrom        Int?             @map("year_from")
+  yearTo          Int?             @map("year_to")
+  bodyType        String?          @map("body_type") @db.VarChar(60)
+  createdAt       DateTime         @default(now()) @map("created_at")
+  updatedAt       DateTime         @updatedAt @map("updated_at")
+  make            VehicleMake      @relation(fields: [makeId], references: [id], onDelete: Cascade)
+  trims           VehicleTrim[]
+  vehicles        Vehicle[]
+  fitmentBindings FitmentBinding[]
 
   @@index([makeId])
   @@map("vehicle_models")
@@ -1013,33 +1014,33 @@ model BookingService {
 
 // ── Parts catalog (buyer-facing) ──────────────────────────────────────────────
 model PartCategory {
-  id       String         @id @db.VarChar(64)
-  name     String         @db.VarChar(160)
+  id           String            @id @db.VarChar(64)
+  name         String            @db.VarChar(160)
   // URL/display slug for the admin category-tree console. Backfilled from `id`
   // by the migration (ids are already slug-shaped), unique so a slug names one
   // category. Nullable to keep the backfill safe on legacy rows.
-  slug     String?        @unique @db.VarChar(96)
-  parentId String?        @map("parent_id") @db.VarChar(64)
-  iconUrl  String?        @map("icon_url")
+  slug         String?           @unique @db.VarChar(96)
+  parentId     String?           @map("parent_id") @db.VarChar(64)
+  iconUrl      String?           @map("icon_url")
   // Ordering among siblings in the admin tree (and any ordered listing). New
   // rows default to 0; the admin move endpoint sets an explicit value.
-  sortOrder Int           @default(0) @map("sort_order")
+  sortOrder    Int               @default(0) @map("sort_order")
   // Accent color + icon key the buyer grid renders (mirrors the old hardcoded
   // MAIN_CATEGORIES metadata now that PartCategory is the source of truth).
-  color    String?        @map("color") @db.VarChar(16)
-  iconKey  String?        @map("icon_key") @db.VarChar(48)
+  color        String?           @map("color") @db.VarChar(16)
+  iconKey      String?           @map("icon_key") @db.VarChar(48)
   // Soft-delete / hide flag. The buyer grid only lists isActive rows; orphan
   // legacy rows are deactivated (never deleted — FK Restrict) by the migration.
-  isActive Boolean        @default(true) @map("is_active")
+  isActive     Boolean           @default(true) @map("is_active")
   // Which PartMainCategory enum this category mirrors (null = custom/vehicle
   // category). The 12 canonical buyer rows carry it; it links bot classification
   // (CatalogPart.mainCategory) → category on backfill + ingest.
   mainCategory PartMainCategory? @map("main_category")
-  createdAt DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
-  parent   PartCategory?  @relation("PartCategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
-  children PartCategory[] @relation("PartCategoryTree")
-  parts    CatalogPart[]
+  createdAt    DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
+  parent       PartCategory?     @relation("PartCategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children     PartCategory[]    @relation("PartCategoryTree")
+  parts        CatalogPart[]
 
   @@index([parentId])
   @@index([parentId, sortOrder])
@@ -1186,6 +1187,7 @@ model CatalogPart {
   seller             CatalogSeller        @relation(fields: [sellerId], references: [id], onDelete: Restrict)
   compatibilities    PartCompatibility[]
   fits               CatalogPartFit[]
+  fitmentBindings    FitmentBinding[]
 
   @@index([categoryId])
   @@index([brandId])
@@ -1604,10 +1606,10 @@ model AppAdmin {
   createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt    DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  refreshTokens AdminRefreshToken[]
-  auditsPerformed AdminAudit[] @relation("AdminAuditActor")
-  auditsReceived  AdminAudit[] @relation("AdminAuditTarget")
-  invitesSent     AdminInvite[] @relation("AdminInviteInviter")
+  refreshTokens   AdminRefreshToken[]
+  auditsPerformed AdminAudit[]        @relation("AdminAuditActor")
+  auditsReceived  AdminAudit[]        @relation("AdminAuditTarget")
+  invitesSent     AdminInvite[]       @relation("AdminInviteInviter")
 
   @@map("app_admins")
 }
@@ -1626,22 +1628,22 @@ model AppAdmin {
 ///
 /// Rows are never updated or deleted by application code.
 model AdminAudit {
-  id             String           @id @default(cuid())
+  id             String            @id @default(cuid())
   action         AdminAuditAction
   // Who performed it. Null only for actions with no signed-in actor — the CLI
   // bootstrap of the first SUPER_ADMIN (see actorLabel).
-  actorId        String?          @map("actor_id")
-  actorEmail     String?          @map("actor_email") @db.VarChar(255)
-  actorName      String?          @map("actor_name") @db.VarChar(120)
+  actorId        String?           @map("actor_id")
+  actorEmail     String?           @map("actor_email") @db.VarChar(255)
+  actorName      String?           @map("actor_name") @db.VarChar(120)
   // Human-readable origin for actions with no admin actor, e.g. "cli:admin:create".
-  actorLabel     String?          @map("actor_label") @db.VarChar(60)
+  actorLabel     String?           @map("actor_label") @db.VarChar(60)
   // Which account it was performed on.
-  targetAdminId  String?          @map("target_admin_id")
-  targetEmail    String?          @map("target_email") @db.VarChar(255)
-  targetName     String?          @map("target_name") @db.VarChar(120)
+  targetAdminId  String?           @map("target_admin_id")
+  targetEmail    String?           @map("target_email") @db.VarChar(255)
+  targetName     String?           @map("target_name") @db.VarChar(120)
   // Before/after for privilege changes (CHANGE_ROLE). Null for other actions.
-  previousRole   AdminRole?       @map("previous_role")
-  newRole        AdminRole?       @map("new_role")
+  previousRole   AdminRole?        @map("previous_role")
+  newRole        AdminRole?        @map("new_role")
   // Target for actions performed on something OTHER than an administrator
   // account — today a dealer. targetAdminId cannot carry these: it is an FK to
   // app_admins, so a dealer id would violate it. Deliberately NOT a foreign key
@@ -1657,13 +1659,13 @@ model AdminAudit {
   // Free-text reason supplied by the acting admin (dealer suspension).
   reason         String?           @db.VarChar(500)
   // Request provenance. Untrusted and display-only — never an authorization input.
-  ip             String?          @db.VarChar(45)
-  userAgent      String?          @map("user_agent") @db.VarChar(400)
+  ip             String?           @db.VarChar(45)
+  userAgent      String?           @map("user_agent") @db.VarChar(400)
   // Correlation id of the HTTP request that performed the action. Grepping the
   // server log for it returns the whole story of the incident — the HTTP entry,
   // any exception, and this audit write — with no join table.
-  requestId      String?          @map("request_id") @db.VarChar(64)
-  createdAt      DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  requestId      String?           @map("request_id") @db.VarChar(64)
+  createdAt      DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
 
   actor  AppAdmin? @relation("AdminAuditActor", fields: [actorId], references: [id], onDelete: SetNull)
   target AppAdmin? @relation("AdminAuditTarget", fields: [targetAdminId], references: [id], onDelete: SetNull)
@@ -1777,23 +1779,23 @@ enum SaleScopeType {
 /// mobile client. A sale is "active" when isActive is true and now falls inside
 /// [startAt, endAt] — endAt null meaning open-ended.
 model Sale {
-  id           String           @id @db.VarChar(64)
-  title        String           @db.VarChar(160)
-  description  String?          @db.VarChar(1000)
-  discountType SaleDiscountType @map("discount_type")
+  id            String           @id @db.VarChar(64)
+  title         String           @db.VarChar(160)
+  description   String?          @db.VarChar(1000)
+  discountType  SaleDiscountType @map("discount_type")
   // PERCENT: 0 < value <= 100. FIXED: value > 0, in whole/fractional UZS.
   // Decimal (not Float) so a percentage like 12.5 and a money amount are both
   // exact — the same 14,2 shape CatalogPart.priceUzs uses for money.
-  discountValue Decimal         @map("discount_value") @db.Decimal(14, 2)
+  discountValue Decimal          @map("discount_value") @db.Decimal(14, 2)
   // Targeting. ALL_PRODUCTS ignores `targets`; every other scope reads them.
-  scopeType    SaleScopeType    @default(ALL_PRODUCTS) @map("scope_type")
-  startAt      DateTime         @map("start_at") @db.Timestamptz(3)
+  scopeType     SaleScopeType    @default(ALL_PRODUCTS) @map("scope_type")
+  startAt       DateTime         @map("start_at") @db.Timestamptz(3)
   // Null = runs until switched off.
-  endAt        DateTime?        @map("end_at") @db.Timestamptz(3)
-  isActive     Boolean          @default(true) @map("is_active")
+  endAt         DateTime?        @map("end_at") @db.Timestamptz(3)
+  isActive      Boolean          @default(true) @map("is_active")
   // Which sale wins when several apply to one product. Higher runs first; ties
   // break on the deeper discount, then on id, so the choice is deterministic.
-  priority     Int              @default(0)
+  priority      Int              @default(0)
   // Soft delete. DELETE /v1/admin/sales/:id stamps this instead of removing the
   // row, so a campaign that ran — and the prices it produced — stays on file and
   // auditable. A deleted sale is invisible to every list and never applies to a
@@ -1801,10 +1803,10 @@ model Sale {
   //
   // Distinct from isActive: isActive is an operational switch an admin flips back
   // and forth, deletedAt is terminal.
-  deletedAt    DateTime?        @map("deleted_at") @db.Timestamptz(3)
-  createdAt    DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt    DateTime         @updatedAt @map("updated_at") @db.Timestamptz(3)
-  targets      SaleTarget[]
+  deletedAt     DateTime?        @map("deleted_at") @db.Timestamptz(3)
+  createdAt     DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime         @updatedAt @map("updated_at") @db.Timestamptz(3)
+  targets       SaleTarget[]
 
   // Covers the active-sale lookup: deletedAt and isActive first (most
   // selective), then the window bounds both endpoints filter on.
@@ -1834,4 +1836,73 @@ model SaleTarget {
   // "which sales target this product/category/dealer" — the discount lookup.
   @@index([targetType, targetId])
   @@map("sale_targets")
+}
+
+// ── 3D Fitment Studio (admin) ─────────────────────────────────────────────────
+// Powers /v1/admin/fitment-studio/*: the operator binds catalog parts to a
+// vehicle model at one of 7 hotspots on the shared 3D car model. Distinct from
+// the buyer-side PartCompatibility (trim/engine-level fit) above — this is a
+// model-level, node-anchored admin mapping surface.
+
+// Fitment strength shown per bound part in the studio. Separate enum from the
+// buyer-facing CompatibilityStatus (FITS/…): the studio's semantics differ.
+enum FitmentStatus {
+  EXACT_MATCH
+  MAYBE
+  UNIVERSAL
+}
+
+// The 7 hotspot categories on the shared 3D car model. One VehicleNode per
+// category (category is @unique), seeded with coordinates matching the admin's
+// three.js scene (see fitment-node.config.ts → NODE_SEED).
+enum NodeCategory {
+  ENGINE
+  FRONT_BRAKES
+  REAR_BRAKES
+  SUSPENSION
+  TRANSMISSION
+  ELECTRICAL
+  EXHAUST
+}
+
+/// A hotspot on the shared 3D car model. There are 7 today (one per
+/// NodeCategory), seeded once with world-space coordinates that match the
+/// admin's three.js scene (fitment-node.config.ts → NODE_SEED).
+model VehicleNode {
+  id        String       @id @default(uuid())
+  category  NodeCategory @unique
+  name      String // "Передние тормоза"
+  positionX Float // 0.86
+  positionY Float // 0.34
+  positionZ Float // 1.30
+
+  bindings FitmentBinding[]
+
+  @@map("vehicle_nodes")
+}
+
+/// Join table: which CatalogPart fits which VehicleModelRef, at which 3D node.
+/// `nodeId` is required (the studio always sends a node), which keeps the
+/// composite unique simple and lets unbind target one exact row. The composite
+/// unique makes bind idempotent.
+model FitmentBinding {
+  id String @id @default(uuid())
+
+  partId String      @db.VarChar(64)
+  part   CatalogPart @relation(fields: [partId], references: [id], onDelete: Cascade)
+
+  vehicleModelId String          @db.VarChar(64)
+  vehicleModel   VehicleModelRef @relation(fields: [vehicleModelId], references: [id], onDelete: Cascade)
+
+  nodeId String
+  node   VehicleNode @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+
+  status    FitmentStatus @default(EXACT_MATCH)
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  @@unique([partId, vehicleModelId, nodeId])
+  @@index([vehicleModelId, nodeId]) // node counts + unmapped filter
+  @@index([partId])
+  @@map("fitment_bindings")
 }

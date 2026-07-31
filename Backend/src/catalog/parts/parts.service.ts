@@ -17,10 +17,12 @@ import {
 } from './dto/list-parts.query.dto';
 import {
   PART_INCLUDE,
+  PartWithRelations,
   presentPartItem,
   computeCompatibility,
   VehicleCompatContext,
 } from './part.presenter';
+import { ActiveSale, DiscountResult, DiscountService } from '../../sales/discount.service';
 
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 100;
@@ -44,9 +46,48 @@ interface VehicleFilterContext extends VehicleCompatContext {
   modelName: string | null;
 }
 
+/** Shared Prisma select for the vehicle fields a compatibility check needs —
+ *  used by both the by-id and by-VIN lookups so they stay in lockstep. */
+const VEHICLE_CONTEXT_SELECT = {
+  trimId: true,
+  engineId: true,
+  year: true,
+  make: { select: { name: true } },
+  model: { select: { name: true } },
+} satisfies Prisma.VehicleSelect;
+
+type VehicleContextRow = Prisma.VehicleGetPayload<{
+  select: typeof VEHICLE_CONTEXT_SELECT;
+}>;
+
+function mapVehicleContext(v: VehicleContextRow): VehicleFilterContext {
+  return {
+    trimId: v.trimId,
+    engineId: v.engineId,
+    year: v.year,
+    makeName: v.make?.name ?? null,
+    modelName: v.model?.name ?? null,
+  };
+}
+
 @Injectable()
 export class PartsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly discounts: DiscountService,
+  ) {}
+
+  /** Price one part against a pre-loaded snapshot of the active sales. */
+  private discountFor(
+    part: PartWithRelations,
+    sales: ActiveSale[],
+  ): DiscountResult {
+    return this.discounts.calculateDiscount(
+      Number(part.priceUzs),
+      { id: part.id, categoryId: part.categoryId, sellerId: part.sellerId },
+      sales,
+    );
+  }
 
   async list(query: ListPartsQueryDto) {
     const vehicle = await this.loadVehicle(query.vehicle_id);
@@ -79,8 +120,11 @@ export class PartsService {
       }),
     ]);
 
+    // One active-sales query for the whole page; each part is priced against it.
+    const sales = items.length ? await this.discounts.loadActiveSales() : [];
+
     return {
-      items: items.map((p) => presentPartItem(p, vehicle)),
+      items: items.map((p) => presentPartItem(p, vehicle, this.discountFor(p, sales))),
       facets: {
         brands: await this.brandFacet(brandFacet),
         price_range_uzs: {
@@ -108,7 +152,8 @@ export class PartsService {
     });
     if (!part) throw new NotFoundException('Part not found');
     const vehicle = await this.loadVehicle(vehicleId);
-    return presentPartItem(part, vehicle);
+    const sales = await this.discounts.loadActiveSales();
+    return presentPartItem(part, vehicle, this.discountFor(part, sales));
   }
 
   async compatibility(partId: string, vehicleId: string) {
@@ -153,6 +198,107 @@ export class PartsService {
         ),
       ],
       source: part.compatibilities[0]?.source ?? null,
+    };
+  }
+
+  /**
+   * App-facing compatibility check (`POST :id/check-compatibility`). Same
+   * matching engine as `compatibility()` above, but the vehicle can be
+   * resolved by `vehicleId` OR `vin`, and the internal `fits|maybe|does_not_fit`
+   * status is mapped onto the mobile contract (EXACT_MATCH / UNIVERSAL /
+   * NOT_COMPATIBLE / UNCERTAIN) with a ready-to-render badge. The older GET
+   * endpoint is kept untouched for backwards compatibility.
+   */
+  async checkCompatibility(
+    partId: string,
+    input: { vehicleId?: string; vin?: string },
+  ) {
+    const part = await this.prisma.catalogPart.findUnique({
+      where: { id: partId },
+      select: {
+        id: true,
+        isUniversal: true,
+        oemNumbers: true,
+        compatibilities: true,
+      },
+    });
+    if (!part) throw new NotFoundException('Part not found');
+
+    const vehicle = input.vehicleId
+      ? await this.loadVehicle(input.vehicleId)
+      : input.vin
+        ? await this.loadVehicleByVin(input.vin)
+        : null;
+
+    const oemNumber = part.oemNumbers?.[0] ?? null;
+    const echoedVehicleId = input.vehicleId ?? null;
+
+    // A universal product (oil, chemistry, generic fastener/bulb) fits every
+    // vehicle by definition — answer UNIVERSAL without touching the match rows.
+    if (part.isUniversal) {
+      return this.presentCompatibility(part.id, echoedVehicleId, 'universal', oemNumber);
+    }
+
+    // No vehicle resolved (neither id nor vin matched a row) → we genuinely
+    // can't tell, so UNCERTAIN rather than a false negative.
+    const internal = computeCompatibility(part.compatibilities, vehicle)?.status ?? 'maybe';
+    return this.presentCompatibility(part.id, echoedVehicleId, internal, oemNumber);
+  }
+
+  /** Map an internal fit status onto the app contract (status + badge + details). */
+  private presentCompatibility(
+    partId: string,
+    vehicleId: string | null,
+    internal: 'universal' | 'fits' | 'maybe' | 'does_not_fit' | string,
+    oemNumber: string | null,
+  ) {
+    const MAP: Record<
+      string,
+      {
+        status: string;
+        isCompatible: boolean;
+        color: 'green' | 'yellow' | 'red';
+        text: string;
+        matchedBy: 'MODEL_REF' | 'OEM_NUMBER' | 'UNIVERSAL';
+      }
+    > = {
+      universal: {
+        status: 'UNIVERSAL',
+        isCompatible: true,
+        color: 'green',
+        text: 'Универсальный товар',
+        matchedBy: 'UNIVERSAL',
+      },
+      fits: {
+        status: 'EXACT_MATCH',
+        isCompatible: true,
+        color: 'green',
+        text: '100% Подходит для вашего авто',
+        matchedBy: 'MODEL_REF',
+      },
+      maybe: {
+        status: 'UNCERTAIN',
+        isCompatible: true,
+        color: 'yellow',
+        text: 'Требует уточнения (проверьте VIN)',
+        matchedBy: 'MODEL_REF',
+      },
+      does_not_fit: {
+        status: 'NOT_COMPATIBLE',
+        isCompatible: false,
+        color: 'red',
+        text: 'Не подходит для вашего авто',
+        matchedBy: 'MODEL_REF',
+      },
+    };
+    const m = MAP[internal] ?? MAP.maybe;
+    return {
+      partId,
+      vehicleId,
+      status: m.status,
+      isCompatible: m.isCompatible,
+      badge: { text: m.text, color: m.color },
+      details: { matchedBy: m.matchedBy, oemNumber },
     };
   }
 
@@ -393,23 +539,23 @@ export class PartsService {
     if (!vehicleId) return null;
     const v = await this.prisma.vehicle.findUnique({
       where: { id: vehicleId },
-      select: {
-        trimId: true,
-        engineId: true,
-        year: true,
-        make: { select: { name: true } },
-        model: { select: { name: true } },
-      },
+      select: VEHICLE_CONTEXT_SELECT,
     });
-    return v
-      ? {
-          trimId: v.trimId,
-          engineId: v.engineId,
-          year: v.year,
-          makeName: v.make?.name ?? null,
-          modelName: v.model?.name ?? null,
-        }
-      : null;
+    return v ? mapVehicleContext(v) : null;
+  }
+
+  /** Resolve a vehicle context by raw VIN (fallback path for the app when it
+   *  only holds a VIN). VIN is not unique in the schema, so take the first
+   *  match — any vehicle with this VIN yields the same trim/engine context. */
+  private async loadVehicleByVin(
+    vin: string,
+  ): Promise<VehicleFilterContext | null> {
+    if (!vin) return null;
+    const v = await this.prisma.vehicle.findFirst({
+      where: { vin },
+      select: VEHICLE_CONTEXT_SELECT,
+    });
+    return v ? mapVehicleContext(v) : null;
   }
 
   private async brandFacet(

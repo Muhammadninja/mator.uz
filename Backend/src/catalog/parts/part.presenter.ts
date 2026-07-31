@@ -1,5 +1,6 @@
 import { Prisma, CompatibilityStatus, ProductKind } from '@prisma/client';
 import { OIL_TYPE_LABELS, formatVolume } from '../../common/motor-oil.util';
+import type { DiscountResult } from '../../sales/discount.service';
 // The kind capability table — the SINGLE source of truth for what a kind is.
 // The card must never re-derive these from a local `kind === MOTOR_OIL` check.
 import { hasCompatibility, hasPartNumbers } from '../../common/product-kind';
@@ -109,10 +110,38 @@ function presentKindAttributes(part: PartWithRelations) {
   }
 }
 
+/**
+ * The `sale` block + discounted/original prices, or the plain price fields when
+ * no sale applies. `price_uzs` is ALWAYS the price the buyer pays (the cart and
+ * order charge the same), so a client shows it as the price and, when a sale
+ * applies, `original_price_uzs` as the struck-through was.
+ */
+function presentPricing(part: PartWithRelations, discount?: DiscountResult | null) {
+  const applied = discount?.appliedSale ? discount : null;
+  const price = applied ? applied.finalPrice : Number(part.priceUzs);
+  return {
+    price_uzs: price,
+    price_label: formatUzs(price),
+    original_price_uzs: applied ? applied.originalPrice : null,
+    original_price_label: applied ? formatUzs(applied.originalPrice) : null,
+    sale: applied
+      ? {
+          id: applied.appliedSale!.id,
+          title: applied.appliedSale!.title,
+          discount_type: applied.appliedSale!.discountType,
+          discount_value: applied.appliedSale!.discountValue,
+          discount_percent: applied.discountPercent,
+          discount_amount_uzs: applied.discountAmount,
+        }
+      : null,
+  };
+}
+
 /** Map a CatalogPart row to the contract's list-item shape. */
 export function presentPartItem(
   part: PartWithRelations,
   vehicle: VehicleCompatContext | null,
+  discount?: DiscountResult | null,
 ) {
   return {
     id: part.id,
@@ -139,8 +168,9 @@ export function presentPartItem(
     // "UNKNOWN" there would read as "we don't know this oil's number", inviting a
     // UI to render an empty "OEM/GM №" row for a product that can never have one.
     part_number_type: hasPartNumbers(part.kind) ? part.partNumberType : null,
-    price_uzs: Number(part.priceUzs),
-    price_label: formatUzs(part.priceUzs),
+    // price_uzs / price_label (+ original_price_uzs + sale when a campaign
+    // applies) — the single place a discount reaches the buyer catalog.
+    ...presentPricing(part, discount),
     currency: part.currency,
     in_stock: part.inStock,
     delivery_eta_days_min: part.deliveryEtaDaysMin,

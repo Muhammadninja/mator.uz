@@ -10,6 +10,7 @@ import {
   SEED_CATEGORIES,
   SEED_DEALERS,
 } from './seed-data/catalog-reference.seed';
+import { NODE_SEED as FITMENT_NODE_SEED } from '../admin/fitment-studio/fitment-node.config';
 
 const prisma = new PrismaClient();
 
@@ -214,12 +215,33 @@ async function seedSmsOperators() {
   }
 }
 
+/**
+ * Seed the 7 VehicleNode hotspots for the 3D Fitment Studio (idempotent, keyed
+ * on the unique category). Coordinates MUST match the admin three.js scene so DB
+ * nodes line up with the model (see admin/fitment-studio/fitment-node.config.ts).
+ */
+async function seedFitmentNodes() {
+  for (const n of FITMENT_NODE_SEED) {
+    await prisma.vehicleNode.upsert({
+      where: { category: n.category },
+      update: {
+        name: n.name,
+        positionX: n.positionX,
+        positionY: n.positionY,
+        positionZ: n.positionZ,
+      },
+      create: n,
+    });
+  }
+}
+
 async function main() {
   await seedAdmin();
   await seedVehicleCatalog();
   await seedCategories();
   await seedDealers();
   await seedSmsOperators();
+  await seedFitmentNodes();
 
   const counts = {
     vehicle_makes: await prisma.vehicleMake.count(),
@@ -230,6 +252,7 @@ async function main() {
     catalog_sellers: await prisma.catalogSeller.count(),
     sms_operators: await prisma.smsOperator.count(),
     sms_operator_prefixes: await prisma.smsOperatorPrefix.count(),
+    vehicle_nodes: await prisma.vehicleNode.count(),
   };
   console.log('[seed] reference-data row counts:');
   console.table(counts);
