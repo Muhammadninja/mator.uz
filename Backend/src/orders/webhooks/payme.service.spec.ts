@@ -295,7 +295,13 @@ describe('PaymeService (Merchant API)', () => {
       });
     });
 
-    it('concurrent create with a DIFFERENT id for the same order is refused', async () => {
+    it('concurrent create with a DIFFERENT id for the same order is refused in the account-error range', async () => {
+      // Regression (Payme sandbox, "CreateTransaction while the account is
+      // busy"): this used to answer -31008, which the sandbox rejects. An order
+      // already held by another active transaction is an ACCOUNT-level refusal,
+      // so the code must land in -31099..-31050 and name the account field in
+      // `data`. Asserting the range — not just the literal — is deliberate:
+      // that is exactly what the sandbox checks.
       prisma.payment.findUnique.mockResolvedValue(null);
       prisma.order.findUnique.mockResolvedValue(
         buildOrder({ id: 'ord_1', totalUzs: 215000 }),
@@ -309,7 +315,10 @@ describe('PaymeService (Merchant API)', () => {
         ...params,
         id: 'pmt-second',
       });
-      expect(res.error.code).toBe(-31008);
+      expect(res.error.code).toBeGreaterThanOrEqual(-31099);
+      expect(res.error.code).toBeLessThanOrEqual(-31050);
+      expect(res.error.code).toBe(-31050);
+      expect(res.error.data).toBe('order_id');
       expect(prisma.payment.create).not.toHaveBeenCalled();
     });
 

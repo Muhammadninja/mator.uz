@@ -252,16 +252,24 @@ export class PaymeService {
           // waiting on the lock while the winner committed. That is a repeat, not
           // a competitor, so report it idempotently — checking the id before
           // refusing is what keeps concurrent same-id calls returning the same
-          // answer instead of one of them getting -31008.
+          // answer instead of one of them getting an error.
           if (active.providerTransactionId === paymeId) return active;
           if (this.isExpired(active, createTime)) {
             // The incumbent timed out; cancel it so this order is payable again
             // rather than being wedged by an abandoned transaction.
             await this.expireInTx(tx, active);
           } else {
+            // A DIFFERENT transaction already holds this order. Payme classes
+            // this as an account-level problem, not a transaction-state one: the
+            // account named in `params.account` cannot accept a new payment, so
+            // the answer must fall in the -31050..-31099 range and carry the
+            // offending account field in `data` (the sandbox asserts the range).
+            // -31008 is reserved here for transaction-state failures and stays
+            // in place for those.
             throw new PaymeError(
-              -31008,
+              -31050,
               'Another transaction is in progress for this order',
+              this.accountField,
             );
           }
         }
