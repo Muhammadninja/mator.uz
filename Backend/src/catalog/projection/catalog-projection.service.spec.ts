@@ -90,7 +90,8 @@ describe('CatalogProjectionService — mapping', () => {
         id: 'part_stock_500',
         title: 'Timing belt',
         brandId: 'brand_2', // exactly one linked vehicle brand → used
-        categoryId: CatalogProjectionService.UNCATEGORIZED_ID,
+        // Bot-assigned mainCategory maps to its canonical PartCategory slug.
+        categoryId: 'belts-and-hoses',
         sellerId: 'seller_7',
         // Unlabeled (UNKNOWN) number → searchable as BOTH GM and OEM.
         oemNumbers: ['96535062'],
@@ -103,6 +104,18 @@ describe('CatalogProjectionService — mapping', () => {
       });
       // update carries the same data (idempotent upsert).
       expect(part.update).toMatchObject({ priceUzs: 185000, inStock: true });
+    });
+
+    it('falls back to the uncategorized bucket for an unclassified product', () => {
+      const base = buildStock() as any;
+      svc.buildProjectionOps({
+        ...base,
+        product: { ...base.product, mainCategory: null },
+      });
+      const part = upsertArg(prisma, 'catalogPart').create;
+      // CatalogPart.categoryId is NOT NULL, so a product the bot never
+      // classified still needs a category to point at.
+      expect(part.categoryId).toBe(CatalogProjectionService.UNCATEGORIZED_ID);
     });
 
     it('projects the classified attributes verbatim from the Product', () => {

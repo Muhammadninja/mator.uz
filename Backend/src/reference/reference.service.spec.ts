@@ -90,12 +90,31 @@ describe('ReferenceService', () => {
       ]);
       const res = await service.listModels('chevrolet');
       expect(prisma.vehicleModelRef.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { makeId: 'chevrolet' }, orderBy: { sortOrder: 'asc' } }),
+        expect.objectContaining({
+          // Scoped to the make; the query also gates on the parent make's
+          // isActive (inactive brands hide their models), so match on the
+          // makeId scope rather than pinning the whole `where` shape.
+          where: expect.objectContaining({ makeId: 'chevrolet' }),
+          orderBy: { sortOrder: 'asc' },
+        }),
       );
       expect(res).toEqual({
         items: [{ id: 'cobalt', make_id: 'chevrolet', name: 'Cobalt' }],
         total: 1,
       });
+    });
+
+    it('hides models whose parent make is inactive', async () => {
+      prisma.vehicleMake.findUnique.mockResolvedValue({ id: 'chevrolet' });
+      prisma.vehicleModelRef.findMany.mockResolvedValue([]);
+      await service.listModels('chevrolet');
+      // Models carry no active flag of their own — the parent make's isActive
+      // gates them, so a deactivated brand drops out of the app catalog.
+      expect(prisma.vehicleModelRef.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { makeId: 'chevrolet', make: { isActive: true } },
+        }),
+      );
     });
   });
 
