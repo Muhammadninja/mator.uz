@@ -1,4 +1,4 @@
-import { Controller, Get, Query } from '@nestjs/common';
+import { Controller, Get, Param, Query } from '@nestjs/common';
 import {
   ApiBadRequestResponse,
   ApiNotFoundResponse,
@@ -66,14 +66,18 @@ export class ReferenceController {
     description: 'Trims for the model.',
     schema: {
       example: {
-        items: [{ id: 'cobalt-p2-premier', model_id: 'cobalt', name: 'Premier' }],
+        items: [
+          { id: 'cobalt-p2-premier', model_id: 'cobalt', name: 'Premier' },
+        ],
         total: 7,
       },
     },
   })
   @ApiBadRequestResponse({
     description: 'modelId is missing or blank.',
-    schema: { example: { code: 'BAD_REQUEST', message: 'modelId is required' } },
+    schema: {
+      example: { code: 'BAD_REQUEST', message: 'modelId is required' },
+    },
   })
   @ApiNotFoundResponse({
     description: 'modelId is unknown.',
@@ -99,7 +103,14 @@ export class ReferenceController {
       'All engines. If trimId is supplied it is validated for existence only (404 if unknown) and does NOT filter the list.',
     schema: {
       example: {
-        items: [{ id: 'b15d2-turbo', name: '1.5L Turbo (B15D2)', displacement_cc: 1500, fuel_type: 'petrol' }],
+        items: [
+          {
+            id: 'b15d2-turbo',
+            name: '1.5L Turbo (B15D2)',
+            displacement_cc: 1500,
+            fuel_type: 'petrol',
+          },
+        ],
         total: 9,
       },
     },
@@ -110,5 +121,64 @@ export class ReferenceController {
   })
   engines(@Query('trimId') trimId?: string) {
     return this.reference.listEngines(trimId);
+  }
+
+  /**
+   * The dynamic part-category tree, one level at a time — the endpoint the
+   * Telegram seller bot walks. Omit `parentId` for the root (vehicle) categories;
+   * pass one to get that category's children.
+   *
+   * ONLY active categories are ever returned, at any level: a category the admin
+   * deactivates disappears from the bot on the next read. An empty `items` is a
+   * normal answer and is exactly what tells the bot to skip the selection step.
+   */
+  @Get('categories')
+  @ApiOperation({
+    summary:
+      'List active part categories (roots, or the children of parentId).',
+    description:
+      'Without parentId: the active root (vehicle) categories. With parentId: ' +
+      "that category's active children. Inactive categories are never returned. " +
+      'An empty items array means the category is a leaf — the caller should not ' +
+      'render a further selection step.',
+  })
+  @ApiQuery({ name: 'parentId', required: false, example: 'brake-system' })
+  @ApiOkResponse({
+    description: 'Active categories in display order.',
+    schema: {
+      example: {
+        items: [
+          {
+            id: 'brake-pads',
+            name: 'Brake Pads',
+            slug: 'brake-pads',
+            parentId: 'brakes',
+            level: 2,
+            sortOrder: 1,
+          },
+        ],
+        total: 1,
+      },
+    },
+  })
+  @ApiNotFoundResponse({
+    description: 'parentId is supplied but unknown.',
+    schema: { example: { code: 'NOT_FOUND', message: 'Category not found' } },
+  })
+  categories(@Query('parentId') parentId?: string) {
+    return this.reference.listCategories(parentId);
+  }
+
+  @Get('categories/:id/children')
+  @ApiOperation({
+    summary: 'List the active children of one category.',
+    description:
+      'Path-param form of GET /v1/reference/categories?parentId=<id>, returning ' +
+      'the identical payload. 404 when the category itself is unknown.',
+  })
+  @ApiOkResponse({ description: 'Active children in display order.' })
+  @ApiNotFoundResponse({ description: 'No such category.' })
+  categoryChildren(@Param('id') id: string) {
+    return this.reference.listCategories(id);
   }
 }

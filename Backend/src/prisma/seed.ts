@@ -8,6 +8,7 @@ import {
 } from './seed-data/vehicle-catalog.seed';
 import {
   SEED_CATEGORIES,
+  SEED_ROOT_CATEGORIES,
   SEED_DEALERS,
 } from './seed-data/catalog-reference.seed';
 import { NODE_SEED as FITMENT_NODE_SEED } from '../admin/fitment-studio/fitment-node.config';
@@ -122,9 +123,40 @@ async function seedVehicleCatalog() {
 }
 
 async function seedCategories() {
-  // The 12 canonical rows (source of truth for the buyer grid) + the fallback
-  // 'cat_uncategorized' bucket. Matches the migration exactly so a fresh DB and
-  // a migrated DB converge.
+  // The category TREE: 8 level-0 vehicle categories, then the 12 canonical
+  // level-1 main categories parented under them, then the fallback bucket.
+  // Matches the migration exactly so a fresh DB and a migrated DB converge.
+  //
+  // Idempotent: every row is upserted by its stable slug-shaped id, so running
+  // the seed repeatedly updates in place and never duplicates.
+  //
+  // Roots FIRST — the main categories below reference them as parents.
+  for (const c of SEED_ROOT_CATEGORIES) {
+    await prisma.partCategory.upsert({
+      where: { id: c.id },
+      update: {
+        name: c.name,
+        slug: c.slug,
+        color: c.color,
+        iconKey: c.iconKey,
+        sortOrder: c.sortOrder,
+        parentId: null,
+        level: 0,
+        isActive: true,
+      },
+      create: {
+        id: c.id,
+        name: c.name,
+        slug: c.slug,
+        color: c.color,
+        iconKey: c.iconKey,
+        sortOrder: c.sortOrder,
+        level: 0,
+        isActive: true,
+      },
+    });
+  }
+
   for (const c of SEED_CATEGORIES) {
     await prisma.partCategory.upsert({
       where: { id: c.id },
@@ -135,6 +167,8 @@ async function seedCategories() {
         iconKey: c.iconKey,
         mainCategory: c.mainCategory,
         sortOrder: c.sortOrder,
+        parentId: c.parentId,
+        level: c.level,
         isActive: true,
       },
       create: {
@@ -145,19 +179,25 @@ async function seedCategories() {
         iconKey: c.iconKey,
         mainCategory: c.mainCategory,
         sortOrder: c.sortOrder,
+        parentId: c.parentId,
+        level: c.level,
         isActive: true,
       },
     });
   }
 
+  // The fallback bucket for unclassified buyer parts. Parked at level 1 (though
+  // parentless) so it is NOT offered to sellers as a root category, while
+  // remaining a valid catalog_parts.category_id target. Mirrors the migration.
   await prisma.partCategory.upsert({
     where: { id: 'cat_uncategorized' },
-    update: { isActive: true },
+    update: { isActive: true, level: 1 },
     create: {
       id: 'cat_uncategorized',
       name: 'Uncategorized',
       slug: 'uncategorized',
       sortOrder: 999,
+      level: 1,
       isActive: true,
     },
   });

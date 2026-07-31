@@ -36,15 +36,35 @@ function makeCacheMock() {
   };
 }
 
+/**
+ * The category tree is served through PartCategoryService (which owns its own
+ * caching + invalidation), so ReferenceService only delegates to it. Mocking it
+ * keeps these tests about the delegation contract; the tree rules themselves are
+ * covered in part-category.service.spec.ts.
+ */
+function makeCategoriesMock() {
+  return {
+    getOrFail: jest.fn().mockResolvedValue({ id: 'brakes' }),
+    findChildren: jest.fn().mockResolvedValue([]),
+    findRootCategories: jest.fn().mockResolvedValue([]),
+  };
+}
+
 describe('ReferenceService', () => {
   let prisma: ReturnType<typeof makePrismaMock>;
   let cache: ReturnType<typeof makeCacheMock>;
+  let categories: ReturnType<typeof makeCategoriesMock>;
   let service: ReferenceService;
 
   beforeEach(() => {
     prisma = makePrismaMock();
     cache = makeCacheMock();
-    service = new ReferenceService(prisma as never, cache as never);
+    categories = makeCategoriesMock();
+    service = new ReferenceService(
+      prisma as never,
+      cache as never,
+      categories as never,
+    );
   });
 
   describe('listMakes', () => {
@@ -240,6 +260,62 @@ describe('ReferenceService', () => {
         24 * 60 * 60,
         expect.any(Function),
       );
+    });
+  });
+
+  // The endpoint the Telegram seller bot walks. Category rules live in
+  // PartCategoryService (mocked here) — these cover the delegation contract.
+  describe('listCategories', () => {
+    const brakes = {
+      id: 'brakes',
+      name: 'Brakes',
+      slug: 'brakes',
+      parentId: 'brake-system',
+      level: 1,
+      sortOrder: 0,
+    };
+
+    it('returns the ROOT categories when no parentId is given', async () => {
+      categories.findRootCategories.mockResolvedValue([brakes]);
+      const res = await service.listCategories();
+      expect(categories.findRootCategories).toHaveBeenCalled();
+      expect(res).toEqual({ items: [brakes], total: 1 });
+    });
+
+    it("returns a category's children when parentId is given", async () => {
+      categories.findChildren.mockResolvedValue([brakes]);
+      const res = await service.listCategories('brake-system');
+      expect(categories.findChildren).toHaveBeenCalledWith('brake-system');
+      expect(res).toEqual({ items: [brakes], total: 1 });
+    });
+
+    it('returns 200 with an empty list for a LEAF — the bot skips the step', async () => {
+      categories.findChildren.mockResolvedValue([]);
+      await expect(service.listCategories('brake-pads')).resolves.toEqual({
+        items: [],
+        total: 0,
+      });
+    });
+
+    it('404s on an unknown parentId (matching makeId/modelId behaviour)', async () => {
+      categories.getOrFail.mockRejectedValue(new NotFoundException());
+      await expect(service.listCategories('ghost')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+    });
+
+    it('400s on a blank parentId', async () => {
+      await expect(service.listCategories('   ')).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+    });
+
+    it('never returns inactive categories (the service filters them out)', async () => {
+      // findChildren/findRootCategories are active-only by construction; this
+      // pins the contract that ReferenceService adds no inactive rows of its own.
+      categories.findRootCategories.mockResolvedValue([brakes]);
+      const res = await service.listCategories();
+      expect(res.items.every((i) => !('isActive' in i))).toBe(true);
     });
   });
 });

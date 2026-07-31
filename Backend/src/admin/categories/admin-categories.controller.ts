@@ -30,6 +30,7 @@ import { AdminJwtGuard } from '../auth/guards/admin-jwt.guard';
 import { AdminRoleGuard } from '../auth/guards/admin-role.guard';
 import { AdminCategoriesService } from './admin-categories.service';
 import { CreateCategoryDto } from './dto/create-category.dto';
+import { ListCategoriesQueryDto } from './dto/list-categories.query.dto';
 import { MoveCategoryDto } from './dto/move-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
 
@@ -48,10 +49,30 @@ import { UpdateCategoryDto } from './dto/update-category.dto';
 @Controller('v1/admin/categories')
 @UseGuards(AdminJwtGuard, AdminRoleGuard)
 @Roles(AdminRole.SUPER_ADMIN, AdminRole.MANAGER, AdminRole.OPERATOR)
-@ApiUnauthorizedResponse({ description: 'Missing or invalid admin access token.' })
+@ApiUnauthorizedResponse({
+  description: 'Missing or invalid admin access token.',
+})
 @ApiForbiddenResponse({ description: 'Insufficient role for this operation.' })
 export class AdminCategoriesController {
   constructor(private readonly categories: AdminCategoriesService) {}
+
+  @Get()
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'List categories (flat, filterable)',
+    description:
+      'Flat listing ordered by level, then sortOrder, then name. Filters ' +
+      'combine with AND. parentId="null" (literal) selects root categories; ' +
+      'omitting parentId applies no parent filter. Use GET /tree for the nested ' +
+      'forest.',
+  })
+  @ApiOkResponse({
+    description: 'Matching categories in the standard admin envelope.',
+  })
+  @ApiBadRequestResponse({ description: 'Invalid query parameter.' })
+  list(@Query() query: ListCategoriesQueryDto) {
+    return this.categories.list(query);
+  }
 
   @Get('tree')
   @HttpCode(HttpStatus.OK)
@@ -61,9 +82,20 @@ export class AdminCategoriesController {
       'Returns the whole PartCategory forest. Each node carries productsCount ' +
       '(count of parts linked directly to that node) and its ordered children.',
   })
-  @ApiOkResponse({ description: 'The category tree in the standard admin envelope.' })
+  @ApiOkResponse({
+    description: 'The category tree in the standard admin envelope.',
+  })
   tree() {
     return this.categories.tree();
+  }
+
+  @Get(':id')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Get one category by id' })
+  @ApiOkResponse({ description: 'The category node.' })
+  @ApiNotFoundResponse({ description: 'No such category.' })
+  findOne(@Param('id') id: string) {
+    return this.categories.findOne(id);
   }
 
   @Post()
@@ -93,7 +125,9 @@ export class AdminCategoriesController {
       'visibility.',
   })
   @ApiOkResponse({ description: 'The updated category node.' })
-  @ApiBadRequestResponse({ description: 'Invalid body or would create a cycle.' })
+  @ApiBadRequestResponse({
+    description: 'Invalid body or would create a cycle.',
+  })
   @ApiConflictResponse({ description: 'Slug already in use.' })
   @ApiNotFoundResponse({ description: 'No such category or target parent.' })
   update(@Param('id') id: string, @Body() dto: UpdateCategoryDto) {
@@ -114,7 +148,9 @@ export class AdminCategoriesController {
     required: false,
     description: 'Category id to move referencing parts into before deletion.',
   })
-  @ApiOkResponse({ description: 'Deletion result (deleted id + reassigned count).' })
+  @ApiOkResponse({
+    description: 'Deletion result (deleted id + reassigned count).',
+  })
   @ApiBadRequestResponse({ description: 'reassignTo equals the deleted id.' })
   @ApiConflictResponse({
     description: 'Parts still reference it and no reassignTo was given.',
@@ -122,6 +158,36 @@ export class AdminCategoriesController {
   @ApiNotFoundResponse({ description: 'No such category or reassign target.' })
   remove(@Param('id') id: string, @Query('reassignTo') reassignTo?: string) {
     return this.categories.remove(id, reassignTo);
+  }
+
+  @Post(':id/activate')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Activate a category',
+    description:
+      'Makes the category visible again in the buyer grid and to the Telegram ' +
+      'seller bot. Invalidates the reference cache, so the bot sees it on the ' +
+      'next read.',
+  })
+  @ApiOkResponse({ description: 'The updated category node.' })
+  @ApiNotFoundResponse({ description: 'No such category.' })
+  activate(@Param('id') id: string) {
+    return this.categories.setActive(id, true);
+  }
+
+  @Post(':id/deactivate')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Deactivate a category (preferred over deletion)',
+    description:
+      'Hides the category from the buyer grid and the seller bot WITHOUT ' +
+      'deleting it, so listings that reference it keep their taxonomy and the ' +
+      'change is reversible. Deactivating a parent hides its whole subtree.',
+  })
+  @ApiOkResponse({ description: 'The updated category node.' })
+  @ApiNotFoundResponse({ description: 'No such category.' })
+  deactivate(@Param('id') id: string) {
+    return this.categories.setActive(id, false);
   }
 
   @Patch(':id/move')
@@ -134,7 +200,9 @@ export class AdminCategoriesController {
       'sortOrder, when given, sets the order among the new siblings.',
   })
   @ApiOkResponse({ description: 'The updated category node.' })
-  @ApiBadRequestResponse({ description: 'Invalid body or would create a cycle.' })
+  @ApiBadRequestResponse({
+    description: 'Invalid body or would create a cycle.',
+  })
   @ApiNotFoundResponse({ description: 'No such category or target parent.' })
   move(@Param('id') id: string, @Body() dto: MoveCategoryDto) {
     return this.categories.move(id, dto);

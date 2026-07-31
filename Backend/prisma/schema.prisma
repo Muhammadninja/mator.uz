@@ -392,15 +392,34 @@ model Product {
   // Package volume in MILLILITRES (integer) — stored as a number, not "4 л", so
   // it sorts and filters correctly; the display label is derived at render time.
   oilVolumeMl     Int?                 @map("oil_volume_ml")
+  // ── Dynamic category tree (the source of truth going forward) ─────────────
+  // `vehicleCategoryId` is the ROOT (level 0) node, `categoryId` the precise node
+  // the seller picked (level 1 main category, or level 2 subcategory when the
+  // main category has children). Both nullable: pre-migration rows and kinds
+  // whose taxonomy follows from the kind itself (MOTOR_OIL) carry neither.
+  //
+  // The `mainCategory` / `vehicleCategory` enums above are DELIBERATELY kept and
+  // still written alongside these ids — the classifier, the buyer projection and
+  // the public `?main_category=` filter all still read them. They are the legacy
+  // mirror; these ids are authoritative. Removing the enums is a separate,
+  // later stage once every consumer reads ids.
+  vehicleCategoryId String?           @map("vehicle_category_id") @db.VarChar(64)
+  categoryId        String?           @map("category_id") @db.VarChar(64)
   createdAt       DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt       DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
   partModels      PartModel[]
   stocks          Stock[]
   images          ProductImage[]
+  // SetNull, not Restrict: a category the admin removes must never make an
+  // existing listing unreadable. Admin delete already reassigns/blocks by policy.
+  categoryRef        PartCategory?     @relation("ProductCategory", fields: [categoryId], references: [id], onDelete: SetNull)
+  vehicleCategoryRef PartCategory?     @relation("ProductVehicleCategory", fields: [vehicleCategoryId], references: [id], onDelete: SetNull)
 
   @@index([mainCategory])
   @@index([vehicleCategory])
   @@index([kind])
+  @@index([categoryId])
+  @@index([vehicleCategoryId])
   @@map("products")
 }
 
@@ -511,10 +530,20 @@ model ProductDraft {
   // send win, so two racing sends can't both storePending (which would delete each
   // other's Cloudinary assets). `status` stays READY_FOR_PREVIEW.
   previewSentAt  DateTime?            @map("preview_sent_at") @db.Timestamptz(3)
+  // ── Dynamic category tree — the seller's EXACT choice, preserved verbatim ──
+  // Mirrors the Product columns (see there) and is copied into them on commit.
+  // The legacy `category` / `subcategory` enum columns above are still written
+  // alongside these ids during the compatibility stage.
+  vehicleCategoryId String?           @map("vehicle_category_id") @db.VarChar(64)
+  categoryId        String?           @map("category_id") @db.VarChar(64)
   images         ProductDraftImage[]
+  categoryRef        PartCategory?    @relation("ProductDraftCategory", fields: [categoryId], references: [id], onDelete: SetNull)
+  vehicleCategoryRef PartCategory?    @relation("ProductDraftVehicleCategory", fields: [vehicleCategoryId], references: [id], onDelete: SetNull)
 
   @@index([sellerId, status]) // "resumable draft for this seller"
   @@index([expiresAt]) // cleanup sweep
+  @@index([categoryId])
+  @@index([vehicleCategoryId])
   @@map("product_drafts")
 }
 
@@ -1036,15 +1065,30 @@ model PartCategory {
   // category). The 12 canonical buyer rows carry it; it links bot classification
   // (CatalogPart.mainCategory) → category on backfill + ingest.
   mainCategory PartMainCategory? @map("main_category")
+  // Depth in the tree, DERIVED from the parent chain (root = 0, its child = 1, …)
+  // and never accepted from a client: the service computes it as parent.level + 1
+  // on create/move. Stored (rather than walked per read) so the seller bot can
+  // query one level directly, and so a level filter is an index hit.
+  //   0 → Vehicle Category   1 → Main Category   2 → Subcategory
+  // Deeper levels are structurally allowed; only these three are exposed today.
+  level        Int               @default(0)
   createdAt    DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt    DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
   parent       PartCategory?     @relation("PartCategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
   children     PartCategory[]    @relation("PartCategoryTree")
   parts        CatalogPart[]
+  // Supply-side (seller bot) listings classified into this tree. Two relations
+  // each: the root vehicle category and the precise selected node.
+  products             Product[]      @relation("ProductCategory")
+  productsVehicle      Product[]      @relation("ProductVehicleCategory")
+  drafts               ProductDraft[] @relation("ProductDraftCategory")
+  draftsVehicle        ProductDraft[] @relation("ProductDraftVehicleCategory")
 
   @@index([parentId])
   @@index([parentId, sortOrder])
   @@index([mainCategory])
+  @@index([level])
+  @@index([isActive])
   @@map("part_categories")
 }
 

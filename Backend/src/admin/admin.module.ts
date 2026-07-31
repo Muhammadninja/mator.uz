@@ -11,6 +11,7 @@ import { AdminDealersController } from './dealers/admin-dealers.controller';
 import { AdminBrandsService } from './brands/admin-brands.service';
 import { AdminBrandsController } from './brands/admin-brands.controller';
 import { AdminModelsController } from './brands/admin-models.controller';
+import { PartCategoryModule } from '../catalog/categories/part-category.module';
 import { AdminCategoriesService } from './categories/admin-categories.service';
 import { AdminCategoriesController } from './categories/admin-categories.controller';
 import { AdminProductsController } from './categories/admin-products.controller';
@@ -33,6 +34,9 @@ import { FitmentStudioModule } from './fitment-studio/fitment-studio.module';
     AdminAuthModule,
     AdminManagementModule,
     FitmentStudioModule,
+    // AdminCategoriesService derives levels / guards cycles / busts the seller
+    // bot's category cache through the shared PartCategoryService.
+    PartCategoryModule,
   ],
   // AdminDealersService takes AdminAuditService, which AdminAuthModule exports.
   // AdminBrandsService takes CacheService from the @Global RedisModule (no

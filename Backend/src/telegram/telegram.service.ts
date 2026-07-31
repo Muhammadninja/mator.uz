@@ -65,6 +65,7 @@ import {
   WIZ_ANY_ACTION,
   isStaleCatalogPayload,
   STALE_CATALOG_MESSAGE,
+  STALE_CATEGORY_MESSAGE,
   selectBrand,
   selectOtherBrand,
   selectOtherCategory,
@@ -88,6 +89,12 @@ import {
   previewLines,
   isUniversalKind,
 } from './product-wizard';
+import type { CategoryOption } from './product-wizard';
+import {
+  MAIN_CATEGORY_BY_SLUG,
+  VEHICLE_CATEGORY_BY_SLUG,
+} from '../catalog/categories/category-map';
+import { PartCategoryService } from '../catalog/categories/part-category.service';
 import { OIL_VISCOSITIES, OIL_VOLUMES } from './motor-oil-catalog';
 import { WIZARD_CATEGORIES } from './wizard-catalog';
 
@@ -228,6 +235,11 @@ interface PendingProduct {
    *  category has no subcategories, in which case the classifier's inference
    *  stands as before. */
   subcategory: PartMainCategory | null;
+  /** The dynamic category-tree ids the seller actually chose — copied verbatim
+   *  onto the Product. Authoritative; the two enum fields above are the legacy
+   *  mirror kept in step with them. Null for kinds that ask no category. */
+  vehicleCategoryId: string | null;
+  categoryId: string | null;
   /** MOTOR_OIL attributes; null for every other kind. */
   oilViscosity: string | null;
   oilType: OilType | null;
@@ -299,6 +311,8 @@ export function buildSessionFromDraft(
     model: string | null;
     category: PartVehicleCategory | null;
     subcategory: PartMainCategory | null;
+    vehicleCategoryId: string | null;
+    categoryId: string | null;
     title: string | null;
     description: string | null;
     partNumberType: ParseOutcome['part_number_type'];
@@ -318,6 +332,14 @@ export function buildSessionFromDraft(
     model: draft.model,
     category: draft.category,
     subcategory: draft.subcategory,
+    vehicleCategoryId: draft.vehicleCategoryId,
+    categoryId: draft.categoryId,
+    // Options are re-loaded when a category step is (re-)rendered, so a resumed
+    // session starts with none rather than a stale snapshot of the tree.
+    categoryOptions: [],
+    // A resumed draft is past its category questions when it already has a
+    // category; anything further is re-asked from the live tree.
+    categoryStepPending: false,
     title: draft.title,
     description: draft.description,
     partNumberType: draft.partNumberType ?? 'UNKNOWN',
@@ -380,6 +402,8 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     private readonly queue: QueueService,
     private readonly telemetry: DraftTelemetry,
     private readonly locks: DraftLock,
+    // The dynamic category tree the wizard's category steps are built from.
+    private readonly categories: PartCategoryService,
   ) {
     this.draftTtlMs = resolveDraftTtlMs(
       this.config.get<string>('DRAFT_TTL_HOURS'),
@@ -482,15 +506,44 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       );
     });
 
+    // Category taps carry the category ID. The children of the tapped node are
+    // loaded here (the wizard module itself stays pure/synchronous) and handed
+    // to the transition, which uses an EMPTY list as the signal to skip the next
+    // selection step entirely.
+    //
+    // The tapped id is re-checked against the LIVE tree first. The session's
+    // option list is only a snapshot of what the keyboard rendered, so on its
+    // own it would still accept a category the admin has since deactivated,
+    // moved, or deleted — a stale button in an open chat. Re-reading closes that
+    // window; `selectCategory` then still resolves against the rendered options,
+    // so both the live state and the session's own path must agree.
     this.bot.action(WIZ_CATEGORY_ACTION, async (ctx) => {
+      const categoryId = ctx.match[1];
+      if (!(await this.isSelectableCategory(categoryId, null))) {
+        await this.rejectStaleCategoryTap(ctx);
+        return;
+      }
+      const children = await this.loadCategoryOptions(categoryId);
       await this.handleWizardAction(ctx, (session) =>
-        selectCategory(session, Number(ctx.match[1])),
+        selectCategory(session, categoryId, children),
       );
     });
 
     this.bot.action(WIZ_SUBCATEGORY_ACTION, async (ctx) => {
+      const categoryId = ctx.match[1];
+      const session = ctx.from ? this.wizard.get(ctx.from.id) : undefined;
+      // A deeper pick must still hang off the category the seller is standing
+      // on, so the parent is pinned to the session's current node — a stale
+      // keyboard from a DIFFERENT branch cannot select a foreign subcategory
+      // even when the id itself is a real, active category.
+      const expectedParent = session?.categoryId ?? null;
+      if (!(await this.isSelectableCategory(categoryId, expectedParent))) {
+        await this.rejectStaleCategoryTap(ctx);
+        return;
+      }
+      const children = await this.loadCategoryOptions(categoryId);
       await this.handleWizardAction(ctx, (session) =>
-        selectSubcategory(session, Number(ctx.match[1])),
+        selectSubcategory(session, categoryId, children),
       );
     });
 
@@ -904,6 +957,8 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       model: session.model,
       category: session.category,
       subcategory: session.subcategory,
+      vehicleCategoryId: session.vehicleCategoryId,
+      categoryId: session.categoryId,
       title: session.title,
       description: session.description,
       partNumberType: session.partNumberType,
@@ -1104,6 +1159,8 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       title: draft.title as string,
       vehicleCategory: draft.category,
       subcategory: draft.subcategory,
+      vehicleCategoryId: draft.vehicleCategoryId,
+      categoryId: draft.categoryId,
       oilViscosity: draft.oilViscosity,
       oilType: draft.oilType,
       oilVolumeMl: draft.oilVolumeMl,
@@ -1706,7 +1763,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
    */
   private async handleWizardAction(
     ctx: Context,
-    transition: (session: WizardSession) => WizardResult,
+    transition: (session: WizardSession) => WizardResult | Promise<WizardResult>,
   ): Promise<void> {
     try {
       await ctx.answerCbQuery();
@@ -1722,7 +1779,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    const result = transition(session);
+    const result = await transition(session);
     if (result.status !== 'ok') return; // stale button — ignore silently
 
     await this.removeInlineKeyboard(ctx);
@@ -1736,8 +1793,100 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     ctx: Context,
     session: WizardSession,
   ): Promise<void> {
+    await this.ensureCategoryOptions(session);
     const prompt = stepPrompt(session);
     await ctx.reply(prompt.text, prompt.keyboard);
+  }
+
+  /**
+   * Make sure a session standing on the CATEGORY step has the ROOT categories
+   * loaded before its keyboard is built. The deeper levels are already loaded by
+   * the tap that opened them, and every other step needs nothing — so this only
+   * fires for the root step (including after a "⬅️ Назад" back onto it, which is
+   * why it lives here rather than at the single point of entry).
+   *
+   * A load failure leaves the options empty rather than throwing: the seller then
+   * sees the step with only "Назад" instead of the bot dying mid-dialogue.
+   */
+  private async ensureCategoryOptions(session: WizardSession): Promise<void> {
+    if (session.step !== WizardStep.CATEGORY) return;
+    session.categoryOptions = await this.loadCategoryOptions(null);
+  }
+
+  /**
+   * The active children of `parentId` (or the roots when null) as wizard
+   * options, carrying the legacy enum mirrors so the draft's compatibility
+   * columns stay populated alongside the ids.
+   */
+  /**
+   * Whether a tapped category id is still a legitimate choice RIGHT NOW, per the
+   * live tree — not per the keyboard's snapshot.
+   *
+   * Rejects a category that has since been deleted or deactivated, and one whose
+   * parent no longer matches where the seller is standing (a move, a re-parent,
+   * or a stale keyboard from another branch). `expectedParent` is null for the
+   * root step, which additionally requires the node to BE a root.
+   *
+   * An inactive PARENT needs no separate check: `findChildren` filters on
+   * isActive at each level, so a deactivated parent's children never appear in
+   * the options the transition resolves against.
+   */
+  private async isSelectableCategory(
+    categoryId: string,
+    expectedParent: string | null,
+  ): Promise<boolean> {
+    try {
+      const category = await this.categories.findById(categoryId);
+      if (!category || !category.isActive) return false;
+      return category.parentId === expectedParent;
+    } catch (err) {
+      // A lookup failure must not silently accept the tap.
+      this.logger.error(
+        `Category re-validation failed for "${categoryId}": ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return false;
+    }
+  }
+
+  /** Tell the seller a category button no longer applies, and re-ask the step. */
+  private async rejectStaleCategoryTap(ctx: Context): Promise<void> {
+    try {
+      await ctx.answerCbQuery();
+    } catch {
+      // Expired callback — proceed to the message below regardless.
+    }
+    await this.removeInlineKeyboard(ctx);
+    await ctx.reply(STALE_CATEGORY_MESSAGE);
+    const from = ctx.from;
+    const session = from ? this.wizard.get(from.id) : undefined;
+    // Re-render the step with the CURRENT tree so the seller can carry on.
+    if (session) await this.sendStepPrompt(ctx, session);
+  }
+
+  private async loadCategoryOptions(
+    parentId: string | null,
+  ): Promise<CategoryOption[]> {
+    try {
+      const rows =
+        parentId === null
+          ? await this.categories.findRootCategories()
+          : await this.categories.findChildren(parentId);
+      return rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        vehicleCategoryEnum: VEHICLE_CATEGORY_BY_SLUG.get(row.id) ?? null,
+        mainCategoryEnum: MAIN_CATEGORY_BY_SLUG.get(row.id) ?? null,
+      }));
+    } catch (err) {
+      this.logger.error(
+        `Failed to load categories (parentId=${parentId ?? 'root'}): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return [];
+    }
   }
 
   /**
@@ -1983,9 +2132,56 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       title,
       vehicleCategory,
       subcategory,
+      vehicleCategoryId,
+      categoryId,
       processedUrls,
       price,
     } = session;
+
+    // Re-validate the category lineage against the DB before it becomes a
+    // Product. The bot's own keyboards can only produce coherent pairs, but this
+    // must hold for ANY caller — a forged callback, a replayed draft, or a
+    // category the admin moved/deactivated between the pick and the commit.
+    // A pair that no longer makes sense is dropped (the listing keeps its legacy
+    // enum taxonomy) rather than failing the seller's commit outright.
+    let validatedVehicleCategoryId = vehicleCategoryId;
+    let validatedCategoryId = categoryId;
+    // True only when a pair EXISTED and failed validation — never for a draft
+    // that legitimately carries no category (MOTOR_OIL, pre-migration rows).
+    let categoryPairWasRejected = false;
+    if (vehicleCategoryId && categoryId) {
+      try {
+        await this.categories.validateCategorySelection(
+          vehicleCategoryId,
+          categoryId,
+        );
+      } catch (err) {
+        this.logger.warn(
+          `Draft ${session.draftId} has an invalid category pair ` +
+            `(vehicle=${vehicleCategoryId}, category=${categoryId}): ` +
+            `${err instanceof Error ? err.message : String(err)} — storing none.`,
+        );
+        validatedVehicleCategoryId = null;
+        validatedCategoryId = null;
+        categoryPairWasRejected = true;
+      }
+    }
+
+    // Keep the LEGACY ENUM MIRRORS consistent with whatever survived validation.
+    // Dropping the ids while still writing the draft's stale enums would leave a
+    // Product whose enum taxonomy contradicts its (now empty) category ids — the
+    // classifier's inference is the honest fallback there, exactly as it is for
+    // a pre-migration listing. When the pair IS valid, the enums are re-derived
+    // from the ids rather than trusted from the draft, so a category the admin
+    // re-parented cannot leave a mirror pointing at its old branch.
+    const mirroredVehicleCategory =
+      validatedVehicleCategoryId === null
+        ? null
+        : (VEHICLE_CATEGORY_BY_SLUG.get(validatedVehicleCategoryId) ?? null);
+    const mirroredSubcategory =
+      validatedCategoryId === null
+        ? null
+        : (MAIN_CATEGORY_BY_SLUG.get(validatedCategoryId) ?? null);
 
     try {
       const primaryUrl = processedUrls[0];
@@ -2021,10 +2217,31 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       const classifiedFields = {
         // The seller's explicit subcategory wins over the keyword guess — the
         // same rule the vehicle category already follows. Null (a category with
-        // no subcategories, so the question was never asked) falls back to the
-        // classifier's inference, leaving those listings exactly as before.
-        mainCategory: subcategory ?? classification.mainCategory,
-        vehicleCategory,
+        // no subcategories or no enum equivalent, so there is nothing to mirror)
+        // falls back to the classifier's inference, leaving those listings
+        // exactly as before.
+        //
+        // The mirror is derived from the VALIDATED id, not read from the draft:
+        // that is what stops a dropped/invalid pair from leaving behind an enum
+        // taxonomy the ids no longer support.
+        //
+        // `categoryPairWasRejected` distinguishes the two null cases. A draft
+        // that simply never had ids (pre-migration, or a kind that asks no
+        // category) still falls back to its own enums — unchanged behaviour. A
+        // draft whose pair was REJECTED has its enums dropped too, because those
+        // are precisely the values that just failed validation; the classifier's
+        // inference is the honest fallback there.
+        mainCategory: categoryPairWasRejected
+          ? classification.mainCategory
+          : (mirroredSubcategory ?? subcategory ?? classification.mainCategory),
+        vehicleCategory: categoryPairWasRejected
+          ? null
+          : (mirroredVehicleCategory ?? vehicleCategory),
+        // The dynamic tree ids the seller chose, copied verbatim from the draft
+        // (never reconstructed from a category NAME, and never re-derived from
+        // the classifier's guess).
+        vehicleCategoryId: validatedVehicleCategoryId,
+        categoryId: validatedCategoryId,
         partBrand: classification.make,
         originRegion: classification.originRegion,
         isOem: classification.isOem,

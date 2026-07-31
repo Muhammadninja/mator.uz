@@ -59,14 +59,17 @@ export interface KindCapabilities {
 
 /** A draft/product field a kind may require. Names match the Prisma columns. */
 export type KindRequiredField =
-  'brand' | 'model' | 'category' | 'oilViscosity' | 'oilType' | 'oilVolumeMl';
+  'brand' | 'model' | 'categoryId' | 'oilViscosity' | 'oilType' | 'oilVolumeMl';
 
 export const KIND_CAPABILITIES: Record<ProductKind, KindCapabilities> = {
   [ProductKind.SPARE_PART]: {
     hasVehicleFitment: true,
     hasPartNumbers: true,
     hasVehicleCategory: true,
-    requiredFields: ['brand', 'model', 'category'],
+    // `categoryId` (the dynamic tree node), NOT the legacy `category` enum: an
+    // admin-created category mirrors no enum, so requiring the enum would make a
+    // fully-answered draft look incomplete.
+    requiredFields: ['brand', 'model', 'categoryId'],
   },
   [ProductKind.MOTOR_OIL]: {
     // A motor oil fits every car, so it has no fitment to collect, no part

@@ -178,7 +178,7 @@ describe('motor-oil happy path', () => {
   it('spare-part steps are never reachable in the oil flow', () => {
     const s = sessionAtViscosity();
     expect(selectModel(s, 0).status).toBe('stale');
-    expect(selectCategory(s, 0).status).toBe('stale');
+    expect(selectCategory(s, 'brake-system').status).toBe('stale');
     expect(choosePartNumberType(s, 'OEM').status).toBe('stale');
     expect(inputPartNumber(s, '96535062').status).toBe('stale');
   });
@@ -327,8 +327,9 @@ describe('motor-oil prompts (Russian, oil-specific)', () => {
     const part = freshSession();
     selectBrand(part, 0);
     selectModel(part, 0);
-    selectCategory(part, 0);
-    selectSubcategory(part, 0);
+    part.categoryOptions = [{ id: 'brake-system', name: 'Тормозная система' }];
+    selectCategory(part, 'brake-system', [{ id: 'brakes', name: 'Тормоза' }]);
+    selectSubcategory(part, 'brakes', []);
     expect(stepPrompt(part).text).toContain('амортизатор');
   });
 });
@@ -573,8 +574,9 @@ describe('rendered keyboards — every step the seller can reach', () => {
     const s = freshSession();
     selectBrand(s, 0);
     selectModel(s, 0);
-    selectCategory(s, 0);
-    selectSubcategory(s, 0);
+    s.categoryOptions = [{ id: 'brake-system', name: 'Тормозная система' }];
+    selectCategory(s, 'brake-system', [{ id: 'brakes', name: 'Тормоза' }]);
+    selectSubcategory(s, 'brakes', []);
     inputTitle(s, 'Фильтр масляный');
     inputDescription(s, 'Новый');
     choosePartNumberType(s, 'OEM');

@@ -35,14 +35,64 @@ import {
   WIZ_ANY_ACTION,
   isStaleCatalogPayload,
 } from './product-wizard';
-import {
-  WIZARD_BRANDS,
-  WIZARD_CATEGORIES,
-  subcategoriesOf,
-} from './wizard-catalog';
+import type { CategoryOption } from './product-wizard';
+import { WIZARD_BRANDS } from './wizard-catalog';
 
 const CHEVROLET = 0; // index in WIZARD_BRANDS
 const COBALT = 0; // index in Chevrolet's model list
+
+/**
+ * A stand-in for the category tree the bot loads from the backend. The wizard is
+ * pure — the CALLER supplies each level's options — so the tests supply them
+ * too. Mirrors the seeded tree (roots → main categories) closely enough to
+ * exercise the real shapes, including the enum mirrors.
+ */
+const CATEGORY_ROOTS: CategoryOption[] = [
+  {
+    id: 'brake-system',
+    name: 'Тормозная система',
+    vehicleCategoryEnum: PartVehicleCategory.BRAKE_SYSTEM,
+  },
+  {
+    id: 'engine-system',
+    name: 'Двигатель',
+    vehicleCategoryEnum: PartVehicleCategory.ENGINE,
+  },
+  {
+    id: 'transmission',
+    name: 'Трансмиссия',
+    vehicleCategoryEnum: PartVehicleCategory.TRANSMISSION,
+  },
+  {
+    id: 'heating-and-cooling',
+    name: 'Климат и Охлаждение',
+    vehicleCategoryEnum: PartVehicleCategory.HEATING_AND_COOLING,
+  },
+];
+
+const CATEGORY_CHILDREN: Record<string, CategoryOption[]> = {
+  'brake-system': [
+    { id: 'brakes', name: 'Тормоза', mainCategoryEnum: PartMainCategory.BRAKES },
+  ],
+  'engine-system': [
+    { id: 'engine', name: 'Двигатель', mainCategoryEnum: PartMainCategory.ENGINE },
+    {
+      id: 'belts-and-hoses',
+      name: 'Ремни и патрубки',
+      mainCategoryEnum: PartMainCategory.BELTS_AND_HOSES,
+    },
+  ],
+  // transmission / heating-and-cooling deliberately absent → leaf categories.
+};
+
+/** The active children of a category, as the bot would have loaded them. */
+const childrenOf = (id: string): CategoryOption[] => CATEGORY_CHILDREN[id] ?? [];
+
+/** Put a session on the CATEGORY step with the root options rendered. */
+function withRootOptions(s: WizardSession): WizardSession {
+  s.categoryOptions = CATEGORY_ROOTS;
+  return s;
+}
 
 /** A session that has passed PHOTOS_FIRST and sits at the first question (BRAND). */
 function freshSession(): WizardSession {
@@ -56,8 +106,9 @@ function sessionAtTitle(): WizardSession {
   const s = freshSession();
   selectBrand(s, CHEVROLET);
   selectModel(s, COBALT);
-  selectCategory(s, 0); // Тормозная система — has subcategories, so one more step
-  selectSubcategory(s, 0); // Тормоза
+  withRootOptions(s);
+  selectCategory(s, 'brake-system', childrenOf('brake-system')); // has children
+  selectSubcategory(s, 'brakes', []); // Тормоза (a leaf) → flow resumes
   return s;
 }
 
@@ -155,32 +206,41 @@ describe('brand / model / category selection (buttons only)', () => {
     expect(s.model).toBe('R2 (Spark)');
   });
 
-  it('rejects out-of-range brand/model/category indexes as stale', () => {
+  it('rejects out-of-range brand/model indexes and unknown category ids as stale', () => {
     const s = freshSession();
     expect(selectBrand(s, 99).status).toBe('stale');
     selectBrand(s, CHEVROLET);
     expect(selectModel(s, 99).status).toBe('stale');
     selectModel(s, COBALT);
-    expect(selectCategory(s, 99).status).toBe('stale');
+    withRootOptions(s);
+    expect(selectCategory(s, 'no-such-category').status).toBe('stale');
   });
 
   it('ignores selections arriving at the wrong step (stale buttons)', () => {
     const s = freshSession();
     expect(selectModel(s, 0).status).toBe('stale'); // no brand chosen yet
-    expect(selectCategory(s, 0).status).toBe('stale');
+    expect(selectCategory(s, 'brake-system').status).toBe('stale');
     selectBrand(s, CHEVROLET);
     expect(selectBrand(s, 1).status).toBe('stale'); // brand already chosen
     expect(s.brand).toBe('Chevrolet'); // unchanged
   });
 
-  it('category buttons carry every wizard category', () => {
+  it('category buttons are built from the loaded options, carrying their ids', () => {
     const s = freshSession();
     selectBrand(s, CHEVROLET);
     selectModel(s, COBALT); // now at CATEGORY
+    withRootOptions(s);
     const kb = categoryKeyboard(s).reply_markup.inline_keyboard.flat();
     expect(kb.map((b) => b.text).filter((t) => t !== '⬅️ Назад')).toEqual(
-      WIZARD_CATEGORIES.map((c) => c.label),
+      CATEGORY_ROOTS.map((c) => c.name),
     );
+    // Each payload carries the category ID, so an admin reordering the tree can
+    // never make an in-flight button resolve to a different category.
+    expect(
+      kb
+        .map((b) => (b as { callback_data: string }).callback_data)
+        .filter((d) => d.includes(':c:')),
+    ).toEqual(CATEGORY_ROOTS.map((c) => buildAction('c', c.id)));
     // BRAND is the first step → no "⬅️ Назад" button, so the keyboard is exactly
     // the brands plus the trailing "Другое" escape from the spare-parts flow.
     const brandButtons =
@@ -198,91 +258,171 @@ describe('subcategory step (mandatory only where subcategories exist)', () => {
     const s = freshSession();
     selectBrand(s, CHEVROLET);
     selectModel(s, COBALT);
-    return s;
+    // The caller (TelegramService) loads the roots before rendering the step.
+    return withRootOptions(s);
   };
 
-  /** Index of a main category in the wizard's category list. */
-  const categoryIndex = (value: PartVehicleCategory): number =>
-    WIZARD_CATEGORIES.findIndex((c) => c.value === value);
-
-  it('a category WITH subcategories asks for one before continuing', () => {
+  it('a category WITH children asks for one before continuing', () => {
     const s = atCategory();
-    selectCategory(s, categoryIndex(PartVehicleCategory.BRAKE_SYSTEM));
+    selectCategory(s, 'brake-system', childrenOf('brake-system'));
     expect(s.step).toBe(WizardStep.SUBCATEGORY);
-    expect(s.subcategory).toBeNull(); // not answered yet
+    expect(s.vehicleCategoryId).toBe('brake-system');
+    // The root stands as the answer until a child narrows it.
+    expect(s.categoryId).toBe('brake-system');
 
-    expect(selectSubcategory(s, 0).status).toBe('ok');
+    expect(selectSubcategory(s, 'brakes', []).status).toBe('ok');
+    expect(s.categoryId).toBe('brakes');
     expect(s.subcategory).toBe(PartMainCategory.BRAKES);
     expect(s.step).toBe(WizardStep.TITLE); // the existing flow resumes
   });
 
-  // The two unmapped categories must behave EXACTLY as they did before the
-  // step existed — this is the guarantee the change is minimal.
-  it.each([
-    ['TRANSMISSION', PartVehicleCategory.TRANSMISSION],
-    ['HEATING_AND_COOLING', PartVehicleCategory.HEATING_AND_COOLING],
-  ])('%s has no subcategories and goes straight to TITLE', (_name, value) => {
-    const s = atCategory();
-    selectCategory(s, categoryIndex(value));
-    expect(s.step).toBe(WizardStep.TITLE);
-    expect(s.subcategory).toBeNull();
-    // Back from TITLE returns to CATEGORY, not through a phantom step.
-    expect(goBack(s).status).toBe('ok');
-    expect(s.step).toBe(WizardStep.CATEGORY);
-  });
+  // The empty-category rule: a category with NO active children must not show
+  // an empty selection step — it continues straight to TITLE.
+  it.each([['transmission'], ['heating-and-cooling']])(
+    '%s has no children and goes straight to TITLE',
+    (id) => {
+      const s = atCategory();
+      selectCategory(s, id, []); // no children loaded
+      expect(s.step).toBe(WizardStep.TITLE);
+      expect(s.categoryId).toBe(id); // the root itself is the answer
+      // Back from TITLE returns to CATEGORY, not through a phantom step.
+      expect(goBack(s).status).toBe('ok');
+      expect(s.step).toBe(WizardStep.CATEGORY);
+    },
+  );
 
-  it('offers exactly the subcategories mapped to the chosen category', () => {
+  it('builds subcategory buttons from the loaded children, not a hardcoded list', () => {
     const s = atCategory();
-    selectCategory(s, categoryIndex(PartVehicleCategory.ENGINE));
+    selectCategory(s, 'engine-system', childrenOf('engine-system'));
     const labels = subcategoryKeyboard(s)
       .reply_markup.inline_keyboard.flat()
       .map((b) => b.text)
       .filter((t) => t !== '⬅️ Назад');
-    expect(labels).toEqual(
-      subcategoriesOf(PartVehicleCategory.ENGINE).map((sc) => sc.label),
-    );
+    expect(labels).toEqual(['Двигатель', 'Ремни и патрубки']);
+  });
+
+  it('an admin-created category with no enum mirror is still selectable', () => {
+    // The whole point of the dynamic tree: a category the admin invented does
+    // not exist in any enum, and must still flow through to the draft.
+    const s = atCategory();
+    selectCategory(s, 'brake-system', [
+      { id: 'brake-pads-custom', name: 'Тормозные колодки' },
+    ]);
+    expect(selectSubcategory(s, 'brake-pads-custom', []).status).toBe('ok');
+    expect(s.categoryId).toBe('brake-pads-custom');
+    expect(s.subcategory).toBeNull(); // no enum mirror — expected
+    expect(s.step).toBe(WizardStep.TITLE);
+  });
+
+  it('supports a third level when the admin nests deeper', () => {
+    const s = atCategory();
+    selectCategory(s, 'brake-system', childrenOf('brake-system'));
+    // 'brakes' itself has children → the step repeats for the next level.
+    expect(
+      selectSubcategory(s, 'brakes', [
+        { id: 'brake-pads', name: 'Тормозные колодки' },
+        { id: 'brake-discs', name: 'Тормозные диски' },
+      ]).status,
+    ).toBe('ok');
+    expect(s.step).toBe(WizardStep.SUBCATEGORY); // still choosing
+    expect(selectSubcategory(s, 'brake-discs', []).status).toBe('ok');
+    expect(s.categoryId).toBe('brake-discs');
+    expect(s.step).toBe(WizardStep.TITLE);
   });
 
   it('re-picking a different category drops the earlier subcategory', () => {
     const s = atCategory();
-    selectCategory(s, categoryIndex(PartVehicleCategory.BRAKE_SYSTEM));
-    selectSubcategory(s, 0);
+    selectCategory(s, 'brake-system', childrenOf('brake-system'));
+    selectSubcategory(s, 'brakes', []);
     expect(s.subcategory).toBe(PartMainCategory.BRAKES);
 
     // Walk back to the category question and choose one with a DIFFERENT list.
     goBack(s); // → SUBCATEGORY
     goBack(s); // → CATEGORY
-    selectCategory(s, categoryIndex(PartVehicleCategory.ENGINE));
+    // Re-rendering the CATEGORY step reloads the roots (TelegramService does
+    // this in ensureCategoryOptions before every category prompt).
+    withRootOptions(s);
+    selectCategory(s, 'engine-system', childrenOf('engine-system'));
     // The brakes answer must not survive into an engine listing.
     expect(s.subcategory).toBeNull();
     expect(s.step).toBe(WizardStep.SUBCATEGORY);
-    selectSubcategory(s, 1);
+    selectSubcategory(s, 'belts-and-hoses', []);
     expect(s.subcategory).toBe(PartMainCategory.BELTS_AND_HOSES);
+    expect(s.categoryId).toBe('belts-and-hoses');
   });
 
-  it('rejects an out-of-range index and a pick at the wrong step as stale', () => {
+  it('rejects an unknown id and a pick at the wrong step as stale', () => {
     const s = atCategory();
     // Before the category is chosen there is no subcategory question at all.
-    expect(selectSubcategory(s, 0).status).toBe('stale');
-    selectCategory(s, categoryIndex(PartVehicleCategory.BRAKE_SYSTEM));
-    // BRAKE_SYSTEM maps to a single subcategory, so index 1 is out of range —
-    // and must not resolve against some other category's list.
-    expect(selectSubcategory(s, 1).status).toBe('stale');
-    expect(s.subcategory).toBeNull();
+    expect(selectSubcategory(s, 'brakes', []).status).toBe('stale');
+    selectCategory(s, 'brake-system', childrenOf('brake-system'));
+    // An id that is not in the CURRENT level's rendered options must not
+    // resolve — this is what replaces the old out-of-range index guard, and it
+    // is what stops a forged callback injecting an arbitrary category.
+    expect(selectSubcategory(s, 'oil-filters', []).status).toBe('stale');
+    expect(s.categoryId).toBe('brake-system'); // unchanged
     expect(s.step).toBe(WizardStep.SUBCATEGORY); // still waiting for an answer
   });
 
-  it('every mapped subcategory is a real PartMainCategory, uniquely owned', () => {
-    // A subcategory listed under two main categories would make the seller's
-    // answer ambiguous for the buyer grid, which keys on this enum.
-    const seen = new Set<PartMainCategory>();
-    for (const category of WIZARD_CATEGORIES) {
-      for (const sub of subcategoriesOf(category.value)) {
-        expect(Object.values(PartMainCategory)).toContain(sub.value);
-        expect(seen.has(sub.value)).toBe(false);
-        seen.add(sub.value);
-      }
-    }
+  // ── Legacy enum mirrors must never go stale ────────────────────────────────
+  // A dynamic category with no enum equivalent must CLEAR any mirror a previous
+  // selection left behind, or the draft would carry an enum taxonomy that
+  // contradicts its categoryId.
+  it('selecting a mirror-less sibling CLEARS a stale mainCategory', () => {
+    const s = atCategory();
+    selectCategory(s, 'brake-system', childrenOf('brake-system'));
+    selectSubcategory(s, 'brakes', []); // → mainCategory mirror = BRAKES
+    expect(s.subcategory).toBe(PartMainCategory.BRAKES);
+
+    // Walk back and pick a sibling the admin created, which mirrors no enum.
+    goBack(s); // → SUBCATEGORY
+    s.categoryOptions = [
+      { id: 'brakes', name: 'Тормоза', mainCategoryEnum: PartMainCategory.BRAKES },
+      { id: 'brake-hardware', name: 'Тормозная фурнитура' },
+    ];
+    selectSubcategory(s, 'brake-hardware', []);
+
+    expect(s.categoryId).toBe('brake-hardware');
+    expect(s.subcategory).toBeNull(); // the BRAKES mirror must NOT survive
+  });
+
+  it('selecting a mirror-less ROOT clears a stale vehicleCategory', () => {
+    const s = atCategory();
+    selectCategory(s, 'brake-system', childrenOf('brake-system'));
+    expect(s.category).toBe(PartVehicleCategory.BRAKE_SYSTEM);
+
+    // selectCategory already advanced onto SUBCATEGORY, so ONE step back lands
+    // on CATEGORY. Pick an admin-created root that mirrors no enum.
+    goBack(s); // → CATEGORY
+    s.categoryOptions = [{ id: 'body-and-interior', name: 'Кузов и салон' }];
+    selectCategory(s, 'body-and-interior', []);
+
+    expect(s.vehicleCategoryId).toBe('body-and-interior');
+    expect(s.category).toBeNull(); // the BRAKE_SYSTEM mirror must NOT survive
+    expect(s.subcategory).toBeNull();
+  });
+
+  it('re-picking a root clears BOTH mirrors before the new branch is walked', () => {
+    const s = atCategory();
+    selectCategory(s, 'brake-system', childrenOf('brake-system'));
+    selectSubcategory(s, 'brakes', []);
+    expect(s.subcategory).toBe(PartMainCategory.BRAKES);
+
+    goBack(s);
+    goBack(s);
+    withRootOptions(s);
+    // A root WITH children: the subcategory mirror must clear immediately, not
+    // linger until the next level is answered.
+    selectCategory(s, 'engine-system', childrenOf('engine-system'));
+    expect(s.subcategory).toBeNull();
+    expect(s.category).toBe(PartVehicleCategory.ENGINE);
+  });
+
+  it('rejects a forged ROOT category id that was never offered', () => {
+    const s = atCategory();
+    expect(selectCategory(s, 'not-a-category', []).status).toBe('stale');
+    expect(s.vehicleCategoryId).toBeNull();
+    expect(s.step).toBe(WizardStep.CATEGORY);
   });
 });
 
@@ -572,9 +712,10 @@ describe('stepPrompt', () => {
     expect(stepPrompt(s).text).toContain('Chevrolet');
     selectModel(s, COBALT);
     expect(labels(s)).toContain('⬅️ Назад'); // CATEGORY
-    selectCategory(s, 0);
+    withRootOptions(s);
+    selectCategory(s, 'brake-system', childrenOf('brake-system'));
     expect(labels(s)).toContain('⬅️ Назад'); // SUBCATEGORY
-    selectSubcategory(s, 0);
+    selectSubcategory(s, 'brakes', []);
     expect(labels(s)).toContain('⬅️ Назад'); // TITLE (was keyboard-less before)
     inputTitle(s, 'Фильтр масляный');
     expect(labels(s)).toContain('⬅️ Назад'); // DESCRIPTION (Skip + Back)
@@ -623,8 +764,9 @@ describe('photos-first entry', () => {
     const s = freshSession();
     selectBrand(s, CHEVROLET);
     selectModel(s, COBALT);
-    selectCategory(s, 0);
-    selectSubcategory(s, 0);
+    withRootOptions(s);
+    selectCategory(s, 'brake-system', childrenOf('brake-system'));
+    selectSubcategory(s, 'brakes', []);
     inputTitle(s, 'Амортизатор'); // → DESCRIPTION
     expect(goBack(s).status).toBe('ok');
     expect(s.step).toBe(WizardStep.TITLE);

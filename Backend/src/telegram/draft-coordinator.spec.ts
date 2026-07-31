@@ -31,6 +31,8 @@ function makeDraft(over: Partial<Record<string, unknown>> = {}) {
     brand: 'Chevrolet',
     model: 'Cobalt',
     category: 'SUSPENSION_AND_STEERING',
+    vehicleCategoryId: 'suspension-and-steering',
+    categoryId: 'suspension',
     oilViscosity: null,
     oilType: null,
     oilVolumeMl: null,
@@ -48,6 +50,8 @@ function makeOilDraft(over: Partial<Record<string, unknown>> = {}) {
     brand: null,
     model: null,
     category: null,
+    vehicleCategoryId: null,
+    categoryId: null,
     oilViscosity: '5W-30',
     oilType: OilType.SYNTHETIC,
     oilVolumeMl: 4000,
@@ -366,7 +370,9 @@ describe('DraftCoordinator rendezvous — per product kind', () => {
   it.each([
     ['brand', { brand: null }],
     ['model', { model: null }],
-    ['category', { category: null }],
+    // The dynamic tree node — the category requirement since categories became
+    // admin-editable (a custom category mirrors no enum).
+    ['categoryId', { categoryId: null }],
   ])('still waits when a spare part is missing its %s', async (_l, missing) => {
     const draft = makeDraft({
       images: [{ id: 'a', status: READY }],

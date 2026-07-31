@@ -44,6 +44,10 @@ export interface DraftFormPatch {
   model?: string | null;
   category?: PartVehicleCategory | null;
   subcategory?: PartMainCategory | null;
+  /** Dynamic category tree ids — authoritative (the two enums above mirror them
+   *  only when the chosen node happens to correspond to a legacy enum value). */
+  vehicleCategoryId?: string | null;
+  categoryId?: string | null;
   title?: string | null;
   description?: string | null;
   partNumberType?: PartNumberType;
@@ -76,6 +80,18 @@ export interface DraftFormFields {
   brand: string | null;
   model: string | null;
   category: PartVehicleCategory | null;
+  /**
+   * The chosen category-tree node. This — not `category` — is what SPARE_PART
+   * requires, because an admin-created category has no legacy enum mirror and
+   * would otherwise leave `category` null on a fully-answered draft.
+   *
+   * Requiring the ID is also what makes the "skip the step when the category has
+   * no children" rule safe: `selectCategory` sets categoryId to the ROOT when
+   * that root is a leaf, so a draft that never saw a subcategory question is
+   * still complete. Nothing here demands a SUBcategory — the wizard flow asks
+   * that question only where it exists.
+   */
+  categoryId: string | null;
   oilViscosity: string | null;
   oilType: OilType | null;
   oilVolumeMl: number | null;
@@ -217,6 +233,8 @@ export class ProductDraftService {
           model: source.model,
           category: source.category,
           subcategory: source.subcategory,
+          vehicleCategoryId: source.vehicleCategoryId,
+          categoryId: source.categoryId,
           title: source.title,
           description: source.description,
           partNumberType: source.partNumberType,
@@ -327,6 +345,8 @@ export class ProductDraftService {
         model: patch.model,
         category: patch.category,
         subcategory: patch.subcategory,
+        vehicleCategoryId: patch.vehicleCategoryId,
+        categoryId: patch.categoryId,
         title: patch.title,
         description: patch.description,
         partNumberType: patch.partNumberType,

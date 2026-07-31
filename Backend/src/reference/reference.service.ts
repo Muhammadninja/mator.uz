@@ -1,4 +1,9 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { PartCategoryService } from '../catalog/categories/part-category.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { CacheService } from '../redis/cache.service';
 import { RedisKeys } from '../redis/redis.keys';
@@ -29,26 +34,31 @@ export class ReferenceService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly cache: CacheService,
+    private readonly categories: PartCategoryService,
   ) {}
 
   /** All vehicle makes, in frontend catalog order. */
   async listMakes() {
-    return this.cache.remember(RedisKeys.cacheReferenceMakes(), REFERENCE_CACHE_TTL, async () => {
-      const makes = await this.prisma.vehicleMake.findMany({
-        where: { isActive: true },
-        orderBy: { sortOrder: 'asc' },
-        select: { id: true, name: true, logoUrl: true, comingSoon: true },
-      });
-      return {
-        items: makes.map((m) => ({
-          id: m.id,
-          name: m.name,
-          logo_url: m.logoUrl,
-          coming_soon: m.comingSoon,
-        })),
-        total: makes.length,
-      };
-    });
+    return this.cache.remember(
+      RedisKeys.cacheReferenceMakes(),
+      REFERENCE_CACHE_TTL,
+      async () => {
+        const makes = await this.prisma.vehicleMake.findMany({
+          where: { isActive: true },
+          orderBy: { sortOrder: 'asc' },
+          select: { id: true, name: true, logoUrl: true, comingSoon: true },
+        });
+        return {
+          items: makes.map((m) => ({
+            id: m.id,
+            name: m.name,
+            logo_url: m.logoUrl,
+            coming_soon: m.comingSoon,
+          })),
+          total: makes.length,
+        };
+      },
+    );
   }
 
   /**
@@ -60,7 +70,9 @@ export class ReferenceService {
   async listModels(makeId: string) {
     if (!makeId) throw new BadRequestException('makeId is required');
 
-    const make = await this.prisma.vehicleMake.findUnique({ where: { id: makeId } });
+    const make = await this.prisma.vehicleMake.findUnique({
+      where: { id: makeId },
+    });
     if (!make) throw new NotFoundException('Unknown make_id');
 
     return this.cache.remember(
@@ -75,7 +87,11 @@ export class ReferenceService {
           select: { id: true, makeId: true, name: true },
         });
         return {
-          items: models.map((m) => ({ id: m.id, make_id: m.makeId, name: m.name })),
+          items: models.map((m) => ({
+            id: m.id,
+            make_id: m.makeId,
+            name: m.name,
+          })),
           total: models.length,
         };
       },
@@ -89,7 +105,9 @@ export class ReferenceService {
   async listTrims(modelId: string) {
     if (!modelId) throw new BadRequestException('modelId is required');
 
-    const model = await this.prisma.vehicleModelRef.findUnique({ where: { id: modelId } });
+    const model = await this.prisma.vehicleModelRef.findUnique({
+      where: { id: modelId },
+    });
     if (!model) throw new NotFoundException('Unknown model_id');
 
     return this.cache.remember(
@@ -102,7 +120,11 @@ export class ReferenceService {
           select: { id: true, modelId: true, name: true },
         });
         return {
-          items: trims.map((t) => ({ id: t.id, model_id: t.modelId, name: t.name })),
+          items: trims.map((t) => ({
+            id: t.id,
+            model_id: t.modelId,
+            name: t.name,
+          })),
           total: trims.length,
         };
       },
@@ -126,7 +148,9 @@ export class ReferenceService {
    */
   async listEngines(trimId?: string) {
     if (trimId) {
-      const trim = await this.prisma.vehicleTrim.findUnique({ where: { id: trimId } });
+      const trim = await this.prisma.vehicleTrim.findUnique({
+        where: { id: trimId },
+      });
       if (!trim) throw new NotFoundException('Unknown trim_id');
     }
 
@@ -138,7 +162,12 @@ export class ReferenceService {
       async () => {
         const engines = await this.prisma.vehicleEngine.findMany({
           orderBy: { sortOrder: 'asc' },
-          select: { id: true, name: true, displacementCc: true, fuelType: true },
+          select: {
+            id: true,
+            name: true,
+            displacementCc: true,
+            fuelType: true,
+          },
         });
         return {
           items: engines.map((e) => ({
@@ -151,5 +180,31 @@ export class ReferenceService {
         };
       },
     );
+  }
+
+  /**
+   * Active part categories: the roots when `parentId` is omitted, otherwise that
+   * category's active children. The Telegram seller bot's only source of
+   * categories.
+   *
+   * Unlike the vehicle lists above, this data is admin-editable at runtime, so
+   * the caching is NOT TTL-only — {@link PartCategoryService} owns both the
+   * (shorter) TTL and the explicit invalidation performed on every admin write.
+   *
+   * A supplied-but-unknown parentId is a 404 (matching the makeId/modelId
+   * behaviour); an EMPTY child list is a 200 with `items: []`, because "this
+   * category is a leaf" is a legitimate, meaningful answer the bot acts on.
+   */
+  async listCategories(parentId?: string) {
+    if (parentId !== undefined) {
+      if (!parentId.trim())
+        throw new BadRequestException('parentId is required');
+      await this.categories.getOrFail(parentId);
+      const items = await this.categories.findChildren(parentId);
+      return { items, total: items.length };
+    }
+
+    const items = await this.categories.findRootCategories();
+    return { items, total: items.length };
   }
 }

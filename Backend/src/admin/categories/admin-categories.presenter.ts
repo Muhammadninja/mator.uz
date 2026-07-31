@@ -10,12 +10,16 @@ export const ADMIN_CATEGORY_NODE_SELECT = {
   name: true,
   slug: true,
   parentId: true,
+  level: true,
   sortOrder: true,
   iconKey: true,
   color: true,
   isActive: true,
   mainCategory: true,
-  _count: { select: { parts: true } },
+  // Parts (buyer catalog) plus the supply-side listings and drafts that point
+  // here. The delete guard needs all three: a category is only detachable when
+  // nothing at all references it.
+  _count: { select: { parts: true, products: true, drafts: true } },
 } satisfies Prisma.PartCategorySelect;
 
 export type AdminCategoryNodeRow = Prisma.PartCategoryGetPayload<{
@@ -28,12 +32,17 @@ export interface AdminCategoryTreeNode {
   name: string;
   slug: string | null;
   parentId: string | null;
+  /** Derived depth: 0 = vehicle category, 1 = main category, 2 = subcategory. */
+  level: number;
   sortOrder: number;
   iconKey: string | null;
   color: string | null;
   isActive: boolean;
   mainCategory: PartMainCategory | null;
+  /** Buyer-catalog parts linked directly to this node. */
   productsCount: number;
+  /** Supply-side listings + drafts pointing here (what blocks a hard delete). */
+  listingsCount: number;
   children: AdminCategoryTreeNode[];
 }
 
@@ -46,12 +55,14 @@ export function presentAdminCategoryNode(
     name: row.name,
     slug: row.slug,
     parentId: row.parentId,
+    level: row.level,
     sortOrder: row.sortOrder,
     iconKey: row.iconKey,
     color: row.color,
     isActive: row.isActive,
     mainCategory: row.mainCategory,
     productsCount: row._count.parts,
+    listingsCount: row._count.products + row._count.drafts,
   };
 }
 

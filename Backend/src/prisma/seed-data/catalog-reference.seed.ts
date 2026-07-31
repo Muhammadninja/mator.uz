@@ -22,7 +22,11 @@
  */
 
 import { PartMainCategory } from '@prisma/client';
-import { MAIN_CATEGORIES } from '../../catalog/categories/part-categories.catalog';
+import { VEHICLE_CATEGORY_TO_SLUG } from '../../catalog/categories/category-map';
+import {
+  MAIN_CATEGORIES,
+  VEHICLE_CATEGORIES,
+} from '../../catalog/categories/part-categories.catalog';
 
 export interface SeedCategory {
   id: string;
@@ -32,7 +36,40 @@ export interface SeedCategory {
   iconKey: string;
   mainCategory: PartMainCategory;
   sortOrder: number;
+  /** The root (vehicle) category this main category hangs under. */
+  parentId: string;
+  level: number;
 }
+
+/** A level-0 vehicle category. Carries no PartMainCategory mirror. */
+export interface SeedRootCategory {
+  id: string;
+  name: string;
+  slug: string;
+  color: string;
+  iconKey: string;
+  sortOrder: number;
+}
+
+/**
+ * PartMainCategory → the PartVehicleCategory root it belongs under, as the
+ * Telegram wizard has always paired them (SUBCATEGORIES in wizard-catalog.ts).
+ * The migration's UPDATE statements encode the identical mapping.
+ */
+const VEHICLE_CATEGORY_PARENT_OF: Record<PartMainCategory, string> = {
+  [PartMainCategory.BRAKES]: 'brake-system',
+  [PartMainCategory.FILTERS]: 'maintenance-and-fluids',
+  [PartMainCategory.OIL_AND_FLUIDS]: 'maintenance-and-fluids',
+  [PartMainCategory.WIPERS]: 'maintenance-and-fluids',
+  [PartMainCategory.SUSPENSION]: 'suspension-and-steering',
+  [PartMainCategory.BATTERIES]: 'electrical-and-lighting',
+  [PartMainCategory.ELECTRICAL_PARTS]: 'electrical-and-lighting',
+  [PartMainCategory.IGNITION]: 'electrical-and-lighting',
+  [PartMainCategory.LIGHTING]: 'electrical-and-lighting',
+  [PartMainCategory.ENGINE]: 'engine-system',
+  [PartMainCategory.BELTS_AND_HOSES]: 'engine-system',
+  [PartMainCategory.EXTERIOR]: 'tuning-and-accessories',
+};
 
 export interface SeedDealer {
   id: string;
@@ -59,7 +96,31 @@ export const SEED_CATEGORIES: SeedCategory[] = MAIN_CATEGORIES.map((c, i) => ({
   iconKey: c.iconKey,
   mainCategory: c.id,
   sortOrder: i,
+  // Parented below, once the roots exist.
+  parentId: VEHICLE_CATEGORY_PARENT_OF[c.id],
+  level: 1,
 }));
+
+/**
+ * The level-0 ROOT categories: the vehicle categories the seller bot lists
+ * first. Derived from VEHICLE_CATEGORIES so the seed cannot drift from the
+ * catalog metadata.
+ *
+ * The id is taken from {@link VEHICLE_CATEGORY_TO_SLUG}, NOT from the entry's own
+ * slug: PartVehicleCategory.ENGINE's root is 'engine-system' because 'engine' is
+ * already the level-1 main category PartMainCategory.ENGINE. The migration
+ * encodes the same exception.
+ */
+export const SEED_ROOT_CATEGORIES: SeedRootCategory[] = VEHICLE_CATEGORIES.map(
+  (c, i) => ({
+    id: VEHICLE_CATEGORY_TO_SLUG[c.id],
+    name: c.name,
+    slug: VEHICLE_CATEGORY_TO_SLUG[c.id],
+    color: c.color,
+    iconKey: c.iconKey,
+    sortOrder: i,
+  }),
+);
 
 // ── Dealers ──────────────────────────────────────────────────────────────────
 // Intentionally empty. Real MATOR Certified dealers are now created by operators

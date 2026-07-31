@@ -56,10 +56,7 @@ import {
 import {
   OTHER_BRAND_LABEL,
   WIZARD_BRANDS,
-  WIZARD_CATEGORIES,
   WIZARD_OTHER_CATEGORIES,
-  hasSubcategories,
-  subcategoriesOf,
 } from './wizard-catalog';
 
 export enum WizardStep {
@@ -70,10 +67,10 @@ export enum WizardStep {
   BRAND = 'BRAND',
   MODEL = 'MODEL',
   CATEGORY = 'CATEGORY',
-  /** Narrow the chosen category down to one of its subcategories. Conditional:
-   *  only reachable when the picked CATEGORY actually has subcategories (see
-   *  `hasSubcategories`), so it is spliced into the flow by {@link flowSteps}
-   *  rather than listed in FLOWS. */
+  /** Narrow the chosen category down through its children. Conditional: only
+   *  reachable when the picked CATEGORY actually has active children in the
+   *  dynamic tree, so it is spliced into the flow by {@link flowSteps} rather
+   *  than listed in FLOWS. The step repeats itself for each further level. */
   SUBCATEGORY = 'SUBCATEGORY',
   /** The "Другое" menu: pick a NON-spare-part category (Моторные масла, …). Only
    *  reachable from BRAND via the "Другое" button. */
@@ -166,14 +163,23 @@ function flowSteps(session: WizardSession): WizardStep[] {
   }
   for (const step of FLOWS[session.kind]) {
     steps.push(step);
-    // The subcategory question exists only for a category that HAS
-    // subcategories, so it is spliced in from the answer itself: a category
-    // with none (TRANSMISSION, HEATING_AND_COOLING) never grows the step, and
-    // the flow continues exactly as it did before.
+    // The subcategory question exists only for a category that HAS active
+    // children, so it is spliced in from the answer itself: a leaf category
+    // never grows the step and the flow continues straight to TITLE. Driven by
+    // the dynamic tree rather than a hardcoded table, so an admin adding the
+    // first subcategory to a category makes the step appear with no redeploy.
+    //
+    // Two conditions, because the step must stay on the path BOTH while it is
+    // being asked and after it has been answered: `categoryStepPending` covers
+    // the former, and "the chosen category is not the root" covers the latter.
+    // Using only the pending flag would drop SUBCATEGORY from the path the
+    // moment it was answered, making `nextStep` fail to locate the current step
+    // and skip the remainder of the questionnaire.
     if (
       step === WizardStep.CATEGORY &&
-      session.category !== null &&
-      hasSubcategories(session.category)
+      (session.categoryStepPending ||
+        (session.categoryId !== null &&
+          session.categoryId !== session.vehicleCategoryId))
     ) {
       steps.push(WizardStep.SUBCATEGORY);
     }
@@ -228,10 +234,36 @@ export interface WizardSession {
   kind: ProductKind;
   brand: string | null;
   model: string | null;
+  /**
+   * LEGACY enum mirror of the chosen vehicle category. Still written (the
+   * classifier, the buyer projection and the public ?vehicle_category= filter
+   * read it) but no longer the wizard's source of truth — `vehicleCategoryId`
+   * is. Null for a dynamic category the admin created that mirrors no enum.
+   */
   category: PartVehicleCategory | null;
-  /** The chosen subcategory, for a category that has them; null otherwise (and
-   *  for kinds whose flow never asks a category at all). */
+  /** LEGACY enum mirror of the chosen subcategory. See `category`. */
   subcategory: PartMainCategory | null;
+  // ── Dynamic category tree (authoritative) ─────────────────────────────────
+  /** The chosen ROOT category's id — the level-0 node. */
+  vehicleCategoryId: string | null;
+  /** The precise node chosen: the root itself when it has no children, else the
+   *  deepest child the seller picked. This is what the draft/product stores. */
+  categoryId: string | null;
+  /**
+   * The options the CURRENT category step is offering, as last rendered. The
+   * wizard is a pure synchronous module (no DB access), so the caller loads the
+   * tree and hands the level in; the session remembers it so a tap can be
+   * resolved and a "⬅️ Назад" can re-render without another fetch.
+   */
+  categoryOptions: CategoryOption[];
+  /**
+   * Whether the seller still owes an answer at the current category level. Set
+   * when a step is opened with a non-empty option list; cleared when the chosen
+   * category turns out to be a leaf. This — not the presence of `categoryId` —
+   * is what draft completeness consults, so a leaf category (no children) does
+   * not demand a further, non-existent selection.
+   */
+  categoryStepPending: boolean;
   title: string | null;
   description: string | null;
   /** 'UNKNOWN' until the seller picks OEM/GM; Skip keeps it 'UNKNOWN'. */
@@ -270,9 +302,34 @@ const invalid = (message: string): WizardResult => ({
   message,
 });
 
+/**
+ * One selectable category, as offered by a category step. Loaded from the
+ * dynamic tree by the caller (never hardcoded here) and carried on the session
+ * so a tap resolves against exactly the list that produced the buttons.
+ */
+export interface CategoryOption {
+  id: string;
+  name: string;
+  /** The legacy enum this node mirrors, when it mirrors one. Written to the
+   *  draft's compatibility columns; null for an admin-created category. */
+  vehicleCategoryEnum?: PartVehicleCategory | null;
+  mainCategoryEnum?: PartMainCategory | null;
+}
+
 // ── Inline-button callback payloads ─────────────────────────────────────────
-// Index-based so a forged/stale callback can never inject an arbitrary name:
-// every payload resolves through the static wizard catalog or is rejected.
+// Category payloads carry the category's ID, not an index. Indexes were correct
+// while the catalog was a static array compiled into the bot, but categories are
+// now admin-editable AT RUNTIME: an admin reordering them would silently make an
+// in-flight "index 5" button resolve to a DIFFERENT category, which is precisely
+// the class of bug CATALOG_VERSION exists to prevent and which a compile-time
+// version constant can no longer catch.
+//
+// Carrying the id makes a tap unambiguous regardless of ordering. It does NOT
+// weaken the anti-forgery property that motivated indexes: an id is never
+// trusted on arrival — `selectCategory` resolves it against the option list the
+// session actually rendered, and the server re-validates the final
+// (vehicleCategoryId, categoryId) lineage against the DB before the product is
+// created. A forged id therefore matches nothing and is rejected as stale.
 //
 // VERSIONED: every payload carries CATALOG_VERSION. Brand/model indexes are only
 // meaningful for the catalog revision that produced them — after WIZARD_BRANDS
@@ -296,7 +353,17 @@ const invalid = (message: string): WizardResult => ({
 // version-2 session has no `subcategory` field and its CATEGORY answer was the
 // last word on taxonomy — resuming such a dialogue under the new flow would drop
 // the seller onto a question their in-flight keyboard cannot answer.
-export const CATALOG_VERSION = 3;
+// Bumped to 4 for dynamic categories. The category payloads changed SHAPE
+// (index → id), so a version-3 "wiz:3:c:5" cannot be resolved under the new
+// scheme at all, and a version-3 session has no vehicleCategoryId/categoryId.
+// The bump routes every in-flight button to the "catalog updated, start again"
+// notice instead of a half-migrated dialogue.
+//
+// NOTE: from here on, a bump is NO LONGER required when the category list
+// itself changes — that is the point of the id-based payloads. Bump it when the
+// SESSION SHAPE or a payload FORMAT changes, or when one of the still
+// index-addressed lists (WIZARD_BRANDS, the motor-oil catalogs) is reordered.
+export const CATALOG_VERSION = 4;
 
 /** Build a versioned callback payload, e.g. buildAction('b', 5) → "wiz:1:b:5". */
 export function buildAction(kind: string, arg: string | number): string {
@@ -308,9 +375,18 @@ export function buildAction(kind: string, arg: string | number): string {
 const V = CATALOG_VERSION;
 export const WIZ_BRAND_ACTION = new RegExp(`^wiz:${V}:b:(\\d{1,2})$`);
 export const WIZ_MODEL_ACTION = new RegExp(`^wiz:${V}:m:(\\d{1,2})$`);
-export const WIZ_CATEGORY_ACTION = new RegExp(`^wiz:${V}:c:(\\d{1,2})$`);
-// A pick from the subcategory menu — index into the CURRENT category's list.
-export const WIZ_SUBCATEGORY_ACTION = new RegExp(`^wiz:${V}:sc:(\\d{1,2})$`);
+// Category picks carry the category ID (slug-shaped: lowercase alphanumerics and
+// dashes, ≤64 chars — the PartCategory.id bound). The pattern only constrains the
+// SHAPE; the value's validity comes from resolving it against the session's
+// rendered options, never from the regex.
+export const WIZ_CATEGORY_ACTION = new RegExp(
+  `^wiz:${V}:c:([a-z0-9_-]{1,64})$`,
+);
+// A pick at the NEXT category level (subcategory and deeper). Same id-based
+// resolution against the current step's option list.
+export const WIZ_SUBCATEGORY_ACTION = new RegExp(
+  `^wiz:${V}:sc:([a-z0-9_-]{1,64})$`,
+);
 export const WIZ_DESCRIPTION_SKIP = buildAction('d', 'skip');
 export const WIZ_PART_NUMBER_TYPE_ACTION = new RegExp(
   `^wiz:${V}:t:(OEM|GM|SKIP)$`,
@@ -357,6 +433,16 @@ export const STALE_CATALOG_MESSAGE =
   'Каталог был обновлён.\n' +
   'Чтобы продолжить создание объявления, пожалуйста, нажмите /start.';
 
+/**
+ * Notice for a tap on a category button that is no longer valid — the admin
+ * deactivated, moved or removed that category after the keyboard was sent.
+ * Unlike STALE_CATALOG_MESSAGE this does NOT ask the seller to restart: only the
+ * one category question is re-asked, with the current tree.
+ */
+export const STALE_CATEGORY_MESSAGE =
+  'Эта категория больше недоступна — каталог был обновлён.\n' +
+  'Пожалуйста, выберите категорию из обновлённого списка.';
+
 // ── Input bounds ────────────────────────────────────────────────────────────
 // Title mirrors the historical guard (≥3 chars) plus the DB column cap.
 const TITLE_MIN = 3;
@@ -390,6 +476,10 @@ export class WizardSessionStore {
       model: null,
       category: null,
       subcategory: null,
+      vehicleCategoryId: null,
+      categoryId: null,
+      categoryOptions: [],
+      categoryStepPending: false,
       title: null,
       description: null,
       partNumberType: 'UNKNOWN',
@@ -511,35 +601,72 @@ export function selectModel(
   return advance(session);
 }
 
+/**
+ * A pick at the ROOT (vehicle) category step. `children` is the chosen
+ * category's active children, loaded by the caller: a NON-EMPTY list opens the
+ * next selection step, an EMPTY one means this category is a leaf and the flow
+ * continues straight to TITLE (the "no empty selection step" rule).
+ */
 export function selectCategory(
   session: WizardSession,
-  categoryIndex: number,
+  categoryId: string,
+  children: CategoryOption[] = [],
 ): WizardResult {
   if (session.step !== WizardStep.CATEGORY) return STALE;
-  const category = WIZARD_CATEGORIES[categoryIndex];
+  // Resolved against the options this session actually rendered — a forged or
+  // stale id matches nothing and is rejected, exactly as an out-of-range index
+  // was before.
+  const category = session.categoryOptions.find((c) => c.id === categoryId);
   if (!category) return STALE;
-  // A subcategory belongs to the category it was picked under, so re-answering
+
+  session.vehicleCategoryId = category.id;
+  // The selection starts AT the root: if it turns out to be a leaf, the root is
+  // itself the answer, so the product still carries a concrete categoryId.
+  session.categoryId = category.id;
+  session.category = category.vehicleCategoryEnum ?? null;
+  // A deeper pick belongs to the category it was made under, so re-answering
   // this step drops it: the seller may have walked back and chosen a DIFFERENT
-  // category, whose subcategory list this value is not part of. `advance` then
-  // lands on SUBCATEGORY (when the new category has any) or on the step that
-  // followed CATEGORY before this step existed.
-  session.category = category.value;
+  // category, whose child list the old value is not part of.
   session.subcategory = null;
+
+  // Hand the next level's options to the step that is about to render them.
+  session.categoryOptions = children;
+  session.categoryStepPending = children.length > 0;
   return advance(session);
 }
 
-/** A pick from the subcategory menu of the category chosen one step earlier. */
+/**
+ * A pick at the next category level down (subcategory, and deeper if the admin
+ * nests further). `children` is that node's own active children — non-empty
+ * keeps the seller on this step for another level, empty ends the category
+ * questions.
+ */
 export function selectSubcategory(
   session: WizardSession,
-  subcategoryIndex: number,
+  categoryId: string,
+  children: CategoryOption[] = [],
 ): WizardResult {
-  if (session.step !== WizardStep.SUBCATEGORY || session.category === null)
+  if (
+    session.step !== WizardStep.SUBCATEGORY ||
+    session.vehicleCategoryId === null
+  )
     return STALE;
-  // Resolved against the CURRENT category's own list, so an index from another
+  // Resolved against the CURRENT level's own list, so an id from another
   // category's (stale) keyboard cannot select a foreign subcategory.
-  const subcategory = subcategoriesOf(session.category)[subcategoryIndex];
-  if (!subcategory) return STALE;
-  session.subcategory = subcategory.value;
+  const chosen = session.categoryOptions.find((c) => c.id === categoryId);
+  if (!chosen) return STALE;
+
+  session.categoryId = chosen.id;
+  // Always assigned (not conditionally): a node with no enum mirror must CLEAR
+  // any mirror left by a previously chosen sibling, or the draft would carry a
+  // legacy subcategory that contradicts its categoryId.
+  session.subcategory = chosen.mainCategoryEnum ?? null;
+
+  session.categoryOptions = children;
+  session.categoryStepPending = children.length > 0;
+  // A node with further children keeps the seller on this step for the next
+  // level; a leaf ends the category questions and the flow moves on.
+  if (children.length > 0) return OK;
   return advance(session);
 }
 
@@ -879,23 +1006,27 @@ export function modelKeyboard(
   return withBack(session, grid(buttons, 2));
 }
 
+/**
+ * The root (vehicle) categories, two per row — built from the options the caller
+ * loaded from the dynamic tree and stored on the session, never from a
+ * hardcoded list. Each button carries its category ID.
+ */
 export function categoryKeyboard(session: WizardSession): InlineKeyboard {
-  const buttons = WIZARD_CATEGORIES.map((c, i) =>
-    Markup.button.callback(c.label, buildAction('c', i)),
+  const buttons = session.categoryOptions.map((c) =>
+    Markup.button.callback(c.name, buildAction('c', c.id)),
   );
   return withBack(session, grid(buttons, 2));
 }
 
 /**
- * The subcategories of the category chosen at the previous step, two per row.
- * Empty (Back only) when there is no category — unreachable in practice, since
- * the step is only spliced into the flow once a category with subcategories has
- * been picked.
+ * The children of the category chosen at the previous level, two per row. Empty
+ * (Back only) when there are none — unreachable in practice, since the step is
+ * only spliced into the flow when the previous pick reported children.
  */
 export function subcategoryKeyboard(session: WizardSession): InlineKeyboard {
-  const buttons = (
-    session.category !== null ? subcategoriesOf(session.category) : []
-  ).map((s, i) => Markup.button.callback(s.label, buildAction('sc', i)));
+  const buttons = session.categoryOptions.map((c) =>
+    Markup.button.callback(c.name, buildAction('sc', c.id)),
+  );
   return withBack(session, grid(buttons, 2));
 }
 

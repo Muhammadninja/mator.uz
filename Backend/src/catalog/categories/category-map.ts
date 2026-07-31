@@ -1,4 +1,4 @@
-import { PartMainCategory } from '@prisma/client';
+import { PartMainCategory, PartVehicleCategory } from '@prisma/client';
 import { MAIN_CATEGORIES } from './part-categories.catalog';
 
 /**
@@ -20,3 +20,46 @@ export const MAIN_CATEGORY_TO_SLUG: Record<PartMainCategory, string> =
     },
     {} as Record<PartMainCategory, string>,
   );
+
+/**
+ * PartVehicleCategory enum → its ROOT PartCategory id.
+ *
+ * NOT derivable from VEHICLE_CATEGORIES' slugs: the root for
+ * PartVehicleCategory.ENGINE is 'engine-system', because the id 'engine' was
+ * already taken by the level-1 main category PartMainCategory.ENGINE. This table
+ * and the migration's CASE expression are the two places that encode that, and
+ * they must agree.
+ */
+export const VEHICLE_CATEGORY_TO_SLUG: Record<PartVehicleCategory, string> = {
+  [PartVehicleCategory.BRAKE_SYSTEM]: 'brake-system',
+  [PartVehicleCategory.MAINTENANCE_AND_FLUIDS]: 'maintenance-and-fluids',
+  [PartVehicleCategory.SUSPENSION_AND_STEERING]: 'suspension-and-steering',
+  [PartVehicleCategory.ELECTRICAL_AND_LIGHTING]: 'electrical-and-lighting',
+  [PartVehicleCategory.ENGINE]: 'engine-system',
+  [PartVehicleCategory.TRANSMISSION]: 'transmission',
+  [PartVehicleCategory.HEATING_AND_COOLING]: 'heating-and-cooling',
+  [PartVehicleCategory.TUNING_AND_ACCESSORIES]: 'tuning-and-accessories',
+};
+
+/**
+ * Reverse lookups: category id → the legacy enum it mirrors, or undefined for an
+ * admin-created category that mirrors none. Used when a dynamic category pick
+ * must also populate the legacy enum columns during the compatibility stage.
+ */
+export const MAIN_CATEGORY_BY_SLUG: ReadonlyMap<string, PartMainCategory> =
+  new Map(
+    Object.entries(MAIN_CATEGORY_TO_SLUG).map(([enumValue, slug]) => [
+      slug,
+      enumValue as PartMainCategory,
+    ]),
+  );
+
+export const VEHICLE_CATEGORY_BY_SLUG: ReadonlyMap<
+  string,
+  PartVehicleCategory
+> = new Map(
+  Object.entries(VEHICLE_CATEGORY_TO_SLUG).map(([enumValue, slug]) => [
+    slug,
+    enumValue as PartVehicleCategory,
+  ]),
+);

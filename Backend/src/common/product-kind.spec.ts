@@ -23,7 +23,7 @@ describe('ProductKind capability table', () => {
       hasVehicleFitment: true,
       hasPartNumbers: true,
       hasVehicleCategory: true,
-      requiredFields: ['brand', 'model', 'category'],
+      requiredFields: ['brand', 'model', 'categoryId'],
     });
   });
 

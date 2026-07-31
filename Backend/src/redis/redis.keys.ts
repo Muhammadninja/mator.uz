@@ -13,9 +13,19 @@ export const RedisKeys = {
   // the full list is always returned), so they use a single key. Add a builder
   // here per cached resource rather than formatting keys at the call site.
   cacheReferenceMakes: (): string => `cache:reference:makes`,
-  cacheReferenceModels: (makeId: string): string => `cache:reference:models:${makeId}`,
-  cacheReferenceTrims: (modelId: string): string => `cache:reference:trims:${modelId}`,
+  cacheReferenceModels: (makeId: string): string =>
+    `cache:reference:models:${makeId}`,
+  cacheReferenceTrims: (modelId: string): string =>
+    `cache:reference:trims:${modelId}`,
   cacheReferenceEngines: (): string => `cache:reference:engines`,
+  // Dynamic part-category tree served to the seller bot. Unlike the vehicle
+  // reference lists above (TTL-only), these ARE explicitly busted: the admin
+  // console edits this taxonomy at runtime and the bot must not offer a category
+  // that was just renamed or deactivated. Every write in PartCategoryService
+  // calls invalidate(), which deletes both keys.
+  cacheReferenceCategories: (): string => `cache:reference:categories`,
+  cacheReferenceCategoryChildren: (parentId: string): string =>
+    `cache:reference:categories:children:${parentId}`,
 
   // ── Rate limiting ─────────────────────────────────────────────────────────
   // Fixed-window counters consumed via the RateLimiter (FixedWindow). One key per
@@ -37,7 +47,8 @@ export const RedisKeys = {
   // a lock means "a duplicate — skip", never "this succeeded". Scoped per draft
   // so two sellers, or two different drafts, never contend.
   lockDraftClone: (draftId: string): string => `lock:draft:clone:${draftId}`,
-  lockDraftPreview: (draftId: string): string => `lock:draft:preview:${draftId}`,
+  lockDraftPreview: (draftId: string): string =>
+    `lock:draft:preview:${draftId}`,
   lockDraftReopen: (draftId: string): string => `lock:draft:reopen:${draftId}`,
   // Keyed by the image ROW, matching the deterministic jobId's granularity: two
   // enqueues of the same row collapse, two different rows never block each other.

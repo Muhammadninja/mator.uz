@@ -141,6 +141,10 @@ function draftRow(over: Record<string, unknown> = {}) {
     brand: 'Chevrolet',
     model: 'Nexia 3',
     category: PartVehicleCategory.ELECTRICAL_AND_LIGHTING,
+    // The dynamic tree ids that back the legacy enum above. `categoryId` is what
+    // completeness now requires (an admin-created category has no enum mirror).
+    vehicleCategoryId: 'electrical-and-lighting',
+    categoryId: 'electrical-parts',
     title: 'Магнитола для Nexia 3',
     description: 'Производство Корея, новая',
     partNumberType: 'UNKNOWN',
@@ -721,6 +725,10 @@ describe('isDraftComplete (per-kind completeness)', () => {
       brand: null,
       model: null,
       category: null,
+      // An oil's taxonomy follows from its KIND, so it carries no category at
+      // all — neither the legacy enum nor a tree id — and must still complete.
+      vehicleCategoryId: null,
+      categoryId: null,
       partNumber: null,
       oilViscosity: '5W-30',
       oilType: OilType.SYNTHETIC,
@@ -739,7 +747,35 @@ describe('isDraftComplete (per-kind completeness)', () => {
   it('rejects a spare part missing its vehicle or category', () => {
     expect(isDraftComplete(draftRow({ brand: null }) as never)).toBe(false);
     expect(isDraftComplete(draftRow({ model: null }) as never)).toBe(false);
-    expect(isDraftComplete(draftRow({ category: null }) as never)).toBe(false);
+    // `categoryId` — the dynamic tree node — is the requirement now.
+    expect(isDraftComplete(draftRow({ categoryId: null }) as never)).toBe(false);
+  });
+
+  it('accepts a spare part in an admin-created category with no enum mirror', () => {
+    // The point of the dynamic tree: a category the admin invented has no
+    // PartVehicleCategory/PartMainCategory value, and must still be complete.
+    expect(
+      isDraftComplete(
+        draftRow({
+          category: null,
+          vehicleCategoryId: 'brake-system',
+          categoryId: 'custom-brake-pads',
+        }) as never,
+      ),
+    ).toBe(true);
+  });
+
+  it('accepts a spare part whose category is a LEAF root (no subcategory step)', () => {
+    // A root with no children answers the question by itself, so categoryId ==
+    // vehicleCategoryId and no further selection was ever asked for.
+    expect(
+      isDraftComplete(
+        draftRow({
+          vehicleCategoryId: 'transmission',
+          categoryId: 'transmission',
+        }) as never,
+      ),
+    ).toBe(true);
   });
 
   it('rejects an oil missing any of its own attributes', () => {
@@ -769,6 +805,17 @@ describe('buildSessionFromDraft', () => {
       brand: 'Chevrolet',
       model: 'Nexia 3',
       category: PartVehicleCategory.ELECTRICAL_AND_LIGHTING,
+      // draftRow() carries no `subcategory` key, so the rebuilt session mirrors
+      // that as undefined rather than inventing a value.
+      subcategory: undefined,
+      // The dynamic category ids are restored verbatim from the draft…
+      vehicleCategoryId: 'electrical-and-lighting',
+      categoryId: 'electrical-parts',
+      // …but the OPTION list is not: it is re-loaded from the live tree whenever
+      // a category step is re-rendered, so a resumed session never replays a
+      // stale snapshot of a taxonomy the admin may have changed meanwhile.
+      categoryOptions: [],
+      categoryStepPending: false,
       title: 'Магнитола для Nexia 3',
       description: 'Производство Корея, новая',
       partNumberType: 'UNKNOWN',
