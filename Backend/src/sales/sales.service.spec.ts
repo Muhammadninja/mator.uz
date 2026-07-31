@@ -606,6 +606,7 @@ describe('SalesService', () => {
         discountType: SaleDiscountType.PERCENT,
         discountValue: 10,
         scopeType: SaleScopeType.ALL_PRODUCTS,
+        targetIds: [],
         startAt: '2026-01-01T00:00:00.000Z',
         endAt: null,
       });

@@ -326,7 +326,8 @@ export class SalesService {
   async listPublic() {
     const sales = await this.prisma.sale.findMany({
       where: this.discounts.activeWhere(),
-      select: SALE_LIST_SELECT,
+      // DETAIL select (includes targets) so the public shape can carry targetIds.
+      select: SALE_DETAIL_SELECT,
       orderBy: [{ priority: 'desc' }, { startAt: 'desc' }, { id: 'asc' }],
       take: MAX_PUBLIC_SALES,
     });

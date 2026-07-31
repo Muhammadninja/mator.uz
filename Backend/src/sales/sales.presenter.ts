@@ -117,12 +117,15 @@ export function presentSaleDetail(sale: SaleDetailRow, now: Date = new Date()) {
 }
 
 /**
- * PUBLIC projection for GET /v1/sales. Deliberately narrower than the admin
- * shape: a buyer sees what the campaign is and when it runs, but not the
- * operational fields (priority, isActive, target ids, createdAt/updatedAt).
- * `status` is omitted too — this endpoint only ever returns active sales.
+ * PUBLIC projection for GET /v1/sales. Narrower than the admin shape — no
+ * operational fields (priority, isActive, createdAt/updatedAt) and `status` is
+ * omitted since this endpoint only returns active sales — but it DOES expose
+ * `targetIds`: a client cannot tell which products a scoped campaign covers
+ * without them (a PRODUCTS/CATEGORIES/DEALERS sale is unusable otherwise). Empty
+ * for an ALL_PRODUCTS sale, which matches everything by definition. The ids are
+ * public catalog/category/dealer ids, so nothing sensitive is exposed.
  */
-export function presentPublicSale(sale: SaleListRow) {
+export function presentPublicSale(sale: SaleDetailRow) {
   return {
     id: sale.id,
     title: sale.title,
@@ -130,6 +133,7 @@ export function presentPublicSale(sale: SaleListRow) {
     discountType: sale.discountType,
     discountValue: decimalToNumber(sale.discountValue),
     scopeType: sale.scopeType,
+    targetIds: (sale.targets ?? []).map((t) => t.targetId),
     startAt: sale.startAt.toISOString(),
     endAt: sale.endAt ? sale.endAt.toISOString() : null,
   };
