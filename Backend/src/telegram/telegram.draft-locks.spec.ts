@@ -16,11 +16,14 @@
 import { Decimal } from '@prisma/client/runtime/library';
 import { TelegramService } from './telegram.service';
 import { WizardSessionStore, WizardStep } from './product-wizard';
-import { makeFakeLock } from './draft-lock.test-util';
+import {
+  makeFakeLock,
+  type TelegramServiceHarness,
+} from './draft-lock.test-util';
 import { RedisKeys } from '../redis/redis.keys';
 import { DraftLock } from '../redis/draft-lock.service';
 
-type AnyService = TelegramService & Record<string, any>;
+type AnyService = TelegramServiceHarness;
 
 function draftRow(over: Record<string, unknown> = {}) {
   return {

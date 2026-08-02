@@ -37,12 +37,14 @@ function build() {
     imageEnhance as never,
     telemetry as never,
   );
-  jest
-    .spyOn((proc as never as { logger: { error: unknown } }).logger, 'error')
-    .mockImplementation(() => undefined);
-  jest
-    .spyOn((proc as never as { logger: { log: unknown } }).logger, 'log')
-    .mockImplementation(() => undefined);
+  // The logger is private; the cast reaches it. Its methods are typed as
+  // functions (not `unknown`) so `spyOn` can resolve an overload — with
+  // `unknown` there is no call signature to spy on and the call has no match.
+  const withLogger = proc as never as {
+    logger: { error: (...args: unknown[]) => void; log: (...args: unknown[]) => void };
+  };
+  jest.spyOn(withLogger.logger, 'error').mockImplementation(() => undefined);
+  jest.spyOn(withLogger.logger, 'log').mockImplementation(() => undefined);
   return {
     proc,
     drafts,

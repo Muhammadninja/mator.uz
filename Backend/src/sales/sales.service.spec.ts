@@ -47,16 +47,22 @@ interface CountArgs {
 }
 
 function makePrismaMock() {
+  // The RETURN type is `Promise<unknown>`, not `unknown`: these are async Prisma
+  // methods, and `mockResolvedValue` resolves its parameter from the awaited
+  // return type. Declaring it as bare `unknown` made that parameter `never`, so
+  // every `mockResolvedValue(row)` failed to compile. The ARGUMENT tuples — the
+  // part that actually buys type-safety on `where`/`data`/`orderBy` — are
+  // unchanged.
   const sale = {
-    findMany: jest.fn<unknown, [SaleFindManyArgs]>(),
+    findMany: jest.fn<Promise<unknown>, [SaleFindManyArgs]>(),
     // getOne/update read through findFirst (they filter on deletedAt too);
     // remove reads through findUnique by primary key.
-    findFirst: jest.fn<unknown, [{ where: Prisma.SaleWhereInput }]>(),
+    findFirst: jest.fn<Promise<unknown>, [{ where: Prisma.SaleWhereInput }]>(),
     findUnique: jest.fn(),
     findUniqueOrThrow: jest.fn(),
     count: jest.fn(),
-    create: jest.fn<unknown, [SaleCreateArgs]>(),
-    update: jest.fn<unknown, [SaleUpdateArgs]>(),
+    create: jest.fn<Promise<unknown>, [SaleCreateArgs]>(),
+    update: jest.fn<Promise<unknown>, [SaleUpdateArgs]>(),
     delete: jest.fn(),
   };
   const saleTarget = { deleteMany: jest.fn(), createMany: jest.fn() };
@@ -523,7 +529,9 @@ describe('SalesService', () => {
       const where = prisma.sale.findMany.mock.calls[0][0].where;
       expect(where.isActive).toBe(false);
       expect(where.AND).toHaveLength(1);
-      expect(where.AND[0].isActive).toBe(true);
+      // `AND` is optional on the args interface; the assertion above is what
+      // establishes it is present, so the index is safe here.
+      expect(where.AND![0].isActive).toBe(true);
     });
 
     it.each([
@@ -538,7 +546,7 @@ describe('SalesService', () => {
         await service.list({ status: status as 'scheduled' });
 
         expect(
-          prisma.sale.findMany.mock.calls[0][0].where.AND[0],
+          prisma.sale.findMany.mock.calls[0][0].where.AND![0],
         ).toMatchObject(shape);
       },
     );

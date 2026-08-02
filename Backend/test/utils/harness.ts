@@ -9,6 +9,10 @@
  * care about with `.mockResolvedValue(...)`.
  */
 
+import { Global, Module } from '@nestjs/common';
+import { DiscountService } from '../../src/sales/discount.service';
+import { QueueService } from '../../src/queue/queue.service';
+
 const MODEL_METHODS = [
   'findUnique',
   'findFirst',
@@ -24,6 +28,9 @@ const MODEL_METHODS = [
   'aggregate',
   'groupBy',
 ] as const;
+
+/** Delegate methods that resolve to a LIST in the real client. */
+const LIST_METHODS = new Set<string>(['findMany', 'groupBy']);
 
 const PASSTHROUGH = new Set(['then', 'catch', 'finally', 'constructor', 'prototype', 'toJSON']);
 
@@ -47,7 +54,21 @@ export function createPrismaMock(): PrismaMock {
         }
         if (!cache[prop]) {
           const delegate: any = {};
-          for (const m of MODEL_METHODS) delegate[m] = jest.fn();
+          // Defaults match PRISMA'S CONTRACT rather than being bare jest.fn()
+          // (which resolves to `undefined`). A list method always returns an
+          // array and `count` a number, so a query a test did not explicitly
+          // stub behaves like "no rows" instead of crashing the caller on
+          // `undefined.map(...)`. That failure mode is what breaks a suite
+          // whenever production adds a query — the test is then failing on the
+          // mock's shape, not on the behaviour it means to assert. Any test
+          // needing real rows still overrides with `.mockResolvedValue(...)`.
+          for (const m of MODEL_METHODS) {
+            delegate[m] = LIST_METHODS.has(m)
+              ? jest.fn().mockResolvedValue([])
+              : m === 'count'
+                ? jest.fn().mockResolvedValue(0)
+                : jest.fn();
+          }
           cache[prop] = delegate;
         }
         return cache[prop];
@@ -110,6 +131,80 @@ export function fakeNotifications(): any {
 }
 export function fakeRealtime(): any {
   return { emit: jest.fn() };
+}
+
+/**
+ * A QueueService double.
+ *
+ * OTP delivery and notification push fan-out are ENQUEUED, not executed on the
+ * request path: OtpService takes a QueueService (not SmsService) and calls
+ * `enqueueSms`, and NotificationsService calls `enqueueNotification` after
+ * committing the inbox row. So the observable behaviour a test asserts is "a job
+ * was enqueued with this payload/jobId", which is what this records.
+ *
+ * The two jobId helpers reproduce the REAL deterministic formats rather than
+ * returning a stub, because their whole purpose is idempotency (the same issue
+ * enqueued twice must collapse to one job) — a test asserting on a job id must
+ * see the id production would actually use.
+ */
+export function fakeQueue(): any {
+  return {
+    enqueueSms: jest.fn(async (data: unknown, opts?: unknown) => ({
+      id: (opts as any)?.jobId ?? 'sms_auto',
+      data,
+    })),
+    otpSmsJobId: jest.fn(
+      (requestId: string, sendCount: number) =>
+        `sms_otp_${requestId}_${sendCount}`,
+    ),
+    enqueueNotification: jest.fn(async (data: any) => ({
+      id: `notify_${data?.notificationId}`,
+      data,
+    })),
+    notificationJobId: jest.fn(
+      (data: any) => `notify_${data?.notificationId}`,
+    ),
+    enqueueImage: jest.fn(async () => ({ id: 'image_auto' })),
+    reenqueueImage: jest.fn(async () => ({ id: 'image_auto' })),
+    removeImageJob: jest.fn(async () => undefined),
+  };
+}
+
+/**
+ * A `@Global` module supplying the QueueService token, for DI-boot suites.
+ *
+ * QueueModule became `@Global` and is supplied by AppModule in production —
+ * the same situation PrismaModule and RedisModule are already handled for in
+ * these suites. Standalone testing modules must put it in the graph themselves,
+ * or every service that injects QueueService (OtpService, NotificationsService)
+ * fails to resolve.
+ *
+ * The REAL QueueModule is deliberately not imported: it registers four BullMQ
+ * queues and the whole processor/worker stack, which would open Redis
+ * connections a DI-graph check neither needs nor has. This provides just the
+ * injectable, so the graph resolves exactly as production while nothing
+ * connects.
+ */
+@Global()
+@Module({
+  providers: [{ provide: QueueService, useFactory: fakeQueue }],
+  exports: [QueueService],
+})
+export class FakeQueueModule {}
+
+/**
+ * A DiscountService that prices everything at full price — the "no active sale"
+ * baseline these smoke tests were written against, so their expected totals are
+ * unaffected by the sales feature.
+ *
+ * `loadActiveSales` is stubbed to return no sales rather than the whole service
+ * being faked, so the REAL `calculateDiscount*` arithmetic still runs: if that
+ * logic ever mis-handles the empty-sales case, these tests notice.
+ */
+export function fakeDiscounts(): any {
+  const svc = new DiscountService(createPrismaMock() as any);
+  jest.spyOn(svc, 'loadActiveSales').mockResolvedValue([]);
+  return svc;
 }
 
 let seq = 0;

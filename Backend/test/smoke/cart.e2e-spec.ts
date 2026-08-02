@@ -1,12 +1,12 @@
 import { CartService } from '../../src/cart/cart.service';
-import { createPrismaMock, buildCart, buildCartItem, PrismaMock } from '../utils/harness';
+import { createPrismaMock, buildCart, buildCartItem, fakeDiscounts, PrismaMock } from '../utils/harness';
 
 describe('Cart smoke', () => {
   let prisma: PrismaMock;
   let svc: CartService;
   beforeEach(() => {
     prisma = createPrismaMock();
-    svc = new CartService(prisma);
+    svc = new CartService(prisma, fakeDiscounts());
   });
 
   it('adds a new part line and reflects it in the snapshot', async () => {

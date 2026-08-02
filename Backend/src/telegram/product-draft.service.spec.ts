@@ -305,6 +305,30 @@ describe('ProductDraftService', () => {
     });
   });
 
+  describe('findImagesInFlight (gates starting a new listing)', () => {
+    it('matches a live CREATING draft that still has a PROCESSING image row', async () => {
+      prisma.productDraft.findFirst.mockResolvedValue(null);
+      const now = new Date('2026-07-25T12:00:00Z');
+
+      await service.findImagesInFlight(42, now);
+
+      // The gate reads the SAME rows the rendezvous does — draft status + image
+      // status — so "the bot says wait" and "the coordinator is still waiting"
+      // cannot disagree. A settled row (READY/FAILED) must not match, which is
+      // what lets the block lift the moment the batch finishes either way.
+      expect(prisma.productDraft.findFirst).toHaveBeenCalledWith({
+        where: {
+          sellerId: 42,
+          status: DraftStatus.CREATING,
+          expiresAt: { gt: now },
+          images: { some: { status: DraftImageStatus.PROCESSING } },
+        },
+        orderBy: { createdAt: 'desc' },
+        include: { images: { orderBy: { sortOrder: 'asc' } } },
+      });
+    });
+  });
+
   describe('recovery/orphan helpers (Phase 2)', () => {
     it('findAwaitingPreview queries the latest READY_FOR_PREVIEW draft within TTL', async () => {
       prisma.productDraft.findFirst.mockResolvedValue(null);

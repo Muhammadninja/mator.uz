@@ -6,7 +6,7 @@ import { CloudinaryService } from '../../src/cloudinary/cloudinary.service';
 import { RedisModule } from '../../src/redis/redis.module';
 import { RedisService } from '../../src/redis/redis.service';
 import { UserController } from '../../src/user/user.controller';
-import { fakeRedis, createPrismaMock } from '../utils/harness';
+import { fakeRedis, createPrismaMock, FakeQueueModule } from '../utils/harness';
 
 /**
  * DI-graph boot check for UserModule. Proves the full injection graph resolves
@@ -24,6 +24,8 @@ describe('UserModule boot (e2e)', () => {
       imports: [
         ConfigModule.forRoot({ isGlobal: true }),
         RedisModule,
+        // QueueModule is @Global in production; supply the token here.
+        FakeQueueModule,
         UserModule,
       ],
     })

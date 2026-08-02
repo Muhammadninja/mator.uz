@@ -26,6 +26,10 @@ function makePrismaMock() {
   const adminRefreshToken = {
     create: jest.fn().mockResolvedValue({}),
     findUnique: jest.fn(),
+    // listSessions reads through findMany; declared here so the delegate's shape
+    // covers every method the service calls rather than being patched onto the
+    // object mid-test (which the type then rejects).
+    findMany: jest.fn().mockResolvedValue([]),
     update: jest.fn().mockResolvedValue({}),
     updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     delete: jest.fn().mockResolvedValue({}),
@@ -33,6 +37,7 @@ function makePrismaMock() {
   };
   const appAdmin = {
     update: jest.fn().mockResolvedValue({ tokenVersion: 4 }),
+    findUnique: jest.fn().mockResolvedValue({ tokenVersion: 3 }),
   };
   return { adminRefreshToken, appAdmin };
 }

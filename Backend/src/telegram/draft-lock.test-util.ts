@@ -1,6 +1,26 @@
 import { DraftLock } from '../redis/draft-lock.service';
 
 /**
+ * The type of a TelegramService built by the specs' `Object.create(prototype)`
+ * harness, which drives the class's PRIVATE helpers directly (no Nest DI, no live
+ * bot) and replaces its injected collaborators with mocks.
+ *
+ * Why an index signature and NOT `TelegramService & Record<string, any>`: an
+ * intersection does not relax visibility. For a name the class already declares,
+ * TypeScript resolves against the class declaration and reports TS2341 ("private
+ * and only accessible within class") — the `Record` half is never consulted, so
+ * that formulation produced an error on every `svc.wizard` / `svc.handlePhotos`
+ * access while looking like it should work.
+ *
+ * A bare index signature has no declared members to resolve against, so both the
+ * private helpers under test and the mock-only fields the harness assigns
+ * (`sendStepPrompt`, `discardSessionPhotos`, …) type-check. This deliberately
+ * keeps the looseness INSIDE the test harness: production visibility is
+ * unchanged, and nothing here widens the service's real API.
+ */
+export type TelegramServiceHarness = Record<string, any>;
+
+/**
  * An in-memory stand-in for {@link DraftLock} used by the TelegramService specs.
  *
  * It really enforces mutual exclusion (a held key makes the next acquire return

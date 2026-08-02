@@ -1,12 +1,16 @@
 import { SearchService } from '../../src/catalog/search/search.service';
 import { PartsService } from '../../src/catalog/parts/parts.service';
 import { CategoriesService } from '../../src/catalog/categories/categories.service';
-import { createPrismaMock, PrismaMock } from '../utils/harness';
+import { createPrismaMock, fakeDiscounts, PrismaMock } from '../utils/harness';
 
 function buildPart(over: Partial<any> = {}): any {
   return {
     id: 'part_belt',
     title: 'Timing belt',
+    // The presenter reads the kind's capability table (part numbers, fitment),
+    // so a row without it resolves `capabilitiesOf(undefined)` to undefined.
+    // SPARE_PART is the column's schema default.
+    kind: 'SPARE_PART',
     brand: { id: 'brand_gates', name: 'Gates' },
     category: { id: 'cat_belts', name: 'Timing belts' },
     seller: { id: 'seller_1', name: 'Avtomir', ratingAvg: 4.6 },
@@ -59,7 +63,7 @@ describe('Catalog/Search smoke', () => {
   });
 
   it('parts list maps the contract item shape with price label', async () => {
-    const svc = new PartsService(prisma);
+    const svc = new PartsService(prisma, fakeDiscounts());
     prisma.catalogPart.count.mockResolvedValue(1);
     prisma.catalogPart.findMany.mockResolvedValue([buildPart()]);
     prisma.catalogPart.groupBy.mockResolvedValue([{ brandId: 'brand_gates', _count: { _all: 1 } }]);
@@ -75,7 +79,7 @@ describe('Catalog/Search smoke', () => {
   });
 
   it('compatibility projects a trim+year match as "fits"', async () => {
-    const svc = new PartsService(prisma);
+    const svc = new PartsService(prisma, fakeDiscounts());
     prisma.catalogPart.findUnique.mockResolvedValue({
       compatibilities: [
         { trimId: 'trim_lt', engineId: null, years: [2022], status: 'FITS', confidence: 1, source: 'oem' },
@@ -89,7 +93,7 @@ describe('Catalog/Search smoke', () => {
   });
 
   it('presents the classified attributes in the item shape', async () => {
-    const svc = new PartsService(prisma);
+    const svc = new PartsService(prisma, fakeDiscounts());
     prisma.catalogPart.count.mockResolvedValue(1);
     prisma.catalogPart.findMany.mockResolvedValue([
       buildPart({
@@ -118,7 +122,7 @@ describe('Catalog/Search smoke', () => {
 
   // Capture the `where` the service builds so we can assert the server-side filters.
   async function whereForQuery(query: any) {
-    const svc = new PartsService(prisma);
+    const svc = new PartsService(prisma, fakeDiscounts());
     prisma.catalogPart.count.mockResolvedValue(0);
     prisma.catalogPart.findMany.mockResolvedValue([]);
     prisma.catalogPart.groupBy.mockResolvedValue([]);
@@ -167,19 +171,34 @@ describe('Catalog/Categories smoke', () => {
   let prisma: PrismaMock;
   beforeEach(() => (prisma = createPrismaMock()));
 
-  it('main scope returns all 12 categories with live counts, unmatched → 0', async () => {
+  it('main scope returns the active PartCategory rows with live counts, unmatched → 0', async () => {
+    // Main scope is served from the admin-editable PartCategory table (the
+    // single source of truth), NOT the hardcoded MAIN_CATEGORIES: the rows come
+    // from `partCategory.findMany` and counts group by `categoryId`. The wire
+    // shape (id, name, slug, count, iconKey, color) is unchanged.
     const svc = new CategoriesService(prisma);
+    const rows = [
+      { id: 'brakes', name: 'Brakes', slug: 'brakes', iconKey: 'brake', color: '#f00', mainCategory: 'BRAKES' },
+      { id: 'engine', name: 'Engine', slug: 'engine', iconKey: 'engine', color: '#0f0', mainCategory: 'ENGINE' },
+      { id: 'batteries', name: 'Batteries', slug: 'batteries', iconKey: 'bat', color: '#00f', mainCategory: 'BATTERIES' },
+    ];
+    prisma.partCategory.findMany.mockResolvedValue(rows);
     prisma.catalogPart.groupBy.mockResolvedValue([
-      { mainCategory: 'BRAKES', _count: { _all: 12 } },
-      { mainCategory: 'ENGINE', _count: { _all: 25 } },
+      { categoryId: 'brakes', _count: { _all: 12 } },
+      { categoryId: 'engine', _count: { _all: 25 } },
     ]);
 
     const res = await svc.list({});
-    expect(res.total).toBe(12);
-    expect(res.items).toHaveLength(12);
-    const brakes = res.items.find((c) => c.id === 'BRAKES')!;
+    // Only ACTIVE rows that carry a mainCategory are listed.
+    expect(prisma.partCategory.findMany.mock.calls[0][0].where).toEqual({
+      isActive: true,
+      mainCategory: { not: null },
+    });
+    expect(res.total).toBe(rows.length);
+    expect(res.items).toHaveLength(rows.length);
+    const brakes = res.items.find((c) => c.id === 'brakes')!;
     expect(brakes).toMatchObject({ name: 'Brakes', slug: 'brakes', count: 12 });
-    const batteries = res.items.find((c) => c.id === 'BATTERIES')!;
+    const batteries = res.items.find((c) => c.id === 'batteries')!;
     expect(batteries.count).toBe(0); // unmatched category → 0
   });
 

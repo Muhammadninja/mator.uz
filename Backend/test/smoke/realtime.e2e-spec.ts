@@ -248,7 +248,8 @@ describe('Realtime smoke', () => {
     it('rejects connections beyond the per-user limit (4408) without touching existing ones', async () => {
       wsAuth.authenticate.mockResolvedValue('usr_1');
       const url = '/realtime?channel=garage:usr_1';
-      const accepted = [];
+      // Annotated: an empty literal infers `never[]`, which rejects every push.
+      const accepted: ReturnType<typeof fakeSocket>[] = [];
       // Open up to the cap; every distinct IP so the handshake rate limit
       // (per-IP) never trips and we isolate the per-user cap.
       for (let i = 0; i < 15; i++) {

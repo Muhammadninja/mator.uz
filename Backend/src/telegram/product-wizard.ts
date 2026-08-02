@@ -593,8 +593,17 @@ export function selectBrand(
   const brand = WIZARD_BRANDS[brandIndex];
   if (!brand) return STALE;
   // A real car brand keeps (or returns) the session on the spare-parts flow —
-  // "returns" matters when the seller walked back from the "Другое" menu.
-  session.kind = ProductKind.SPARE_PART;
+  // "returns" matters when the seller walked back from the "Другое" menu. The
+  // oil answers of the abandoned branch go with it, so a session that returns
+  // to the parts flow carries no orphan oil attributes into its draft.
+  if (session.kind !== ProductKind.SPARE_PART) {
+    session.kind = ProductKind.SPARE_PART;
+    session.oilViscosity = null;
+    session.oilType = null;
+    session.oilVolumeMl = null;
+    session.viscosityIsCustom = false;
+    session.volumeIsCustom = false;
+  }
   session.brand = brand.name;
   return advance(session);
 }
@@ -691,15 +700,27 @@ export function selectCategory(
   // itself the answer, so the product still carries a concrete categoryId.
   session.categoryId = category.id;
   session.category = category.vehicleCategoryEnum ?? null;
-  // A category may start a DIFFERENT questionnaire (the oil category does). The
-  // brand/model already answered are deliberately KEPT — that is what makes this
-  // an oil FOR a specific car, and therefore not universal.
-  if (category.kind !== undefined && category.kind !== session.kind) {
-    session.kind = category.kind;
+  // The CHOSEN category DETERMINES the questionnaire — it does not merely
+  // upgrade it. A category that declares no kind is an ordinary spare part, so
+  // the absence of `kind` is the SPARE_PART answer, not "leave as-is". Treating
+  // it as "leave as-is" made the switch one-way: a seller who picked "Моторные
+  // масла", walked back, and then picked a normal category kept kind=MOTOR_OIL
+  // and was asked for oil viscosity for a brake pad.
+  //
+  // The brand/model already answered are deliberately KEPT — that is what makes
+  // an oil picked here an oil FOR a specific car, and therefore not universal.
+  const kind = category.kind ?? ProductKind.SPARE_PART;
+  if (kind !== session.kind) {
+    session.kind = kind;
     // The new questionnaire owns its own attribute set; anything the previous
     // flow collected that this one never asks must not survive into the draft.
     session.partNumberType = 'UNKNOWN';
     session.partNumber = null;
+    session.oilViscosity = null;
+    session.oilType = null;
+    session.oilVolumeMl = null;
+    session.viscosityIsCustom = false;
+    session.volumeIsCustom = false;
   }
   // A deeper pick belongs to the category it was made under, so re-answering
   // this step drops it: the seller may have walked back and chosen a DIFFERENT

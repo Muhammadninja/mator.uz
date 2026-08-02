@@ -14,7 +14,7 @@ import { TokenService } from '../../src/auth/tokens/token.service';
 import { JwtKeyService } from '../../src/auth/tokens/jwt-key.service';
 import { hashPassword } from '../../src/auth/password.util';
 import { RedisKeys } from '../../src/redis/redis.keys';
-import { createPrismaMock, fakeConfig, fakeRedis, buildAppUser, PrismaMock } from '../utils/harness';
+import { createPrismaMock, fakeConfig, fakeQueue, fakeRedis, buildAppUser, PrismaMock } from '../utils/harness';
 
 /** Real token service (ephemeral RS256 keypair) for end-to-end token integration. */
 function realTokens(prisma: PrismaMock, redis: any = fakeRedis()) {
@@ -30,13 +30,16 @@ describe('Auth smoke', () => {
 
   describe('Phone OTP', () => {
     it('issues, then verifies the exact code that was sent', async () => {
-      const sms = { sendSms: jest.fn().mockResolvedValue(undefined) };
-      // No AUTH_DEV_MODE → production path: SMS is sent, no dev code returned.
-      // OTP now lives in Redis; the hourly ceiling runs through FixedWindowRateLimiter.
+      // No AUTH_DEV_MODE → production path: the code goes out for real delivery
+      // and no dev code is returned. Delivery is ENQUEUED (queue.enqueueSms),
+      // not sent inline: OtpService takes the QUEUE, and SmsProcessor is what
+      // talks to a provider. OTP state lives in Redis; the hourly ceiling runs
+      // through FixedWindowRateLimiter.
+      const queue = fakeQueue();
       const redis = fakeRedis();
       const otp = new OtpService(
         redis as any,
-        sms as any,
+        queue as any,
         fakeConfig(),
         new FixedWindowRateLimiter(redis as any),
       );
@@ -44,20 +47,24 @@ describe('Auth smoke', () => {
 
       const issued = await otp.request(phone);
       expect(issued.otpLength).toBe(6);
-      expect(sms.sendSms).toHaveBeenCalledTimes(1);
+      expect(queue.enqueueSms).toHaveBeenCalledTimes(1);
+      // Deterministic jobId keyed on (requestId, sendCount=0 for the initial
+      // issue) — what makes a duplicated enqueue collapse to one delivery.
+      expect(queue.enqueueSms.mock.calls[0][1]).toEqual({
+        jobId: `sms_otp_${issued.requestId}_0`,
+      });
 
-      const code = /(\d{6})/.exec(sms.sendSms.mock.calls[0][1])![1];
+      const code = /(\d{6})/.exec(queue.enqueueSms.mock.calls[0][0].message)![1];
       // The exact code verifies and consumes the record (key removed from Redis).
       await expect(otp.verify(issued.requestId, phone, code)).resolves.toBeUndefined();
       expect(redis.store.has(RedisKeys.otp(phone))).toBe(false);
     });
 
     it('rejects an incorrect code and counts the attempt', async () => {
-      const sms = { sendSms: jest.fn().mockResolvedValue(undefined) };
       const redis = fakeRedis();
       const otp = new OtpService(
         redis as any,
-        sms as any,
+        fakeQueue() as any,
         fakeConfig(),
         new FixedWindowRateLimiter(redis as any),
       );

@@ -29,16 +29,33 @@ import {
  * by default so removeImageJob's getJob→job.remove() path runs; a test can override
  * getJob to return null (already-gone) or a job whose remove() rejects (locked).
  */
+/** The job shape the double hands back (only what QueueService touches). */
+interface FakeJob {
+  id: string | undefined;
+  remove: () => Promise<unknown>;
+}
+
 function makeQueueMock() {
   const jobRemove = jest.fn(async () => undefined);
+  // The return types are declared rather than inferred from the DEFAULT
+  // implementations: inference pins them to exactly what the default returns
+  // (e.g. `remove: jest.Mock<Promise<undefined>>`), which then rejects the
+  // overrides this double exists to support — `null` for an already-gone job, or
+  // a job whose remove() rejects. Declaring the contract keeps both legal.
   return {
-    add: jest.fn(async (name: string, data: unknown, opts?: unknown) => ({
+    add: jest.fn<
+      Promise<{ id: string | undefined }>,
+      [string, unknown, unknown?]
+    >(async (name: string, data: unknown, opts?: unknown) => ({
       id: (opts as any)?.jobId ?? 'auto-id',
       name,
       data,
       opts,
     })),
-    getJob: jest.fn(async (id: string) => ({ id, remove: jobRemove })),
+    getJob: jest.fn<Promise<FakeJob | null>, [string]>(async (id: string) => ({
+      id,
+      remove: jobRemove,
+    })),
     // Exposed so tests can assert on the job-level remove() the code now calls.
     __jobRemove: jobRemove,
   };

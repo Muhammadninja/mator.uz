@@ -311,6 +311,39 @@ export class ProductDraftService {
   }
 
   /**
+   * The seller's in-flight draft: a live (CREATING, within TTL) draft that still
+   * has at least one image row PROCESSING — i.e. the image pipeline is genuinely
+   * mid-flight for them right now.
+   *
+   * This is the state source that gates STARTING A NEW LISTING. It is deliberately
+   * derived from the same rows the rendezvous itself reads (draft status + image
+   * status) rather than from a separate in-memory flag: a flag would be a second,
+   * process-local copy of a fact the DB already owns, and would be wrong after a
+   * restart, across replicas, or whenever a worker settles a row without the bot
+   * thread noticing. Because both gates read one source, "the bot says photos are
+   * processing" and "the coordinator is still waiting for images" cannot disagree.
+   *
+   * Returns null the moment the last row settles (READY or FAILED), so the block
+   * lifts exactly when the batch finishes — including the failure case, where the
+   * seller must be able to reach the retry/cancel buttons.
+   */
+  findImagesInFlight(
+    sellerId: number,
+    now: Date = new Date(),
+  ): Promise<DraftWithImages | null> {
+    return this.prisma.productDraft.findFirst({
+      where: {
+        sellerId,
+        status: DraftStatus.CREATING,
+        expiresAt: { gt: now },
+        images: { some: { status: DraftImageStatus.PROCESSING } },
+      },
+      orderBy: { createdAt: 'desc' },
+      include: { images: { orderBy: { sortOrder: 'asc' } } },
+    });
+  }
+
+  /**
    * The most recent draft for a seller that is READY_FOR_PREVIEW and within TTL —
    * used on /start to RE-PRESENT a preview whose delivery was lost (e.g. the backend
    * crashed after the coordinator flipped the draft but before the preview message

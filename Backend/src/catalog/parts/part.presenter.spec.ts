@@ -47,6 +47,13 @@ function part(over: Partial<PartWithRelations> = {}): PartWithRelations {
     oilViscosity: null,
     oilType: null,
     oilVolumeMl: null,
+    // Columns the presenter does not read, but the row type requires: omitting
+    // them leaves `undefined`, which the Decimal types reject. Values match the
+    // schema (purchase price is nullable; cashback defaults to 0).
+    purchasePriceUzs: null,
+    cashbackPct: 0 as never,
+    stockQty: 1,
+    lowStockThreshold: 0,
     createdAt: new Date(),
     updatedAt: new Date(),
     brand: null,

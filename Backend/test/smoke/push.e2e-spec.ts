@@ -4,7 +4,7 @@ import { PushDispatchService } from '../../src/notifications/push/push-dispatch.
 import { NotificationsService } from '../../src/notifications/notifications.service';
 import { SettlementService } from '../../src/orders/webhooks/settlement.service';
 import { OrderStatusService } from '../../src/orders/order-status.service';
-import { createPrismaMock, fakeConfig, PrismaMock } from '../utils/harness';
+import { createPrismaMock, fakeConfig, PrismaMock, fakeQueue } from '../utils/harness';
 
 describe('Push delivery smoke', () => {
   let prisma: PrismaMock;
@@ -66,40 +66,52 @@ describe('Push delivery smoke', () => {
   });
 
   describe('NotificationsService.emit', () => {
+    // emit() ENQUEUES the push fan-out (NotificationsProcessor runs it); it no
+    // longer calls PushDispatchService on the request path. So the observable
+    // "was a push sent?" is "was a notification job enqueued?".
     function build() {
-      const push = { sendToUser: jest.fn().mockResolvedValue(undefined) };
-      const svc = new NotificationsService(prisma, push as any);
+      const queue = fakeQueue();
+      const svc = new NotificationsService(prisma, queue as any);
       prisma.notification.create.mockResolvedValue({ id: 'ntf_1' });
-      return { svc, push };
+      return { svc, queue };
     }
 
-    it('persists the inbox row and pushes when allowed', async () => {
-      const { svc, push } = build();
+    it('persists the inbox row and enqueues the push fan-out when allowed', async () => {
+      const { svc, queue } = build();
       prisma.notificationPreference.findUnique.mockResolvedValue(null); // default allow
       await svc.emit('usr_1', { type: NotificationType.ORDER_PAID, title: 't', body: 'b' });
       expect(prisma.notification.create).toHaveBeenCalled();
-      expect(push.sendToUser).toHaveBeenCalled();
+      expect(queue.enqueueNotification).toHaveBeenCalledTimes(1);
+      // The COMMITTED row's id is the fan-out target and the job's idempotency
+      // key — one inbox row produces at most one push fan-out.
+      expect(queue.enqueueNotification.mock.calls[0][0]).toMatchObject({
+        userId: 'usr_1',
+        notificationId: 'ntf_1',
+        type: NotificationType.ORDER_PAID,
+      });
     });
 
     it('stores the inbox row but skips push when the category preference is off', async () => {
-      const { svc, push } = build();
+      const { svc, queue } = build();
       prisma.notificationPreference.findUnique.mockResolvedValue({ payments: false, quietHoursStart: null, quietHoursEnd: null });
       await svc.emit('usr_1', { type: NotificationType.ORDER_PAID, title: 't', body: 'b' });
       expect(prisma.notification.create).toHaveBeenCalled();
-      expect(push.sendToUser).not.toHaveBeenCalled();
+      expect(queue.enqueueNotification).not.toHaveBeenCalled();
     });
 
     it('suppresses push during quiet hours', async () => {
-      const { svc, push } = build();
+      const { svc, queue } = build();
       prisma.notificationPreference.findUnique.mockResolvedValue({ payments: true, quietHoursStart: '00:00', quietHoursEnd: '23:59' });
       await svc.emit('usr_1', { type: NotificationType.ORDER_PAID, title: 't', body: 'b' });
-      expect(push.sendToUser).not.toHaveBeenCalled();
+      expect(queue.enqueueNotification).not.toHaveBeenCalled();
     });
 
-    it('never throws when push delivery fails', async () => {
-      const { svc, push } = build();
+    it('never throws when the push enqueue fails', async () => {
+      // The inbox row is already committed, so a queue hiccup must not fail the
+      // emit — it is logged and swallowed.
+      const { svc, queue } = build();
       prisma.notificationPreference.findUnique.mockResolvedValue(null);
-      push.sendToUser.mockRejectedValue(new Error('expo down'));
+      queue.enqueueNotification.mockRejectedValue(new Error('redis down'));
       await expect(svc.emit('usr_1', { type: NotificationType.AI_REPLY, title: 't', body: 'b' })).resolves.toBeDefined();
     });
   });
@@ -107,7 +119,7 @@ describe('Push delivery smoke', () => {
   describe('order_paid wiring', () => {
     it('SettlementService.markPaid emits an ORDER_PAID notification after commit', async () => {
       const notifications = { emit: jest.fn().mockResolvedValue(undefined) };
-      const settlement = new SettlementService(prisma, notifications as any, { emit: jest.fn() } as any, new OrderStatusService(prisma));
+      const settlement = new SettlementService(prisma, notifications as any, { emit: jest.fn() } as any, new OrderStatusService(prisma), fakeConfig());
       prisma.payment.findUnique.mockResolvedValue({
         id: 'pay_1',
         status: 'PENDING',
@@ -127,7 +139,7 @@ describe('Push delivery smoke', () => {
 
     it('is idempotent — an already-paid payment does not re-notify', async () => {
       const notifications = { emit: jest.fn() };
-      const settlement = new SettlementService(prisma, notifications as any, { emit: jest.fn() } as any, new OrderStatusService(prisma));
+      const settlement = new SettlementService(prisma, notifications as any, { emit: jest.fn() } as any, new OrderStatusService(prisma), fakeConfig());
       prisma.payment.findUnique.mockResolvedValue({ id: 'pay_1', status: 'PAID', orderId: 'ord_1', order: { userId: 'usr_1' } });
       await settlement.markPaid('pay_1');
       expect(notifications.emit).not.toHaveBeenCalled();

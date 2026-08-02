@@ -660,3 +660,112 @@ describe('callback payloads stay within Telegram limits', () => {
     }
   });
 });
+
+/**
+ * The questionnaire a session walks must follow the CHOSEN CATEGORY, not the
+ * high-water mark of everything the seller ever tapped.
+ *
+ * The regression: `selectCategory` only ever UPGRADED the kind (it acted when a
+ * category declared one and ignored it otherwise), so the switch was one-way. A
+ * seller who opened "Моторные масла", walked back, and picked an ordinary
+ * category kept kind=MOTOR_OIL — and the flow asked for oil viscosity for a
+ * brake pad. A category that declares no kind now IS the SPARE_PART answer.
+ */
+describe('the chosen category determines the flow (no sticky MOTOR_OIL)', () => {
+  /** The root grid the bot renders after a car is chosen. */
+  const ROOTS = [
+    { id: 'brake-system', name: 'Тормозная система' },
+    { id: 'engine-system', name: 'Двигатель' },
+    { id: 'motor-oil', name: 'Моторные масла', kind: ProductKind.MOTOR_OIL },
+  ];
+
+  /** A session standing on the CATEGORY step with the root grid rendered. */
+  function atCategory(): WizardSession {
+    const s = freshSession();
+    selectBrand(s, 0);
+    selectModel(s, 0);
+    s.categoryOptions = ROOTS;
+    return s;
+  }
+
+  it.each([['brake-system'], ['engine-system']])(
+    'SPARE_PART + ordinary category "%s" never reaches OIL_VISCOSITY',
+    (categoryId) => {
+      const s = atCategory();
+      selectCategory(s, categoryId, []);
+      expect(s.kind).toBe(ProductKind.SPARE_PART);
+      expect(s.step).toBe(WizardStep.TITLE);
+    },
+  );
+
+  it('an ordinary category with children asks the subcategory, then TITLE', () => {
+    const s = atCategory();
+    selectCategory(s, 'brake-system', [{ id: 'brakes', name: 'Тормоза' }]);
+    expect(s.step).toBe(WizardStep.SUBCATEGORY);
+    selectSubcategory(s, 'brakes', []);
+    expect(s.kind).toBe(ProductKind.SPARE_PART);
+    expect(s.step).toBe(WizardStep.TITLE);
+  });
+
+  it('THE BUG: oil → back → ordinary category returns to the parts flow', () => {
+    const s = atCategory();
+    selectCategory(s, 'motor-oil', []);
+    expect(s.step).toBe(WizardStep.OIL_VISCOSITY);
+
+    goBack(s);
+    expect(s.step).toBe(WizardStep.CATEGORY);
+
+    s.categoryOptions = ROOTS;
+    selectCategory(s, 'brake-system', []);
+    expect(s.kind).toBe(ProductKind.SPARE_PART);
+    expect(s.step).toBe(WizardStep.TITLE);
+  });
+
+  it('abandoning the oil branch drops the oil answers it collected', () => {
+    const s = atCategory();
+    selectCategory(s, 'motor-oil', []);
+    selectOilViscosity(s, FIVE_W_30);
+    selectOilType(s, SYNTHETIC);
+    expect(s.oilViscosity).toBe('5W-30');
+
+    while (s.step !== WizardStep.CATEGORY && goBack(s).status === 'ok') {
+      // walk back to the category question
+    }
+    s.categoryOptions = ROOTS;
+    selectCategory(s, 'brake-system', []);
+
+    // A brake pad must carry no oil attributes into its draft.
+    expect(s.kind).toBe(ProductKind.SPARE_PART);
+    expect(s.oilViscosity).toBeNull();
+    expect(s.oilType).toBeNull();
+    expect(s.oilVolumeMl).toBeNull();
+  });
+
+  it('returning to the BRAND step also clears the abandoned oil answers', () => {
+    const s = sessionAtViscosity();
+    selectOilViscosity(s, FIVE_W_30);
+    while (s.step !== WizardStep.BRAND && goBack(s).status === 'ok') {
+      // walk back to the branch point
+    }
+    selectBrand(s, 0);
+    expect(s.kind).toBe(ProductKind.SPARE_PART);
+    expect(s.oilViscosity).toBeNull();
+    expect(s.viscosityIsCustom).toBe(false);
+  });
+
+  it('the oil category still starts the oil questionnaire (vehicle path)', () => {
+    const s = atCategory();
+    selectCategory(s, 'motor-oil', []);
+    expect(s.kind).toBe(ProductKind.MOTOR_OIL);
+    expect(s.step).toBe(WizardStep.OIL_VISCOSITY);
+    // Picked AFTER a car, so the vehicle is kept and the listing is specific.
+    expect(s.brand).toBe('Chevrolet');
+    expect(s.model).toBe('Cobalt');
+  });
+
+  it('"Другое" → any child still starts the oil questionnaire', () => {
+    const s = sessionAtViscosity();
+    expect(s.kind).toBe(ProductKind.MOTOR_OIL);
+    expect(s.step).toBe(WizardStep.OIL_VISCOSITY);
+  });
+});

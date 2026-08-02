@@ -8,7 +8,7 @@ import { RealtimeModule } from './../src/realtime/realtime.module';
 import { PrismaService } from './../src/prisma/prisma.service';
 import { RedisModule } from './../src/redis/redis.module';
 import { RedisService } from './../src/redis/redis.service';
-import { fakeRedis, createPrismaMock } from './utils/harness';
+import { fakeRedis, createPrismaMock, FakeQueueModule } from './utils/harness';
 
 /**
  * HTTP integration boot: stands up real contract controllers + the JWT guard
@@ -25,6 +25,8 @@ describe('App integration boot (e2e)', () => {
       imports: [
         ConfigModule.forRoot({ isGlobal: true }),
         RedisModule,
+        // QueueModule is @Global in production; supply the token here.
+        FakeQueueModule,
         CartModule,
         RealtimeModule,
       ],

@@ -24,7 +24,10 @@ function makeDraft(over: Partial<Record<string, unknown>> = {}) {
   return {
     id: 'draft_1',
     tgId: 123n,
-    status: DraftStatus.CREATING,
+    // Annotated as the full enum, not left to infer the 'CREATING' literal: the
+    // stateful drafts mock below transitions this field, which a literal type
+    // would reject.
+    status: DraftStatus.CREATING as DraftStatus,
     version: 0,
     kind: ProductKind.SPARE_PART,
     title: 'Amortizator',

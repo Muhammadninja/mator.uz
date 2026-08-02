@@ -175,6 +175,12 @@ const DRAFT_CANCEL = 'draft:cancel';
 // Nudge shown to anyone interacting outside an active wizard session.
 const START_HINT = '👋 Чтобы добавить товар, нажмите /start';
 
+// Shown when a seller tries to START A NEW listing while their previous one's
+// photos are still being processed. The block is lifted automatically the moment
+// the batch settles, so this asks for nothing but patience.
+export const IMAGES_PROCESSING_MESSAGE =
+  '📸 Фото обрабатывается, пожалуйста, подождите.';
+
 // Sent unprompted the moment an administrator approves a seller, so they learn
 // their account is live without having to poll the bot with /start.
 export const SELLER_APPROVED_MESSAGE =
@@ -772,6 +778,14 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         await ctx.reply(START_HINT);
         return;
       }
+      // The prompt's keyboard may have been sent BEFORE a batch started (or a
+      // re-upload began after it was rendered), so the same in-flight check runs
+      // here rather than trusting the tap. Otherwise this path would cancel a
+      // draft whose worker is mid-write, deleting assets from under it.
+      if (await this.drafts.findImagesInFlight(seller.id)) {
+        await ctx.reply(IMAGES_PROCESSING_MESSAGE);
+        return;
+      }
       // Discard the old draft (assets + jobs) and begin a brand-new flow.
       await this.cancelActiveDraft(from.id);
       await this.startProductCreation(ctx, from.id, seller.id);
@@ -818,6 +832,31 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     const awaitingPreview = await this.drafts.findAwaitingPreview(sellerId);
     if (awaitingPreview) {
       await this.presentDraftPreview(awaitingPreview.id, tgUserId);
+      return;
+    }
+
+    // A draft whose image batch is still in flight BLOCKS starting a new listing.
+    // Without this the seller could open a second wizard while the first draft's
+    // worker jobs ran, and the preview that landed later belonged to the OLD
+    // draft — arriving in the middle of the new one and reading as a bug.
+    //
+    // This is checked BEFORE the resume prompt on purpose: that prompt offers
+    // "🆕 Начать заново", which cancels the draft and deletes assets a running
+    // worker is still writing to. Refusing here means the in-flight batch is
+    // never raced by a restart; once it settles the normal resume prompt (or the
+    // preview) appears on the next /start, and the questionnaire continues where
+    // it left off. Repeated taps are naturally idempotent — each one re-reads the
+    // same rows and replies with the same message, creating nothing.
+    const inFlight = await this.drafts.findImagesInFlight(sellerId);
+    if (inFlight) {
+      await ctx.reply(IMAGES_PROCESSING_MESSAGE);
+      // Refusing to start a new listing must not also strand THIS one. A row can
+      // sit PROCESSING with no live job (the enqueue loop crashed, or the job was
+      // lost), and that row is what the block keys on — so without this the draft
+      // would wait behind its own "please wait" forever. Healing here keeps the
+      // recovery `resumeDraft` performs reachable while the wizard stays closed:
+      // re-enqueue is idempotent, so a genuinely running batch is unaffected.
+      await this.reenqueueStuckImages(inFlight);
       return;
     }
 
@@ -1907,8 +1946,13 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         mainCategoryEnum: MAIN_CATEGORY_BY_SLUG.get(row.id) ?? null,
         // Resolved from the category's STABLE ID, never its name, so renaming
         // "Моторные масла" in the admin panel cannot change what it does.
-        // Undefined for an ordinary category, which leaves the kind untouched.
-        kind: CATEGORY_ID_TO_KIND[row.id],
+        // Undefined for an ordinary category, which makes it a spare part.
+        // Own-property check only: a bare index would let an admin category
+        // whose id is 'constructor' or 'toString' inherit a truthy value off
+        // Object.prototype and pass a non-ProductKind into the wizard.
+        kind: Object.prototype.hasOwnProperty.call(CATEGORY_ID_TO_KIND, row.id)
+          ? CATEGORY_ID_TO_KIND[row.id]
+          : undefined,
       }));
     } catch (err) {
       this.logger.error(

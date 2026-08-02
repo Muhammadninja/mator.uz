@@ -1,6 +1,6 @@
 import { SettlementService } from '../../src/orders/webhooks/settlement.service';
 import { OrderStatusService } from '../../src/orders/order-status.service';
-import { createPrismaMock, PrismaMock } from '../utils/harness';
+import { createPrismaMock, fakeConfig, PrismaMock } from '../utils/harness';
 
 describe('Settlement order_paid WS emit smoke', () => {
   let prisma: PrismaMock;
@@ -12,7 +12,7 @@ describe('Settlement order_paid WS emit smoke', () => {
     prisma = createPrismaMock();
     notifications = { emit: jest.fn().mockResolvedValue(undefined) };
     realtime = { emit: jest.fn() };
-    svc = new SettlementService(prisma, notifications as any, realtime as any, new OrderStatusService(prisma));
+    svc = new SettlementService(prisma, notifications as any, realtime as any, new OrderStatusService(prisma), fakeConfig());
   });
 
   it('markPaid flips order + payment, emits order_paid over WS, and notifies', async () => {

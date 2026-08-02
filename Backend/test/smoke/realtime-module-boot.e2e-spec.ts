@@ -7,7 +7,7 @@ import { PrismaModule } from '../../src/prisma/prisma.module';
 import { PrismaService } from '../../src/prisma/prisma.service';
 import { RedisModule } from '../../src/redis/redis.module';
 import { RedisService } from '../../src/redis/redis.service';
-import { fakeRedis, createPrismaMock } from '../utils/harness';
+import { fakeRedis, createPrismaMock, FakeQueueModule } from '../utils/harness';
 
 /**
  * DI-graph boot check for RealtimeModule. The gateway now injects TokenService
@@ -29,6 +29,8 @@ describe('RealtimeModule boot (e2e)', () => {
         ConfigModule.forRoot({ isGlobal: true }),
         PrismaModule,
         RedisModule,
+        // QueueModule is @Global in production; supply the token here.
+        FakeQueueModule,
         RealtimeModule,
       ],
     })

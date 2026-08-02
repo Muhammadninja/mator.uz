@@ -18,7 +18,10 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { Decimal } from '@prisma/client/runtime/library';
 import { TelegramService } from './telegram.service';
-import { makeFakeLock } from './draft-lock.test-util';
+import {
+  makeFakeLock,
+  type TelegramServiceHarness,
+} from './draft-lock.test-util';
 import {
   WizardSessionStore,
   WizardStep,
@@ -27,7 +30,7 @@ import {
   selectBrand,
 } from './product-wizard';
 
-type AnyService = TelegramService & Record<string, any>;
+type AnyService = TelegramServiceHarness;
 
 function makeService(over: Partial<Record<string, unknown>> = {}): AnyService {
   const svc = Object.create(TelegramService.prototype) as AnyService;
@@ -311,8 +314,13 @@ describe('TelegramService — draft flow (photos-first)', () => {
 
       await svc.presentDraftPreview('draft_1', 7);
 
-      // processedUrls sorted by sortOrder.
-      const pendingArg = storePending.mock.calls[0][0];
+      // processedUrls sorted by sortOrder. The spy is taken on the harness's
+      // index-signature type, so its recorded args come back as `unknown`;
+      // naming the shape here restores the field checks on the assertions below.
+      const pendingArg = storePending.mock.calls[0][0] as {
+        processedUrls: string[];
+        tgUserId: number;
+      };
       expect(pendingArg.processedUrls).toEqual(['u0', 'u1']);
       expect(pendingArg.tgUserId).toBe(7);
       // A single-or-multi send happened via bot.telegram.
@@ -395,6 +403,175 @@ describe('TelegramService — draft flow (photos-first)', () => {
       const [chatId, text] = svc.bot.telegram.sendMessage.mock.calls[0];
       expect(chatId).toBe(7);
       expect(text).toContain('2');
+    });
+  });
+
+  /**
+   * A new listing must not begin while the PREVIOUS one's photos are still being
+   * processed. The bug this locks down: the seller sent/changed a photo, the batch
+   * went to the worker, and the bot happily opened a SECOND wizard — so when the
+   * batch finished, the old draft's finished preview arrived in the middle of the
+   * new listing and looked like the bot had answered the wrong thing.
+   *
+   * The gate is the DB state the rendezvous itself reads (a CREATING draft with a
+   * PROCESSING image row), never a separate in-memory boolean — see
+   * ProductDraftService.findImagesInFlight.
+   */
+  describe('a new listing is blocked while images are processing', () => {
+    const PROCESSING_MSG = '📸 Фото обрабатывается, пожалуйста, подождите.';
+
+    /** A draft whose batch is genuinely mid-flight. */
+    function inFlightDraft(over: Record<string, unknown> = {}) {
+      return {
+        id: 'draft_busy',
+        images: [
+          { id: 'dimg_1', status: 'PROCESSING', processedUrl: null },
+          { id: 'dimg_2', status: 'READY', processedUrl: 'https://cdn/a.jpg' },
+        ],
+        ...over,
+      };
+    }
+
+    it('startProductCreation refuses to open a wizard and creates NO draft', async () => {
+      const drafts = {
+        findAwaitingPreview: jest.fn().mockResolvedValue(null),
+        findImagesInFlight: jest.fn().mockResolvedValue(inFlightDraft()),
+        findResumable: jest.fn(),
+        createWithImages: jest.fn(),
+        setImageJobId: jest.fn().mockResolvedValue(undefined),
+      };
+      const svc = makeService({ drafts });
+      const ctx = makeCtx();
+
+      await svc.startProductCreation(ctx, 7, 1);
+
+      expect(ctx.reply).toHaveBeenCalledWith(PROCESSING_MSG);
+      // No new wizard session, and no new draft row.
+      expect(svc.wizard.get(7)).toBeUndefined();
+      expect(drafts.createWithImages).not.toHaveBeenCalled();
+      // Never even reached the resume prompt (which offers "Начать заново").
+      expect(drafts.findResumable).not.toHaveBeenCalled();
+    });
+
+    it('the block is checked BEFORE the resume prompt, so "🆕 Начать заново" is never offered mid-batch', async () => {
+      const drafts = {
+        findAwaitingPreview: jest.fn().mockResolvedValue(null),
+        findImagesInFlight: jest.fn().mockResolvedValue(inFlightDraft()),
+        findResumable: jest.fn().mockResolvedValue(inFlightDraft()),
+        setImageJobId: jest.fn().mockResolvedValue(undefined),
+      };
+      const svc = makeService({ drafts });
+      const ctx = makeCtx();
+
+      await svc.startProductCreation(ctx, 7, 1);
+
+      const texts = ctx.reply.mock.calls.map((c: unknown[]) => c[0]);
+      expect(texts).toContain(PROCESSING_MSG);
+      expect(
+        texts.some((t: string) => t.includes('незавершённое объявление')),
+      ).toBe(false);
+    });
+
+    it('repeated taps stay idempotent: same message, still no draft and no session', async () => {
+      const drafts = {
+        findAwaitingPreview: jest.fn().mockResolvedValue(null),
+        findImagesInFlight: jest.fn().mockResolvedValue(inFlightDraft()),
+        findResumable: jest.fn(),
+        createWithImages: jest.fn(),
+        setImageJobId: jest.fn().mockResolvedValue(undefined),
+      };
+      const svc = makeService({ drafts });
+      const ctx = makeCtx();
+
+      await svc.startProductCreation(ctx, 7, 1);
+      await svc.startProductCreation(ctx, 7, 1);
+      await svc.startProductCreation(ctx, 7, 1);
+
+      const texts = ctx.reply.mock.calls.map((c: unknown[]) => c[0]);
+      expect(texts).toEqual([PROCESSING_MSG, PROCESSING_MSG, PROCESSING_MSG]);
+      expect(drafts.createWithImages).not.toHaveBeenCalled();
+      expect(svc.wizard.get(7)).toBeUndefined();
+    });
+
+    it('blocking still heals a stuck row, so a lost job cannot strand the draft behind its own block', async () => {
+      // The row the block keys on is exactly the row that may have lost its job.
+      // Without healing here, "please wait" would never lift.
+      const drafts = {
+        findAwaitingPreview: jest.fn().mockResolvedValue(null),
+        findImagesInFlight: jest.fn().mockResolvedValue(inFlightDraft()),
+        findResumable: jest.fn(),
+        setImageJobId: jest.fn().mockResolvedValue(undefined),
+      };
+      const svc = makeService({ drafts });
+
+      await svc.startProductCreation(makeCtx(), 7, 1);
+
+      expect(svc.queue.reenqueueImage).toHaveBeenCalledWith({
+        draftId: 'draft_busy',
+        imageId: 'dimg_1',
+      });
+    });
+
+    it('once the batch SUCCEEDS the block lifts and the flow continues (preview is presented)', async () => {
+      const drafts = {
+        // Batch settled → no longer in flight; the finished draft awaits preview.
+        findImagesInFlight: jest.fn().mockResolvedValue(null),
+        findAwaitingPreview: jest.fn().mockResolvedValue({ id: 'draft_busy' }),
+        findResumable: jest.fn(),
+      };
+      const svc = makeService({ drafts });
+      const present = jest
+        .spyOn(svc, 'presentDraftPreview')
+        .mockResolvedValue(undefined);
+      const ctx = makeCtx();
+
+      await svc.startProductCreation(ctx, 7, 1);
+
+      expect(present).toHaveBeenCalledWith('draft_busy', 7);
+      const texts = ctx.reply.mock.calls.map((c: unknown[]) => c[0]);
+      expect(texts).not.toContain(PROCESSING_MSG);
+    });
+
+    it('once the batch FAILS the block lifts too, so the seller can reach retry/cancel', async () => {
+      // A FAILED row is settled, not in flight — findImagesInFlight matches only
+      // PROCESSING. The seller must not be locked out of recovery.
+      const failedDraft = {
+        id: 'draft_busy',
+        formStep: WizardStep.PRICE,
+        images: [{ id: 'dimg_1', status: 'FAILED', processedUrl: null }],
+      };
+      const drafts = {
+        findImagesInFlight: jest.fn().mockResolvedValue(null),
+        findAwaitingPreview: jest.fn().mockResolvedValue(null),
+        findResumable: jest.fn().mockResolvedValue(failedDraft),
+      };
+      const svc = makeService({ drafts });
+      const ctx = makeCtx();
+
+      await svc.startProductCreation(ctx, 7, 1);
+
+      const texts = ctx.reply.mock.calls.map((c: unknown[]) => c[0]);
+      expect(texts).not.toContain(PROCESSING_MSG);
+      // The normal resume prompt is offered instead.
+      expect(
+        texts.some((t: string) => t.includes('незавершённое объявление')),
+      ).toBe(true);
+    });
+
+    it('a draft with NO processing rows never triggers the block (normal questionnaire in progress)', async () => {
+      const drafts = {
+        findImagesInFlight: jest.fn().mockResolvedValue(null),
+        findAwaitingPreview: jest.fn().mockResolvedValue(null),
+        findResumable: jest.fn().mockResolvedValue(null),
+      };
+      const svc = makeService({ drafts });
+      const ctx = makeCtx();
+
+      await svc.startProductCreation(ctx, 7, 1);
+
+      // Fresh wizard opened as usual.
+      expect(svc.wizard.get(7)).toBeDefined();
+      expect(svc.wizard.get(7).step).toBe(WizardStep.PHOTOS_FIRST);
     });
   });
 
@@ -580,6 +757,8 @@ describe('TelegramService — draft flow (photos-first)', () => {
             ),
           ),
         findResumable: jest.fn().mockResolvedValue(null),
+        // The cancelled draft's images were all READY — nothing in flight.
+        findImagesInFlight: jest.fn().mockResolvedValue(null),
         findWithImages: jest
           .fn()
           .mockImplementation(() => Promise.resolve(readyDraft({ status }))),
@@ -821,6 +1000,8 @@ describe('TelegramService — draft flow (photos-first)', () => {
       const drafts = {
         findAwaitingPreview: jest.fn().mockResolvedValue(null),
         findResumable: jest.fn().mockResolvedValue(null),
+        // A COMMITTING draft's images are all READY, so nothing is in flight.
+        findImagesInFlight: jest.fn().mockResolvedValue(null),
       };
       const svc = makeService({ drafts });
       const present = jest
