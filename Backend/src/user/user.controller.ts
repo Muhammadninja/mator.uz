@@ -1,5 +1,6 @@
 import {
   Controller,
+  Delete,
   Get,
   Patch,
   Post,
@@ -17,15 +18,18 @@ import {
   ApiBody,
   ApiConsumes,
   ApiConflictResponse,
+  ApiNoContentResponse,
   ApiOkResponse,
   ApiOperation,
   ApiTags,
+  ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { UserService } from './user.service';
 import { AvatarService, MAX_AVATAR_BYTES } from './avatar.service';
 import { PhoneChangeService } from './phone-change.service';
+import { AccountDeletionService } from './account-deletion.service';
 import { UpdateMeDto } from './dto/update-me.dto';
 import { RequestPhoneChangeDto } from './dto/request-phone-change.dto';
 import { ConfirmPhoneChangeDto } from './dto/confirm-phone-change.dto';
@@ -88,6 +92,7 @@ export class UserController {
     private readonly avatars: AvatarService,
     private readonly phoneChange: PhoneChangeService,
     private readonly notifications: NotificationsService,
+    private readonly accountDeletion: AccountDeletionService,
   ) {}
 
   @Get()
@@ -108,6 +113,33 @@ export class UserController {
   })
   updateMe(@Request() req: { user: { id: string } }, @Body() dto: UpdateMeDto) {
     return this.users.updateMe(req.user.id, dto);
+  }
+
+  // ── Account deletion ───────────────────────────────────────────────────────
+  // Required by App Store review for any app that supports account creation.
+  // The account acted on is ALWAYS the authenticated principal (`req.user.id`);
+  // no user id is accepted from the client, so one user can never delete
+  // another's account.
+  @Delete()
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @Throttle({ default: { limit: 5, ttl: 60 * 1000 } })
+  @ApiOperation({
+    summary: 'Permanently delete the authenticated account.',
+    description:
+      "Deletes or irreversibly anonymizes the user's personal data (profile, " +
+      'addresses, garage, notifications, devices/push tokens, AI sessions, ' +
+      'identities and MyID records) and revokes every session. Orders are ' +
+      'RETAINED for financial/legal records with buyer PII detached. ' +
+      'Irreversible — the access and refresh tokens stop working immediately.',
+  })
+  @ApiNoContentResponse({ description: 'Account deleted. No response body.' })
+  @ApiUnauthorizedResponse({
+    description:
+      'Missing or invalid token — including a token belonging to an ' +
+      'already-deleted account.',
+  })
+  async deleteMe(@Request() req: { user: { id: string } }): Promise<void> {
+    await this.accountDeletion.deleteAccount(req.user.id);
   }
 
   // ── Avatar upload ─────────────────────────────────────────────────────────

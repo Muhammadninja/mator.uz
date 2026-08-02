@@ -134,6 +134,14 @@ export class TokenService {
     if (!stored) {
       throw new UnauthorizedException('Invalid refresh token');
     }
+    // Deleted account (DELETE /v1/me): the deletion drops the whole refresh
+    // family, so reaching here means this row was created in the race window
+    // just behind that sweep. Refuse it and delete it, so a deleted account can
+    // never rotate its way back into a live session.
+    if (stored.user.deletedAt) {
+      await this.prisma.refreshToken.delete({ where: { id: stored.id } });
+      throw new UnauthorizedException('Account deleted');
+    }
     // Already rotated once -> replay/theft. A replayed refresh token means the
     // credential is in someone else's hands, so this is a full compromise
     // signal, not just a bad refresh: revoke EVERYTHING (refresh family, live

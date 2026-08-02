@@ -45,6 +45,10 @@ function buildStock(over: Partial<any> = {}): StockRow {
       oilViscosity: null,
       oilType: null,
       oilVolumeMl: null,
+      // Curated rating (admin-maintained), projected verbatim like every other
+      // Product attribute. Unrated by default; the rating tests override these.
+      ratingAvg: null,
+      reviewCount: 0,
       images: [
         { url: 'https://cdn/img0.webp', sortOrder: 0 },
         { url: 'https://cdn/img1.webp', sortOrder: 1 },
@@ -310,6 +314,47 @@ describe('CatalogProjectionService — mapping', () => {
         oilType: null,
         oilVolumeMl: null,
       });
+    });
+  });
+
+  describe('curated rating', () => {
+    it('projects ratingAvg and reviewCount verbatim from the Product', () => {
+      const stock = buildStock();
+      // Mutate the fully-built fixture: `buildStock`'s top-level `over` spread
+      // REPLACES the whole `product` object, which would drop partModels/images.
+      Object.assign((stock as any).product, { ratingAvg: 4.7, reviewCount: 123 });
+      svc.buildProjectionOps(stock);
+      const upsert = upsertArg(prisma, 'catalogPart');
+      // Present on BOTH branches: a first projection creates the row, a later
+      // one updates it, and a rating edit must reach an existing row too.
+      expect(upsert.create).toMatchObject({ ratingAvg: 4.7, reviewCount: 123 });
+      expect(upsert.update).toMatchObject({ ratingAvg: 4.7, reviewCount: 123 });
+    });
+
+    it('projects an unrated product as null / 0 rather than a fabricated value', () => {
+      svc.buildProjectionOps(buildStock());
+      const part = upsertArg(prisma, 'catalogPart').create;
+      expect(part.ratingAvg).toBeNull();
+      expect(part.reviewCount).toBe(0);
+    });
+  });
+
+  describe('projectProduct', () => {
+    it('re-projects EVERY stock of the product, so a rating edit fans out', async () => {
+      prisma.stock.findMany.mockResolvedValue([{ id: 500 }, { id: 501 }]);
+      prisma.stock.findUnique
+        .mockResolvedValueOnce(buildStock({ id: 500 }))
+        .mockResolvedValueOnce(buildStock({ id: 501 }));
+
+      const ids = await svc.projectProduct(100);
+
+      expect(ids).toEqual(['part_stock_500', 'part_stock_501']);
+    });
+
+    it('is a no-op for a product no seller lists', async () => {
+      prisma.stock.findMany.mockResolvedValue([]);
+      expect(await svc.projectProduct(100)).toEqual([]);
+      expect(prisma.$transaction).not.toHaveBeenCalled();
     });
   });
 

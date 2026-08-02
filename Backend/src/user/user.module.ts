@@ -7,6 +7,7 @@ import { CloudinaryModule } from '../cloudinary/cloudinary.module';
 import { UserService } from './user.service';
 import { AvatarService } from './avatar.service';
 import { PhoneChangeService } from './phone-change.service';
+import { AccountDeletionService } from './account-deletion.service';
 import { UserController } from './user.controller';
 
 @Module({
@@ -15,7 +16,10 @@ import { UserController } from './user.controller';
   // CloudinaryService is declared where it is used and resolves even in an
   // isolated UserModule test harness.
   imports: [PrismaModule, AuthModule, NotificationsModule, AddressesModule, CloudinaryModule],
-  providers: [UserService, AvatarService, PhoneChangeService],
+  // AccountDeletionService takes TokenService (from AuthModule) so deletion goes
+  // through the SINGLE existing revocation entry point, and CloudinaryService to
+  // clean up the avatar asset.
+  providers: [UserService, AvatarService, PhoneChangeService, AccountDeletionService],
   controllers: [UserController],
 })
 export class UserModule {}

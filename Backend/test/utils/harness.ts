@@ -229,6 +229,10 @@ export function buildAppUser(over: Partial<any> = {}): any {
     transactionLimitUzs: 1000000,
     tokenVersion: 0,
     thumbnailUrl: null,
+    // Account deletion (DELETE /v1/me): a live account has neither set. A test
+    // for a deleted account overrides `deletedAt`.
+    avatarPublicId: null,
+    deletedAt: null,
     createdAt: new Date('2026-01-01T00:00:00Z'),
     updatedAt: new Date('2026-01-01T00:00:00Z'),
     ...over,

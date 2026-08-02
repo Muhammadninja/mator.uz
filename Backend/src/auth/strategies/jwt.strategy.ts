@@ -51,6 +51,12 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     }
     const user = await this.prisma.appUser.findUnique({ where: { id: payload.sub } });
     if (!user) throw new UnauthorizedException();
+    // Deleted account (DELETE /v1/me). The row survives only because retained
+    // orders reference it — it holds no personal data and must never
+    // authenticate again. Checked here, the single gate every authenticated
+    // request passes through, so no endpoint can be reached with a token minted
+    // before the deletion. Rejected exactly like any other invalid token.
+    if (user.deletedAt) throw new UnauthorizedException('Account deleted');
     // Session versioning — runs on EVERY authenticated request, not just login:
     // a bumped AppUser.tokenVersion (logout-all, and any future security event)
     // invalidates every access token signed with an older version, instantly.

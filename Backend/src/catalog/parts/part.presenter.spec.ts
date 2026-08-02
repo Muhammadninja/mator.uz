@@ -4,6 +4,7 @@
 // contract: correct field mapping, deterministic order, and an empty array for
 // parts with no fit rows (universal parts). No schema change, no invented data.
 
+import { Prisma } from '@prisma/client';
 import { presentPartItem, PartWithRelations } from './part.presenter';
 
 function fit(
@@ -54,6 +55,10 @@ function part(over: Partial<PartWithRelations> = {}): PartWithRelations {
     cashbackPct: 0 as never,
     stockQty: 1,
     lowStockThreshold: 0,
+    // Curated rating: unrated by default (null average, zero ratings), which is
+    // the state every row starts in. Tests that assert the rating override these.
+    ratingAvg: null,
+    reviewCount: 0,
     createdAt: new Date(),
     updatedAt: new Date(),
     brand: null,
@@ -339,5 +344,44 @@ describe('presentPartItem — sale pricing', () => {
     expect(out.price_uzs).toBe(25000);
     expect(out.original_price_uzs).toBeNull();
     expect(out.sale).toBeNull();
+  });
+});
+
+// The curated PRODUCT rating (admin-maintained), distinct from `seller.rating_avg`
+// which rates the dealer. The wire contract is strict about types: a Prisma
+// Decimal must never reach the client as a string or an object.
+describe('presentPartItem — curated rating', () => {
+  it('exposes rating_avg as a NUMBER and review_count as a number', () => {
+    const out = presentPartItem(
+      part({ ratingAvg: new Prisma.Decimal('4.7'), reviewCount: 123 }),
+      null,
+    );
+    expect(out.rating_avg).toBe(4.7);
+    expect(typeof out.rating_avg).toBe('number');
+    expect(out.review_count).toBe(123);
+  });
+
+  it('exposes an unrated part as null / 0, never a fabricated value', () => {
+    const out = presentPartItem(part({ ratingAvg: null, reviewCount: 0 }), null);
+    expect(out.rating_avg).toBeNull();
+    expect(out.review_count).toBe(0);
+  });
+
+  it('keeps a 0.0 rating as 0, distinct from unrated null', () => {
+    const out = presentPartItem(
+      part({ ratingAvg: new Prisma.Decimal('0'), reviewCount: 4 }),
+      null,
+    );
+    expect(out.rating_avg).toBe(0);
+    expect(out.review_count).toBe(4);
+  });
+
+  it('never leaks a Decimal object onto the wire', () => {
+    const out = presentPartItem(
+      part({ ratingAvg: new Prisma.Decimal('3.5'), reviewCount: 2 }),
+      null,
+    );
+    // JSON round-trip is what the client actually receives.
+    expect(JSON.parse(JSON.stringify(out)).rating_avg).toBe(3.5);
   });
 });

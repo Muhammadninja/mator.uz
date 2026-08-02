@@ -17,6 +17,8 @@ import { AdminCategoriesController } from './categories/admin-categories.control
 import { AdminProductsController } from './categories/admin-products.controller';
 import { AdminInventoryService } from './inventory/admin-inventory.service';
 import { AdminInventoryController } from './inventory/admin-inventory.controller';
+import { AdminProductsRatingService } from './products/admin-products-rating.service';
+import { CatalogModule } from '../catalog/catalog.module';
 import { SellersModule } from '../sellers/sellers.module';
 import { AuthModule } from '../auth/auth.module';
 import { AdminAuthModule } from './auth/admin-auth.module';
@@ -37,6 +39,10 @@ import { FitmentStudioModule } from './fitment-studio/fitment-studio.module';
     // AdminCategoriesService derives levels / guards cycles / busts the seller
     // bot's category cache through the shared PartCategoryService.
     PartCategoryModule,
+    // CatalogModule exports CatalogProjectionService, so an admin rating edit on
+    // a supply-side Product reaches the buyer catalog through the SINGLE
+    // existing projection rather than a second mapping written here.
+    CatalogModule,
   ],
   // AdminDealersService takes AdminAuditService, which AdminAuthModule exports.
   // AdminBrandsService takes CacheService from the @Global RedisModule (no
@@ -49,6 +55,7 @@ import { FitmentStudioModule } from './fitment-studio/fitment-studio.module';
     AdminBrandsService,
     AdminCategoriesService,
     AdminInventoryService,
+    AdminProductsRatingService,
   ],
   controllers: [
     AdminController,

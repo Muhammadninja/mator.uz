@@ -200,6 +200,14 @@ export function presentPartItem(
         model_name: f.modelName,
       })),
     images: part.images,
+    // Curated PRODUCT rating (admin-maintained; distinct from `seller.rating_avg`
+    // below, which rates the DEALER). `Number(...)` unwraps the Prisma Decimal —
+    // returning it raw would serialize as a string or an object, breaking a
+    // client doing arithmetic on it. Null is preserved as null (not coerced to
+    // 0): "unrated" and "rated 0.0" are different facts and the client renders
+    // them differently.
+    rating_avg: part.ratingAvg === null ? null : Number(part.ratingAvg),
+    review_count: part.reviewCount,
     // `certified` is the "MATOR Certified" dealer badge (CatalogSeller.certified,
     // maintained by the admin dealer console). Non-null by schema default, so
     // every seller — curated or projected — reports a real boolean, never null.

@@ -121,6 +121,33 @@ export class CatalogProjectionService {
   }
 
   /**
+   * Re-project EVERY Stock row of one Product, so a change to a product-level
+   * attribute (today: the curated rating) reaches the buyer catalog immediately
+   * instead of waiting for a batch job.
+   *
+   * The unit of projection is a Stock, not a Product — one product listed by N
+   * sellers is N CatalogParts — so a product-level edit has to fan out across
+   * its stocks. Each is projected through the ordinary idempotent path, so this
+   * introduces no second mapping and a product with no stocks is simply a no-op
+   * (nothing is listed for buyers to see).
+   *
+   * @returns the CatalogPart ids written.
+   */
+  async projectProduct(productId: number): Promise<string[]> {
+    const stocks = await this.prisma.stock.findMany({
+      where: { productId },
+      select: { id: true },
+    });
+
+    const ids: string[] = [];
+    for (const { id } of stocks) {
+      const partId = await this.projectStock(id);
+      if (partId) ids.push(partId);
+    }
+    return ids;
+  }
+
+  /**
    * Remove the CatalogPart projected from a Stock row (the seller listing
    * disappeared). Idempotent: deleting an absent projection is a no-op. Parent
    * CatalogSeller / PartBrand / PartCategory rows are left in place — they are
@@ -270,6 +297,14 @@ export class CatalogProjectionService {
       oilViscosity: product.oilViscosity,
       oilType: product.oilType,
       oilVolumeMl: product.oilVolumeMl,
+      // Curated rating, projected verbatim like every other Product attribute
+      // above. It is admin-maintained data, NOT user reviews — the buyer side
+      // only ever reads it. Copying it here (rather than joining CatalogPart
+      // back to Product) is what keeps buyer catalog reads free of a cross-
+      // context join, and is why an admin edit must re-project the affected
+      // stocks to become visible.
+      ratingAvg: product.ratingAvg,
+      reviewCount: product.reviewCount,
     };
 
     ops.push(

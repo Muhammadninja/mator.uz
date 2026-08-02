@@ -405,6 +405,20 @@ model Product {
   // later stage once every consumer reads ids.
   vehicleCategoryId String?           @map("vehicle_category_id") @db.VarChar(64)
   categoryId        String?           @map("category_id") @db.VarChar(64)
+  // ── Curated rating (admin-maintained; NOT user reviews) ───────────────────
+  // There is no review subsystem: operators set these by hand in the admin
+  // console and they are projected verbatim into catalog_parts. Decimal(2,1)
+  // holds exactly one decimal place over 0.0–5.0, so the stored value is the
+  // displayed value — no rounding at read time.
+  //
+  // NULL means "no rating" (render no stars), which is distinct from 0.0 ("rated
+  // zero"); that is why the column is nullable rather than defaulting to 0.
+  // The 0–5 bound is enforced by the admin DTO (the only writer); the column's
+  // scale is what makes a second decimal place unstorable.
+  ratingAvg       Decimal?             @map("rating_avg") @db.Decimal(2, 1)
+  // Number of ratings behind ratingAvg, shown as "(123)" next to the stars.
+  // Non-null with a 0 default: "no reviews yet" is 0, never unknown.
+  reviewCount     Int                  @default(0) @map("review_count")
   createdAt       DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt       DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
   partModels      PartModel[]
@@ -589,6 +603,14 @@ model AppUser {
   firstName           String?    @map("first_name") @db.VarChar(100)
   lastName            String?    @map("last_name") @db.VarChar(100)
   avatarUrl           String?    @map("avatar_url")
+  // Cloudinary public_id of the CURRENT avatar, stored at upload time. Deleting
+  // the asset needs this id, and deriving it from the secure URL is fragile and
+  // wrong in general (version segments, folders, transformations, and a format
+  // suffix that is not part of the id). Storing what the upload response already
+  // returned — the same `publicId` the draft-image pipeline persists — makes
+  // avatar cleanup exact instead of a guess. Null for avatars uploaded before
+  // this column existed, and for users with no avatar.
+  avatarPublicId      String?    @map("avatar_public_id")
   thumbnailUrl        String?    @map("thumbnail_url")
   role                Role       @default(USER)
   language            Language   @default(UZ)
@@ -597,6 +619,15 @@ model AppUser {
   // Session version: every access token carries the value it was signed with;
   // bumping it invalidates all outstanding access tokens on the next request.
   tokenVersion        Int        @default(0) @map("token_version")
+  // Account deletion (DELETE /v1/me — an App Store requirement). The row is NOT
+  // dropped: orders reference it with onDelete: Restrict and must be retained
+  // for financial/legal records. Instead every personal field on it is
+  // irreversibly overwritten and this timestamp is set.
+  //
+  // It is the AUTHORITATIVE "this account is gone" flag: JwtStrategy rejects any
+  // token whose user carries it, so a deleted account can never authenticate
+  // again even though the row survives. Null for every live account.
+  deletedAt           DateTime?  @map("deleted_at") @db.Timestamptz(3)
   createdAt           DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt           DateTime   @updatedAt @map("updated_at") @db.Timestamptz(3)
 
@@ -615,6 +646,7 @@ model AppUser {
   myIdSessions           MyIdSession[]
   myIdVerifications      MyIdVerification[]
 
+  @@index([deletedAt])
   @@map("app_users")
 }
 
@@ -1224,6 +1256,12 @@ model CatalogPart {
   oilViscosity       String?              @map("oil_viscosity") @db.VarChar(20)
   oilType            OilType?             @map("oil_type")
   oilVolumeMl        Int?                 @map("oil_volume_ml")
+  // Curated product rating, projected verbatim from the supply-side Product so
+  // the buyer catalog renders stars WITHOUT joining back to the seller domain
+  // (the two contexts share no FKs). Same types and semantics as the source
+  // columns: NULL ratingAvg = unrated, reviewCount 0 = no ratings yet.
+  ratingAvg          Decimal?             @map("rating_avg") @db.Decimal(2, 1)
+  reviewCount        Int                  @default(0) @map("review_count")
   createdAt          DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt          DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
   brand              PartBrand?           @relation(fields: [brandId], references: [id], onDelete: SetNull)

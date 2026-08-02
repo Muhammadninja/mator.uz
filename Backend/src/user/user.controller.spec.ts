@@ -22,6 +22,7 @@ function build() {
     avatars as never,
     {} as never,
     {} as never,
+    {} as never, // AccountDeletionService — unused by these field-selection tests
   );
   return { controller, avatars };
 }
