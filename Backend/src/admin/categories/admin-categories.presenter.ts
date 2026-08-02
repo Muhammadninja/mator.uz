@@ -15,7 +15,10 @@ export const ADMIN_CATEGORY_NODE_SELECT = {
   color: true,
   isActive: true,
   mainCategory: true,
-  _count: { select: { parts: true } },
+  // parts = buyer-catalog rows (productsCount, reassignable on delete);
+  // products + productDrafts = supply-side listings (listingsCount) that steer an
+  // admin toward deactivate over a hard delete.
+  _count: { select: { parts: true, products: true, productDrafts: true } },
 } satisfies Prisma.PartCategorySelect;
 
 export type AdminCategoryNodeRow = Prisma.PartCategoryGetPayload<{
@@ -28,30 +31,43 @@ export interface AdminCategoryTreeNode {
   name: string;
   slug: string | null;
   parentId: string | null;
+  /** Depth in the tree — 0 = root, 1 = main, 2 = subcategory. DERIVED from the
+   *  parent chain (there is no stored column); assigned during tree assembly.
+   *  Flat CRUD responses report 0 as a placeholder — the authoritative value
+   *  comes from the tree read the client refetches after a write. */
+  level: number;
   sortOrder: number;
   iconKey: string | null;
   color: string | null;
   isActive: boolean;
   mainCategory: PartMainCategory | null;
   productsCount: number;
+  /** Supply-side products + drafts that chose this category. `> 0` steers an
+   *  admin toward deactivate — a hard delete would strand live listings. */
+  listingsCount: number;
   children: AdminCategoryTreeNode[];
 }
 
-/** Flat wire node (no children) — the shape returned by the move/CRUD endpoints. */
+/** Flat wire node (no children) — the shape returned by the move/CRUD endpoints.
+ *  `level` defaults to 0 for the flat responses (see the field's note); the tree
+ *  builder passes the real depth. */
 export function presentAdminCategoryNode(
   row: AdminCategoryNodeRow,
+  level = 0,
 ): Omit<AdminCategoryTreeNode, 'children'> {
   return {
     id: row.id,
     name: row.name,
     slug: row.slug,
     parentId: row.parentId,
+    level,
     sortOrder: row.sortOrder,
     iconKey: row.iconKey,
     color: row.color,
     isActive: row.isActive,
     mainCategory: row.mainCategory,
     productsCount: row._count.parts,
+    listingsCount: row._count.products + row._count.productDrafts,
   };
 }
 
@@ -75,5 +91,14 @@ export function buildAdminCategoryTree(
     if (parent) parent.children.push(node);
     else roots.push(node);
   }
+
+  // Assign `level` by depth from the roots (no stored column). A DFS after the
+  // forest is built handles rows arriving in any order.
+  const assignLevel = (node: AdminCategoryTreeNode, level: number) => {
+    node.level = level;
+    for (const child of node.children) assignLevel(child, level + 1);
+  };
+  for (const root of roots) assignLevel(root, 0);
+
   return roots;
 }

@@ -376,6 +376,15 @@ model Product {
   // inferable. Projected verbatim into catalog_parts for buyer-side filtering.
   mainCategory    PartMainCategory?    @map("main_category")
   vehicleCategory PartVehicleCategory? @map("vehicle_category")
+  // The seller-chosen PartCategory this listing belongs to (its id == slug, e.g.
+  // "motorcycle-oil"). AUTHORITATIVE over the mainCategory enum for projection:
+  // it lets an admin-created "Другое" child (which has no enum mirror) carry its
+  // parts into the buyer catalog. Nullable + SetNull so a deactivated/removed
+  // category never blocks a listing — the projection falls back to the enum then
+  // the Uncategorized bucket. Set at commit from the draft; backfilled from the
+  // enum for pre-existing rows.
+  categoryId      String?              @map("category_id") @db.VarChar(64)
+  category        PartCategory?        @relation("ProductCategory", fields: [categoryId], references: [id], onDelete: SetNull)
   partBrand       String?              @map("part_brand") @db.VarChar(120)
   originRegion    PartOriginRegion?    @map("origin_region")
   isOem           Boolean              @default(false) @map("is_oem")
@@ -400,6 +409,7 @@ model Product {
 
   @@index([mainCategory])
   @@index([vehicleCategory])
+  @@index([categoryId])
   @@index([kind])
   @@map("products")
 }
@@ -492,6 +502,13 @@ model ProductDraft {
   // a completeness requirement on its own; the wizard flow enforces the answer
   // where the question is asked.
   subcategory    PartMainCategory?
+  // The seller-chosen PartCategory id (== slug) for a "Другое" child listing —
+  // set when the seller taps a live OTHER category button. Carried into the
+  // published Product.categoryId on commit. Null for the plain spare-part flow,
+  // where the enum category is authoritative. SetNull so an admin removing the
+  // category mid-draft can't orphan the row.
+  categoryId     String?              @map("category_id") @db.VarChar(64)
+  partCategory   PartCategory?        @relation("ProductDraftCategory", fields: [categoryId], references: [id], onDelete: SetNull)
   title          String?              @db.VarChar(255)
   description    String?              @db.Text
   partNumberType PartNumberType       @default(UNKNOWN) @map("part_number_type")
@@ -515,6 +532,7 @@ model ProductDraft {
 
   @@index([sellerId, status]) // "resumable draft for this seller"
   @@index([expiresAt]) // cleanup sweep
+  @@index([categoryId])
   @@map("product_drafts")
 }
 
@@ -1041,6 +1059,10 @@ model PartCategory {
   parent       PartCategory?     @relation("PartCategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
   children     PartCategory[]    @relation("PartCategoryTree")
   parts        CatalogPart[]
+  // Supply-side listings that chose this category (by id). Powers listingsCount
+  // — the count that steers an admin toward deactivate over a hard delete.
+  products      Product[]        @relation("ProductCategory")
+  productDrafts ProductDraft[]   @relation("ProductDraftCategory")
 
   @@index([parentId])
   @@index([parentId, sortOrder])

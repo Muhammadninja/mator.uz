@@ -13,6 +13,7 @@ import {
 } from './admin-categories.presenter';
 import { BulkMoveProductsDto } from './dto/bulk-move-products.dto';
 import { CreateCategoryDto } from './dto/create-category.dto';
+import { ListCategoriesQueryDto } from './dto/list-categories.query.dto';
 import { MoveCategoryDto } from './dto/move-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
 
@@ -41,6 +42,101 @@ export class AdminCategoriesService {
       orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
     });
     return { success: true, data: buildAdminCategoryTree(rows) };
+  }
+
+  /**
+   * Flat, filterable list of category nodes (no children). All filters are
+   * optional and AND-combined:
+   *   • parentId — the LITERAL string "null" restricts to roots; any other value
+   *     filters to that parent's direct children. Omitted → no parent filter.
+   *   • level — 0 = root, 1 = main, 2 = subcategory (derived from the parent chain).
+   *   • isActive — visibility filter.
+   * Ordered by level, then sortOrder, then name.
+   */
+  async list(query: ListCategoriesQueryDto) {
+    const rows = await this.prisma.partCategory.findMany({
+      select: ADMIN_CATEGORY_NODE_SELECT,
+      orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+    });
+    const levels = this.deriveLevels(rows);
+
+    const wantParent =
+      query.parentId === undefined
+        ? undefined
+        : query.parentId === 'null'
+          ? null
+          : query.parentId;
+
+    const filtered = rows
+      .filter((r) => (wantParent === undefined ? true : (r.parentId ?? null) === wantParent))
+      .filter((r) => (query.level === undefined ? true : levels.get(r.id) === query.level))
+      .filter((r) => (query.isActive === undefined ? true : r.isActive === query.isActive))
+      .map((r) => presentAdminCategoryNode(r, levels.get(r.id) ?? 0))
+      .sort(
+        (a, b) => a.level - b.level || a.sortOrder - b.sortOrder || a.name.localeCompare(b.name),
+      );
+
+    return { success: true, data: filtered, meta: { total: filtered.length } };
+  }
+
+  /** One category node (flat, no children), with its derived level. 404 if missing. */
+  async findOne(id: string) {
+    const row = await this.prisma.partCategory.findUnique({
+      where: { id },
+      select: ADMIN_CATEGORY_NODE_SELECT,
+    });
+    if (!row) throw new NotFoundException('Category not found');
+    const levels = this.deriveLevels(
+      await this.prisma.partCategory.findMany({ select: { id: true, parentId: true } }),
+    );
+    return { success: true, data: presentAdminCategoryNode(row, levels.get(id) ?? 0) };
+  }
+
+  /**
+   * Activate or deactivate a category. Deactivating hides its whole subtree from
+   * the bot and buyer (reads filter isActive at every level) and is fully
+   * reversible — the preferred alternative to a hard delete. 404 if missing.
+   */
+  async setActive(id: string, isActive: boolean) {
+    const category = await this.prisma.partCategory.findUnique({
+      where: { id },
+      select: { id: true },
+    });
+    if (!category) throw new NotFoundException('Category not found');
+    const updated = await this.prisma.partCategory.update({
+      where: { id },
+      data: { isActive },
+      select: ADMIN_CATEGORY_NODE_SELECT,
+    });
+    return { success: true, data: presentAdminCategoryNode(updated) };
+  }
+
+  /**
+   * Depth-from-root map for a set of rows (there is no stored `level` column).
+   * Memoized with a cycle guard — the move endpoint already prevents cycles, but
+   * a read must never loop on bad data.
+   */
+  private deriveLevels(rows: { id: string; parentId: string | null }[]): Map<string, number> {
+    const parentOf = new Map(rows.map((r) => [r.id, r.parentId ?? null]));
+    const cache = new Map<string, number>();
+    const depth = (id: string): number => {
+      const hit = cache.get(id);
+      if (hit !== undefined) return hit;
+      let d = 0;
+      let cur: string | null = id;
+      const seen = new Set<string>();
+      while (cur && !seen.has(cur)) {
+        seen.add(cur);
+        const parent = parentOf.get(cur) ?? null;
+        if (parent === null || !parentOf.has(parent)) break;
+        d += 1;
+        cur = parent;
+      }
+      cache.set(id, d);
+      return d;
+    };
+    for (const r of rows) depth(r.id);
+    return cache;
   }
 
   /**
@@ -214,6 +310,37 @@ export class AdminCategoriesService {
       select: { id: true },
     });
     if (!category) throw new NotFoundException('Category not found');
+
+    // A category with children can't be hard-deleted — the self-relation is
+    // onDelete: SetNull, so deleting it would silently promote its whole subtree
+    // to roots. Refuse (409) and steer the operator to move/remove the children
+    // first (or just deactivate, which hides the subtree reversibly).
+    const childCount = await this.prisma.partCategory.count({
+      where: { parentId: id },
+    });
+    if (childCount > 0) {
+      throw new ConflictException(
+        `This category has ${childCount} subcategor${
+          childCount === 1 ? 'y' : 'ies'
+        } — move or delete them first, or deactivate it instead.`,
+      );
+    }
+
+    // Supply-side listings (published products + in-flight drafts) that chose this
+    // category pin it: a hard delete would SET NULL their category_id, silently
+    // stranding a seller's choice. Refuse and steer to deactivate (reversible).
+    const [productCount, draftCount] = await Promise.all([
+      this.prisma.product.count({ where: { categoryId: id } }),
+      this.prisma.productDraft.count({ where: { categoryId: id } }),
+    ]);
+    const listingCount = productCount + draftCount;
+    if (listingCount > 0) {
+      throw new ConflictException(
+        `${listingCount} seller listing${
+          listingCount === 1 ? '' : 's'
+        } point here — deactivate this category instead of deleting it.`,
+      );
+    }
 
     const referencing = await this.prisma.catalogPart.count({
       where: { categoryId: id },

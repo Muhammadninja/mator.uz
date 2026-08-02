@@ -221,14 +221,20 @@ export class CatalogProjectionService {
         product.partNumberType,
       );
 
-    // Point the part at the canonical PartCategory that mirrors its bot-assigned
-    // main category (BRAKES → 'brakes', …). PartCategory is the source of truth
-    // for the buyer grid, so ingest classifies here rather than dumping every
-    // part into the fallback bucket. Unclassified parts keep 'cat_uncategorized'.
-    const categoryId = product.mainCategory
-      ? (MAIN_CATEGORY_TO_SLUG[product.mainCategory] ??
-        CatalogProjectionService.UNCATEGORIZED_ID)
-      : CatalogProjectionService.UNCATEGORIZED_ID;
+    // Resolve the buyer-side category, most-specific-first:
+    //   1. the seller's explicitly chosen PartCategory (product.categoryId) —
+    //      authoritative, and the ONLY way an admin-created "Другое" child (no
+    //      enum mirror) gets its listings into the catalog. The supply-side FK
+    //      guarantees the row exists, so the CatalogPart FK is satisfied.
+    //   2. else the canonical category mirroring the bot-assigned main category
+    //      (BRAKES → 'brakes', …);
+    //   3. else the Uncategorized fallback bucket.
+    const categoryId =
+      product.categoryId ??
+      (product.mainCategory
+        ? (MAIN_CATEGORY_TO_SLUG[product.mainCategory] ??
+          CatalogProjectionService.UNCATEGORIZED_ID)
+        : CatalogProjectionService.UNCATEGORIZED_ID);
 
     const partData = {
       title: product.title,

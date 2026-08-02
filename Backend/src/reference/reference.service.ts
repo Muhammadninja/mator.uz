@@ -24,12 +24,89 @@ export const REFERENCE_CACHE_TTL = 24 * 60 * 60; // 24h, in seconds
  *
  * This service creates nothing and mutates nothing.
  */
+/** The synthetic fallback bucket — never surfaced to the buyer, at any level. */
+const UNCATEGORIZED_ID = 'cat_uncategorized';
+
 @Injectable()
 export class ReferenceService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly cache: CacheService,
   ) {}
+
+  /**
+   * Public part-category children. Pass `parentId` to list the active children of
+   * that node (e.g. the "Другое"/OTHER root's id → its oil sub-buckets); omit it
+   * for the active roots. Only ACTIVE categories are ever returned, at any level,
+   * and the synthetic Uncategorized bucket is never surfaced.
+   *
+   * Unlike the make/model reference lists this is NOT cached: categories are
+   * admin-editable and every admin write must take effect on the next read (the
+   * same "no stale categories" contract the buyer grid follows).
+   *
+   * `parentId` unknown → 404; an empty `items` on a known leaf is a normal 200.
+   * `level` is derived from the parent chain (there is no stored column). The
+   * node ships camelCase (`parentId`, `sortOrder`) to match the frontend contract.
+   */
+  async listCategories(parentId?: string) {
+    const wanted = parentId && parentId.trim() ? parentId.trim() : null;
+
+    const rows = await this.prisma.partCategory.findMany({
+      select: {
+        id: true,
+        name: true,
+        slug: true,
+        parentId: true,
+        sortOrder: true,
+        isActive: true,
+      },
+      orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+    });
+    const byId = new Map(rows.map((r) => [r.id, r]));
+
+    if (wanted !== null && !byId.has(wanted)) {
+      throw new NotFoundException('Unknown parentId');
+    }
+
+    // Depth from the root, memoized, with a cycle guard (the admin move endpoint
+    // already prevents cycles, but a read must never loop on bad data).
+    const levelCache = new Map<string, number>();
+    const levelOf = (id: string): number => {
+      const cached = levelCache.get(id);
+      if (cached !== undefined) return cached;
+      let depth = 0;
+      let cur = byId.get(id);
+      const seen = new Set<string>();
+      while (cur?.parentId && byId.has(cur.parentId) && !seen.has(cur.id)) {
+        seen.add(cur.id);
+        depth += 1;
+        cur = byId.get(cur.parentId);
+      }
+      levelCache.set(id, depth);
+      return depth;
+    };
+
+    const items = rows
+      .filter(
+        (r) =>
+          (r.parentId ?? null) === wanted &&
+          r.isActive &&
+          r.id !== UNCATEGORIZED_ID,
+      )
+      // Sort here rather than trust the query order: siblings order by sortOrder,
+      // ties by name (the same order the admin tree uses).
+      .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name))
+      .map((r) => ({
+        id: r.id,
+        name: r.name,
+        slug: r.slug,
+        parentId: r.parentId,
+        level: levelOf(r.id),
+        sortOrder: r.sortOrder,
+      }));
+
+    return { items, total: items.length };
+  }
 
   /** All vehicle makes, in frontend catalog order. */
   async listMakes() {

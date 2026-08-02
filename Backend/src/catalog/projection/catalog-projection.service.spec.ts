@@ -90,7 +90,9 @@ describe('CatalogProjectionService — mapping', () => {
         id: 'part_stock_500',
         title: 'Timing belt',
         brandId: 'brand_2', // exactly one linked vehicle brand → used
-        categoryId: CatalogProjectionService.UNCATEGORIZED_ID,
+        // BELTS_AND_HOSES is a canonical category → its slug (enum mapping); the
+        // fixture carries no explicit product.categoryId, so the enum path wins.
+        categoryId: 'belts-and-hoses',
         sellerId: 'seller_7',
         // Unlabeled (UNKNOWN) number → searchable as BOTH GM and OEM.
         oemNumbers: ['96535062'],
@@ -103,6 +105,37 @@ describe('CatalogProjectionService — mapping', () => {
       });
       // update carries the same data (idempotent upsert).
       expect(part.update).toMatchObject({ priceUzs: 185000, inStock: true });
+    });
+
+    // A universal motor-oil listing (no vehicle links) with the chosen category.
+    const oilProduct = (categoryId: string | null) => ({
+      id: 100,
+      gmNumber: 'tg_oil_1',
+      oemNumber: null,
+      partNumberType: 'UNKNOWN',
+      title: 'Motul 7100 10W-40',
+      isUniversal: true,
+      mainCategory: 'OIL_AND_FLUIDS',
+      kind: 'MOTOR_OIL',
+      oilViscosity: '10W-40',
+      oilType: 'SYNTHETIC',
+      oilVolumeMl: 4000,
+      categoryId,
+      images: [],
+      partModels: [],
+    });
+
+    it('prefers the seller-chosen product.categoryId over the enum mapping', () => {
+      // An admin-created "Другое" child (no PartMainCategory mirror): the chosen
+      // categoryId must win so the listing lands in that exact category.
+      svc.buildProjectionOps(buildStock({ product: oilProduct('motorcycle-oil') }));
+      expect(upsertArg(prisma, 'catalogPart').create.categoryId).toBe('motorcycle-oil');
+    });
+
+    it('falls back to the enum mapping when product.categoryId is null', () => {
+      svc.buildProjectionOps(buildStock({ product: oilProduct(null) }));
+      // OIL_AND_FLUIDS is a canonical row → its slug, not the Uncategorized bucket.
+      expect(upsertArg(prisma, 'catalogPart').create.categoryId).toBe('oil-and-fluids');
     });
 
     it('projects the classified attributes verbatim from the Product', () => {

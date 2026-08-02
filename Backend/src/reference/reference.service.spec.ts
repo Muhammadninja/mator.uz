@@ -16,6 +16,7 @@ function makePrismaMock() {
     vehicleModelRef: { findMany: jest.fn(), findUnique: jest.fn() },
     vehicleTrim: { findMany: jest.fn(), findUnique: jest.fn() },
     vehicleEngine: { findMany: jest.fn() },
+    partCategory: { findMany: jest.fn() },
   };
 }
 
@@ -89,8 +90,13 @@ describe('ReferenceService', () => {
         { id: 'cobalt', makeId: 'chevrolet', name: 'Cobalt' },
       ]);
       const res = await service.listModels('chevrolet');
+      // Models of an inactive brand are hidden — the parent make's isActive gates
+      // them (see "hide inactive brands"), so the where includes make.isActive.
       expect(prisma.vehicleModelRef.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { makeId: 'chevrolet' }, orderBy: { sortOrder: 'asc' } }),
+        expect.objectContaining({
+          where: { makeId: 'chevrolet', make: { isActive: true } },
+          orderBy: { sortOrder: 'asc' },
+        }),
       );
       expect(res).toEqual({
         items: [{ id: 'cobalt', make_id: 'chevrolet', name: 'Cobalt' }],
@@ -159,6 +165,63 @@ describe('ReferenceService', () => {
       expect(prisma.vehicleTrim.findUnique).toHaveBeenCalledWith({ where: { id: 'cobalt-p2-premier' } });
       // The full list is returned — trimId does not filter.
       expect(res.total).toBe(2);
+    });
+  });
+
+  describe('listCategories', () => {
+    // A small forest: two roots (one inactive), an active + an inactive child of
+    // `other`, plus the synthetic Uncategorized bucket that must never surface.
+    const catRows = [
+      { id: 'other', name: 'Другое', slug: 'other', parentId: null, sortOrder: 99, isActive: true },
+      { id: 'brakes', name: 'Тормоза', slug: 'brakes', parentId: null, sortOrder: 1, isActive: true },
+      { id: 'hidden-root', name: 'Hidden', slug: 'hidden-root', parentId: null, sortOrder: 2, isActive: false },
+      { id: 'cat_uncategorized', name: 'Uncategorized', slug: null, parentId: null, sortOrder: 0, isActive: true },
+      { id: 'motorcycle-oil', name: 'Мото', slug: 'motorcycle-oil', parentId: 'other', sortOrder: 1, isActive: true },
+      { id: 'off-oil', name: 'Off', slug: 'off-oil', parentId: 'other', sortOrder: 2, isActive: false },
+    ];
+
+    it('lists a parent’s ACTIVE children with derived level, camelCase, ordered', async () => {
+      prisma.partCategory.findMany.mockResolvedValue(catRows);
+      const res = await service.listCategories('other');
+      expect(res).toEqual({
+        items: [
+          {
+            id: 'motorcycle-oil',
+            name: 'Мото',
+            slug: 'motorcycle-oil',
+            parentId: 'other',
+            level: 1,
+            sortOrder: 1,
+          },
+        ],
+        total: 1,
+      });
+    });
+
+    it('omitted parentId returns the active roots, excluding Uncategorized', async () => {
+      prisma.partCategory.findMany.mockResolvedValue(catRows);
+      const res = await service.listCategories();
+      // brakes (sortOrder 1) before other (99); hidden-root + uncategorized dropped.
+      expect(res.items.map((c) => c.id)).toEqual(['brakes', 'other']);
+      expect(res.items.every((c) => c.level === 0)).toBe(true);
+      expect(res.total).toBe(2);
+    });
+
+    it('404s when parentId is unknown', async () => {
+      prisma.partCategory.findMany.mockResolvedValue(catRows);
+      await expect(service.listCategories('nope')).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('a known leaf returns an empty list (normal 200)', async () => {
+      prisma.partCategory.findMany.mockResolvedValue(catRows);
+      const res = await service.listCategories('brakes');
+      expect(res).toEqual({ items: [], total: 0 });
+    });
+
+    it('is NOT cached — categories are admin-editable', async () => {
+      prisma.partCategory.findMany.mockResolvedValue(catRows);
+      await service.listCategories('other');
+      expect(cache.remember).not.toHaveBeenCalled();
     });
   });
 

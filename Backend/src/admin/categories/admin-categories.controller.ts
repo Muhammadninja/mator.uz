@@ -30,6 +30,7 @@ import { AdminJwtGuard } from '../auth/guards/admin-jwt.guard';
 import { AdminRoleGuard } from '../auth/guards/admin-role.guard';
 import { AdminCategoriesService } from './admin-categories.service';
 import { CreateCategoryDto } from './dto/create-category.dto';
+import { ListCategoriesQueryDto } from './dto/list-categories.query.dto';
 import { MoveCategoryDto } from './dto/move-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
 
@@ -53,6 +54,19 @@ import { UpdateCategoryDto } from './dto/update-category.dto';
 export class AdminCategoriesController {
   constructor(private readonly categories: AdminCategoriesService) {}
 
+  @Get()
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Flat, filterable list of category nodes',
+    description:
+      'AND-combined optional filters: parentId (the literal "null" → roots), ' +
+      'level (0/1/2), isActive. Ordered by level, then sortOrder, then name.',
+  })
+  @ApiOkResponse({ description: 'Flat nodes in the standard admin envelope (+ meta.total).' })
+  list(@Query() query: ListCategoriesQueryDto) {
+    return this.categories.list(query);
+  }
+
   @Get('tree')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
@@ -64,6 +78,15 @@ export class AdminCategoriesController {
   @ApiOkResponse({ description: 'The category tree in the standard admin envelope.' })
   tree() {
     return this.categories.tree();
+  }
+
+  @Get(':id')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'One category node (flat, no children).' })
+  @ApiOkResponse({ description: 'The category node in the standard admin envelope.' })
+  @ApiNotFoundResponse({ description: 'No such category.' })
+  findOne(@Param('id') id: string) {
+    return this.categories.findOne(id);
   }
 
   @Post()
@@ -138,5 +161,31 @@ export class AdminCategoriesController {
   @ApiNotFoundResponse({ description: 'No such category or target parent.' })
   move(@Param('id') id: string, @Body() dto: MoveCategoryDto) {
     return this.categories.move(id, dto);
+  }
+
+  @Post(':id/activate')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Activate a category',
+    description: 'Sets isActive=true. Reversible companion to deactivate.',
+  })
+  @ApiOkResponse({ description: 'The updated category node.' })
+  @ApiNotFoundResponse({ description: 'No such category.' })
+  activate(@Param('id') id: string) {
+    return this.categories.setActive(id, true);
+  }
+
+  @Post(':id/deactivate')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Deactivate a category (prefer over delete)',
+    description:
+      'Sets isActive=false, hiding the node’s whole subtree from the bot and ' +
+      'buyer (reads filter isActive at every level). Fully reversible.',
+  })
+  @ApiOkResponse({ description: 'The updated category node.' })
+  @ApiNotFoundResponse({ description: 'No such category.' })
+  deactivate(@Param('id') id: string) {
+    return this.categories.setActive(id, false);
   }
 }

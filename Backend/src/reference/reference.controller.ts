@@ -1,4 +1,4 @@
-import { Controller, Get, Query } from '@nestjs/common';
+import { Controller, Get, Param, Query } from '@nestjs/common';
 import {
   ApiBadRequestResponse,
   ApiNotFoundResponse,
@@ -110,5 +110,55 @@ export class ReferenceController {
   })
   engines(@Query('trimId') trimId?: string) {
     return this.reference.listEngines(trimId);
+  }
+
+  @Get('categories')
+  @ApiOperation({
+    summary: 'List active part-category children (public).',
+    description:
+      'Pass parentId to list the active children of that category (e.g. the ' +
+      'OTHER root → its oil sub-buckets); omit it for the active roots. Only ' +
+      'active categories are returned, at any level. Ids are opaque — carry them ' +
+      'through to GET /v1/catalog/parts?category=<id>.',
+  })
+  @ApiQuery({ name: 'parentId', required: false, example: 'other' })
+  @ApiOkResponse({
+    description: 'Active children (or roots), camelCase nodes.',
+    schema: {
+      example: {
+        items: [
+          {
+            id: 'motorcycle-oil',
+            name: 'Мотоциклетные масла',
+            slug: 'motorcycle-oil',
+            parentId: 'other',
+            level: 1,
+            sortOrder: 1,
+          },
+        ],
+        total: 1,
+      },
+    },
+  })
+  @ApiNotFoundResponse({
+    description: 'parentId is supplied but unknown.',
+    schema: { example: { code: 'NOT_FOUND', message: 'Unknown parentId' } },
+  })
+  categories(@Query('parentId') parentId?: string) {
+    return this.reference.listCategories(parentId);
+  }
+
+  @Get('categories/:id/children')
+  @ApiOperation({
+    summary: 'List a category’s active children (path-param form).',
+    description: 'Identical to GET /v1/reference/categories?parentId=<id>.',
+  })
+  @ApiOkResponse({ description: 'Active children of the category.' })
+  @ApiNotFoundResponse({
+    description: 'The category id is unknown.',
+    schema: { example: { code: 'NOT_FOUND', message: 'Unknown parentId' } },
+  })
+  categoryChildren(@Param('id') id: string) {
+    return this.reference.listCategories(id);
   }
 }
