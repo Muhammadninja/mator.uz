@@ -14,9 +14,14 @@ import { CatalogProjectionService } from './projection/catalog-projection.servic
   imports: [PrismaModule, SalesModule],
   providers: [PartsService, SearchService, CategoriesService, CatalogProjectionService],
   controllers: [PartsController, SearchController, CategoriesController],
-  // Exported so the Telegram pipeline (and future admin/seller tools) can
-  // project supply-side writes into the buyer catalog through the single
-  // authoritative mapping.
-  exports: [CatalogProjectionService],
+  // CatalogProjectionService is exported so the Telegram pipeline (and future
+  // admin/seller tools) can project supply-side writes into the buyer catalog
+  // through the single authoritative mapping.
+  //
+  // PartsService/CategoriesService are exported for the AI advisor's catalogue
+  // tools: the assistant must answer from the SAME code path that serves
+  // GET /v1/catalog/parts (sale pricing, fitment, motor-oil rules included),
+  // rather than querying Prisma itself and drifting from the buyer catalogue.
+  exports: [CatalogProjectionService, PartsService, CategoriesService],
 })
 export class CatalogModule {}

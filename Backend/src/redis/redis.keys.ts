@@ -38,6 +38,10 @@ export const RedisKeys = {
   rateLogin: (ip: string): string => `rate:login:${ip}`,
   rateRefresh: (userId: string): string => `rate:refresh:${userId}`,
   rateSms: (phone: string): string => `rate:sms:${phone}`,
+  // AI advisor messages, keyed on the USER rather than the session: the budget
+  // being enforced is model spend, so opening a second session must not grant a
+  // second allowance.
+  rateAiMessage: (userId: string): string => `rate:ai:message:${userId}`,
 
   // ── Draft-flow locks (DraftLock) ──────────────────────────────────────────
   // Short-lived mutexes that collapse duplicate taps on the draft/preview flow

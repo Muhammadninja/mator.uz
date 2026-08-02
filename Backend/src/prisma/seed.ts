@@ -13,6 +13,10 @@ import {
   SEED_DEALERS,
 } from './seed-data/catalog-reference.seed';
 import { NODE_SEED as FITMENT_NODE_SEED } from '../admin/fitment-studio/fitment-node.config';
+import {
+  seedLaunchCatalog,
+  launchDatasetIsEmpty,
+} from './seed-launch-catalog';
 
 const prisma = new PrismaClient();
 
@@ -301,6 +305,38 @@ async function seedFitmentNodes() {
   }
 }
 
+/**
+ * Verify the seeded shape and report it. Read-only — this asserts nothing and
+ * fails nothing, it makes the outcome of a run inspectable: the category tree's
+ * parent/child structure, and whether a commercial catalogue is present.
+ */
+async function verify() {
+  const [roots, mains, orphans, oils, activeSales] = await Promise.all([
+    prisma.partCategory.count({ where: { level: 0, isActive: true } }),
+    prisma.partCategory.count({ where: { level: 1, isActive: true } }),
+    // A level-1 category whose parent is missing would break the buyer grid.
+    prisma.partCategory.count({ where: { level: 1, parentId: null, isActive: true } }),
+    prisma.catalogPart.count({ where: { kind: 'MOTOR_OIL' } }),
+    prisma.sale.count({ where: { isActive: true, deletedAt: null } }),
+  ]);
+
+  console.log('[seed] category tree:');
+  console.table({
+    root_categories: roots,
+    main_categories: mains,
+    // 'other' + 'cat_uncategorized' are parentless by design; anything beyond
+    // those two is worth a look.
+    parentless_level1: orphans,
+  });
+  console.log('[seed] catalogue:');
+  console.table({
+    part_brands: await prisma.partBrand.count(),
+    catalog_parts: await prisma.catalogPart.count(),
+    motor_oils: oils,
+    active_sales: activeSales,
+  });
+}
+
 async function main() {
   await seedAdmin();
   await seedVehicleCatalog();
@@ -308,6 +344,10 @@ async function main() {
   await seedDealers();
   await seedSmsOperators();
   await seedFitmentNodes();
+
+  // The launch commercial catalogue (brands / dealers / products / sales). Runs
+  // last: it references the categories and dealers seeded above.
+  const launch = await seedLaunchCatalog(prisma);
 
   const counts = {
     vehicle_makes: await prisma.vehicleMake.count(),
@@ -322,6 +362,23 @@ async function main() {
   };
   console.log('[seed] reference-data row counts:');
   console.table(counts);
+
+  console.log('[seed] launch catalogue rows applied:');
+  console.table(launch);
+
+  if (launchDatasetIsEmpty()) {
+    // Loud, but NOT an error: a reference-data-only bootstrap is a valid state.
+    // The message names the exact file that has to be filled in, so this cannot
+    // be mistaken for "the catalogue seeded successfully".
+    console.warn(
+      '[seed] NOTE: no launch commercial data is present. Brands, dealers, products and\n' +
+        '       sales were NOT seeded because the real dataset has not been supplied.\n' +
+        '       Populate src/prisma/seed-data/launch-catalog.seed.ts and re-run `npm run seed`.\n' +
+        '       The loader is complete and idempotent — no code change is required.',
+    );
+  }
+
+  await verify();
 }
 
 main()
