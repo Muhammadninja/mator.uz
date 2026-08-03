@@ -161,6 +161,33 @@ else
   fail "vehicle NOT carried — endpoint acting stateless?" "turn-2 model='$MODEL7' brand='$BRAND7'"
 fi
 
+close_ticket_by_nonce(){ # $1 = nonce
+  local id
+  id="$(field "$(http GET '/v1/admin/sourcing-tickets?limit=8' "$TOKEN")" \
+    ".data[] | select(.rawMessage | contains(\"$1\")) | .id" | head -n1)"
+  [ -n "$id" ] && http PATCH "/v1/admin/sourcing-tickets/$id/status" "$TOKEN" '{"status":"CLOSED"}' >/dev/null 2>&1
+}
+
+# ── §8 de-duplication (same part within 10 min → one ticket) ─────────────────
+group "§8  De-duplication"
+DNONCE="QADEDUP$(date +%s)$$"
+before8="$(ticket_total)"
+chat "Нужна деталь с артикулом $DNONCE, срочно" >/dev/null
+chat "Нужна деталь с артикулом $DNONCE, срочно" >/dev/null   # identical → must NOT open a 2nd
+assert_eq "same part twice ⇒ exactly ONE ticket" "$(ticket_total)" "$((before8 + 1))"
+close_ticket_by_nonce "$DNONCE"
+
+# ── §9 localized canonical reply (Uzbek-Latin) ───────────────────────────────
+group "§9  Localized reply (uz_lat)"
+UNONCE="QAUZ$(date +%s)$$"
+R9="$(chat "Menga $UNONCE ehtiyot qism kerak")"   # uz_lat markers: menga/ehtiyot/qism/kerak
+REPLY9="$(field "${R9#*$'\t'}" '.reply_text')"
+case "$REPLY9" in
+  *Murojaatingiz*) pass "reply localized to Uzbek-Latin" ;;
+  *)               fail "reply not localized (expected uz_lat)" "got: $REPLY9" ;;
+esac
+close_ticket_by_nonce "$UNONCE"
+
 # ── §5 admin WebSocket (optional) ────────────────────────────────────────────
 if [ "$RUN_WS" = "1" ]; then
   group "§5  Admin WebSocket /admin-events"

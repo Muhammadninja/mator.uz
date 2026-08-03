@@ -5,6 +5,7 @@ import { SendMessageDto } from './dto/send-message.dto';
 import { RagSearchService, StockItem } from './rag-search.service';
 import { SourcingService } from '../sourcing/sourcing.service';
 import { AdminEventsGateway } from '../events/admin-events.gateway';
+import { CANONICAL_RESPONSES, detectLanguage } from '../common/i18n.util';
 
 /**
  * Intent on the response. The LLM only ever returns the first three; the
@@ -35,16 +36,9 @@ export interface ChatResponse {
   extracted_data: ExtractedData;
   /** Present only when intent is FOUND_IN_STOCK. */
   items?: StockItem[];
+  /** Set on CREATE_SOURCING_TICKET — the new or de-duplicated existing ticket. */
+  ticket_id?: string;
 }
-
-// Canonical Russian replies for the two orchestrated branches. Deterministic
-// copy here (rather than the LLM's free-form reply) keeps the funnel UX
-// predictable regardless of how the model phrased its answer.
-const FOUND_REPLY =
-  'Нашёл подходящие товары в наличии — можете выбрать из списка ниже.';
-const SOURCING_REPLY =
-  'Спасибо за обращение! Этой позиции сейчас нет в нашем каталоге. ' +
-  'Наш отдел закупок уже проверяет цены и свяжется с вами в течение 15 минут.';
 
 // Cheap, fast triage tier — the right Claude model for high-volume structured
 // extraction (Opus, used by the AI advisor, would be overkill here). Low
@@ -107,10 +101,15 @@ export class AiChatService {
       return base;
     }
 
+    // Reply in the user's language (canonical copy is localized RU / UZ).
+    const lang = detectLanguage(dto.message);
+    // Non-null past the gate above; keep a typed local for the dedup lookup.
+    const partName = base.extracted_data.part_name as string;
+
     // From here on part_name is guaranteed → RAG → FOUND_IN_STOCK | CREATE_SOURCING_TICKET.
     try {
       const rag = await this.rag.searchInStock({
-        partName: base.extracted_data.part_name,
+        partName,
         brand: base.extracted_data.brand,
         model: base.extracted_data.model,
       });
@@ -119,12 +118,28 @@ export class AiChatService {
         return {
           ...base,
           intent: 'FOUND_IN_STOCK',
-          reply_text: FOUND_REPLY,
+          reply_text: CANONICAL_RESPONSES.FOUND_IN_STOCK[lang],
           items: rag.items,
         };
       }
 
-      // Not in local stock → persist a ticket and notify admins (best effort).
+      // De-dup: a still-open ticket for the same part (same user when known)
+      // in the last 10 min → reuse it. Skip the WS broadcast (and Telegram, once
+      // wired) so operators don't get a second copy of the same request.
+      const duplicate = await this.sourcing.findRecentDuplicate({
+        partName,
+        userId: dto.userId ?? null,
+      });
+      if (duplicate) {
+        return {
+          ...base,
+          intent: 'CREATE_SOURCING_TICKET',
+          reply_text: CANONICAL_RESPONSES.CREATE_SOURCING_TICKET[lang],
+          ticket_id: duplicate.id,
+        };
+      }
+
+      // Not in local stock and not a duplicate → persist + notify admins.
       const ticket = await this.sourcing.createTicket({
         userId: dto.userId ?? null,
         rawMessage: dto.message,
@@ -134,7 +149,12 @@ export class AiChatService {
       });
       this.adminEvents.notifyAdminsNewTicket(ticket);
 
-      return { ...base, intent: 'CREATE_SOURCING_TICKET', reply_text: SOURCING_REPLY };
+      return {
+        ...base,
+        intent: 'CREATE_SOURCING_TICKET',
+        reply_text: CANONICAL_RESPONSES.CREATE_SOURCING_TICKET[lang],
+        ticket_id: ticket.id,
+      };
     } catch (err) {
       this.logger.error(
         `Sourcing orchestration failed: ${err instanceof Error ? err.message : String(err)}`,
