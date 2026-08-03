@@ -1989,3 +1989,33 @@ model FitmentBinding {
   @@index([partId])
   @@map("fitment_bindings")
 }
+
+// Lifecycle of a part-sourcing request opened by the AI chat when a customer
+// asks for a part that isn't in local stock. Operators in mator-admin pick these
+// up (via the NEW_SOURCING_TICKET realtime event) and move them through the
+// funnel: PENDING -> IN_PROGRESS -> OFFERED -> CLOSED.
+enum SourcingTicketStatus {
+  PENDING
+  IN_PROGRESS
+  OFFERED
+  CLOSED
+}
+
+// A sourcing request raised by AiChatService when RAG finds no in-stock match.
+// `userId` is nullable and NOT a foreign key: the chat is available to
+// anonymous customers and the id is client-supplied, so it's stored as an
+// opaque tag rather than a constrained relation. `extractedData` is the LLM's
+// structured extraction (brand/model/year/vin/part_name/preference) as jsonb.
+model SourcingTicket {
+  id            String               @id @default(uuid()) @db.Uuid
+  userId        String?              @map("user_id")
+  rawMessage    String               @map("raw_message") @db.Text
+  extractedData Json                 @map("extracted_data") @db.JsonB
+  status        SourcingTicketStatus @default(PENDING)
+  createdAt     DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@index([status])
+  @@index([userId])
+  @@map("sourcing_tickets")
+}

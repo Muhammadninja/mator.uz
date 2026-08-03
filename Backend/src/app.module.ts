@@ -20,6 +20,9 @@ import { CartModule } from './cart/cart.module';
 import { OrdersModule } from './orders/orders.module';
 import { ProvidersModule } from './providers/providers.module';
 import { AiAdvisorModule } from './ai-advisor/ai-advisor.module';
+import { AiChatModule } from './ai-chat/ai-chat.module';
+import { SourcingModule } from './sourcing/sourcing.module';
+import { EventsModule } from './events/events.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { RealtimeModule } from './realtime/realtime.module';
 import { HealthModule } from './health/health.module';
@@ -71,6 +74,9 @@ import { isBlueprintEnabled } from './blueprint/blueprint-auth';
     OrdersModule,
     ProvidersModule,
     AiAdvisorModule,
+    AiChatModule,
+    SourcingModule,
+    EventsModule,
     NotificationsModule,
     RealtimeModule,
     HealthModule,

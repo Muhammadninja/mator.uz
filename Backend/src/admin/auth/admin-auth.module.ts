@@ -60,6 +60,10 @@ import { AdminJwtStrategy } from './strategies/admin-jwt.strategy';
     AdminTokenService,
     AdminJwtGuard,
     AdminRoleGuard,
+    // Exported so other modules (e.g. the admin realtime gateway's WS auth) can
+    // verify admin tokens against the SAME signing secret. Re-providing it would
+    // mint a second ephemeral dev secret and reject otherwise-valid tokens.
+    AdminAuthConfig,
   ],
 })
 export class AdminAuthModule {}
