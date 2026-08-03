@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { AiChatService } from './ai-chat.service';
 import { AiChatController } from './ai-chat.controller';
-import { RagSearchService } from './services/rag-search.service';
+import { RagSearchService } from './rag-search.service';
 import { SourcingModule } from '../sourcing/sourcing.module';
 import { EventsModule } from '../events/events.module';
 
