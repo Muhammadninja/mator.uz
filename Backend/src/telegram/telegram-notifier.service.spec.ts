@@ -38,6 +38,7 @@ function withFakeClient(service: TelegramNotifierService) {
 const FULL_ENV = {
   TELEGRAM_BOT_TOKEN: 'bot-token',
   TELEGRAM_DEALERS_GROUP_ID: '-1009999',
+  TELEGRAM_MANAGER_USERNAME: '@mator_manager',
 };
 
 describe('TelegramNotifierService', () => {
@@ -111,6 +112,40 @@ describe('TelegramNotifierService', () => {
       expect(chatId).toBe('-1009999');
       expect(text).toContain('<b>Part:</b> передние колодки');
       expect(opts).toMatchObject({ parse_mode: 'HTML' });
+    });
+
+    it('attaches the «Связаться для доставки» URL button (@username → t.me url)', async () => {
+      const service = new TelegramNotifierService(configWith(FULL_ENV));
+      const sendMessage = withFakeClient(service);
+      await service.sendSourcingTicketToDealers(ticket());
+      const opts = sendMessage.mock.calls[0][2];
+      const button = opts.reply_markup.inline_keyboard[0][0];
+      expect(button).toMatchObject({
+        text: 'Связаться для доставки',
+        url: 'https://t.me/mator_manager',
+      });
+    });
+
+    it('omits the button when no manager contact is configured', async () => {
+      const service = new TelegramNotifierService(
+        configWith({
+          TELEGRAM_BOT_TOKEN: 'bot-token',
+          TELEGRAM_DEALERS_GROUP_ID: '-1009999',
+        }),
+      );
+      const sendMessage = withFakeClient(service);
+      await service.sendSourcingTicketToDealers(ticket());
+      expect(sendMessage.mock.calls[0][2].reply_markup).toBeUndefined();
+    });
+
+    it('accepts a full URL for the manager contact unchanged', () => {
+      const service = new TelegramNotifierService(
+        configWith({ ...FULL_ENV, TELEGRAM_MANAGER_USERNAME: 'https://wa.me/998901112233' }),
+      );
+      const markup = service.deliveryButtonMarkup();
+      expect(markup.reply_markup?.inline_keyboard[0][0]).toMatchObject({
+        url: 'https://wa.me/998901112233',
+      });
     });
 
     it('resolves (never rejects) when Telegram delivery fails', async () => {
