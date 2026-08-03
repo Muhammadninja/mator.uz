@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   HttpStatus,
@@ -73,5 +74,19 @@ export class AdminSourcingController {
   ) {
     const ticket = await this.sourcing.updateStatus(id, dto.status);
     return { success: true, data: ticket };
+  }
+
+  @Delete(':id')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Delete a sourcing ticket',
+    description: 'Permanently removes the ticket. Idempotent envelope: { success }.',
+  })
+  @ApiOkResponse({ description: 'The ticket was deleted.' })
+  @ApiNotFoundResponse({ description: 'No ticket with that id.' })
+  @ApiBadRequestResponse({ description: 'Malformed id.' })
+  async remove(@Param('id', ParseUUIDPipe) id: string) {
+    await this.sourcing.deleteTicket(id);
+    return { success: true };
   }
 }

@@ -116,4 +116,22 @@ export class SourcingService {
       throw err;
     }
   }
+
+  /**
+   * Permanently remove a ticket. Throws NotFoundException when no ticket has the
+   * given id (Prisma P2025 on delete of a missing row).
+   */
+  async deleteTicket(id: string): Promise<void> {
+    try {
+      await this.prisma.sourcingTicket.delete({ where: { id } });
+    } catch (err) {
+      if (
+        err instanceof Prisma.PrismaClientKnownRequestError &&
+        err.code === 'P2025'
+      ) {
+        throw new NotFoundException('Sourcing ticket not found');
+      }
+      throw err;
+    }
+  }
 }
