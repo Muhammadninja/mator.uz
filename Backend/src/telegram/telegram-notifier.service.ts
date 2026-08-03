@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Telegraf } from 'telegraf';
+import { Markup, Telegraf } from 'telegraf';
+import type { InlineKeyboardMarkup } from 'telegraf/types';
 import type { SourcingTicket } from '@prisma/client';
 
 /**
@@ -43,6 +44,11 @@ export class TelegramNotifierService {
   private readonly logger = new Logger(TelegramNotifierService.name);
   private readonly botToken: string;
   private readonly dealersGroupId: string;
+  /**
+   * URL the «Связаться для доставки» card button opens (a manager's Telegram).
+   * Empty → the card is sent without the button. Env-configured, never hardcoded.
+   */
+  private readonly managerContactUrl: string;
   /** Built lazily on first send — an unconfigured deployment builds nothing. */
   private client?: Telegraf;
 
@@ -50,11 +56,27 @@ export class TelegramNotifierService {
     this.botToken = config.get<string>('TELEGRAM_BOT_TOKEN')?.trim() ?? '';
     this.dealersGroupId =
       config.get<string>('TELEGRAM_DEALERS_GROUP_ID')?.trim() ?? '';
+    this.managerContactUrl = this.normalizeContactUrl(
+      config.get<string>('TELEGRAM_MANAGER_USERNAME'),
+    );
     if (!this.configured) {
       this.logger.warn(
         'TELEGRAM_BOT_TOKEN / TELEGRAM_DEALERS_GROUP_ID not set — sourcing tickets will NOT be sent to Telegram.',
       );
     }
+  }
+
+  /**
+   * Turn the configured manager handle into a tappable URL. Accepts a full URL
+   * (https://…, tg://…, wa.me/…), a `t.me/user` shorthand, or a bare `@username`
+   * / `username`, which becomes `https://t.me/username`. Empty/undefined → ''.
+   */
+  private normalizeContactUrl(raw: string | undefined): string {
+    const v = raw?.trim();
+    if (!v) return '';
+    if (/^(https?|tg):\/\//i.test(v)) return v;
+    if (/^(t\.me|wa\.me)\//i.test(v)) return `https://${v}`;
+    return `https://t.me/${v.replace(/^@/, '')}`;
   }
 
   /** Both the bot token and the destination group must be configured. */
@@ -77,6 +99,7 @@ export class TelegramNotifierService {
       await this.bot().telegram.sendMessage(this.dealersGroupId, text, {
         parse_mode: 'HTML',
         link_preview_options: { is_disabled: true },
+        ...this.deliveryButtonMarkup(),
       });
       this.logger.debug(`Sourcing ticket ${ticket.id} sent to dealers group`);
     } catch (err) {
@@ -132,6 +155,18 @@ export class TelegramNotifierService {
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;');
+  }
+
+  /**
+   * The «Связаться для доставки» inline button, as a partial sendMessage option
+   * ({ reply_markup }). Returns {} when no manager URL is configured, so the
+   * card is simply sent without a button (spread into the send options).
+   */
+  deliveryButtonMarkup(): { reply_markup?: InlineKeyboardMarkup } {
+    if (!this.managerContactUrl) return {};
+    return Markup.inlineKeyboard([
+      Markup.button.url('Связаться для доставки', this.managerContactUrl),
+    ]);
   }
 
   /** The send-only client, constructed once on first use. */
