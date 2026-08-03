@@ -1,4 +1,4 @@
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   IsArray,
@@ -34,6 +34,10 @@ export class ChatHistoryItemDto {
  * client sends the most recent turns.
  */
 export class SendMessageDto {
+  // Trim first so a whitespace-only message ("   ") is rejected as empty
+  // (→ 400) instead of slipping past @IsNotEmpty and crashing the LLM call
+  // downstream (→ 503).
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsString()
   @IsNotEmpty()
   @MaxLength(2000)
