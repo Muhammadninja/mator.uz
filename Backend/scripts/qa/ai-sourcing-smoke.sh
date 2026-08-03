@@ -96,8 +96,9 @@ group "§2  CREATE_SOURCING_TICKET + canonical SLA"
 NONCE="QASMOKE$(date +%s)$$"
 CREATED_ID=""
 before="$(ticket_total)"
-# A concrete part request whose part cannot exist in the catalog (nonce) → forces CREATE.
-R2="$(chat "Нужен $NONCE редуктор в сборе на Chevrolet Malibu 2019, срочно")"
+# A concrete part request whose part cannot exist in the catalog (pure nonce, so
+# no token can match title/brand under the ranked search) → forces CREATE.
+R2="$(chat "Нужна деталь с артикулом $NONCE на Chevrolet Malibu 2019, срочно")"
 c2="${R2%%$'\t'*}"; b2="${R2#*$'\t'}"; intent2="$(field "$b2" '.intent')"; reply2="$(field "$b2" '.reply_text')"
 assert_eq "200" "$c2" "200"
 if [ "$intent2" = "CREATE_SOURCING_TICKET" ]; then
