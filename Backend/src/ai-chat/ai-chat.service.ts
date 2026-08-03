@@ -5,6 +5,7 @@ import { SendMessageDto } from './dto/send-message.dto';
 import { RagSearchService, StockItem } from './rag-search.service';
 import { SourcingService } from '../sourcing/sourcing.service';
 import { AdminEventsGateway } from '../events/admin-events.gateway';
+import { CANONICAL_RESPONSES, detectLanguage } from '../common/i18n.util';
 
 /**
  * Intent on the response. The LLM only ever returns the first three; the
@@ -35,16 +36,9 @@ export interface ChatResponse {
   extracted_data: ExtractedData;
   /** Present only when intent is FOUND_IN_STOCK. */
   items?: StockItem[];
+  /** Set on CREATE_SOURCING_TICKET — the new or de-duplicated existing ticket. */
+  ticket_id?: string;
 }
-
-// Canonical Russian replies for the two orchestrated branches. Deterministic
-// copy here (rather than the LLM's free-form reply) keeps the funnel UX
-// predictable regardless of how the model phrased its answer.
-const FOUND_REPLY =
-  'Нашёл подходящие товары в наличии — можете выбрать из списка ниже.';
-const SOURCING_REPLY =
-  'Спасибо за обращение! Этой позиции сейчас нет в нашем каталоге. ' +
-  'Наш отдел закупок уже проверяет цены и свяжется с вами в течение 15 минут.';
 
 // Cheap, fast triage tier — the right Claude model for high-volume structured
 // extraction (Opus, used by the AI advisor, would be overkill here). Low
@@ -107,10 +101,15 @@ export class AiChatService {
       return base;
     }
 
+    // Reply in the user's language (canonical copy is localized RU / UZ).
+    const lang = detectLanguage(dto.message);
+    // Non-null past the gate above; keep a typed local for the dedup lookup.
+    const partName = base.extracted_data.part_name as string;
+
     // From here on part_name is guaranteed → RAG → FOUND_IN_STOCK | CREATE_SOURCING_TICKET.
     try {
       const rag = await this.rag.searchInStock({
-        partName: base.extracted_data.part_name,
+        partName,
         brand: base.extracted_data.brand,
         model: base.extracted_data.model,
       });
@@ -119,12 +118,28 @@ export class AiChatService {
         return {
           ...base,
           intent: 'FOUND_IN_STOCK',
-          reply_text: FOUND_REPLY,
+          reply_text: CANONICAL_RESPONSES.FOUND_IN_STOCK[lang],
           items: rag.items,
         };
       }
 
-      // Not in local stock → persist a ticket and notify admins (best effort).
+      // De-dup: a still-open ticket for the same part (same user when known)
+      // in the last 10 min → reuse it. Skip the WS broadcast (and Telegram, once
+      // wired) so operators don't get a second copy of the same request.
+      const duplicate = await this.sourcing.findRecentDuplicate({
+        partName,
+        userId: dto.userId ?? null,
+      });
+      if (duplicate) {
+        return {
+          ...base,
+          intent: 'CREATE_SOURCING_TICKET',
+          reply_text: CANONICAL_RESPONSES.CREATE_SOURCING_TICKET[lang],
+          ticket_id: duplicate.id,
+        };
+      }
+
+      // Not in local stock and not a duplicate → persist + notify admins.
       const ticket = await this.sourcing.createTicket({
         userId: dto.userId ?? null,
         rawMessage: dto.message,
@@ -134,7 +149,12 @@ export class AiChatService {
       });
       this.adminEvents.notifyAdminsNewTicket(ticket);
 
-      return { ...base, intent: 'CREATE_SOURCING_TICKET', reply_text: SOURCING_REPLY };
+      return {
+        ...base,
+        intent: 'CREATE_SOURCING_TICKET',
+        reply_text: CANONICAL_RESPONSES.CREATE_SOURCING_TICKET[lang],
+        ticket_id: ticket.id,
+      };
     } catch (err) {
       this.logger.error(
         `Sourcing orchestration failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -155,7 +175,7 @@ export class AiChatService {
         max_tokens: MAX_TOKENS,
         temperature: TEMPERATURE,
         system: this.buildSystemPrompt(),
-        messages: [{ role: 'user', content: this.buildUserContent(dto) }],
+        messages: this.buildMessages(dto),
       });
 
       const text = message.content.find((block) => block.type === 'text')?.text;
@@ -174,22 +194,26 @@ export class AiChatService {
   private buildSystemPrompt(): string {
     return [
       'You are the AI Assistant for the MATOR auto-parts platform.',
-      'Analyze the user message to extract vehicle details (brand, model, year, VIN) and required parts.',
-      'Respond strictly in JSON format with the following structure:',
+      'Extract the required part and any vehicle details (brand, model, year, VIN) from the conversation.',
+      'Respond strictly in JSON with this structure:',
       '{',
-      '  "reply_text": "User-facing friendly response in Russian",',
+      '  "reply_text": "Short, friendly user-facing reply in Russian",',
       '  "intent": "SEARCH_PART" | "CREATE_SOURCING_TICKET" | "GENERAL_QUESTION",',
       '  "extracted_data": {',
-      '    "brand": string | null,',
-      '    "model": string | null,',
-      '    "year": string | null,',
-      '    "vin": string | null,',
-      '    "part_name": string | null,',
+      '    "brand": string | null, "model": string | null, "year": string | null,',
+      '    "vin": string | null, "part_name": string | null,',
       '    "preference": "cheapest" | "oem" | "fastest" | null',
       '  }',
       '}',
-      'If the user asks for a part (e.g., "самая дешевая колодка на Skoda"), set "intent" to "CREATE_SOURCING_TICKET" so our admins in mator-admin can handle it, and write a polite reply_text stating that our sourcing department is checking prices and will respond within 15 minutes.',
-      'reply_text must always be written in Russian.',
+      '',
+      'Behaviour rules (follow strictly):',
+      '- Use the FULL conversation history. NEVER ask again for anything the user already gave (brand, model, part, oil grade, etc.) — carry it forward into extracted_data.',
+      '- As soon as a specific part is identifiable, set intent to a part request (SEARCH_PART, or CREATE_SOURCING_TICKET when it must be sourced) and proceed. Do NOT keep asking for more details.',
+      '- VIN and exact car model are OPTIONAL. Never require them, never repeat a request for them, and if the user declines to share them, proceed with whatever information you have.',
+      '- Use GENERAL_QUESTION ONLY when no part can be identified at all, or for greetings / advice / off-topic. Ask at most ONE short clarifying question, and only about the part itself — never about the vehicle.',
+      '- For a part request, reply_text should say our sourcing department is checking prices and will respond within 15 minutes.',
+      '',
+      'reply_text is ALWAYS in Russian and short (1–2 sentences).',
       'Use null for any field you cannot confidently extract. Never invent values.',
       'Respond with ONLY the raw JSON object — no markdown, no code fences, no text before or after it.',
     ].join('\n');
@@ -199,6 +223,20 @@ export class AiChatService {
     // Surface a client-supplied VIN as an explicit hint; the model still owns
     // extraction, but this anchors the `vin` field when the scanner provided it.
     return dto.vin ? `${dto.message}\n\n[known VIN: ${dto.vin}]` : dto.message;
+  }
+
+  /**
+   * Prior turns + the current message. `history` keeps the stateless endpoint
+   * context-aware (a vehicle named in an earlier turn is still known when the
+   * part is named later). Anthropic requires the first message to be `user`,
+   * so any leading assistant turns are dropped.
+   */
+  private buildMessages(dto: SendMessageDto): Anthropic.MessageParam[] {
+    const history: Anthropic.MessageParam[] = (dto.history ?? [])
+      .filter((h) => h.content?.trim())
+      .map((h) => ({ role: h.role, content: h.content }));
+    while (history.length > 0 && history[0].role === 'assistant') history.shift();
+    return [...history, { role: 'user', content: this.buildUserContent(dto) }];
   }
 
   /**
