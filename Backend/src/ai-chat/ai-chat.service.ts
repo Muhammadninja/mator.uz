@@ -197,7 +197,7 @@ export class AiChatService {
       'Extract the required part and any vehicle details (brand, model, year, VIN) from the conversation.',
       'Respond strictly in JSON with this structure:',
       '{',
-      '  "reply_text": "Short, friendly user-facing reply in Russian",',
+      '  "reply_text": "Short, friendly reply in the user language",',
       '  "intent": "SEARCH_PART" | "CREATE_SOURCING_TICKET" | "GENERAL_QUESTION",',
       '  "extracted_data": {',
       '    "brand": string | null, "model": string | null, "year": string | null,',
@@ -213,7 +213,7 @@ export class AiChatService {
       '- Use GENERAL_QUESTION ONLY when no part can be identified at all, or for greetings / advice / off-topic. Ask at most ONE short clarifying question, and only about the part itself — never about the vehicle.',
       '- For a part request, reply_text should say our sourcing department is checking prices and will respond within 15 minutes.',
       '',
-      'reply_text is ALWAYS in Russian and short (1–2 sentences).',
+      'Write reply_text in the SAME language the user wrote in — Russian or Uzbek, matching their script (Latin or Cyrillic). Keep it short (1-2 sentences).',
       'Use null for any field you cannot confidently extract. Never invent values.',
       'Respond with ONLY the raw JSON object — no markdown, no code fences, no text before or after it.',
     ].join('\n');
