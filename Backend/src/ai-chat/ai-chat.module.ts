@@ -5,16 +5,18 @@ import { RagSearchService } from './rag-search.service';
 import { SourcingModule } from '../sourcing/sourcing.module';
 import { EventsModule } from '../events/events.module';
 import { SalesModule } from '../sales/sales.module';
+import { TelegramNotifierModule } from '../telegram/telegram-notifier.module';
 
 /**
  * Anthropic-backed support/sourcing chat. Runs RAG over the catalog projection
  * (RagSearchService, PrismaModule is global), opens tickets via SourcingModule,
- * pushes NEW_SOURCING_TICKET events via EventsModule's admin gateway, and prices
+ * pushes NEW_SOURCING_TICKET events via EventsModule's admin gateway, prices
  * in-stock matches through SalesModule's DiscountService so the chat quotes the
- * same sale-adjusted price as the catalog.
+ * same sale-adjusted price as the catalog, and fans new sourcing tickets out to
+ * the dealers' Telegram group via TelegramNotifierModule.
  */
 @Module({
-  imports: [SourcingModule, EventsModule, SalesModule],
+  imports: [SourcingModule, EventsModule, SalesModule, TelegramNotifierModule],
   providers: [AiChatService, RagSearchService],
   controllers: [AiChatController],
   exports: [AiChatService],

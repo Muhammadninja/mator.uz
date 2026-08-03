@@ -6,6 +6,7 @@ import { RagSearchService, StockItem } from './rag-search.service';
 import { SourcingService } from '../sourcing/sourcing.service';
 import { AdminEventsGateway } from '../events/admin-events.gateway';
 import { CANONICAL_RESPONSES, detectLanguage } from '../common/i18n.util';
+import { TelegramNotifierService } from '../telegram/telegram-notifier.service';
 
 /**
  * Intent on the response. The LLM only ever returns the first three; the
@@ -66,6 +67,7 @@ export class AiChatService {
     private readonly rag: RagSearchService,
     private readonly sourcing: SourcingService,
     private readonly adminEvents: AdminEventsGateway,
+    private readonly telegram: TelegramNotifierService,
   ) {
     const apiKey = config.get<string>('ANTHROPIC_API_KEY');
     this.client = apiKey ? new Anthropic({ apiKey }) : null;
@@ -124,8 +126,8 @@ export class AiChatService {
       }
 
       // De-dup: a still-open ticket for the same part (same user when known)
-      // in the last 10 min → reuse it. Skip the WS broadcast (and Telegram, once
-      // wired) so operators don't get a second copy of the same request.
+      // in the last 10 min → reuse it. Skip BOTH the WS broadcast and the
+      // Telegram fan-out so operators don't get a second copy of the same request.
       const duplicate = await this.sourcing.findRecentDuplicate({
         partName,
         userId: dto.userId ?? null,
@@ -148,6 +150,10 @@ export class AiChatService {
         extractedData: base.extracted_data as unknown as Record<string, unknown>,
       });
       this.adminEvents.notifyAdminsNewTicket(ticket);
+      // Fan the new ticket out to the dealers' Telegram group. Fire-and-forget:
+      // the notifier resolves even on failure, and we deliberately do NOT await
+      // it so a slow/down Telegram never delays (or fails) the chat response.
+      void this.telegram.sendSourcingTicketToDealers(ticket);
 
       return {
         ...base,
