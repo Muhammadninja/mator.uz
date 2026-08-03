@@ -2,7 +2,7 @@ import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common'
 import { ConfigService } from '@nestjs/config';
 import Anthropic from '@anthropic-ai/sdk';
 import { SendMessageDto } from './dto/send-message.dto';
-import { RagSearchService, StockItem } from './services/rag-search.service';
+import { RagSearchService, StockItem } from './rag-search.service';
 import { SourcingService } from '../sourcing/sourcing.service';
 import { AdminEventsGateway } from '../events/admin-events.gateway';
 
