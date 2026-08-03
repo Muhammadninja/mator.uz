@@ -1,6 +1,10 @@
-import { Injectable } from '@nestjs/common';
-import { Prisma, SourcingTicket } from '@prisma/client';
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { Prisma, SourcingTicket, SourcingTicketStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { clampLimit } from '../common/pagination.util';
+import { QuerySourcingTicketsDto } from './dto/query-sourcing-tickets.dto';
+
+const MAX_PAGE_SIZE = 100;
 
 export interface CreateSourcingTicketInput {
   /** Optional client-supplied user id (chat is anonymous-capable). */
@@ -29,5 +33,64 @@ export class SourcingService {
         // status defaults to PENDING at the DB level.
       },
     });
+  }
+
+  /**
+   * Paginated ticket list for the mator-admin console, newest first, optionally
+   * filtered by status. `limit` is clamped to [1, 100] so the ceiling holds even
+   * if a value slips past DTO validation. Returns the standard admin envelope.
+   */
+  async findAllForAdmin(query: QuerySourcingTicketsDto) {
+    const page = Math.max(1, Math.floor(query.page ?? 1));
+    const limit = clampLimit(query.limit, 20, MAX_PAGE_SIZE);
+    const where: Prisma.SourcingTicketWhereInput = query.status
+      ? { status: query.status }
+      : {};
+
+    // Count + page in one round trip so total and rows are read consistently.
+    const [total, data] = await this.prisma.$transaction([
+      this.prisma.sourcingTicket.count({ where }),
+      this.prisma.sourcingTicket.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+    ]);
+
+    return {
+      success: true,
+      data,
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.max(1, Math.ceil(total / limit)),
+      },
+    };
+  }
+
+  /**
+   * Move a ticket to a new status. Throws NotFoundException when no ticket has
+   * the given id (Prisma P2025 on update of a missing row).
+   */
+  async updateStatus(
+    id: string,
+    status: SourcingTicketStatus,
+  ): Promise<SourcingTicket> {
+    try {
+      return await this.prisma.sourcingTicket.update({
+        where: { id },
+        data: { status },
+      });
+    } catch (err) {
+      if (
+        err instanceof Prisma.PrismaClientKnownRequestError &&
+        err.code === 'P2025'
+      ) {
+        throw new NotFoundException('Sourcing ticket not found');
+      }
+      throw err;
+    }
   }
 }
