@@ -24,6 +24,29 @@ export interface CreateSourcingTicketInput {
 export class SourcingService {
   constructor(private readonly prisma: PrismaService) {}
 
+  /**
+   * A still-open (PENDING) ticket for the same part opened within `windowMinutes`
+   * — used to de-duplicate rapid repeats so operators don't get N copies of one
+   * ask. Scoped to `userId` when it's known; otherwise matches on part alone.
+   */
+  findRecentDuplicate(input: {
+    partName: string;
+    userId?: string | null;
+    windowMinutes?: number;
+  }): Promise<SourcingTicket | null> {
+    const since = new Date(Date.now() - (input.windowMinutes ?? 10) * 60_000);
+    return this.prisma.sourcingTicket.findFirst({
+      where: {
+        status: SourcingTicketStatus.PENDING,
+        createdAt: { gte: since },
+        // jsonb: extracted_data->>'part_name' = partName (exact).
+        extractedData: { path: ['part_name'], equals: input.partName },
+        ...(input.userId ? { userId: input.userId } : {}),
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
   createTicket(input: CreateSourcingTicketInput): Promise<SourcingTicket> {
     return this.prisma.sourcingTicket.create({
       data: {
