@@ -180,11 +180,13 @@ close_ticket_by_nonce "$DNONCE"
 # ── §9 localized canonical reply (Uzbek-Latin) ───────────────────────────────
 group "§9  Localized reply (uz_lat)"
 UNONCE="QAUZ$(date +%s)$$"
-R9="$(chat "Menga $UNONCE ehtiyot qism kerak")"   # uz_lat markers: menga/ehtiyot/qism/kerak
+# Concrete part (amortizator) in Uzbek-Latin (markers: menga/kerak) → a canonical
+# uz_lat reply (FOUND or CREATE — both contain "mahsulot").
+R9="$(chat "Menga $UNONCE amortizator kerak")"
 REPLY9="$(field "${R9#*$'\t'}" '.reply_text')"
 case "$REPLY9" in
-  *Murojaatingiz*) pass "reply localized to Uzbek-Latin" ;;
-  *)               fail "reply not localized (expected uz_lat)" "got: $REPLY9" ;;
+  *mahsulot*) pass "reply localized to Uzbek-Latin (canonical)" ;;
+  *)          fail "reply not localized (expected uz_lat)" "got: $REPLY9" ;;
 esac
 close_ticket_by_nonce "$UNONCE"
 
@@ -196,24 +198,31 @@ if [ "$RUN_WS" = "1" ]; then
     if node -e '
       const WebSocket = require("ws");
       const base = process.argv[1], token = process.argv[2];
-      const timeout = (ms) => new Promise((_, r) => setTimeout(() => r(new Error("timeout")), ms));
-      const closeCode = (url) => new Promise((res) => { const w = new WebSocket(url); w.on("close", (c) => res(c)); w.on("error", () => {}); });
-      const connectOk = (url) => new Promise((res, rej) => {
-        const w = new WebSocket(url); let got = false;
+      const withTimeout = (p, ms, label) =>
+        Promise.race([p, new Promise((_, r) => setTimeout(() => r(new Error("timeout:" + label)), ms))]);
+      // Unauthorized: gateway may reject at handshake (error) or accept-then-close(4401).
+      const rejected = (url) => new Promise((res) => {
+        const w = new WebSocket(url);
+        w.on("close", (c) => res("close:" + c));
+        w.on("error", () => res("error"));
+      });
+      // Authorized: open → send ping → expect pong.
+      const pinged = (url) => new Promise((res, rej) => {
+        const w = new WebSocket(url); let ok = false;
         w.on("open", () => w.send(JSON.stringify({ type: "ping" })));
-        w.on("message", (d) => { const m = JSON.parse(d.toString()); if (m.type === "pong") { got = true; w.close(); } });
-        w.on("close", () => (got ? res() : rej(new Error("no pong"))));
-        w.on("error", rej);
+        w.on("message", (d) => { try { if (JSON.parse(d.toString()).type === "pong") { ok = true; w.close(); } } catch {} });
+        w.on("close", () => (ok ? res() : rej(new Error("closed before pong"))));
+        w.on("error", (e) => rej(new Error("error:" + e.message)));
       });
       (async () => {
-        const code = await Promise.race([closeCode(`${base}/admin-events`), timeout(8000)]);
-        if (code !== 4401) throw new Error("unauthorized close code = " + code + " (want 4401)");
-        await Promise.race([connectOk(`${base}/admin-events?token=${token}`), timeout(8000)]);
-      })().then(() => process.exit(0)).catch((e) => { console.error(e.message); process.exit(1); });
+        const r = await withTimeout(rejected(base + "/admin-events"), 8000, "unauth");
+        if (!/^close:4401$|^error$/.test(r)) throw new Error("no-token not rejected (" + r + ")");
+        await withTimeout(pinged(base + "/admin-events?token=" + encodeURIComponent(token)), 8000, "auth");
+      })().then(() => process.exit(0)).catch((e) => { console.error("       WS: " + e.message); process.exit(1); });
     ' "$WS_BASE" "$TOKEN"; then
-      pass "no-token connect closes with 4401; token connect answers ping→pong"
+      pass "no-token → rejected (4401); token → ping/pong"
     else
-      fail "WebSocket auth/heartbeat check failed"
+      fail "WebSocket check failed (see WS: line for the failing step)"
     fi
   else
     skip "WS test (node + ws not resolvable — run from the backend dir)"
