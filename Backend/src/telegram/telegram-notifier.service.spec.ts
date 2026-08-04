@@ -26,11 +26,16 @@ function ticket(overrides: Partial<SourcingTicket> = {}): SourcingTicket {
   } as unknown as SourcingTicket;
 }
 
-/** Give the service a fake send-only client so no network is touched. */
-function withFakeClient(service: TelegramNotifierService) {
+/** Give the service a fake send-only client so no network is touched. `getMe`
+ *  resolves the bot username used to build the offer deep-link button. */
+function withFakeClient(
+  service: TelegramNotifierService,
+  username: string | undefined = 'mator_dealers_bot',
+) {
   const sendMessage = jest.fn().mockResolvedValue(undefined);
+  const getMe = jest.fn().mockResolvedValue({ username });
   (service as unknown as { client: unknown }).client = {
-    telegram: { sendMessage },
+    telegram: { sendMessage, getMe },
   };
   return sendMessage;
 }
@@ -114,19 +119,31 @@ describe('TelegramNotifierService', () => {
       expect(opts).toMatchObject({ parse_mode: 'HTML' });
     });
 
-    it('attaches the «Связаться для доставки» URL button (@username → t.me url)', async () => {
+    it('makes «🙋 У меня есть» (offer deep-link) the primary button', async () => {
       const service = new TelegramNotifierService(configWith(FULL_ENV));
       const sendMessage = withFakeClient(service);
       await service.sendSourcingTicketToDealers(ticket());
-      const opts = sendMessage.mock.calls[0][2];
-      const button = opts.reply_markup.inline_keyboard[0][0];
-      expect(button).toMatchObject({
-        text: 'Связаться для доставки',
-        url: 'https://t.me/mator_manager',
+      const first = sendMessage.mock.calls[0][2].reply_markup.inline_keyboard[0][0];
+      expect(first).toMatchObject({
+        text: '🙋 У меня есть',
+        url: 'https://t.me/mator_dealers_bot?start=offer_tkt_1',
       });
     });
 
-    it('omits the button when no manager contact is configured', async () => {
+    it('keeps the «Связаться для доставки» manager button (@username → t.me url)', async () => {
+      const service = new TelegramNotifierService(configWith(FULL_ENV));
+      const sendMessage = withFakeClient(service);
+      await service.sendSourcingTicketToDealers(ticket());
+      const flat = sendMessage.mock.calls[0][2].reply_markup.inline_keyboard.flat();
+      expect(flat).toContainEqual(
+        expect.objectContaining({
+          text: 'Связаться для доставки',
+          url: 'https://t.me/mator_manager',
+        }),
+      );
+    });
+
+    it('omits the manager button when no manager contact is configured (offer button stays)', async () => {
       const service = new TelegramNotifierService(
         configWith({
           TELEGRAM_BOT_TOKEN: 'bot-token',
@@ -135,17 +152,38 @@ describe('TelegramNotifierService', () => {
       );
       const sendMessage = withFakeClient(service);
       await service.sendSourcingTicketToDealers(ticket());
+      const flat = sendMessage.mock.calls[0][2].reply_markup.inline_keyboard.flat();
+      expect(flat.some((b: { text: string }) => b.text === 'Связаться для доставки')).toBe(false);
+      expect(flat.some((b: { text: string }) => b.text === '🙋 У меня есть')).toBe(true);
+    });
+
+    it('still sends (offer button omitted) when getMe fails', async () => {
+      const service = new TelegramNotifierService(
+        configWith({
+          TELEGRAM_BOT_TOKEN: 'bot-token',
+          TELEGRAM_DEALERS_GROUP_ID: '-1009999',
+        }),
+      );
+      const sendMessage = jest.fn().mockResolvedValue(undefined);
+      (service as unknown as { client: unknown }).client = {
+        telegram: { sendMessage, getMe: jest.fn().mockRejectedValue(new Error('boom')) },
+      };
+      jest.spyOn((service as any).logger, 'warn').mockImplementation(() => undefined);
+      await service.sendSourcingTicketToDealers(ticket());
+      // No manager URL, getMe failed → no buttons at all, but the card still posts.
       expect(sendMessage.mock.calls[0][2].reply_markup).toBeUndefined();
     });
 
-    it('accepts a full URL for the manager contact unchanged', () => {
+    it('accepts a full URL for the manager contact unchanged', async () => {
       const service = new TelegramNotifierService(
         configWith({ ...FULL_ENV, TELEGRAM_MANAGER_USERNAME: 'https://wa.me/998901112233' }),
       );
-      const markup = service.deliveryButtonMarkup();
-      expect(markup.reply_markup?.inline_keyboard[0][0]).toMatchObject({
-        url: 'https://wa.me/998901112233',
-      });
+      withFakeClient(service);
+      const markup = await service.cardMarkup('tkt_1');
+      const flat = markup.reply_markup?.inline_keyboard.flat() ?? [];
+      expect(flat).toContainEqual(
+        expect.objectContaining({ url: 'https://wa.me/998901112233' }),
+      );
     });
 
     it('resolves (never rejects) when Telegram delivery fails', async () => {

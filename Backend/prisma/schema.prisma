@@ -302,6 +302,7 @@ enum NotificationType {
   VEHICLE_STATUS_UPDATED
   MYID_VERIFIED
   MARKETING
+  SOURCING_OFFER
 }
 
 enum AiMessageRole {
@@ -1998,7 +1999,59 @@ enum SourcingTicketStatus {
   PENDING
   IN_PROGRESS
   OFFERED
+  ACCEPTED
   CLOSED
+  CANCELLED
+}
+
+// A seller's quote for a sourcing ticket. Price is the ONLY hard requirement —
+// a seller who can't send a photo still files a valid, first-class offer, so
+// `images` may be empty. Condition/availability/note are best-effort extras.
+// `seller*` fields identify the Telegram dealer who quoted (no FK — dealers are
+// Telegram users, not AppUsers). Delivered to the requesting customer as a
+// SOURCING_OFFER notification.
+enum SourcingOfferCondition {
+  NEW
+  USED
+  OEM
+  AFTERMARKET
+  UNKNOWN
+}
+
+enum SourcingOfferAvailability {
+  IN_STOCK
+  ON_ORDER
+  UNKNOWN
+}
+
+enum SourcingOfferStatus {
+  SENT
+  ACCEPTED
+  DECLINED
+  EXPIRED
+}
+
+model SourcingOffer {
+  id             String                    @id @db.VarChar(64)
+  ticketId       String                    @map("ticket_id") @db.Uuid
+  price          Int
+  currency       String                    @default("UZS") @db.VarChar(8)
+  condition      SourcingOfferCondition    @default(UNKNOWN)
+  availability   SourcingOfferAvailability @default(UNKNOWN)
+  etaDays        Int?                      @map("eta_days")
+  note           String?                   @db.Text
+  images         String[]                  @default([])
+  sellerTgId     String                    @map("seller_tg_id")
+  sellerName     String?                   @map("seller_name")
+  sellerUsername String?                   @map("seller_username")
+  status         SourcingOfferStatus       @default(SENT)
+  createdAt      DateTime                  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime                  @updatedAt @map("updated_at") @db.Timestamptz(3)
+  ticket         SourcingTicket            @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId])
+  @@index([status])
+  @@map("sourcing_offers")
 }
 
 // A sourcing request raised by AiChatService when RAG finds no in-stock match.
@@ -2014,6 +2067,7 @@ model SourcingTicket {
   status        SourcingTicketStatus @default(PENDING)
   createdAt     DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt     DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
+  offers        SourcingOffer[]
 
   @@index([status])
   @@index([userId])

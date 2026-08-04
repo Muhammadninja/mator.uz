@@ -23,4 +23,5 @@ export const CloudinaryFolder = {
   PRODUCTS: 'mator/products',
   AVATARS: 'mator/avatars',
   DEALER_LOGOS: 'mator/dealers',
+  SOURCING_OFFERS: 'mator/sourcing',
 } as const;
