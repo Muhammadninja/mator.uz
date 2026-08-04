@@ -143,8 +143,19 @@ export class SourcingService {
   /**
    * Permanently remove a ticket. Throws NotFoundException when no ticket has the
    * given id (Prisma P2025 on delete of a missing row).
+   *
+   * The ticket's offers cascade-delete (FK onDelete: Cascade), but the customer's
+   * SOURCING_OFFER notifications have no FK to the offer, so they would dangle
+   * (tapping one → "offer not found"). We collect the offer ids first and clean
+   * their notifications after the delete — best-effort, so a cleanup hiccup never
+   * fails the delete.
    */
   async deleteTicket(id: string): Promise<void> {
+    const offers = await this.prisma.sourcingOffer.findMany({
+      where: { ticketId: id },
+      select: { id: true },
+    });
+
     try {
       await this.prisma.sourcingTicket.delete({ where: { id } });
     } catch (err) {
@@ -155,6 +166,17 @@ export class SourcingService {
         throw new NotFoundException('Sourcing ticket not found');
       }
       throw err;
+    }
+
+    if (offers.length > 0) {
+      await this.prisma.notification
+        .deleteMany({
+          where: {
+            type: 'SOURCING_OFFER',
+            deeplinkPath: { in: offers.map((o) => `/sourcing/offer/${o.id}`) },
+          },
+        })
+        .catch(() => undefined);
     }
   }
 }
