@@ -205,6 +205,54 @@ export class TelegramNotifierService {
     }
   }
 
+  /**
+   * DM the dealer that the customer ACCEPTED their offer (bought it). The dealer
+   * DM'd the bot to submit the offer, so their `sellerTgId` chat is reachable.
+   * Send-only, resolves-never-rejects — a Telegram hiccup never fails the accept.
+   */
+  async notifyDealerOfferAccepted(
+    sellerTgId: string,
+    partName: string | null,
+    priceText: string,
+  ): Promise<void> {
+    const part = this.escape(partName ?? 'запчасть');
+    await this.dmDealer(
+      sellerTgId,
+      `✅ <b>Ваше предложение принято!</b>\n\n${part} — ${this.escape(priceText)}\n\n` +
+        'Покупатель добавил товар в корзину. Свяжитесь с менеджером для организации доставки.',
+    );
+  }
+
+  /** DM the dealer that the customer DECLINED their offer, with the reason. */
+  async notifyDealerOfferDeclined(
+    sellerTgId: string,
+    partName: string | null,
+    reasonLabel?: string | null,
+  ): Promise<void> {
+    const part = this.escape(partName ?? 'запчасть');
+    const reason = reasonLabel ? `\nПричина: ${this.escape(reasonLabel)}` : '';
+    await this.dmDealer(
+      sellerTgId,
+      `❌ Покупатель отклонил ваше предложение (${part}).${reason}`,
+    );
+  }
+
+  /** Send one HTML DM to a dealer by their Telegram user id. Only the bot token
+   *  is required (not the group). Logs, never throws. */
+  private async dmDealer(sellerTgId: string, html: string): Promise<void> {
+    if (!this.botToken || !sellerTgId) return;
+    try {
+      await this.bot().telegram.sendMessage(sellerTgId, html, {
+        parse_mode: 'HTML',
+        link_preview_options: { is_disabled: true },
+      });
+    } catch (err) {
+      this.logger.warn(
+        `Failed to DM dealer ${sellerTgId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
   /** The send-only client, constructed once on first use. */
   private bot(): Telegraf {
     this.client ??= new Telegraf(this.botToken);

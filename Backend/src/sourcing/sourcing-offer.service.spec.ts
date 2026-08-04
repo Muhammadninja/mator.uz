@@ -22,8 +22,10 @@ const OWNED_OFFER = {
   id: 'soff_1',
   ticketId: 'ticket-1',
   price: 250000,
+  currency: 'UZS',
   images: ['https://cdn/img1.jpg'],
   status: 'SENT',
+  sellerTgId: '99',
   ticket: { userId: 'usr_1', extractedData: { part_name: 'Тормозные колодки' } },
 };
 
@@ -51,14 +53,19 @@ function makePrisma(overrides: Record<string, unknown> = {}) {
 function build(prisma = makePrisma()) {
   const notifications = { emit: jest.fn(async () => ({ id: 'ntf_1' })) };
   const cart = { addSourcedOffer: jest.fn(async () => ({ items: [], subtotalUzs: 250000 })) };
+  const telegram = {
+    notifyDealerOfferAccepted: jest.fn(async () => undefined),
+    notifyDealerOfferDeclined: jest.fn(async () => undefined),
+  };
   const service = new SourcingOfferService(
     prisma as never,
     notifications as never,
     cart as never,
+    telegram as never,
   );
   jest.spyOn((service as any).logger, 'warn').mockImplementation(() => undefined);
   jest.spyOn((service as any).logger, 'debug').mockImplementation(() => undefined);
-  return { service, prisma, notifications, cart };
+  return { service, prisma, notifications, cart, telegram };
 }
 
 const baseInput = {
@@ -181,6 +188,16 @@ describe('SourcingOfferService.acceptOffer', () => {
     expect(snapshot).toMatchObject({ subtotalUzs: 250000 });
   });
 
+  it('notifies the dealer their offer was accepted', async () => {
+    const { service, telegram } = build();
+    await service.acceptOffer('soff_1', 'usr_1');
+    expect(telegram.notifyDealerOfferAccepted).toHaveBeenCalledWith(
+      '99',
+      'Тормозные колодки',
+      expect.stringContaining('UZS'),
+    );
+  });
+
   it('is idempotent-safe: a non-SENT offer (flip count 0) → Conflict, no cart write', async () => {
     const prisma = makePrisma({
       sourcingOffer: {
@@ -221,6 +238,16 @@ describe('SourcingOfferService.rejectOffer', () => {
     );
     expect(prisma.sourcingTicket.update).not.toHaveBeenCalled();
     expect(res).toEqual({ success: true });
+  });
+
+  it('notifies the dealer their offer was declined + reason', async () => {
+    const { service, telegram } = build();
+    await service.rejectOffer('soff_1', 'usr_1', 'TOO_EXPENSIVE');
+    expect(telegram.notifyDealerOfferDeclined).toHaveBeenCalledWith(
+      '99',
+      'Тормозные колодки',
+      'слишком дорого',
+    );
   });
 
   it('conflicts when the offer is no longer SENT', async () => {

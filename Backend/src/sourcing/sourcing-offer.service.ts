@@ -16,7 +16,16 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CartService } from '../cart/cart.service';
+import { TelegramNotifierService } from '../telegram/telegram-notifier.service';
 import { prefixedId, IdPrefix } from '../common/ulid.util';
+
+/** Decline reason → short RU label for the dealer DM. */
+const DECLINE_REASON_RU: Record<SourcingOfferDeclineReason, string> = {
+  TOO_EXPENSIVE: 'слишком дорого',
+  FOUND_CHEAPER: 'нашёл дешевле',
+  NO_LONGER_NEEDED: 'уже не нужно',
+  OTHER: 'другое',
+};
 
 /**
  * A seller's quote against a sourcing ticket, as captured from the Telegram
@@ -68,6 +77,7 @@ export class SourcingOfferService {
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
     private readonly cart: CartService,
+    private readonly telegram: TelegramNotifierService,
   ) {}
 
   /**
@@ -160,6 +170,13 @@ export class SourcingOfferService {
       data: { status: SourcingTicketStatus.ACCEPTED },
     });
 
+    // Let the dealer know their offer was bought (fire-and-forget).
+    void this.telegram.notifyDealerOfferAccepted(
+      offer.sellerTgId,
+      this.partName(offer.ticket.extractedData),
+      `${offer.price.toLocaleString('ru-RU')} ${offer.currency}`,
+    );
+
     return cart;
   }
 
@@ -171,7 +188,7 @@ export class SourcingOfferService {
     reason: SourcingOfferDeclineReason,
     note?: string | null,
   ) {
-    await this.loadOwnedOffer(offerId, userId);
+    const offer = await this.loadOwnedOffer(offerId, userId);
     const flip = await this.prisma.sourcingOffer.updateMany({
       where: { id: offerId, status: 'SENT' },
       data: { status: 'DECLINED', declineReason: reason, declineNote: note ?? null },
@@ -179,6 +196,14 @@ export class SourcingOfferService {
     if (flip.count === 0) {
       throw new ConflictException('Offer can no longer be declined');
     }
+
+    // Let the dealer know their offer was declined + why (fire-and-forget).
+    void this.telegram.notifyDealerOfferDeclined(
+      offer.sellerTgId,
+      this.partName(offer.ticket.extractedData),
+      DECLINE_REASON_RU[reason],
+    );
+
     return { success: true };
   }
 
