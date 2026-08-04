@@ -19,6 +19,7 @@ export function presentOffer(offer: SourcingOffer & { partName: string | null })
     images: offer.images,
     sellerUsername: offer.sellerUsername,
     status: offer.status,
+    declineReason: offer.declineReason,
     createdAt: offer.createdAt,
   };
 }

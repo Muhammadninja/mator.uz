@@ -106,6 +106,35 @@ export class CartService {
     return this.snapshot(userId);
   }
 
+  /**
+   * Add an accepted sourcing offer to the cart as a self-contained line (no
+   * catalog part — the title/price/image are carried on the row). Idempotent:
+   * re-accepting an offer already in the cart just returns the current snapshot
+   * rather than stacking duplicate lines. Called by SourcingOfferService inside
+   * the accept transaction.
+   */
+  async addSourcedOffer(
+    userId: string,
+    input: { offerId: string; title: string; priceUzs: number | string; imageUrl?: string | null },
+  ) {
+    const cart = await this.getOrCreate(userId);
+    const already = cart.items.find((i) => i.offerId === input.offerId);
+    if (!already) {
+      await this.prisma.cartItem.create({
+        data: {
+          id: prefixedId(IdPrefix.CART_ITEM),
+          cartId: cart.id,
+          offerId: input.offerId,
+          title: input.title,
+          imageUrl: input.imageUrl ?? null,
+          priceUzsSnapshot: input.priceUzs,
+          quantity: 1,
+        },
+      });
+    }
+    return this.snapshot(userId);
+  }
+
   async updateItem(userId: string, itemId: string, quantity: number) {
     await this.assertItemOwned(userId, itemId);
     if (quantity <= 0) {
