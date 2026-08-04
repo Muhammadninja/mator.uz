@@ -1345,6 +1345,7 @@ model CartItem {
   serviceId        String?   @map("service_id") @db.VarChar(64)
   providerId       String?   @map("provider_id") @db.VarChar(64)
   vehicleId        String?   @map("vehicle_id") @db.VarChar(64)
+  offerId          String?   @map("offer_id") @db.VarChar(64)
   title            String    @db.VarChar(255)
   imageUrl         String?   @map("image_url")
   quantity         Int       @default(1)
@@ -1352,6 +1353,7 @@ model CartItem {
   priceUzsSnapshot Decimal   @map("price_uzs_snapshot") @db.Decimal(14, 2)
   createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
   cart             Cart      @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  offer            SourcingOffer? @relation(fields: [offerId], references: [id], onDelete: SetNull)
 
   @@index([cartId])
   @@map("cart_items")
@@ -2031,6 +2033,15 @@ enum SourcingOfferStatus {
   EXPIRED
 }
 
+// Why a customer turned an offer down — feeds back to sourcing so operators /
+// dealers can re-quote (e.g. TOO_EXPENSIVE → find a cheaper source).
+enum SourcingOfferDeclineReason {
+  TOO_EXPENSIVE
+  FOUND_CHEAPER
+  NO_LONGER_NEEDED
+  OTHER
+}
+
 model SourcingOffer {
   id             String                    @id @db.VarChar(64)
   ticketId       String                    @map("ticket_id") @db.Uuid
@@ -2045,9 +2056,12 @@ model SourcingOffer {
   sellerName     String?                   @map("seller_name")
   sellerUsername String?                   @map("seller_username")
   status         SourcingOfferStatus       @default(SENT)
+  declineReason  SourcingOfferDeclineReason? @map("decline_reason")
+  declineNote    String?                   @map("decline_note") @db.Text
   createdAt      DateTime                  @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt      DateTime                  @updatedAt @map("updated_at") @db.Timestamptz(3)
   ticket         SourcingTicket            @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  cartItems      CartItem[]
 
   @@index([ticketId])
   @@index([status])

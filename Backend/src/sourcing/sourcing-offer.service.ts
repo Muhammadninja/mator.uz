@@ -1,14 +1,21 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import {
   NotificationType,
   Prisma,
   SourcingOffer,
   SourcingOfferAvailability,
   SourcingOfferCondition,
+  SourcingOfferDeclineReason,
   SourcingTicketStatus,
 } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { CartService } from '../cart/cart.service';
 import { prefixedId, IdPrefix } from '../common/ulid.util';
 
 /**
@@ -60,6 +67,7 @@ export class SourcingOfferService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
+    private readonly cart: CartService,
   ) {}
 
   /**
@@ -120,6 +128,70 @@ export class SourcingOfferService {
     if (!offer || offer.ticket.userId !== userId) return null;
     const { ticket, ...rest } = offer;
     return { ...rest, partName: this.partName(ticket.extractedData) };
+  }
+
+  /**
+   * Accept an offer → add it to the customer's cart as a self-contained line and
+   * move the offer + ticket to ACCEPTED. The status flip is an atomic
+   * updateMany guarded on `status = SENT`, so a double-tap / concurrent accept
+   * can't add the line twice. Returns the updated cart snapshot for the app.
+   */
+  async acceptOffer(offerId: string, userId: string) {
+    const offer = await this.loadOwnedOffer(offerId, userId);
+
+    const flip = await this.prisma.sourcingOffer.updateMany({
+      where: { id: offerId, status: 'SENT' },
+      data: { status: 'ACCEPTED' },
+    });
+    if (flip.count === 0) {
+      throw new ConflictException('Offer is no longer available');
+    }
+
+    const cart = await this.cart.addSourcedOffer(userId, {
+      offerId,
+      title: this.partName(offer.ticket.extractedData) ?? 'Запчасть',
+      priceUzs: offer.price,
+      imageUrl: offer.images[0] ?? null,
+    });
+
+    // The whole ticket is resolved once the customer buys one offer.
+    await this.prisma.sourcingTicket.update({
+      where: { id: offer.ticketId },
+      data: { status: SourcingTicketStatus.ACCEPTED },
+    });
+
+    return cart;
+  }
+
+  /** Decline an offer with a reason. The ticket stays open so other dealers can
+   *  still win it. Atomic on `status = SENT` (can't decline an accepted offer). */
+  async rejectOffer(
+    offerId: string,
+    userId: string,
+    reason: SourcingOfferDeclineReason,
+    note?: string | null,
+  ) {
+    await this.loadOwnedOffer(offerId, userId);
+    const flip = await this.prisma.sourcingOffer.updateMany({
+      where: { id: offerId, status: 'SENT' },
+      data: { status: 'DECLINED', declineReason: reason, declineNote: note ?? null },
+    });
+    if (flip.count === 0) {
+      throw new ConflictException('Offer can no longer be declined');
+    }
+    return { success: true };
+  }
+
+  /** Load an offer the caller owns (via its ticket), or throw NotFound. */
+  private async loadOwnedOffer(offerId: string, userId: string) {
+    const offer = await this.prisma.sourcingOffer.findUnique({
+      where: { id: offerId },
+      include: { ticket: { select: { userId: true, extractedData: true } } },
+    });
+    if (!offer || offer.ticket.userId !== userId) {
+      throw new NotFoundException('Offer not found');
+    }
+    return offer;
   }
 
   /**

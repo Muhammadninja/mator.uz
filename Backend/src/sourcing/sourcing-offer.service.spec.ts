@@ -7,7 +7,7 @@
 //   • notification failure / anonymous owner NEVER fails offer creation
 //   • a missing ticket throws NotFoundException
 
-import { NotFoundException } from '@nestjs/common';
+import { ConflictException, NotFoundException } from '@nestjs/common';
 import { NotificationType } from '@prisma/client';
 import { SourcingOfferService } from './sourcing-offer.service';
 
@@ -18,17 +18,28 @@ const TICKET = {
   extractedData: { part_name: 'Тормозные колодки' },
 };
 
+const OWNED_OFFER = {
+  id: 'soff_1',
+  ticketId: 'ticket-1',
+  price: 250000,
+  images: ['https://cdn/img1.jpg'],
+  status: 'SENT',
+  ticket: { userId: 'usr_1', extractedData: { part_name: 'Тормозные колодки' } },
+};
+
 function makePrisma(overrides: Record<string, unknown> = {}) {
   return {
     sourcingTicket: {
       findUnique: jest.fn(async () => TICKET),
       updateMany: jest.fn(async () => ({ count: 1 })),
+      update: jest.fn(async () => TICKET),
     },
     sourcingOffer: {
       create: jest.fn(async ({ data }: { data: Record<string, unknown> }) => ({
         ...data,
       })),
-      findUnique: jest.fn(),
+      findUnique: jest.fn(async () => OWNED_OFFER),
+      updateMany: jest.fn(async () => ({ count: 1 })),
     },
     appUser: {
       findUnique: jest.fn(async () => ({ id: 'usr_1' })),
@@ -39,10 +50,15 @@ function makePrisma(overrides: Record<string, unknown> = {}) {
 
 function build(prisma = makePrisma()) {
   const notifications = { emit: jest.fn(async () => ({ id: 'ntf_1' })) };
-  const service = new SourcingOfferService(prisma as never, notifications as never);
+  const cart = { addSourcedOffer: jest.fn(async () => ({ items: [], subtotalUzs: 250000 })) };
+  const service = new SourcingOfferService(
+    prisma as never,
+    notifications as never,
+    cart as never,
+  );
   jest.spyOn((service as any).logger, 'warn').mockImplementation(() => undefined);
   jest.spyOn((service as any).logger, 'debug').mockImplementation(() => undefined);
-  return { service, prisma, notifications };
+  return { service, prisma, notifications, cart };
 }
 
 const baseInput = {
@@ -140,5 +156,84 @@ describe('SourcingOfferService.createOffer', () => {
     const { service } = build(prisma);
 
     await expect(service.createOffer(baseInput)).rejects.toBeInstanceOf(NotFoundException);
+  });
+});
+
+describe('SourcingOfferService.acceptOffer', () => {
+  it('adds the offer to the cart and marks offer + ticket ACCEPTED', async () => {
+    const { service, prisma, cart } = build();
+
+    const snapshot = await service.acceptOffer('soff_1', 'usr_1');
+
+    expect(prisma.sourcingOffer.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'soff_1', status: 'SENT' },
+        data: { status: 'ACCEPTED' },
+      }),
+    );
+    expect(cart.addSourcedOffer).toHaveBeenCalledWith(
+      'usr_1',
+      expect.objectContaining({ offerId: 'soff_1', priceUzs: 250000, title: 'Тормозные колодки' }),
+    );
+    expect(prisma.sourcingTicket.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { status: 'ACCEPTED' } }),
+    );
+    expect(snapshot).toMatchObject({ subtotalUzs: 250000 });
+  });
+
+  it('is idempotent-safe: a non-SENT offer (flip count 0) → Conflict, no cart write', async () => {
+    const prisma = makePrisma({
+      sourcingOffer: {
+        findUnique: jest.fn(async () => OWNED_OFFER),
+        updateMany: jest.fn(async () => ({ count: 0 })),
+      },
+    });
+    const { service, cart } = build(prisma);
+
+    await expect(service.acceptOffer('soff_1', 'usr_1')).rejects.toBeInstanceOf(ConflictException);
+    expect(cart.addSourcedOffer).not.toHaveBeenCalled();
+  });
+
+  it('rejects an offer the caller does not own', async () => {
+    const prisma = makePrisma({
+      sourcingOffer: {
+        findUnique: jest.fn(async () => ({ ...OWNED_OFFER, ticket: { userId: 'someone-else' } })),
+        updateMany: jest.fn(),
+      },
+    });
+    const { service } = build(prisma);
+
+    await expect(service.acceptOffer('soff_1', 'usr_1')).rejects.toBeInstanceOf(NotFoundException);
+  });
+});
+
+describe('SourcingOfferService.rejectOffer', () => {
+  it('declines with a reason (ticket left untouched)', async () => {
+    const { service, prisma } = build();
+
+    const res = await service.rejectOffer('soff_1', 'usr_1', 'TOO_EXPENSIVE', 'дорого');
+
+    expect(prisma.sourcingOffer.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'soff_1', status: 'SENT' },
+        data: { status: 'DECLINED', declineReason: 'TOO_EXPENSIVE', declineNote: 'дорого' },
+      }),
+    );
+    expect(prisma.sourcingTicket.update).not.toHaveBeenCalled();
+    expect(res).toEqual({ success: true });
+  });
+
+  it('conflicts when the offer is no longer SENT', async () => {
+    const prisma = makePrisma({
+      sourcingOffer: {
+        findUnique: jest.fn(async () => OWNED_OFFER),
+        updateMany: jest.fn(async () => ({ count: 0 })),
+      },
+    });
+    const { service } = build(prisma);
+
+    await expect(
+      service.rejectOffer('soff_1', 'usr_1', 'OTHER'),
+    ).rejects.toBeInstanceOf(ConflictException);
   });
 });
