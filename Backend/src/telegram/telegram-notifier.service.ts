@@ -51,6 +51,8 @@ export class TelegramNotifierService {
   private readonly managerContactUrl: string;
   /** Built lazily on first send — an unconfigured deployment builds nothing. */
   private client?: Telegraf;
+  /** Cached bot @username (for the offer deep-link); resolved once via getMe. */
+  private cachedUsername?: string;
 
   constructor(config: ConfigService) {
     this.botToken = config.get<string>('TELEGRAM_BOT_TOKEN')?.trim() ?? '';
@@ -99,7 +101,7 @@ export class TelegramNotifierService {
       await this.bot().telegram.sendMessage(this.dealersGroupId, text, {
         parse_mode: 'HTML',
         link_preview_options: { is_disabled: true },
-        ...this.deliveryButtonMarkup(),
+        ...(await this.cardMarkup(ticket.id)),
       });
       this.logger.debug(`Sourcing ticket ${ticket.id} sent to dealers group`);
     } catch (err) {
@@ -158,15 +160,49 @@ export class TelegramNotifierService {
   }
 
   /**
-   * The «Связаться для доставки» inline button, as a partial sendMessage option
-   * ({ reply_markup }). Returns {} when no manager URL is configured, so the
-   * card is simply sent without a button (spread into the send options).
+   * The card's inline keyboard, as a partial sendMessage option ({ reply_markup }):
+   *   • «🙋 У меня есть» — deep-links the dealer into a private bot chat that runs
+   *     the offer-capture flow (`/start offer_<ticketId>`). Present only when the
+   *     bot @username resolves.
+   *   • «Связаться для доставки» — the manager DM (when configured).
+   * Returns {} when neither button can be built, so the card is sent bare.
    */
-  deliveryButtonMarkup(): { reply_markup?: InlineKeyboardMarkup } {
-    if (!this.managerContactUrl) return {};
-    return Markup.inlineKeyboard([
-      Markup.button.url('Связаться для доставки', this.managerContactUrl),
-    ]);
+  async cardMarkup(ticketId: string): Promise<{ reply_markup?: InlineKeyboardMarkup }> {
+    const rows: ReturnType<typeof Markup.button.url>[][] = [];
+
+    const username = await this.botUsername();
+    if (username) {
+      // `offer_` prefix must match OFFER_DEEPLINK_PREFIX in telegram-offer.service.
+      rows.push([
+        Markup.button.url(
+          '🙋 У меня есть',
+          `https://t.me/${username}?start=offer_${ticketId}`,
+        ),
+      ]);
+    }
+    if (this.managerContactUrl) {
+      rows.push([Markup.button.url('Связаться для доставки', this.managerContactUrl)]);
+    }
+
+    return rows.length ? Markup.inlineKeyboard(rows) : {};
+  }
+
+  /** Bot @username, resolved once via getMe and cached. Null on failure (retried
+   *  next send — a transient getMe error must not permanently drop the button). */
+  private async botUsername(): Promise<string | null> {
+    if (this.cachedUsername) return this.cachedUsername;
+    try {
+      const me = await this.bot().telegram.getMe();
+      this.cachedUsername = me.username ?? undefined;
+      return this.cachedUsername ?? null;
+    } catch (err) {
+      this.logger.warn(
+        `getMe failed — offer deep-link button omitted this send: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return null;
+    }
   }
 
   /** The send-only client, constructed once on first use. */

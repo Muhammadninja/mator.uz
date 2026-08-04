@@ -28,6 +28,7 @@ import { QueueService } from '../queue/queue.service';
 import { DraftLock } from '../redis/draft-lock.service';
 import { RedisKeys } from '../redis/redis.keys';
 import { MediaGroupBuffer } from './media-group-buffer';
+import { TelegramOfferService } from './telegram-offer.service';
 import { persistVehicleLinks } from './vehicle-links';
 import {
   ProductDraftService,
@@ -412,6 +413,8 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     private readonly locks: DraftLock,
     // The dynamic category tree the wizard's category steps are built from.
     private readonly categories: PartCategoryService,
+    // The "У меня есть" → DM offer-capture flow (isolated session state).
+    private readonly offerFlow: TelegramOfferService,
   ) {
     this.draftTtlMs = resolveDraftTtlMs(
       this.config.get<string>('DRAFT_TTL_HOURS'),
@@ -455,6 +458,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   onModuleDestroy() {
     this.mediaBuffer?.clear();
     this.groupCtx.clear();
+    this.offerFlow.clear();
     this.wizard.clear();
     this.staleNoticeSentAt.clear();
     for (const session of this.pending.values()) clearTimeout(session.expiry);
@@ -463,11 +467,25 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   }
 
   private registerHandlers() {
+    // Sourcing offer-flow inline buttons (`sof:*`) — namespaced so they never
+    // collide with the wizard's own actions.
+    this.offerFlow.registerActions(this.bot);
+
     // /start: no instruction message — an ACTIVE seller goes straight into the
     // product-creation wizard (restarting any wizard already in progress).
     this.bot.start(async (ctx) => {
       const from = ctx.from;
       if (!from) return;
+
+      // "У меня есть" deep-link (`/start offer_<ticketId>`) → the sourcing offer
+      // DM flow, BEFORE any seller-wizard logic. Consumed here when it matches.
+      const startPayload =
+        typeof (ctx as Context & { startPayload?: string }).startPayload === 'string'
+          ? (ctx as Context & { startPayload?: string }).startPayload!
+          : 'text' in ctx.message
+            ? ctx.message.text.split(/\s+/).slice(1).join(' ')
+            : '';
+      if (await this.offerFlow.startFromDeepLink(ctx, startPayload)) return;
 
       const seller = await this.sellers.upsertFromBot(
         BigInt(from.id),
@@ -641,6 +659,9 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       const from = msg.from;
       if (!from) return;
 
+      // An active offer session takes precedence over the product wizard.
+      if (await this.offerFlow.handleText(ctx)) return;
+
       const session = this.wizard.get(from.id);
       if (!session) {
         await ctx.reply(START_HINT);
@@ -696,6 +717,11 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
       // Highest-resolution rendition of this photo.
       const bestPhoto = msg.photo[msg.photo.length - 1];
+
+      // An active offer session claims incoming photos (each appended to the
+      // quote), before the wizard's album buffer sees them.
+      if (await this.offerFlow.handlePhoto(ctx, bestPhoto.file_id)) return;
+
       const groupId = 'media_group_id' in msg ? msg.media_group_id : undefined;
 
       if (groupId) {
