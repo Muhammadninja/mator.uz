@@ -78,6 +78,29 @@ export class SourcingService {
         orderBy: { createdAt: 'desc' },
         skip: (page - 1) * limit,
         take: limit,
+        // Each ticket carries its dealer offers so the operator console can show
+        // the live state (SENT = offered, ACCEPTED = bought, DECLINED = rejected).
+        // sellerTgId is intentionally omitted (internal).
+        include: {
+          offers: {
+            orderBy: { createdAt: 'desc' },
+            select: {
+              id: true,
+              price: true,
+              currency: true,
+              status: true,
+              condition: true,
+              availability: true,
+              etaDays: true,
+              note: true,
+              images: true,
+              sellerName: true,
+              sellerUsername: true,
+              declineReason: true,
+              createdAt: true,
+            },
+          },
+        },
       }),
     ]);
 
