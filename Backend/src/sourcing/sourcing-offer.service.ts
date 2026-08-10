@@ -130,14 +130,26 @@ export class SourcingOfferService {
   async getOfferForUser(
     offerId: string,
     userId: string,
-  ): Promise<(SourcingOffer & { partName: string | null }) | null> {
+  ): Promise<
+    | (SourcingOffer & {
+        partName: string | null;
+        vehicleBrand: string | null;
+        vehicleModel: string | null;
+      })
+    | null
+  > {
     const offer = await this.prisma.sourcingOffer.findUnique({
       where: { id: offerId },
       include: { ticket: { select: { userId: true, extractedData: true } } },
     });
     if (!offer || offer.ticket.userId !== userId) return null;
     const { ticket, ...rest } = offer;
-    return { ...rest, partName: this.partName(ticket.extractedData) };
+    return {
+      ...rest,
+      partName: this.partName(ticket.extractedData),
+      vehicleBrand: this.strField(ticket.extractedData, 'brand'),
+      vehicleModel: this.strField(ticket.extractedData, 'model'),
+    };
   }
 
   /**
@@ -252,6 +264,10 @@ export class SourcingOfferService {
           offerId: offer.id,
           ticketId: offer.ticketId,
           partName,
+          // The vehicle the customer asked the part for (from the chat-extracted
+          // ticket data) so the offer card can show "for <Brand> <Model>".
+          vehicleBrand: this.strField(extractedData, 'brand'),
+          vehicleModel: this.strField(extractedData, 'model'),
           price: offer.price,
           currency: offer.currency,
           condition: offer.condition,
@@ -284,8 +300,14 @@ export class SourcingOfferService {
   }
 
   private partName(extractedData: Prisma.JsonValue): string | null {
+    return this.strField(extractedData, 'part_name');
+  }
+
+  /** Read a trimmed non-empty string field out of the ticket's `extractedData`
+   *  jsonb (part_name / brand / model / …), or null. */
+  private strField(extractedData: Prisma.JsonValue, key: string): string | null {
     if (extractedData && typeof extractedData === 'object' && !Array.isArray(extractedData)) {
-      const v = (extractedData as Record<string, unknown>).part_name;
+      const v = (extractedData as Record<string, unknown>)[key];
       if (typeof v === 'string' && v.trim()) return v.trim();
     }
     return null;

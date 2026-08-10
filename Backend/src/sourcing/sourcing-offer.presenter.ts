@@ -5,11 +5,21 @@ import { SourcingOffer } from '@prisma/client';
  * seller id — only a display username (if any) is exposed for a "contact seller"
  * affordance.
  */
-export function presentOffer(offer: SourcingOffer & { partName: string | null }) {
+export function presentOffer(
+  offer: SourcingOffer & {
+    partName: string | null;
+    vehicleBrand?: string | null;
+    vehicleModel?: string | null;
+  },
+) {
   return {
     id: offer.id,
     ticketId: offer.ticketId,
     partName: offer.partName,
+    // The vehicle the part was requested for (from the ticket's chat-extracted
+    // data), so the app can show "for <Brand> <Model>" on existing offers too.
+    vehicleBrand: offer.vehicleBrand ?? null,
+    vehicleModel: offer.vehicleModel ?? null,
     price: offer.price,
     currency: offer.currency,
     condition: offer.condition,
