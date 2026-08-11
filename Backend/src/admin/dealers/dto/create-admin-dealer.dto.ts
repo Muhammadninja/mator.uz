@@ -1,14 +1,22 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { Type } from 'class-transformer';
 import {
   IsBoolean,
   IsIn,
   IsInt,
+  IsNumber,
   IsOptional,
   IsString,
+  Matches,
   Max,
   MaxLength,
   Min,
 } from 'class-validator';
+import {
+  MAX_VAT_PERCENT,
+  MIN_VAT_PERCENT,
+  TIN_PATTERN,
+} from '../../../common/fiscal.util';
 import { ADMIN_DEALER_STATUSES } from './list-admin-dealers.query.dto';
 // `import type` is required: with isolatedModules + emitDecoratorMetadata, a
 // type used in a decorated signature must not be emitted as a value import.
@@ -85,6 +93,35 @@ export class CreateAdminDealerDto {
   @Min(0)
   @Max(200)
   years?: number;
+
+  // ── Налоговые данные ──────────────────────────────────────────────────────
+  // Optional at creation: a dealer may be onboarded before its tax data is
+  // known, and its sellers can list products meanwhile. Only Payme checkout
+  // requires them (see PaymeFiscalService), so they can be filled in later via
+  // PATCH without touching a single product.
+  @ApiPropertyOptional({
+    description: 'ИНН (9 digits) or ПИНФЛ (14 digits).',
+    example: '301234567',
+  })
+  @IsOptional()
+  @IsString()
+  @Matches(TIN_PATTERN, {
+    message: 'tin must be 9 digits (ИНН) or 14 digits (ПИНФЛ)',
+  })
+  tin?: string;
+
+  @ApiPropertyOptional({
+    description: 'Ставка НДС in percent (e.g. 0 or 12).',
+    example: 12,
+    minimum: MIN_VAT_PERCENT,
+    maximum: MAX_VAT_PERCENT,
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(MIN_VAT_PERCENT)
+  @Max(MAX_VAT_PERCENT)
+  vatPercent?: number;
 
   @ApiPropertyOptional({ description: 'MATOR-certified badge. Defaults to true for a console-created dealer.', example: true })
   @IsOptional()

@@ -3,7 +3,11 @@
 // referenced categories, and the cache invalidation that makes an admin edit
 // reach the Telegram seller bot.
 
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  NotFoundException,
+} from '@nestjs/common';
 import { AdminCategoriesService } from './admin-categories.service';
 import { ListCategoriesQueryDto } from './dto/list-categories.query.dto';
 
@@ -18,6 +22,10 @@ const node = (over: Record<string, unknown> = {}) => ({
   color: null,
   isActive: true,
   mainCategory: null,
+  // Фискальные данные — unconfigured by default, the state a category starts in.
+  mxik: null,
+  packageCodeSingle: null,
+  packageCodeSet: null,
   _count: { parts: 0, products: 0, drafts: 0 },
   ...over,
 });
@@ -251,6 +259,166 @@ describe('DELETE guards (deactivation is the preferred path)', () => {
     expect(res).toEqual({
       success: true,
       data: { deleted: 'brakes', reassigned: 0 },
+    });
+  });
+});
+
+// ── Фискальные данные ────────────────────────────────────────────────────────
+// A category owns the MXIK and the two Tasnif package codes every product in it
+// is fiscalized with. The rule the console must enforce is a property of the ROW
+// AFTER the patch, not of the body: "configured" means BOTH an MXIK and a single
+// package code, with the set code optional.
+
+describe('fiscal configuration', () => {
+  const FISCAL = {
+    mxik: '08708005011000000',
+    packageCodeSingle: '1417722',
+    packageCodeSet: '1417723',
+  };
+
+  it('creates a category with one package code', async () => {
+    const { service, prisma } = makeService();
+    await service.create({
+      name: 'Filters',
+      mxik: '08421002001000000',
+      packageCodeSingle: '1499205',
+    });
+    expect(prisma.partCategory.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          mxik: '08421002001000000',
+          packageCodeSingle: '1499205',
+        }),
+      }),
+    );
+    // The set code is not named, so nothing is written for it — the column's
+    // own null is what "sold in one form" means.
+    expect(
+      prisma.partCategory.create.mock.calls[0][0].data,
+    ).not.toHaveProperty('packageCodeSet');
+  });
+
+  it('creates a category with two package codes', async () => {
+    const { service, prisma } = makeService();
+    await service.create({ name: 'Brakes', ...FISCAL });
+    expect(prisma.partCategory.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining(FISCAL),
+      }),
+    );
+  });
+
+  it('creates an UNCONFIGURED category, writing no fiscal columns', async () => {
+    const { service, prisma } = makeService();
+    await service.create({ name: 'Turbochargers' });
+    const data = prisma.partCategory.create.mock.calls[0][0].data;
+    expect(data).not.toHaveProperty('mxik');
+    expect(data).not.toHaveProperty('packageCodeSingle');
+  });
+
+  it('rejects a package code with no MXIK', async () => {
+    const { service } = makeService();
+    await expect(
+      service.create({ name: 'Brakes', packageCodeSingle: '1417722' }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects an MXIK with no single package code', async () => {
+    const { service } = makeService();
+    await expect(
+      service.create({ name: 'Brakes', mxik: '08708005011000000' }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects a SET code without the single code it depends on', async () => {
+    const { service } = makeService();
+    await expect(
+      service.create({
+        name: 'Brakes',
+        mxik: '08708005011000000',
+        packageCodeSet: '1417723',
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('adds a set code to an already-configured category', async () => {
+    const { service, prisma } = makeService();
+    prisma.partCategory.findUnique.mockResolvedValue(
+      node({ mxik: FISCAL.mxik, packageCodeSingle: FISCAL.packageCodeSingle }),
+    );
+    await service.update('brakes', { packageCodeSet: '1417723' });
+    // Only the named column is written — the stored MXIK is left alone.
+    const data = prisma.partCategory.update.mock.calls[0][0].data;
+    expect(data.packageCodeSet).toBe('1417723');
+    expect(data).not.toHaveProperty('mxik');
+  });
+
+  it('refuses to strip the single code from a configured category', async () => {
+    const { service, prisma } = makeService();
+    prisma.partCategory.findUnique.mockResolvedValue(node(FISCAL));
+    await expect(
+      service.update('brakes', { packageCodeSingle: null }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('allows clearing the whole configuration at once', async () => {
+    const { service, prisma } = makeService();
+    prisma.partCategory.findUnique.mockResolvedValue(node(FISCAL));
+    await service.update('brakes', {
+      mxik: null,
+      packageCodeSingle: null,
+      packageCodeSet: null,
+    });
+    expect(prisma.partCategory.update.mock.calls[0][0].data).toEqual(
+      expect.objectContaining({
+        mxik: null,
+        packageCodeSingle: null,
+        packageCodeSet: null,
+      }),
+    );
+  });
+
+  it('treats a blank string as "clear", not as a stored empty code', async () => {
+    const { service, prisma } = makeService();
+    prisma.partCategory.findUnique.mockResolvedValue(node(FISCAL));
+    await expect(
+      service.update('brakes', { mxik: '', packageCodeSingle: '' }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    // …and clearing all three blank-wise is accepted.
+    await service.update('brakes', {
+      mxik: '',
+      packageCodeSingle: '',
+      packageCodeSet: '',
+    });
+    expect(prisma.partCategory.update.mock.calls[0][0].data.mxik).toBeNull();
+  });
+
+  it('writes no fiscal column when the body names none', async () => {
+    const { service, prisma } = makeService();
+    prisma.partCategory.findUnique.mockResolvedValue(node(FISCAL));
+    await service.update('brakes', { name: 'Тормоза' });
+    const data = prisma.partCategory.update.mock.calls[0][0].data;
+    expect(data).not.toHaveProperty('mxik');
+    expect(data).not.toHaveProperty('packageCodeSet');
+  });
+
+  it('reports the derived flags the console renders', async () => {
+    const { service, prisma } = makeService();
+    prisma.partCategory.findUnique.mockResolvedValue(node(FISCAL));
+    const { data } = await service.findOne('brakes');
+    expect(data).toMatchObject({
+      mxik: FISCAL.mxik,
+      packageCodeSingle: FISCAL.packageCodeSingle,
+      packageCodeSet: FISCAL.packageCodeSet,
+      fiscalConfigured: true,
+      offersPackageChoice: true,
+    });
+
+    prisma.partCategory.findUnique.mockResolvedValue(node());
+    const unconfigured = await service.findOne('brakes');
+    expect(unconfigured.data).toMatchObject({
+      fiscalConfigured: false,
+      offersPackageChoice: false,
     });
   });
 });

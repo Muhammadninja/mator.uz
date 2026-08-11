@@ -37,6 +37,9 @@ export const ADMIN_DEALER_DETAIL_SELECT = {
   years: true,
   isCurated: true,
   suspendedReason: true,
+  // Налоговые данные — the console's tax section.
+  tin: true,
+  vatPercent: true,
 } satisfies Prisma.CatalogSellerSelect;
 
 export type AdminDealerListRow = Prisma.CatalogSellerGetPayload<{
@@ -93,6 +96,14 @@ export function presentAdminDealerDetail(d: AdminDealerDetail) {
     rating: Number(d.ratingAvg),
     years: d.years,
     certifiedPartner: d.isCurated,
+    // Налоговые данные. `vatPercent` leaves as a NUMBER (the column is Decimal
+    // so a fractional rate is storable, but JSON should carry 12, not "12.00").
+    // Null is preserved rather than coerced to 0: "not configured" and "0% VAT"
+    // are different facts, and only the first blocks Payme checkout.
+    tin: d.tin ?? null,
+    vatPercent: d.vatPercent == null ? null : Number(d.vatPercent),
+    /** Derived: whether this dealer's products can be paid for through Payme. */
+    fiscalConfigured: d.tin != null && d.vatPercent != null,
     // Only meaningful while suspended; cleared on reactivation, so a stale
     // reason never trails an active dealer.
     suspendedReason:

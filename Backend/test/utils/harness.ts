@@ -11,6 +11,7 @@
 
 import { Global, Module } from '@nestjs/common';
 import { DiscountService } from '../../src/sales/discount.service';
+import { PaymeFiscalService } from '../../src/orders/webhooks/payme-fiscal.service';
 import { QueueService } from '../../src/queue/queue.service';
 
 const MODEL_METHODS = [
@@ -205,6 +206,26 @@ export function fakeDiscounts(): any {
   const svc = new DiscountService(createPrismaMock() as any);
   jest.spyOn(svc, 'loadActiveSales').mockResolvedValue([]);
   return svc;
+}
+
+/**
+ * The REAL fiscal-receipt builder over the Prisma double.
+ *
+ * Deliberately not a stub: with no `order_items` stubbed the mock reports an
+ * order with no product lines, so `buildOrderDetail` returns null and both the
+ * checkout gate and CheckPerformTransaction behave exactly as they did before
+ * fiscalization existed. A test that wants a receipt stubs `orderItem.findMany`
+ * / `catalogPart.findMany` and gets the production mapping, not a fake one.
+ *
+ * `env` supplies the platform's own fiscal codes (delivery, service fee) for a
+ * test that builds a receipt containing them; delivery falls back to the same
+ * defaults production uses.
+ */
+export function fakeFiscal(
+  prisma: PrismaMock,
+  env: Record<string, string | undefined> = {},
+): any {
+  return new PaymeFiscalService(prisma, fakeConfig(env));
 }
 
 let seq = 0;

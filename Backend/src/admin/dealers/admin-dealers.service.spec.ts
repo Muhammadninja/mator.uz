@@ -80,6 +80,10 @@ function detailRow(over: Partial<Record<string, unknown>> = {}) {
     years: 12,
     isCurated: true,
     suspendedReason: null,
+    // Налоговые данные — unconfigured by default, the state every dealer
+    // starts in and the one that blocks Payme checkout.
+    tin: null,
+    vatPercent: null,
     ...over,
   };
 }
@@ -92,6 +96,8 @@ function mutableRow(over: Partial<Record<string, unknown>> = {}) {
     status: DealerStatus.PENDING,
     certified: false,
     lowestPrice: false,
+    tin: null,
+    vatPercent: null,
     ...over,
   };
 }
@@ -580,6 +586,140 @@ describe('AdminDealersService', () => {
       ).rejects.toThrow(NotFoundException);
     });
   });
+
+  // ── Налоговые данные ──────────────────────────────────────────────────────
+  // ИНН/ПИНФЛ and the VAT rate live on the dealer, are set only here (no
+  // automatic lookup, no Telegram question), and are what every Payme receipt
+  // of this dealer's products is built from.
+  describe('tax data', () => {
+    it('saves the TIN', async () => {
+      prisma.catalogSeller.findUnique
+        .mockResolvedValueOnce(mutableRow())
+        .mockResolvedValueOnce(detailRow());
+
+      await service.update('d1', { tin: '301234567' }, CTX);
+
+      expect(prisma.catalogSeller.update).toHaveBeenCalledWith({
+        where: { id: 'd1' },
+        data: { tin: '301234567' },
+      });
+    });
+
+    it('saves the VAT percentage, including an explicit 0', async () => {
+      prisma.catalogSeller.findUnique
+        .mockResolvedValueOnce(mutableRow())
+        .mockResolvedValueOnce(detailRow());
+
+      await service.update('d1', { vatPercent: 0 }, CTX);
+
+      // 0 is a RATE the operator chose, not a missing value: it must be
+      // written, and it must not be mistaken for "nothing to update".
+      expect(prisma.catalogSeller.update).toHaveBeenCalledWith({
+        where: { id: 'd1' },
+        data: { vatPercent: 0 },
+      });
+    });
+
+    it('updates an existing VAT percentage', async () => {
+      prisma.catalogSeller.findUnique
+        .mockResolvedValueOnce(mutableRow({ vatPercent: 0 }))
+        .mockResolvedValueOnce(detailRow());
+
+      await service.update('d1', { vatPercent: 12 }, CTX);
+
+      expect(prisma.catalogSeller.update).toHaveBeenCalledWith({
+        where: { id: 'd1' },
+        data: { vatPercent: 12 },
+      });
+    });
+
+    it('audits both fields together, with before and after values', async () => {
+      prisma.catalogSeller.findUnique
+        .mockResolvedValueOnce(mutableRow({ tin: null, vatPercent: null }))
+        .mockResolvedValueOnce(detailRow());
+
+      await service.update('d1', { tin: '301234567', vatPercent: 12 }, CTX);
+
+      const [entry] = audit.record.mock.calls[0];
+      expect(entry.action).toBe(AdminAuditAction.DEALER_UPDATED);
+      expect(entry.previousValues).toEqual({ tin: null, vatPercent: null });
+      expect(entry.newValues).toEqual({ tin: '301234567', vatPercent: 12 });
+    });
+
+    it('writes nothing when the values already hold (Decimal compared as a number)', async () => {
+      prisma.catalogSeller.findUnique
+        .mockResolvedValueOnce(
+          // Prisma hands back a Decimal; comparing it to 12 by identity would
+          // report a change on every save.
+          mutableRow({ tin: '301234567', vatPercent: { toString: () => '12' } }),
+        )
+        .mockResolvedValueOnce(detailRow());
+
+      await service.update('d1', { tin: '301234567', vatPercent: 12 }, CTX);
+
+      expect(prisma.catalogSeller.update).not.toHaveBeenCalled();
+      expect(audit.record).not.toHaveBeenCalled();
+    });
+
+    it('clears the TIN on an empty string', async () => {
+      prisma.catalogSeller.findUnique
+        .mockResolvedValueOnce(mutableRow({ tin: '301234567' }))
+        .mockResolvedValueOnce(detailRow());
+
+      await service.update('d1', { tin: '  ' }, CTX);
+
+      expect(prisma.catalogSeller.update).toHaveBeenCalledWith({
+        where: { id: 'd1' },
+        data: { tin: null },
+      });
+    });
+
+    it('stores the tax data given at creation', async () => {
+      // uniqueDealerId probes for a collision (none), then getOne re-reads.
+      prisma.catalogSeller.findUnique
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(detailRow());
+      await service.create(
+        { name: 'BYD Motors', tin: '209876543', vatPercent: 12 },
+        CTX,
+      );
+      expect(prisma.catalogSeller.create.mock.calls[0][0].data).toMatchObject({
+        tin: '209876543',
+        vatPercent: 12,
+      });
+    });
+
+    it('leaves a dealer onboarded WITHOUT tax data unconfigured, not defaulted', async () => {
+      prisma.catalogSeller.findUnique
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(detailRow());
+      await service.create({ name: 'New Dealer' }, CTX);
+      expect(prisma.catalogSeller.create.mock.calls[0][0].data).toMatchObject({
+        tin: null,
+        vatPercent: null,
+      });
+    });
+
+    it('presents both fields, and the derived readiness flag', async () => {
+      prisma.catalogSeller.findUnique.mockResolvedValue(
+        detailRow({ tin: '301234567', vatPercent: 0 }),
+      );
+      const { data } = await service.getOne('d1');
+      // A 0% dealer IS configured — the flag reads null-ness, not truthiness.
+      expect(data).toMatchObject({
+        tin: '301234567',
+        vatPercent: 0,
+        fiscalConfigured: true,
+      });
+
+      prisma.catalogSeller.findUnique.mockResolvedValue(detailRow());
+      expect((await service.getOne('d1')).data).toMatchObject({
+        tin: null,
+        vatPercent: null,
+        fiscalConfigured: false,
+      });
+    });
+  });
 });
 
 // The DTOs are the trust boundary: bad input must be rejected by the global
@@ -651,6 +791,33 @@ describe('UpdateAdminDealerDto', () => {
     expect(validate({ reason: 'x'.repeat(501) })).not.toHaveLength(0);
   });
 
+  // ── Налоговые данные ────────────────────────────────────────────────────
+  it('accepts a 9-digit ИНН and a 14-digit ПИНФЛ', () => {
+    expect(validate({ tin: '301234567' })).toHaveLength(0);
+    expect(validate({ tin: '12345678901234' })).toHaveLength(0);
+  });
+
+  it('rejects a TIN of any other length or shape', () => {
+    expect(validate({ tin: '30123456' })[0].property).toBe('tin');
+    expect(validate({ tin: '3012345678' })[0].property).toBe('tin');
+    expect(validate({ tin: '30123456X' })[0].property).toBe('tin');
+  });
+
+  it('accepts an empty TIN as "clear this field"', () => {
+    expect(validate({ tin: '' })).toHaveLength(0);
+  });
+
+  it('accepts VAT rates across the whole legal range, including 0', () => {
+    expect(validate({ vatPercent: 0 })).toHaveLength(0);
+    expect(validate({ vatPercent: 12 })).toHaveLength(0);
+  });
+
+  it('rejects a VAT rate outside 0–100 or of the wrong type', () => {
+    expect(validate({ vatPercent: -1 })[0].property).toBe('vatPercent');
+    expect(validate({ vatPercent: 101 })[0].property).toBe('vatPercent');
+    expect(validate({ vatPercent: 'twelve' })[0].property).toBe('vatPercent');
+  });
+
   // Derived metrics (gmvUzs, orders, skus, joinedAt) stay absent from the class,
   // so the global pipe's forbidNonWhitelisted rejects them; the editable set is
   // the badges, the status, and the storefront presentation fields.
@@ -669,6 +836,8 @@ describe('UpdateAdminDealerDto', () => {
       lowestPrice: false,
       status: 'active',
       reason: 'x',
+      tin: '301234567',
+      vatPercent: 12,
     });
     expect(Object.keys(instance).sort()).toEqual([
       'brandColor',
@@ -683,6 +852,8 @@ describe('UpdateAdminDealerDto', () => {
       'phone',
       'reason',
       'status',
+      'tin',
+      'vatPercent',
       'years',
     ]);
   });

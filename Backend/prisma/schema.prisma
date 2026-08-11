@@ -166,6 +166,19 @@ enum OilType {
   MINERAL
 }
 
+// The FORM a listing is sold in — one item ("Штука") or a set ("Комплект /
+// набор"). It selects WHICH of the category's two Tasnif package codes
+// fiscalizes the item, so the two forms are named explicitly rather than
+// implied by the order two codes were entered in.
+//
+// Only stored when the seller was actually ASKED (i.e. the category carries
+// both codes). A null means "not asked", and the category's single package
+// code applies — see resolvePackageCode() in common/fiscal.util.ts.
+enum PackageForm {
+  SINGLE
+  SET
+}
+
 enum PartVehicleCategory {
   BRAKE_SYSTEM
   MAINTENANCE_AND_FLUIDS
@@ -406,6 +419,12 @@ model Product {
   // later stage once every consumer reads ids.
   vehicleCategoryId String?           @map("vehicle_category_id") @db.VarChar(64)
   categoryId        String?           @map("category_id") @db.VarChar(64)
+  // The sale form the seller chose for THIS listing (see PackageForm). It is the
+  // only fiscal fact a product owns: the codes themselves stay on the category,
+  // so this column selects one of them rather than copying it. Null when the
+  // question was never asked (the category has a single package code) — the
+  // fiscal builder then falls back to that code.
+  packageForm       PackageForm?      @map("package_form")
   // ── Curated rating (admin-maintained; NOT user reviews) ───────────────────
   // There is no review subsystem: operators set these by hand in the admin
   // console and they are projected verbatim into catalog_parts. Decimal(2,1)
@@ -551,6 +570,11 @@ model ProductDraft {
   // alongside these ids during the compatibility stage.
   vehicleCategoryId String?           @map("vehicle_category_id") @db.VarChar(64)
   categoryId        String?           @map("category_id") @db.VarChar(64)
+  // The sale form answered at the PACKAGE_FORM step, mirroring the Product
+  // column (see there) and copied into it on commit. Null while unanswered — and
+  // permanently so for a category that offers only one package code, whose
+  // seller is never asked. Cleared whenever the chosen category changes.
+  packageForm       PackageForm?      @map("package_form")
   images         ProductDraftImage[]
   categoryRef        PartCategory?    @relation("ProductDraftCategory", fields: [categoryId], references: [id], onDelete: SetNull)
   vehicleCategoryRef PartCategory?    @relation("ProductDraftVehicleCategory", fields: [vehicleCategoryId], references: [id], onDelete: SetNull)
@@ -1105,6 +1129,28 @@ model PartCategory {
   //   0 → Vehicle Category   1 → Main Category   2 → Subcategory
   // Deeper levels are structurally allowed; only these three are exposed today.
   level        Int               @default(0)
+  // ── Fiscal data (Tasnif / soliq), owned by the CATEGORY ────────────────────
+  // Every product of a category is fiscalized with the SAME code pair, so these
+  // live here once instead of on every Product: an admin correcting a code fixes
+  // every existing and future listing of that category with no product write.
+  //
+  // `mxik` (a.k.a. IKPU) is the 17-digit classifier code sent to Payme as
+  // `code`. `packageCodeSingle` / `packageCodeSet` are the two TASNIF PACKAGE
+  // codes — the form the item is SOLD in, "Штука" vs "Комплект / набор" — sent
+  // as `package_code`. They are NOT physical package ids and are NOT ordered:
+  // each form has its own named column precisely so nothing depends on which
+  // code an operator happened to type first.
+  //
+  // All three are NULLABLE: existing rows predate fiscal configuration and a
+  // category stays unconfigured until an admin enters real values (codes are
+  // never guessed). The business rule — a configured category has BOTH `mxik`
+  // and `packageCodeSingle` — is enforced by the admin write path, not by a DB
+  // constraint, so no existing row can become unwritable. `packageCodeSet` is
+  // optional: its presence is what makes the seller bot ask the sale-form
+  // question at all (see WizardStep.PACKAGE_FORM).
+  mxik              String?      @db.VarChar(17)
+  packageCodeSingle String?      @map("package_code_single") @db.VarChar(20)
+  packageCodeSet    String?      @map("package_code_set") @db.VarChar(20)
   createdAt    DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt    DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
   parent       PartCategory?     @relation("PartCategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
@@ -1186,6 +1232,24 @@ model CatalogSeller {
   // a pre-formatted display string ("18k+") that GET /v1/dealers returns — and
   // is left untouched so that contract does not change.
   ordersCount      Int           @default(0) @map("orders_count")
+  // ── Налоговые данные (fiscal identity of the dealer) ──────────────────────
+  // Set by an operator in the admin console ONLY — there is no automatic
+  // tax-status lookup and the seller bot never asks for these. Both feed the
+  // Payme receipt of every item this dealer sells: `tin` → commission_info.tin,
+  // `vatPercent` → vat_percent.
+  //
+  // `tin` is a STRING, never a number: it is an identifier whose leading zeros
+  // are significant, and it holds either a 9-digit ИНН or a 14-digit ПИНФЛ.
+  //
+  // Both are NULLABLE and have NO default. Null means "not configured yet",
+  // which is a genuinely different fact from a configured 0% rate — defaulting
+  // vatPercent to 0 would silently fiscalize every unconfigured dealer as
+  // VAT-exempt. Products of such a dealer are still created and listed
+  // normally; only Payme checkout refuses them (see PaymeFiscalService), and
+  // filling these two columns in makes every existing product of the dealer
+  // payable at once, with no product write.
+  tin              String?       @db.VarChar(14)
+  vatPercent       Decimal?      @map("vat_percent") @db.Decimal(5, 2)
   // When the dealer joined. Existing rows have no creation timestamp, so the
   // migration backfills them to now(); new rows default to insert time.
   joinedAt         DateTime      @default(now()) @map("joined_at") @db.Timestamptz(3)
@@ -1257,6 +1321,12 @@ model CatalogPart {
   oilViscosity       String?              @map("oil_viscosity") @db.VarChar(20)
   oilType            OilType?             @map("oil_type")
   oilVolumeMl        Int?                 @map("oil_volume_ml")
+  // The listing's sale form, projected verbatim from the supply-side Product so
+  // the Payme fiscal builder resolves `package_code` from this row's own
+  // category WITHOUT joining back to the seller domain (the two contexts share
+  // no FKs). Same semantics as the source column: null = never asked ⇒ the
+  // category's single package code applies.
+  packageForm        PackageForm?         @map("package_form")
   // Curated product rating, projected verbatim from the supply-side Product so
   // the buyer catalog renders stars WITHOUT joining back to the seller domain
   // (the two contexts share no FKs). Same types and semantics as the source

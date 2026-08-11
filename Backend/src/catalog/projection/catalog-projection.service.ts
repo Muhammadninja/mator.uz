@@ -297,6 +297,11 @@ export class CatalogProjectionService {
       oilViscosity: product.oilViscosity,
       oilType: product.oilType,
       oilVolumeMl: product.oilVolumeMl,
+      // The listing's sale form, projected verbatim like every attribute above.
+      // It is what lets the Payme receipt builder pick between this row's
+      // category's two package codes without reaching back into the supply
+      // domain — the codes themselves stay on the category and are NOT copied.
+      packageForm: product.packageForm,
       // Curated rating, projected verbatim like every other Product attribute
       // above. It is admin-maintained data, NOT user reviews — the buyer side
       // only ever reads it. Copying it here (rather than joining CatalogPart

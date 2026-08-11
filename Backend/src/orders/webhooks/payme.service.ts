@@ -12,6 +12,11 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { prefixedId, IdPrefix } from '../../common/ulid.util';
 import { SettlementService } from './settlement.service';
 import { readPaymeConfig } from './payme.config';
+import {
+  FiscalDataIncompleteException,
+  PaymeFiscalService,
+} from './payme-fiscal.service';
+import type { PaymeReceiptDetail } from './payme-fiscal.util';
 
 /** Constant-time string equality (hash to a fixed length first so unequal
  * lengths don't short-circuit and leak timing). */
@@ -81,6 +86,7 @@ export class PaymeService {
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
     private readonly settlement: SettlementService,
+    private readonly fiscal: PaymeFiscalService,
   ) {
     const payme = readPaymeConfig((key) => this.config.get<string>(key));
     this.accountField = payme.accountField;
@@ -196,7 +202,29 @@ export class PaymeService {
     if (order.status !== OrderStatus.PENDING_PAYMENT) {
       throw new PaymeError(-31008, 'Order is not awaiting payment');
     }
-    return { allow: true };
+
+    // Fiscalization. Payme takes the receipt from THIS reply, so the items are
+    // built here — per item, each with its own dealer's TIN and VAT rate, so an
+    // order spanning several dealers settles correctly.
+    //
+    // An order whose fiscal data is incomplete is REFUSED rather than allowed
+    // with a partial receipt: sending malformed fiscal data is worse than a
+    // failed payment, and the checkout path already rejects such an order
+    // before it ever gets here (see PaymentsService.createPaymeInvoice), so in
+    // practice this is the backstop for data that changed in between.
+    let detail: PaymeReceiptDetail | null;
+    try {
+      detail = await this.fiscal.buildOrderDetail(order.id);
+    } catch (err) {
+      if (err instanceof FiscalDataIncompleteException) {
+        throw new PaymeError(-31008, 'Order cannot be fiscalized');
+      }
+      throw err;
+    }
+
+    // An order with no product lines (services only) carries no fiscal items;
+    // it is allowed exactly as it was before fiscalization existed.
+    return detail ? { allow: true, detail } : { allow: true };
   }
 
   /**

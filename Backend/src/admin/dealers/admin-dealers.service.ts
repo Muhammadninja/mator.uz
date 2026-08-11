@@ -166,6 +166,11 @@ export class AdminDealersService {
           certified,
           lowestPrice,
           status,
+          // Налоговые данные — optional at creation. Left NULL when absent
+          // rather than defaulted: an unconfigured dealer must be refused at
+          // Payme checkout, not silently fiscalized as 0% VAT.
+          tin: dto.tin?.trim() || null,
+          vatPercent: dto.vatPercent ?? null,
         },
       });
 
@@ -302,7 +307,9 @@ export class AdminDealersService {
       !hasPresentation &&
       dto.certified === undefined &&
       dto.lowestPrice === undefined &&
-      dto.status === undefined
+      dto.status === undefined &&
+      dto.tin === undefined &&
+      dto.vatPercent === undefined
     ) {
       throw new BadRequestException('Nothing to update');
     }
@@ -377,6 +384,31 @@ export class AdminDealersService {
         presPrev[field] = current;
         presNext[field] = next;
       }
+      // Налоговые данные. Handled apart from the presentation loop because
+      // neither field is a string to be trimmed into a column of the same
+      // shape: `tin` clears on an empty string, and `vatPercent` is a Decimal
+      // that must be COMPARED numerically (`new Decimal(12) !== 12`), or every
+      // no-op save would look like a change and write a spurious audit entry.
+      // They join the same DEALER_UPDATED entry — one operator edit, one row in
+      // the trail — while status/badges keep their own verbs.
+      if (dto.tin !== undefined) {
+        const next = dto.tin.trim() || null;
+        if (next !== dealer.tin) {
+          data.tin = next;
+          presPrev.tin = dealer.tin;
+          presNext.tin = next;
+        }
+      }
+      if (dto.vatPercent !== undefined) {
+        const current =
+          dealer.vatPercent === null ? null : Number(dealer.vatPercent);
+        if (dto.vatPercent !== current) {
+          data.vatPercent = dto.vatPercent;
+          presPrev.vatPercent = current;
+          presNext.vatPercent = dto.vatPercent;
+        }
+      }
+
       if (Object.keys(presNext).length > 0) {
         entries.push({
           action: AdminAuditAction.DEALER_UPDATED,
@@ -512,6 +544,9 @@ export class AdminDealersService {
         logoUrl: true,
         orders: true,
         years: true,
+        // Налоговые данные, so an edit can be diffed against the stored values.
+        tin: true,
+        vatPercent: true,
       },
     });
     if (!dealer) throw new NotFoundException('Dealer not found');

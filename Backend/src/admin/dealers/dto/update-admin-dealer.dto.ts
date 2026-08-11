@@ -1,14 +1,23 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
+import { Type } from 'class-transformer';
 import {
   IsBoolean,
   IsIn,
   IsInt,
+  IsNumber,
   IsOptional,
   IsString,
+  Matches,
   Max,
   MaxLength,
   Min,
+  ValidateIf,
 } from 'class-validator';
+import {
+  MAX_VAT_PERCENT,
+  MIN_VAT_PERCENT,
+  TIN_PATTERN,
+} from '../../../common/fiscal.util';
 import { ADMIN_DEALER_STATUSES } from './list-admin-dealers.query.dto';
 // `import type` is required: with isolatedModules + emitDecoratorMetadata, a
 // type used in a decorated signature must not be emitted as a value import.
@@ -88,6 +97,42 @@ export class UpdateAdminDealerDto {
   @Min(0)
   @Max(200)
   years?: number;
+
+  // ── Налоговые данные ──────────────────────────────────────────────────────
+  // Configured HERE and only here: there is no automatic tax-status lookup and
+  // the Telegram seller bot never asks for them. Both are required before this
+  // dealer's products can be paid for through Payme (see PaymeFiscalService),
+  // and filling them in makes every existing product of the dealer payable at
+  // once — no product row is touched.
+  @ApiPropertyOptional({
+    description:
+      'ИНН (9 digits) or ПИНФЛ (14 digits). Sent to Payme as ' +
+      'commission_info.tin. Empty string clears it.',
+    example: '301234567',
+  })
+  @IsOptional()
+  @IsString()
+  @ValidateIf((_, value) => value !== '')
+  @Matches(TIN_PATTERN, {
+    message: 'tin must be 9 digits (ИНН) or 14 digits (ПИНФЛ)',
+  })
+  tin?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Ставка НДС in percent — the value Payme receives as vat_percent. ' +
+      'Set explicitly per dealer (0 and 12 are the usual rates); it is never ' +
+      'defaulted in business logic.',
+    example: 12,
+    minimum: MIN_VAT_PERCENT,
+    maximum: MAX_VAT_PERCENT,
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(MIN_VAT_PERCENT)
+  @Max(MAX_VAT_PERCENT)
+  vatPercent?: number;
 
   @ApiPropertyOptional({
     description: 'MATOR-certified badge.',

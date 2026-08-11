@@ -152,6 +152,9 @@ function draftRow(over: Record<string, unknown> = {}) {
     oilViscosity: null,
     oilType: null,
     oilVolumeMl: null,
+    // The sale form: unanswered, i.e. this category offered a single package
+    // code and the seller was never asked.
+    packageForm: null,
     priceUzs: new Decimal(450000),
     previewSentAt: new Date(),
     images: [
@@ -816,6 +819,10 @@ describe('buildSessionFromDraft', () => {
       // stale snapshot of a taxonomy the admin may have changed meanwhile.
       categoryOptions: [],
       categoryStepPending: false,
+      // No sale form was answered, so the question is not on this dialogue's
+      // path either — the category's single package code applies.
+      packageForm: null,
+      packageChoiceRequired: false,
       title: 'Магнитола для Nexia 3',
       description: 'Производство Корея, новая',
       partNumberType: 'UNKNOWN',

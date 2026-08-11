@@ -36,6 +36,7 @@
 
 import {
   OilType,
+  PackageForm,
   PartMainCategory,
   PartVehicleCategory,
   ProductKind,
@@ -44,6 +45,7 @@ import { Markup } from 'telegraf';
 import type { PartNumberType } from '../ai/part-parser.types';
 import { parsePrice } from '../ai/price-parser';
 import { capabilitiesOf, isUniversalFor } from '../common/product-kind';
+import { offersPackageChoice } from '../common/fiscal.util';
 import {
   OIL_TYPES,
   OIL_TYPE_LABELS,
@@ -72,6 +74,12 @@ export enum WizardStep {
   /** The "Другое" menu: pick a NON-spare-part category (Моторные масла, …). Only
    *  reachable from BRAND via the "Другое" button. */
   OTHER_CATEGORY = 'OTHER_CATEGORY',
+  /** "Как продаётся товар?" — Штука or Комплект / набор. CONDITIONAL, like
+   *  SUBCATEGORY: it exists only for a category that carries BOTH Tasnif package
+   *  codes, so it is spliced into the flow by {@link flowSteps} from the chosen
+   *  category's own fiscal data. A category sold in one form never shows it and
+   *  its single code applies automatically. */
+  PACKAGE_FORM = 'PACKAGE_FORM',
   // ── Motor-oil steps ───────────────────────────────────────────────────────
   OIL_VISCOSITY = 'OIL_VISCOSITY',
   /** Free-text viscosity, reached only from OIL_VISCOSITY's "Другое" button. */
@@ -197,6 +205,10 @@ function flowSteps(session: WizardSession): WizardStep[] {
     (session.kind !== ProductKind.SPARE_PART && session.brand === null)
   ) {
     steps.push(WizardStep.OTHER_CATEGORY);
+    // The "Другое" child IS the listing's category, so the sale-form question
+    // (when that category offers a choice) follows it here — this branch's flow
+    // has no CATEGORY step of its own to hang it off.
+    if (session.packageChoiceRequired) steps.push(WizardStep.PACKAGE_FORM);
   }
   for (const step of flowFor(session)) {
     steps.push(step);
@@ -219,6 +231,16 @@ function flowSteps(session: WizardSession): WizardStep[] {
           session.categoryId !== session.vehicleCategoryId))
     ) {
       steps.push(WizardStep.SUBCATEGORY);
+    }
+    // The sale form is a property of the CHOSEN category, so its question comes
+    // after the category questions are over — i.e. after SUBCATEGORY when there
+    // is one, which is why it is pushed here rather than inside the branch
+    // above. It is on the path only while `packageChoiceRequired` holds, which
+    // the category transitions recompute from the newly chosen node: changing
+    // category therefore adds or removes this step automatically, for both
+    // forward motion and "⬅️ Назад".
+    if (step === WizardStep.CATEGORY && session.packageChoiceRequired) {
+      steps.push(WizardStep.PACKAGE_FORM);
     }
     if (
       step === WizardStep.PART_NUMBER_TYPE &&
@@ -301,6 +323,22 @@ export interface WizardSession {
    * not demand a further, non-existent selection.
    */
   categoryStepPending: boolean;
+  // ── Sale form (fiscal) ────────────────────────────────────────────────────
+  /**
+   * How the item is sold, once the seller has been asked. Null when the
+   * question does not apply (the chosen category carries one package code) —
+   * the category's single code then fiscalizes the listing, so "not asked" and
+   * "Штука" are deliberately the same stored value: null.
+   */
+  packageForm: PackageForm | null;
+  /**
+   * Whether the CHOSEN category offers both package codes and the seller
+   * therefore owes an answer. Recomputed by every category transition from the
+   * category actually picked, and cleared when the choice moves to a node that
+   * offers no alternative — which is what makes the step appear and disappear
+   * with the category, in both directions of the flow.
+   */
+  packageChoiceRequired: boolean;
   title: string | null;
   description: string | null;
   /** 'UNKNOWN' until the seller picks OEM/GM; Skip keeps it 'UNKNOWN'. */
@@ -364,6 +402,18 @@ export interface CategoryOption {
   kind?: ProductKind;
 }
 
+/**
+ * The two Tasnif package codes of ONE category — the only fiscal fact the
+ * wizard needs. Passed in by the caller from the LIVE tree (the same uncached
+ * read that re-validates the tapped category), never carried on
+ * {@link CategoryOption}: option lists are cached for the reference API, and a
+ * cached payload must not decide whether a seller is asked a question.
+ */
+export interface CategoryPackageCodes {
+  packageCodeSingle: string | null;
+  packageCodeSet: string | null;
+}
+
 // ── Inline-button callback payloads ─────────────────────────────────────────
 // Category payloads carry the category's ID, not an index. Indexes were correct
 // while the catalog was a static array compiled into the bot, but categories are
@@ -411,7 +461,13 @@ export interface CategoryOption {
 // itself changes — that is the point of the id-based payloads. Bump it when the
 // SESSION SHAPE or a payload FORMAT changes, or when one of the still
 // index-addressed lists (WIZARD_BRANDS, the motor-oil catalogs) is reordered.
-export const CATALOG_VERSION = 4;
+//
+// Bumped to 5 for the sale-form (PACKAGE_FORM) step: sessions gained
+// `packageForm` / `packageChoiceRequired`, and a category tap now decides
+// whether a further question follows. A version-4 keyboard belongs to a
+// dialogue that has no such step, so its taps are routed to the "catalog
+// updated, start again" notice rather than into a flow whose shape it predates.
+export const CATALOG_VERSION = 5;
 
 /** Build a versioned callback payload, e.g. buildAction('b', 5) → "wiz:1:b:5". */
 export function buildAction(kind: string, arg: string | number): string {
@@ -435,6 +491,9 @@ export const WIZ_CATEGORY_ACTION = new RegExp(
 export const WIZ_SUBCATEGORY_ACTION = new RegExp(
   `^wiz:${V}:sc:([a-z0-9_-]{1,64})$`,
 );
+// The sale form: "Штука" or "Комплект / набор". A closed two-value payload
+// (not an index), so nothing about it can shift when catalogs change.
+export const WIZ_PACKAGE_FORM_ACTION = new RegExp(`^wiz:${V}:pf:(single|set)$`);
 export const WIZ_DESCRIPTION_SKIP = buildAction('d', 'skip');
 export const WIZ_PART_NUMBER_TYPE_ACTION = new RegExp(
   `^wiz:${V}:t:(OEM|GM|SKIP)$`,
@@ -530,6 +589,8 @@ export class WizardSessionStore {
       categoryId: null,
       categoryOptions: [],
       categoryStepPending: false,
+      packageForm: null,
+      packageChoiceRequired: false,
       title: null,
       description: null,
       partNumberType: 'UNKNOWN',
@@ -620,8 +681,39 @@ export function selectOtherBrand(session: WizardSession): WizardResult {
   session.model = null;
   session.category = null;
   session.subcategory = null;
+  // The category is about to be re-chosen from a different branch, so any sale
+  // form answered under the old one goes with it.
+  clearPackageChoice(session);
   session.step = WizardStep.OTHER_CATEGORY;
   return OK;
+}
+
+/**
+ * Drop the sale-form answer and the question itself. Called by every transition
+ * that CHANGES which category the listing belongs to: a package code is only
+ * meaningful for the category it came from, so an answer must never outlive the
+ * choice that raised the question.
+ */
+function clearPackageChoice(session: WizardSession): void {
+  session.packageForm = null;
+  session.packageChoiceRequired = false;
+}
+
+/**
+ * Recompute whether the sale-form question applies, from the category the
+ * seller just settled on. `fiscal` is that category's own package codes, read
+ * from the LIVE tree by the caller (this module does no I/O).
+ *
+ * The previous answer is always dropped first: even re-picking the same
+ * category re-opens the question, which is the same rule the subcategory pick
+ * already follows and keeps "answered" from ever describing a stale category.
+ */
+function applyPackageChoice(
+  session: WizardSession,
+  fiscal: CategoryPackageCodes | null | undefined,
+): void {
+  clearPackageChoice(session);
+  session.packageChoiceRequired = fiscal ? offersPackageChoice(fiscal) : false;
 }
 
 /**
@@ -633,6 +725,7 @@ export function selectOtherBrand(session: WizardSession): WizardResult {
 export function selectOtherCategory(
   session: WizardSession,
   categoryId: string,
+  fiscal: CategoryPackageCodes | null = null,
 ): WizardResult {
   if (session.step !== WizardStep.OTHER_CATEGORY) return STALE;
   // Resolved against the admin-managed options this session actually rendered,
@@ -659,6 +752,9 @@ export function selectOtherCategory(
   session.categoryId = chosen.id;
   session.categoryOptions = [];
   session.categoryStepPending = false;
+  // This pick is FINAL (a "Другое" child has no deeper level in the wizard), so
+  // the sale-form question is settled here from the chosen child's own codes.
+  applyPackageChoice(session, fiscal);
   session.partNumberType = 'UNKNOWN';
   session.partNumber = null;
   return advance(session);
@@ -687,6 +783,7 @@ export function selectCategory(
   session: WizardSession,
   categoryId: string,
   children: CategoryOption[] = [],
+  fiscal: CategoryPackageCodes | null = null,
 ): WizardResult {
   if (session.step !== WizardStep.CATEGORY) return STALE;
   // Resolved against the options this session actually rendered — a forged or
@@ -730,6 +827,11 @@ export function selectCategory(
   // Hand the next level's options to the step that is about to render them.
   session.categoryOptions = children;
   session.categoryStepPending = children.length > 0;
+  // The sale form belongs to the FINAL category. A root with children is not
+  // final — the answer comes from the leaf the seller is about to pick — so the
+  // question is only raised when this root IS the leaf. Either way any previous
+  // answer is dropped, because the listing's category just changed.
+  applyPackageChoice(session, children.length > 0 ? null : fiscal);
   return advance(session);
 }
 
@@ -743,6 +845,7 @@ export function selectSubcategory(
   session: WizardSession,
   categoryId: string,
   children: CategoryOption[] = [],
+  fiscal: CategoryPackageCodes | null = null,
 ): WizardResult {
   if (
     session.step !== WizardStep.SUBCATEGORY ||
@@ -762,9 +865,27 @@ export function selectSubcategory(
 
   session.categoryOptions = children;
   session.categoryStepPending = children.length > 0;
+  // Same rule as the root pick: only a LEAF settles the sale form.
+  applyPackageChoice(session, children.length > 0 ? null : fiscal);
   // A node with further children keeps the seller on this step for the next
   // level; a leaf ends the category questions and the flow moves on.
   if (children.length > 0) return OK;
+  return advance(session);
+}
+
+// ── Sale-form transition ────────────────────────────────────────────────────
+/**
+ * "Как продаётся товар?" — record the form and move on. Only reachable when the
+ * chosen category carries both package codes, so there is no "skip": a category
+ * that offers a choice always gets an explicit answer, and one that does not
+ * never asks.
+ */
+export function selectPackageForm(
+  session: WizardSession,
+  form: PackageForm,
+): WizardResult {
+  if (session.step !== WizardStep.PACKAGE_FORM) return STALE;
+  session.packageForm = form;
   return advance(session);
 }
 
@@ -1134,6 +1255,28 @@ export function subcategoryKeyboard(session: WizardSession): InlineKeyboard {
   return withBack(session, grid(buttons, 2));
 }
 
+/**
+ * The two sale forms, one per row so the longer "Комплект / набор" label is not
+ * truncated. Shown only on a category that carries both package codes.
+ */
+export function packageFormKeyboard(session: WizardSession): InlineKeyboard {
+  return withBack(session, [
+    [
+      Markup.button.callback(
+        PACKAGE_FORM_LABELS.SINGLE,
+        buildAction('pf', 'single'),
+      ),
+    ],
+    [Markup.button.callback(PACKAGE_FORM_LABELS.SET, buildAction('pf', 'set'))],
+  ]);
+}
+
+/** Seller-facing names of the two sale forms (also used by the preview/tests). */
+export const PACKAGE_FORM_LABELS: Record<PackageForm, string> = {
+  [PackageForm.SINGLE]: 'Штука',
+  [PackageForm.SET]: 'Комплект / набор',
+};
+
 export function descriptionKeyboard(session: WizardSession): InlineKeyboard {
   return withBack(session, [
     [Markup.button.callback('⏭ Пропустить', WIZ_DESCRIPTION_SKIP)],
@@ -1208,6 +1351,11 @@ export function stepPrompt(session: WizardSession): StepPrompt {
       return {
         text: '🗂 Выберите категорию товара:',
         keyboard: otherCategoryKeyboard(session),
+      };
+    case WizardStep.PACKAGE_FORM:
+      return {
+        text: '📦 Как продаётся товар?',
+        keyboard: packageFormKeyboard(session),
       };
     case WizardStep.OIL_VISCOSITY:
       return {

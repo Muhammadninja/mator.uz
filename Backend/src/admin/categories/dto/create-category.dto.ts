@@ -5,12 +5,17 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  Matches,
   MaxLength,
   Min,
   MinLength,
   ValidateIf,
 } from 'class-validator';
 import { PartMainCategory } from '@prisma/client';
+import {
+  MXIK_PATTERN,
+  PACKAGE_CODE_PATTERN,
+} from '../../../common/fiscal.util';
 
 /**
  * Body of POST /v1/admin/categories. Creates a PartCategory node.
@@ -78,4 +83,41 @@ export class CreateCategoryDto {
   @IsOptional()
   @IsEnum(PartMainCategory)
   mainCategory?: PartMainCategory;
+
+  // ── Фискальные данные ─────────────────────────────────────────────────────
+  // Optional on create (a category may be configured later) but never PARTIAL:
+  // the service rejects a body that sets one of these without the others it
+  // requires, so a half-configured category cannot be stored.
+  @ApiPropertyOptional({
+    description: 'MXIK / ИКПУ — exactly 17 digits.',
+    example: '08708005011000000',
+  })
+  @IsOptional()
+  @IsString()
+  @Matches(MXIK_PATTERN, { message: 'mxik must be exactly 17 digits' })
+  mxik?: string;
+
+  @ApiPropertyOptional({
+    description: 'Tasnif package code for a single item ("Штука").',
+    example: '1417722',
+  })
+  @IsOptional()
+  @IsString()
+  @Matches(PACKAGE_CODE_PATTERN, {
+    message: 'packageCodeSingle must be 1–20 digits',
+  })
+  packageCodeSingle?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Tasnif package code for a set ("Комплект / набор"). Optional — its ' +
+      'presence is what makes the seller bot ask how the item is sold.',
+    example: '1417723',
+  })
+  @IsOptional()
+  @IsString()
+  @Matches(PACKAGE_CODE_PATTERN, {
+    message: 'packageCodeSet must be 1–20 digits',
+  })
+  packageCodeSet?: string;
 }

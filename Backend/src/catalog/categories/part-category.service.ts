@@ -283,6 +283,15 @@ const CATEGORY_SELECT = {
   level: true,
   sortOrder: true,
   isActive: true,
+  // Fiscal configuration. Read by the seller bot at the moment a category is
+  // TAPPED (findById — an uncached read) to decide whether the sale-form
+  // question applies. Deliberately NOT carried into CategoryNode: that shape is
+  // what gets cached in Redis and returned by the public reference API, so
+  // adding fields there would change a cached payload and leak fiscal codes to
+  // a public endpoint.
+  mxik: true,
+  packageCodeSingle: true,
+  packageCodeSet: true,
 } as const;
 
 export interface CategoryRow {
@@ -293,6 +302,9 @@ export interface CategoryRow {
   level: number;
   sortOrder: number;
   isActive: boolean;
+  mxik: string | null;
+  packageCodeSingle: string | null;
+  packageCodeSet: string | null;
 }
 
 /** The public (reference-API / bot) shape of one category. */

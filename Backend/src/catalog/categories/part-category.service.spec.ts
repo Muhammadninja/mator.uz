@@ -20,6 +20,11 @@ const row = (over: Partial<CategoryRow> & { id: string }): CategoryRow => ({
   level: 0,
   sortOrder: 0,
   isActive: true,
+  // Fiscal columns are part of the row the bot reads; unconfigured by default,
+  // which is what an ordinary tree-rule test cares about.
+  mxik: null,
+  packageCodeSingle: null,
+  packageCodeSet: null,
   ...over,
 });
 

@@ -11,6 +11,7 @@ import {
   SEED_OTHER_CATEGORIES,
   SEED_ROOT_CATEGORIES,
   SEED_DEALERS,
+  fiscalDataFor,
 } from './seed-data/catalog-reference.seed';
 import { NODE_SEED as FITMENT_NODE_SEED } from '../admin/fitment-studio/fitment-node.config';
 import {
@@ -148,6 +149,10 @@ async function seedCategories() {
         parentId: null,
         level: 0,
         isActive: true,
+        // Known MXIK / package codes for the childless roots a seller can pick
+        // directly (transmission, heating-and-cooling). Absent for every other
+        // root, which therefore keeps whatever an admin configured.
+        ...fiscalDataFor(c.id),
       },
       create: {
         id: c.id,
@@ -158,6 +163,7 @@ async function seedCategories() {
         sortOrder: c.sortOrder,
         level: 0,
         isActive: true,
+        ...fiscalDataFor(c.id),
       },
     });
   }
@@ -175,6 +181,9 @@ async function seedCategories() {
         parentId: c.parentId,
         level: c.level,
         isActive: true,
+        // The leaf categories carry the fiscal data — this is where a seller's
+        // listing actually lands (see CATEGORY_FISCAL_DATA).
+        ...fiscalDataFor(c.id),
       },
       create: {
         id: c.id,
@@ -187,6 +196,7 @@ async function seedCategories() {
         parentId: c.parentId,
         level: c.level,
         isActive: true,
+        ...fiscalDataFor(c.id),
       },
     });
   }

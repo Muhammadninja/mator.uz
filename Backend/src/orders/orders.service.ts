@@ -7,6 +7,7 @@ import { RealtimeGateway } from '../realtime/realtime.gateway';
 import { prefixedId, IdPrefix } from '../common/ulid.util';
 import { resolvePromo } from '../cart/promo.util';
 import { priceCartLines } from '../cart/cart-pricing.util';
+import { allocatePromoDiscount } from './promo-allocation.util';
 import { DiscountService } from '../sales/discount.service';
 import { ORDER_INCLUDE, presentOrder } from './order.presenter';
 import { OrderStatusService, TransitionActor } from './order-status.service';
@@ -88,6 +89,20 @@ export class OrdersService {
     const discount = cart.promoCode ? resolvePromo(cart.promoCode, subtotal).discountUzs : 0;
     const total = Math.max(0, subtotal + deliveryUzs + serviceFeeUzs - discount);
 
+    // Spread the promo discount INTO the line prices, in tiyin, so the charged
+    // amount is carried entirely by the items. A Payme receipt has no negative
+    // line and no discount field, so a discount left at order level has nowhere
+    // to go on the receipt and the order becomes unpayable; embedded here, the
+    // lines reconcile against the charge on their own. See promo-allocation.util.
+    const allocation = allocatePromoDiscount(
+      cart.items.map((i) => ({
+        id: i.id,
+        unitPriceTiyin: Math.round(unitPriceOf(i) * 100),
+        quantity: i.quantity,
+      })),
+      Math.round(discount * 100),
+    );
+
     const ttlMin = Number(this.config.get<string>('ORDER_TTL_MIN') ?? 30);
     const expiresAt = new Date(Date.now() + ttlMin * 60_000);
     const contactPhone =
@@ -114,7 +129,18 @@ export class OrdersService {
           expiresAt,
           items: {
             create: cart.items.map((i) => {
-              const unit = unitPriceOf(i);
+              // Net of the promo share. `lineTotalUzs` is the authority — for a
+              // multi-unit line the net total need not divide evenly, so
+              // priceUzs is its (floored) per-unit view and the two can differ
+              // by tiyin. The receipt splits the line rather than trusting the
+              // product back (see splitEvenLines).
+              const share = allocation.get(i.id);
+              const lineTotal = share
+                ? share.effectiveLineTotalTiyin / 100
+                : unitPriceOf(i) * i.quantity;
+              const unit = share
+                ? share.effectiveUnitPriceTiyin / 100
+                : unitPriceOf(i);
               return {
                 id: prefixedId(IdPrefix.ORDER_ITEM),
                 partId: i.partId,
@@ -123,7 +149,7 @@ export class OrdersService {
                 title: i.title,
                 quantity: i.quantity,
                 priceUzs: unit,
-                lineTotalUzs: unit * i.quantity,
+                lineTotalUzs: lineTotal,
                 scheduledAt: i.scheduledAt,
               };
             }),

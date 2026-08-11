@@ -12,6 +12,7 @@ import { PaymentsService } from './payments.service';
 import { PaymentsController } from './payments.controller';
 import { SettlementService } from './webhooks/settlement.service';
 import { PaymeService } from './webhooks/payme.service';
+import { PaymeFiscalService } from './webhooks/payme-fiscal.service';
 import { ClickService } from './webhooks/click.service';
 import { PaymentWebhookController } from './webhooks/payment-webhook.controller';
 
@@ -34,6 +35,9 @@ import { PaymentWebhookController } from './webhooks/payment-webhook.controller'
     PaymentsService,
     SettlementService,
     PaymeService,
+    // The fiscal-receipt builder, used by BOTH Payme paths: the checkout gate
+    // (PaymentsService) and the webhook's CheckPerformTransaction reply.
+    PaymeFiscalService,
     ClickService,
   ],
   controllers: [OrdersController, PaymentsController, PaymentWebhookController],

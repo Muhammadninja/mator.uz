@@ -66,6 +66,31 @@ export const CATEGORY_ID_TO_KIND: Readonly<Record<string, ProductKind>> = {
 };
 
 /**
+ * Whether listings of this category are fiscalized from their OIL TYPE rather
+ * than from the category's own MXIK / package codes.
+ *
+ * These are exactly the categories whose listings come out as MOTOR_OIL, and
+ * the two ways that happens are already encoded in the wizard: the `motor-oil`
+ * anchor (CATEGORY_ID_TO_KIND) and any child of the "Другое" root, where
+ * `selectOtherCategory` defaults every child to the oil questionnaire. The rule
+ * is stated once here so the admin console, the seed and the receipt builder
+ * agree on which categories are legitimately left without codes.
+ *
+ * Such a category is fiscally COMPLETE with no columns filled in: its products'
+ * codes come from OIL_TYPE_FISCAL (see common/fiscal.util.ts), which is why an
+ * empty `mxik` there is not a configuration gap.
+ */
+export function isFiscalizedByOilType(category: {
+  id: string;
+  parentId: string | null;
+}): boolean {
+  return (
+    category.id === CategoryAnchor.MOTOR_OIL ||
+    category.parentId === CategoryAnchor.OTHER
+  );
+}
+
+/**
  * PartVehicleCategory enum → its ROOT PartCategory id.
  *
  * NOT derivable from VEHICLE_CATEGORIES' slugs: the root for

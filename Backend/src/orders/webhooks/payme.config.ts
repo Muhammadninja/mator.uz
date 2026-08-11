@@ -119,6 +119,67 @@ export function validatePaymeEnv(
  * caller ({@link PaymeService}) refuses to authorize anything when it is blank,
  * which is the non-production counterpart to the boot-time check above.
  */
+/**
+ * Fiscal codes for the PLATFORM's own charges — the lines a receipt needs
+ * beyond the goods, so its total matches what the customer is charged.
+ *
+ * Read from configuration rather than hardcoded because they are the
+ * marketplace's own classification, not a category's: an operator registers the
+ * business's services in Tasnif and puts the resulting codes here. Delivery
+ * ships with the courier-service defaults below; the service fee ships with
+ * NONE, so an order carrying one is refused with a message naming these keys
+ * rather than fiscalized under a code that describes delivery.
+ *
+ * Names are unprefixed to sit beside the charges they describe
+ * (DELIVERY_COURIER_UZS, SERVICE_FEE_UZS), which is where an operator will look.
+ */
+export interface PaymeFiscalConfig {
+  delivery: PlatformChargeFiscal;
+  serviceFee: PlatformChargeFiscal;
+  /** The marketplace's own ИНН, attached to platform lines. Null ⇒ omitted. */
+  marketplaceTin: string | null;
+}
+
+export interface PlatformChargeFiscal {
+  mxik: string | null;
+  packageCode: string | null;
+  vatPercent: number;
+}
+
+/** Courier/delivery services. Overridable per deployment. */
+export const DEFAULT_DELIVERY_MXIK = '05320001001000000';
+export const DEFAULT_DELIVERY_PACKAGE_CODE = '1000000';
+
+export function readPaymeFiscalConfig(
+  get: (key: string) => string | undefined,
+): PaymeFiscalConfig {
+  const percent = (key: string): number => {
+    const raw = asTrimmedString(get(key));
+    const parsed = Number(raw);
+    // An unset or unparseable rate is 0, never a guess: the platform's own
+    // services are VAT-exempt unless an operator states otherwise.
+    return raw && Number.isFinite(parsed) ? parsed : 0;
+  };
+
+  return {
+    delivery: {
+      mxik: asTrimmedString(get('DELIVERY_MXIK')) || DEFAULT_DELIVERY_MXIK,
+      packageCode:
+        asTrimmedString(get('DELIVERY_PACKAGE_CODE')) ||
+        DEFAULT_DELIVERY_PACKAGE_CODE,
+      vatPercent: percent('DELIVERY_VAT_PERCENT'),
+    },
+    serviceFee: {
+      // No default: the marketplace's service fee is a different service from
+      // delivery, and reusing delivery's code would mis-declare it.
+      mxik: asTrimmedString(get('SERVICE_FEE_MXIK')) || null,
+      packageCode: asTrimmedString(get('SERVICE_FEE_PACKAGE_CODE')) || null,
+      vatPercent: percent('SERVICE_FEE_VAT_PERCENT'),
+    },
+    marketplaceTin: asTrimmedString(get('MARKETPLACE_TIN')) || null,
+  };
+}
+
 export function readPaymeConfig(
   get: (key: string) => string | undefined,
 ): PaymeConfig {

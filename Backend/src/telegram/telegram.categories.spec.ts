@@ -122,12 +122,17 @@ describe('ensureCategoryOptions', () => {
 // and the tap the admin may deactivate, move, re-parent or delete the category,
 // so the tapped id is re-checked against the LIVE tree — the session's option
 // list is only a snapshot of what was rendered.
-describe('isSelectableCategory (stale-callback guard)', () => {
+describe('selectableCategory (stale-callback guard)', () => {
   const live = (over: Record<string, unknown> = {}) => ({
     id: 'brakes',
     parentId: 'brake-system',
     level: 1,
     isActive: true,
+    // The fiscal columns travel with the row: the guard RETURNS the category so
+    // the transition fiscalizes from the very row it validated.
+    mxik: null,
+    packageCodeSingle: null,
+    packageCodeSet: null,
     ...over,
   });
 
@@ -140,58 +145,58 @@ describe('isSelectableCategory (stale-callback guard)', () => {
   it('accepts a category that is active and still under the expected parent', async () => {
     const svc = svcWith(live());
     await expect(
-      svc.isSelectableCategory('brakes', 'brake-system'),
-    ).resolves.toBe(true);
+      svc.selectableCategory('brakes', 'brake-system'),
+    ).resolves.toMatchObject({ id: 'brakes' });
   });
 
   it('rejects a category DEACTIVATED after the keyboard was sent', async () => {
     const svc = svcWith(live({ isActive: false }));
     await expect(
-      svc.isSelectableCategory('brakes', 'brake-system'),
-    ).resolves.toBe(false);
+      svc.selectableCategory('brakes', 'brake-system'),
+    ).resolves.toBeNull();
   });
 
   it('rejects a category MOVED under a different parent', async () => {
     const svc = svcWith(live({ parentId: 'maintenance-and-fluids' }));
     await expect(
-      svc.isSelectableCategory('brakes', 'brake-system'),
-    ).resolves.toBe(false);
+      svc.selectableCategory('brakes', 'brake-system'),
+    ).resolves.toBeNull();
   });
 
   it('rejects a category RE-PARENTED to root when a parent was expected', async () => {
     const svc = svcWith(live({ parentId: null, level: 0 }));
     await expect(
-      svc.isSelectableCategory('brakes', 'brake-system'),
-    ).resolves.toBe(false);
+      svc.selectableCategory('brakes', 'brake-system'),
+    ).resolves.toBeNull();
   });
 
   it('rejects a DELETED category', async () => {
     const svc = svcWith(null);
     await expect(
-      svc.isSelectableCategory('brakes', 'brake-system'),
-    ).resolves.toBe(false);
+      svc.selectableCategory('brakes', 'brake-system'),
+    ).resolves.toBeNull();
   });
 
   it('rejects a non-root id at the ROOT step', async () => {
     // The root step passes expectedParent=null, so a level-1 category tapped
     // from a stale keyboard cannot masquerade as a vehicle category.
     const svc = svcWith(live());
-    await expect(svc.isSelectableCategory('brakes', null)).resolves.toBe(false);
+    await expect(svc.selectableCategory('brakes', null)).resolves.toBeNull();
   });
 
   it('accepts a genuine root at the ROOT step', async () => {
     const svc = svcWith(live({ id: 'brake-system', parentId: null, level: 0 }));
-    await expect(svc.isSelectableCategory('brake-system', null)).resolves.toBe(
-      true,
-    );
+    await expect(
+      svc.selectableCategory('brake-system', null),
+    ).resolves.toMatchObject({ id: 'brake-system' });
   });
 
   it('rejects (never silently accepts) when the lookup itself fails', async () => {
     const svc: AnyService = makeService();
     svc.categories.findById = jest.fn().mockRejectedValue(new Error('db down'));
     await expect(
-      svc.isSelectableCategory('brakes', 'brake-system'),
-    ).resolves.toBe(false);
+      svc.selectableCategory('brakes', 'brake-system'),
+    ).resolves.toBeNull();
   });
 
   it('a valid, active category from ANOTHER parent is still rejected', async () => {
@@ -201,8 +206,8 @@ describe('isSelectableCategory (stale-callback guard)', () => {
       live({ id: 'oil-filters', parentId: 'maintenance-and-fluids' }),
     );
     await expect(
-      svc.isSelectableCategory('oil-filters', 'brake-system'),
-    ).resolves.toBe(false);
+      svc.selectableCategory('oil-filters', 'brake-system'),
+    ).resolves.toBeNull();
   });
 });
 

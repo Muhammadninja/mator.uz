@@ -13,6 +13,9 @@ function item(over: Partial<CartWithItems['items'][number]> = {}): CartWithItems
     imageUrl: null,
     quantity: 2,
     scheduledAt: null,
+    // An ordinary catalog line, not one added from a sourcing offer. The column
+    // the presenter does not read, but the row type requires.
+    offerId: null,
     priceUzsSnapshot: 100000 as never,
     createdAt: new Date(),
     ...over,

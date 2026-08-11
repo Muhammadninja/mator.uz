@@ -48,6 +48,8 @@ function part(over: Partial<PartWithRelations> = {}): PartWithRelations {
     oilViscosity: null,
     oilType: null,
     oilVolumeMl: null,
+    // The sale form: unset, i.e. the category's single package code applies.
+    packageForm: null,
     // Columns the presenter does not read, but the row type requires: omitting
     // them leaves `undefined`, which the Decimal types reject. Values match the
     // schema (purchase price is nullable; cashback defaults to 0).

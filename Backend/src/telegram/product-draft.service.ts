@@ -4,6 +4,7 @@ import {
   DraftStatus,
   ImageProcessingStage,
   OilType,
+  PackageForm,
   PartMainCategory,
   PartVehicleCategory,
   PartNumberType,
@@ -48,6 +49,9 @@ export interface DraftFormPatch {
    *  only when the chosen node happens to correspond to a legacy enum value). */
   vehicleCategoryId?: string | null;
   categoryId?: string | null;
+  /** The sale form answered at the PACKAGE_FORM step; null when the chosen
+   *  category offers a single package code (the question is never asked). */
+  packageForm?: PackageForm | null;
   title?: string | null;
   description?: string | null;
   partNumberType?: PartNumberType;
@@ -235,6 +239,9 @@ export class ProductDraftService {
           subcategory: source.subcategory,
           vehicleCategoryId: source.vehicleCategoryId,
           categoryId: source.categoryId,
+          // The sale form travels with the category it was answered for, so
+          // replacing photos does not re-ask a question already settled.
+          packageForm: source.packageForm,
           title: source.title,
           description: source.description,
           partNumberType: source.partNumberType,
@@ -380,6 +387,7 @@ export class ProductDraftService {
         subcategory: patch.subcategory,
         vehicleCategoryId: patch.vehicleCategoryId,
         categoryId: patch.categoryId,
+        packageForm: patch.packageForm,
         title: patch.title,
         description: patch.description,
         partNumberType: patch.partNumberType,

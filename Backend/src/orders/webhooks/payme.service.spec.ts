@@ -17,6 +17,7 @@ import {
 import {
   createPrismaMock,
   fakeConfig,
+  fakeFiscal,
   buildOrder,
   PrismaMock,
 } from '../../../test/utils/harness';
@@ -71,7 +72,12 @@ describe('PaymeService (Merchant API)', () => {
       markPaid: jest.fn().mockResolvedValue(undefined),
       markCancelled: jest.fn().mockResolvedValue(undefined),
     };
-    svc = new PaymeService(prisma, CONFIG as any, settlement as any);
+    svc = new PaymeService(
+      prisma,
+      CONFIG as any,
+      settlement as any,
+      fakeFiscal(prisma),
+    );
   });
 
   // Any test that freezes the clock must not leak fake timers into the next one.
@@ -104,6 +110,7 @@ describe('PaymeService (Merchant API)', () => {
         prisma,
         fakeConfig({}) as any,
         settlement as any,
+        fakeFiscal(prisma),
       );
       // The header that an empty key would otherwise make valid.
       const emptyKeyAuth = 'Basic ' + Buffer.from('Paycom:').toString('base64');
@@ -202,6 +209,132 @@ describe('PaymeService (Merchant API)', () => {
         amount: 21_500_000,
       });
       expect(res.error.code).toBe(-31008);
+    });
+
+    // ── Фискализация ──────────────────────────────────────────────────────
+    // Payme takes the receipt from this reply, so the items are attached here.
+    it('returns the fiscal receipt alongside allow', async () => {
+      // buildOrder(): 185 000 goods + 25 000 delivery + 5 000 fee = 215 000,
+      // which is the amount Payme is about to charge — so the receipt has to
+      // carry a line for each of the three.
+      const fiscal = new PaymeService(
+        prisma,
+        CONFIG as any,
+        settlement as any,
+        fakeFiscal(prisma, {
+          SERVICE_FEE_MXIK: '10307001001000000',
+          SERVICE_FEE_PACKAGE_CODE: '1000001',
+        }),
+      );
+      prisma.order.findUnique.mockResolvedValue(
+        buildOrder({ id: 'ord_1', totalUzs: 215000 }),
+      );
+      prisma.orderItem.findMany.mockResolvedValue([
+        {
+          id: 'oi_1',
+          partId: 'part_1',
+          title: 'Тормозные колодки',
+          quantity: 1,
+          priceUzs: 185000,
+        },
+      ]);
+      prisma.catalogPart.findMany.mockResolvedValue([
+        {
+          id: 'part_1',
+          packageForm: 'SET',
+          kind: 'SPARE_PART',
+          oilType: null,
+          category: {
+            mxik: '08708005011000000',
+            packageCodeSingle: '1417722',
+            packageCodeSet: '1417723',
+          },
+          seller: { tin: '301234567', vatPercent: 0 },
+        },
+      ]);
+
+      const res: any = await fiscal.handle(AUTH, {
+        id: 1,
+        method: 'CheckPerformTransaction',
+        params: { account: { order_id: 'ord_1' }, amount: 21_500_000 },
+      });
+
+      expect(res.result).toEqual({
+        allow: true,
+        detail: {
+          receipt_type: 0,
+          items: [
+            {
+              title: 'Тормозные колодки',
+              price: 18_500_000,
+              count: 1,
+              code: '08708005011000000',
+              package_code: '1417723',
+              vat_percent: 0,
+              commission_info: { tin: '301234567' },
+            },
+            {
+              title: 'Услуга доставки',
+              price: 2_500_000,
+              count: 1,
+              code: '05320001001000000',
+              package_code: '1000000',
+              vat_percent: 0,
+            },
+            {
+              title: 'Сервисный сбор',
+              price: 500_000,
+              count: 1,
+              code: '10307001001000000',
+              package_code: '1000001',
+              vat_percent: 0,
+            },
+          ],
+        },
+      });
+
+      // The receipt adds up to exactly the amount being authorised.
+      const sum = res.result.detail.items.reduce(
+        (t: number, i: any) => t + i.price * i.count,
+        0,
+      );
+      expect(sum).toBe(21_500_000);
+    });
+
+    it('refuses an order it cannot fiscalize instead of sending a partial receipt', async () => {
+      prisma.order.findUnique.mockResolvedValue(
+        buildOrder({ id: 'ord_1', totalUzs: 215000 }),
+      );
+      prisma.orderItem.findMany.mockResolvedValue([
+        {
+          id: 'oi_1',
+          partId: 'part_1',
+          title: 'Колодки',
+          quantity: 1,
+          priceUzs: 150000,
+        },
+      ]);
+      // The dealer's ИНН / ставка НДС have not been entered by an operator yet.
+      prisma.catalogPart.findMany.mockResolvedValue([
+        {
+          id: 'part_1',
+          packageForm: null,
+          category: {
+            mxik: '08708005011000000',
+            packageCodeSingle: '1417722',
+            packageCodeSet: null,
+          },
+          seller: { tin: null, vatPercent: null },
+        },
+      ]);
+
+      const res = await call('CheckPerformTransaction', {
+        account: { order_id: 'ord_1' },
+        amount: 21_500_000,
+      });
+
+      expect(res.error.code).toBe(-31008);
+      expect(res.result).toBeUndefined();
     });
   });
 

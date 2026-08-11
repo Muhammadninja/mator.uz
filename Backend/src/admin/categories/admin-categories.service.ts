@@ -7,6 +7,7 @@ import {
 import { Prisma } from '@prisma/client';
 import { PartCategoryService } from '../../catalog/categories/part-category.service';
 import { PrismaService } from '../../prisma/prisma.service';
+import { isCategoryFiscallyConfigured } from '../../common/fiscal.util';
 import {
   ADMIN_CATEGORY_NODE_SELECT,
   buildAdminCategoryTree,
@@ -181,6 +182,14 @@ export class AdminCategoriesService {
     // accepted — the DTO does not even expose the field.
     const level = await this.categories.validateParent(dto.parentId);
 
+    // A new category may arrive unconfigured, but never HALF-configured: the
+    // combination is checked against an all-null baseline, since nothing is
+    // stored yet.
+    const fiscal = this.resolveFiscal(
+      { mxik: null, packageCodeSingle: null, packageCodeSet: null },
+      dto,
+    );
+
     const created = await this.prisma.partCategory.create({
       data: {
         id: slug,
@@ -191,6 +200,7 @@ export class AdminCategoriesService {
         color: dto.color ?? null,
         sortOrder: dto.sortOrder ?? 0,
         mainCategory: dto.mainCategory ?? null,
+        ...fiscal,
         ...(dto.parentId != null
           ? { parent: { connect: { id: dto.parentId } } }
           : {}),
@@ -210,11 +220,23 @@ export class AdminCategoriesService {
   async update(id: string, dto: UpdateCategoryDto) {
     const category = await this.prisma.partCategory.findUnique({
       where: { id },
-      select: { id: true, parentId: true },
+      // The fiscal columns are read too: a PARTIAL fiscal patch is only legal
+      // in combination with what the row already holds ("add a set code to an
+      // already-configured category"), so the check needs the current values.
+      select: {
+        id: true,
+        parentId: true,
+        mxik: true,
+        packageCodeSingle: true,
+        packageCodeSet: true,
+      },
     });
     if (!category) throw new NotFoundException('Category not found');
 
-    const data: Prisma.PartCategoryUpdateInput = {};
+    const data: Prisma.PartCategoryUpdateInput = this.resolveFiscal(
+      category,
+      dto,
+    );
 
     if (dto.name !== undefined) data.name = dto.name;
     if (dto.iconKey !== undefined) data.iconKey = dto.iconKey;
@@ -372,6 +394,89 @@ export class AdminCategoriesService {
   }
 
   // ── helpers ────────────────────────────────────────────────────────────────
+
+  /**
+   * Resolve the fiscal columns a create/update must write, and REJECT any patch
+   * that would leave the category half-configured.
+   *
+   * The rule is a property of the row AFTER the patch, not of the body, so it is
+   * checked here rather than in the DTO (which can only see one field at a
+   * time): a body that only adds `packageCodeSet` is perfectly valid for an
+   * already-configured category and invalid for an empty one.
+   *
+   * The three legal end states:
+   *   • nothing set        — unconfigured; products of this category simply
+   *                          cannot be paid for online until an admin fills it in;
+   *   • mxik + single      — configured, sold in one form ("Штука"); the seller
+   *                          is never asked how the item is sold;
+   *   • mxik + single + set — configured, sold in two forms; the seller bot asks.
+   * Anything else (a set code with no single code, an MXIK with no package code,
+   * a package code with no MXIK) is a 400 — never a silently-stored partial.
+   *
+   * Returns ONLY the columns the body actually names, so an update that touches
+   * no fiscal field writes none of them.
+   */
+  private resolveFiscal(
+    current: {
+      mxik: string | null;
+      packageCodeSingle: string | null;
+      packageCodeSet: string | null;
+    },
+    dto: {
+      mxik?: string | null;
+      packageCodeSingle?: string | null;
+      packageCodeSet?: string | null;
+    },
+  ): {
+    mxik?: string | null;
+    packageCodeSingle?: string | null;
+    packageCodeSet?: string | null;
+  } {
+    const touched =
+      dto.mxik !== undefined ||
+      dto.packageCodeSingle !== undefined ||
+      dto.packageCodeSet !== undefined;
+    if (!touched) return {};
+
+    // Empty strings are treated as "clear", so a console sending a blank input
+    // unconfigures the field instead of storing "".
+    const pick = (
+      next: string | null | undefined,
+      stored: string | null,
+    ): string | null => (next === undefined ? stored : next?.trim() || null);
+
+    const mxik = pick(dto.mxik, current.mxik);
+    const packageCodeSingle = pick(
+      dto.packageCodeSingle,
+      current.packageCodeSingle,
+    );
+    const packageCodeSet = pick(dto.packageCodeSet, current.packageCodeSet);
+
+    const configured = isCategoryFiscallyConfigured({
+      mxik,
+      packageCodeSingle,
+      packageCodeSet,
+    });
+    if (!configured && (mxik || packageCodeSingle || packageCodeSet)) {
+      throw new BadRequestException(
+        'Fiscal configuration is incomplete: a category needs BOTH mxik and ' +
+          'packageCodeSingle (packageCodeSet is optional). Clear all three to ' +
+          'leave the category unconfigured.',
+      );
+    }
+    if (packageCodeSet && !configured) {
+      throw new BadRequestException(
+        'packageCodeSet requires mxik and packageCodeSingle',
+      );
+    }
+
+    // Only the named columns are returned; an untouched one keeps its value.
+    return {
+      ...(dto.mxik !== undefined ? { mxik } : {}),
+      ...(dto.packageCodeSingle !== undefined ? { packageCodeSingle } : {}),
+      ...(dto.packageCodeSet !== undefined ? { packageCodeSet } : {}),
+    };
+  }
 
   /**
    * Deterministic slug: lowercase, non-alphanumerics → single dashes, trimmed.

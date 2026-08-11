@@ -10,16 +10,24 @@ import { prefixedId, IdPrefix } from '../common/ulid.util';
 import { CreateInvoiceDto } from './dto/create-invoice.dto';
 import { readPaymeConfig } from './webhooks/payme.config';
 import { buildPaymeCheckoutUrl } from './webhooks/payme-checkout.util';
+import { PaymeFiscalService } from './webhooks/payme-fiscal.service';
 
 @Injectable()
 export class PaymentsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
+    private readonly fiscal: PaymeFiscalService,
   ) {}
 
   async createPaymeInvoice(userId: string, dto: CreateInvoiceDto) {
     const order = await this.loadPayableOrder(userId, dto.order_id);
+    // Refuse BEFORE a checkout link exists. An order whose items lack fiscal
+    // data (typically a dealer whose ИНН / ставка НДС is not configured yet)
+    // must never reach Payme, and the customer should learn that here — while
+    // paying is still just a button — rather than after being handed a link
+    // that the webhook would then reject.
+    await this.fiscal.assertFiscalizable(order.id);
     const amountUzs = Number(order.totalUzs);
     const tiyin = Math.round(amountUzs * 100);
     const payme = readPaymeConfig((key) => this.config.get<string>(key));

@@ -9,6 +9,7 @@ import { OnEvent } from '@nestjs/event-emitter';
 import {
   DraftStatus,
   OilType,
+  PackageForm,
   PartMainCategory,
   PartVehicleCategory,
   ProductKind,
@@ -55,6 +56,7 @@ import {
   WIZ_MODEL_ACTION,
   WIZ_CATEGORY_ACTION,
   WIZ_SUBCATEGORY_ACTION,
+  WIZ_PACKAGE_FORM_ACTION,
   WIZ_DESCRIPTION_SKIP,
   WIZ_PART_NUMBER_TYPE_ACTION,
   WIZ_OTHER_BRAND_ACTION,
@@ -73,6 +75,7 @@ import {
   selectModel,
   selectCategory,
   selectSubcategory,
+  selectPackageForm,
   selectOilViscosity,
   inputOilViscosity,
   selectOilType,
@@ -97,7 +100,10 @@ import {
   MAIN_CATEGORY_BY_SLUG,
   VEHICLE_CATEGORY_BY_SLUG,
 } from '../catalog/categories/category-map';
-import { PartCategoryService } from '../catalog/categories/part-category.service';
+import {
+  PartCategoryService,
+  type CategoryRow,
+} from '../catalog/categories/part-category.service';
 import { OIL_VISCOSITIES, OIL_VOLUMES } from './motor-oil-catalog';
 import { WIZARD_CATEGORIES } from './wizard-catalog';
 
@@ -249,6 +255,9 @@ interface PendingProduct {
    *  mirror kept in step with them. Null for kinds that ask no category. */
   vehicleCategoryId: string | null;
   categoryId: string | null;
+  /** The sale form chosen for this listing (see PackageForm) — null when the
+   *  category offered a single package code and the question was never asked. */
+  packageForm: PackageForm | null;
   /** MOTOR_OIL attributes; null for every other kind. */
   oilViscosity: string | null;
   oilType: OilType | null;
@@ -322,6 +331,7 @@ export function buildSessionFromDraft(
     subcategory: PartMainCategory | null;
     vehicleCategoryId: string | null;
     categoryId: string | null;
+    packageForm: PackageForm | null;
     title: string | null;
     description: string | null;
     partNumberType: ParseOutcome['part_number_type'];
@@ -349,6 +359,17 @@ export function buildSessionFromDraft(
     // A resumed draft is past its category questions when it already has a
     // category; anything further is re-asked from the live tree.
     categoryStepPending: false,
+    // The seller's answered sale form is PRESERVED across a resume/edit — the
+    // category has not changed, so neither has the question's answer.
+    packageForm: draft.packageForm,
+    // Whether that question is on this dialogue's path is RECOMPUTED rather
+    // than stored, exactly like `viscosityIsCustom`: it is true iff the seller
+    // answered it (a form is stored only when asked) or is standing on it right
+    // now. The category's codes are not re-read here — this module does no I/O —
+    // and they do not need to be: a category that stopped offering a set code
+    // only matters when the seller re-picks a category, which recomputes it.
+    packageChoiceRequired:
+      draft.packageForm !== null || step === WizardStep.PACKAGE_FORM,
     title: draft.title,
     description: draft.description,
     partNumberType: draft.partNumberType ?? 'UNKNOWN',
@@ -545,13 +566,18 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     // so both the live state and the session's own path must agree.
     this.bot.action(WIZ_CATEGORY_ACTION, async (ctx) => {
       const categoryId = ctx.match[1];
-      if (!(await this.isSelectableCategory(categoryId, null))) {
+      // The live row doubles as the FISCAL source: its package codes decide
+      // whether the sale-form question follows. Read here (uncached) rather
+      // than taken from the keyboard's cached option list, so the question
+      // always reflects the configuration as it stands right now.
+      const category = await this.selectableCategory(categoryId, null);
+      if (!category) {
         await this.rejectStaleCategoryTap(ctx);
         return;
       }
       const children = await this.loadCategoryOptions(categoryId);
       await this.handleWizardAction(ctx, (session) =>
-        selectCategory(session, categoryId, children),
+        selectCategory(session, categoryId, children, category),
       );
     });
 
@@ -563,13 +589,24 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       // keyboard from a DIFFERENT branch cannot select a foreign subcategory
       // even when the id itself is a real, active category.
       const expectedParent = session?.categoryId ?? null;
-      if (!(await this.isSelectableCategory(categoryId, expectedParent))) {
+      const category = await this.selectableCategory(categoryId, expectedParent);
+      if (!category) {
         await this.rejectStaleCategoryTap(ctx);
         return;
       }
       const children = await this.loadCategoryOptions(categoryId);
       await this.handleWizardAction(ctx, (session) =>
-        selectSubcategory(session, categoryId, children),
+        selectSubcategory(session, categoryId, children, category),
+      );
+    });
+
+    // "Штука" / "Комплект / набор" — only reachable for a category that carries
+    // both package codes (the step is otherwise not in the flow).
+    this.bot.action(WIZ_PACKAGE_FORM_ACTION, async (ctx) => {
+      const form =
+        ctx.match[1] === 'set' ? PackageForm.SET : PackageForm.SINGLE;
+      await this.handleWizardAction(ctx, (session) =>
+        selectPackageForm(session, form),
       );
     });
 
@@ -585,12 +622,16 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     // admin deactivated or moved after the keyboard was sent is rejected.
     this.bot.action(WIZ_OTHER_CATEGORY_ACTION, async (ctx) => {
       const categoryId = ctx.match[1];
-      if (!(await this.isSelectableCategory(categoryId, CategoryAnchor.OTHER))) {
+      const category = await this.selectableCategory(
+        categoryId,
+        CategoryAnchor.OTHER,
+      );
+      if (!category) {
         await this.rejectStaleCategoryTap(ctx);
         return;
       }
       await this.handleWizardAction(ctx, (session) =>
-        selectOtherCategory(session, categoryId),
+        selectOtherCategory(session, categoryId, category),
       );
     });
 
@@ -1034,6 +1075,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       subcategory: session.subcategory,
       vehicleCategoryId: session.vehicleCategoryId,
       categoryId: session.categoryId,
+      packageForm: session.packageForm,
       title: session.title,
       description: session.description,
       partNumberType: session.partNumberType,
@@ -1236,6 +1278,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       subcategory: draft.subcategory,
       vehicleCategoryId: draft.vehicleCategoryId,
       categoryId: draft.categoryId,
+      packageForm: draft.packageForm,
       oilViscosity: draft.oilViscosity,
       oilType: draft.oilType,
       oilVolumeMl: draft.oilVolumeMl,
@@ -1923,14 +1966,18 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
    * isActive at each level, so a deactivated parent's children never appear in
    * the options the transition resolves against.
    */
-  private async isSelectableCategory(
+  private async selectableCategory(
     categoryId: string,
     expectedParent: string | null,
-  ): Promise<boolean> {
+  ): Promise<CategoryRow | null> {
     try {
       const category = await this.categories.findById(categoryId);
-      if (!category || !category.isActive) return false;
-      return category.parentId === expectedParent;
+      if (!category || !category.isActive) return null;
+      // The ROW itself is returned, not just a verdict: it carries the fiscal
+      // package codes the transition needs, and re-reading them separately
+      // would open a window where the tap was validated against one version of
+      // the category and fiscalized from another.
+      return category.parentId === expectedParent ? category : null;
     } catch (err) {
       // A lookup failure must not silently accept the tap.
       this.logger.error(
@@ -1938,7 +1985,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
           err instanceof Error ? err.message : String(err)
         }`,
       );
-      return false;
+      return null;
     }
   }
 
@@ -2346,6 +2393,12 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         // the classifier's guess).
         vehicleCategoryId: validatedVehicleCategoryId,
         categoryId: validatedCategoryId,
+        // The sale form selects one of the CATEGORY's package codes, so it is
+        // meaningless without a category: a rejected pair drops it along with
+        // the ids, rather than leaving a form pointing at codes this listing no
+        // longer has. Always stated (never omitted) so a re-listing that
+        // changes category cannot keep the previous one's answer.
+        packageForm: validatedCategoryId === null ? null : session.packageForm,
         partBrand: classification.make,
         originRegion: classification.originRegion,
         isOem: classification.isOem,
