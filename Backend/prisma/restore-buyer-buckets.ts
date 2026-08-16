@@ -25,7 +25,11 @@ import { PrismaClient, PartMainCategory } from '@prisma/client';
 
 const prisma = new PrismaClient();
 
-/** The 12 canonical buyer buckets: id + the fields the grid needs. */
+/**
+ * The 12 canonical buyer buckets, in HOME-GRID IMPORTANCE ORDER (most-purchased
+ * consumables/wear parts first). The array index IS the sortOrder written to each
+ * row, so reordering this list re-orders the grid on the next run.
+ */
 const BUCKETS: {
   id: string;
   name: string;
@@ -34,16 +38,16 @@ const BUCKETS: {
   color: string;
 }[] = [
   { id: 'brakes', name: 'Brakes', mainCategory: 'BRAKES', iconKey: 'brakes', color: '#EA4335' },
-  { id: 'batteries', name: 'Batteries', mainCategory: 'BATTERIES', iconKey: 'batteries', color: '#FBBC04' },
-  { id: 'filters', name: 'Filters', mainCategory: 'FILTERS', iconKey: 'filters', color: '#34A853' },
-  { id: 'ignition', name: 'Ignition', mainCategory: 'IGNITION', iconKey: 'ignition', color: '#FF6D01' },
-  { id: 'engine', name: 'Engine', mainCategory: 'ENGINE', iconKey: 'engine', color: '#4285F4' },
-  { id: 'electrical-parts', name: 'Electrical Parts', mainCategory: 'ELECTRICAL_PARTS', iconKey: 'electrical', color: '#A142F4' },
   { id: 'oil-and-fluids', name: 'Oil & Fluids', mainCategory: 'OIL_AND_FLUIDS', iconKey: 'oil', color: '#00ACC1' },
-  { id: 'belts-and-hoses', name: 'Belts & Hoses', mainCategory: 'BELTS_AND_HOSES', iconKey: 'belts', color: '#795548' },
-  { id: 'wipers', name: 'Wipers', mainCategory: 'WIPERS', iconKey: 'wipers', color: '#607D8B' },
-  { id: 'lighting', name: 'Lighting', mainCategory: 'LIGHTING', iconKey: 'lighting', color: '#F9AB00' },
+  { id: 'filters', name: 'Filters', mainCategory: 'FILTERS', iconKey: 'filters', color: '#34A853' },
   { id: 'suspension', name: 'Suspension', mainCategory: 'SUSPENSION', iconKey: 'suspension', color: '#009688' },
+  { id: 'engine', name: 'Engine', mainCategory: 'ENGINE', iconKey: 'engine', color: '#4285F4' },
+  { id: 'ignition', name: 'Ignition', mainCategory: 'IGNITION', iconKey: 'ignition', color: '#FF6D01' },
+  { id: 'electrical-parts', name: 'Electrical Parts', mainCategory: 'ELECTRICAL_PARTS', iconKey: 'electrical', color: '#A142F4' },
+  { id: 'batteries', name: 'Batteries', mainCategory: 'BATTERIES', iconKey: 'batteries', color: '#FBBC04' },
+  { id: 'belts-and-hoses', name: 'Belts & Hoses', mainCategory: 'BELTS_AND_HOSES', iconKey: 'belts', color: '#795548' },
+  { id: 'lighting', name: 'Lighting', mainCategory: 'LIGHTING', iconKey: 'lighting', color: '#F9AB00' },
+  { id: 'wipers', name: 'Wipers', mainCategory: 'WIPERS', iconKey: 'wipers', color: '#607D8B' },
   { id: 'exterior', name: 'Exterior', mainCategory: 'EXTERIOR', iconKey: 'exterior', color: '#5F6368' },
 ];
 
@@ -71,7 +75,9 @@ async function main(): Promise<void> {
   let recreated = 0;
   const missing: string[] = [];
 
-  for (const b of BUCKETS) {
+  for (let i = 0; i < BUCKETS.length; i++) {
+    const b = BUCKETS[i];
+    const sortOrder = i; // array position === importance rank
     const row = await prisma.partCategory.findUnique({
       where: { id: b.id },
       select: { id: true, isActive: true, mainCategory: true, iconKey: true, color: true },
@@ -98,6 +104,7 @@ async function main(): Promise<void> {
           iconKey: b.iconKey,
           color: b.color,
           isActive: true,
+          sortOrder,
           level: parent.level + 1,
           parent: { connect: { id: parentId } },
         },
@@ -119,6 +126,7 @@ async function main(): Promise<void> {
       where: { id: b.id },
       data: {
         isActive: true,
+        sortOrder, // enforce the importance order on every run
         mainCategory: row.mainCategory ?? b.mainCategory,
         iconKey: row.iconKey ?? b.iconKey,
         color: row.color ?? b.color,
