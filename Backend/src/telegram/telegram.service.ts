@@ -460,6 +460,20 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
     this.bot = new Telegraf(token);
     this.registerHandlers();
+
+    // Only ONE process may long-poll a given bot token — Telegram 409s every
+    // other getUpdates ("terminated by other getUpdates request"). A non-prod
+    // instance that shares this token (staging, or a dev's laptop running the
+    // backend) will otherwise kick prod off intermittently. Such instances set
+    // TELEGRAM_POLLING_DISABLED=true and never poll; prod leaves it unset.
+    if (this.config.get<string>('TELEGRAM_POLLING_DISABLED') === 'true') {
+      this.logger.warn(
+        'Bot long-polling DISABLED (TELEGRAM_POLLING_DISABLED=true) — this instance ' +
+          'will NOT receive seller updates. Unset it on exactly one (prod) instance.',
+      );
+      return;
+    }
+
     // launch() only resolves once polling stops (i.e. on shutdown) — log
     // start-up separately. A launch failure (e.g. a transient network error
     // reaching api.telegram.org) must not crash the whole backend as an
