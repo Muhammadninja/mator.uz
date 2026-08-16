@@ -55,18 +55,17 @@ describe('loadCategoryOptions (the bot reads the tree, never a hardcoded list)',
     ]);
   });
 
-  it("loads a category's children and mirrors their main-category enums", async () => {
+  it('hides the mainCategory buckets from the seller drill, keeping real subcategories', async () => {
     const svc: AnyService = makeService();
     svc.categories.findChildren.mockResolvedValue([
-      { id: 'brakes', name: 'Brakes' },
+      { id: 'brakes', name: 'Brakes' }, // a bucket → hidden from the drill
+      { id: 'front-brake-pads', name: 'Передние колодки' }, // real sub → kept
     ]);
     const options = await svc.loadCategoryOptions('brake-system');
 
     expect(svc.categories.findChildren).toHaveBeenCalledWith('brake-system');
-    expect(options[0]).toMatchObject({
-      id: 'brakes',
-      mainCategoryEnum: 'BRAKES',
-    });
+    expect(options.map((o: { id: string }) => o.id)).toEqual(['front-brake-pads']);
+    expect(options[0].mainCategoryEnum).toBeNull();
   });
 
   it('surfaces an admin-created category with NO enum mirror', async () => {

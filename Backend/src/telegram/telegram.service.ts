@@ -2012,7 +2012,14 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         parentId === null
           ? await this.categories.findRootCategories()
           : await this.categories.findChildren(parentId);
-      return rows.map((row) => ({
+      return rows
+        // Hide the 12 mainCategory BUCKETS from the seller drill: they are the
+        // home-grid taxonomy (and the classifier's auto-fallback target), NOT a
+        // pickable node. A bucket id is exactly a key of MAIN_CATEGORY_BY_SLUG.
+        // Sellers now drill roots → the real subcategories; mainCategory is still
+        // set from the classifier, so the bucket linkage/counts are unaffected.
+        .filter((row) => !MAIN_CATEGORY_BY_SLUG.has(row.id))
+        .map((row) => ({
         id: row.id,
         name: row.name,
         vehicleCategoryEnum: VEHICLE_CATEGORY_BY_SLUG.get(row.id) ?? null,

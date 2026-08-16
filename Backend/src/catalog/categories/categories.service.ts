@@ -58,19 +58,23 @@ export class CategoriesService {
       },
     });
 
+    // Count by mainCategory, NOT by exact categoryId: a part filed on a
+    // SUBCATEGORY (e.g. 'oil-filters') still carries mainCategory FILTERS, so it
+    // rolls up to the Filters bucket here. Grouping by categoryId would drop
+    // every sub-filed part from the home grid the moment reclassification runs.
     const grouped = await this.prisma.catalogPart.groupBy({
-      by: ['categoryId'],
+      by: ['mainCategory'],
       where: vehicleWhere,
       _count: { _all: true },
     });
-    const counts = new Map(grouped.map((g) => [g.categoryId, g._count._all]));
+    const counts = new Map(grouped.map((g) => [g.mainCategory, g._count._all]));
 
     return {
       items: categories.map((c) => ({
         id: c.id,
         name: c.name,
         slug: c.slug ?? c.id,
-        count: counts.get(c.id) ?? 0,
+        count: c.mainCategory ? (counts.get(c.mainCategory) ?? 0) : 0,
         iconKey: c.iconKey,
         color: c.color,
       })),
