@@ -26,6 +26,7 @@
     "seed:categories": "ts-node --compiler-options '{\"module\":\"commonjs\"}' prisma/seed-categories.ts",
     "fix:category-slugs": "ts-node --compiler-options '{\"module\":\"commonjs\"}' prisma/fix-category-slugs.ts",
     "seed:category-titles": "ts-node --compiler-options '{\"module\":\"commonjs\"}' prisma/seed-category-titles.ts",
+    "restore:buyer-buckets": "ts-node --compiler-options '{\"module\":\"commonjs\"}' prisma/restore-buyer-buckets.ts",
     "admin:create": "ts-node --compiler-options '{\"module\":\"commonjs\"}' scripts/create-admin.ts",
     "blueprint:graph": "ts-node --compiler-options '{\"module\":\"commonjs\"}' scripts/parse-schema.ts",
     "payme:fixture": "ts-node --compiler-options '{\"module\":\"commonjs\"}' scripts/create-payme-test-fixture.ts",
