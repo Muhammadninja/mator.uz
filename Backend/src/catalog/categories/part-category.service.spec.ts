@@ -15,6 +15,8 @@ import { RedisKeys } from '../../redis/redis.keys';
 /** A category row as Prisma would return it under CATEGORY_SELECT. */
 const row = (over: Partial<CategoryRow> & { id: string }): CategoryRow => ({
   name: over.id,
+  titleRu: null,
+  titleUz: null,
   slug: over.id,
   parentId: null,
   level: 0,

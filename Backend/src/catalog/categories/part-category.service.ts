@@ -278,6 +278,8 @@ export const MAX_DEPTH = 4;
 const CATEGORY_SELECT = {
   id: true,
   name: true,
+  titleRu: true,
+  titleUz: true,
   slug: true,
   parentId: true,
   level: true,
@@ -297,6 +299,8 @@ const CATEGORY_SELECT = {
 export interface CategoryRow {
   id: string;
   name: string;
+  titleRu: string | null;
+  titleUz: string | null;
   slug: string | null;
   parentId: string | null;
   level: number;
@@ -311,6 +315,8 @@ export interface CategoryRow {
 export interface CategoryNode {
   id: string;
   name: string;
+  titleRu: string | null;
+  titleUz: string | null;
   slug: string;
   parentId: string | null;
   level: number;
@@ -326,6 +332,8 @@ export function toNode(row: CategoryRow): CategoryNode {
   return {
     id: row.id,
     name: row.name,
+    titleRu: row.titleRu,
+    titleUz: row.titleUz,
     slug: row.slug ?? row.id,
     parentId: row.parentId,
     level: row.level,

@@ -1102,6 +1102,12 @@ model BookingService {
 model PartCategory {
   id           String            @id @db.VarChar(64)
   name         String            @db.VarChar(160)
+  // Localized display titles. `name` stays as the canonical/legacy label (and
+  // the fallback); `title_ru` / `title_uz` are what the buyer app renders for the
+  // active language (uz → title_uz, else title_ru, each falling back to `name`).
+  // Nullable so existing rows and any future category stay valid until translated.
+  titleRu      String?           @map("title_ru") @db.VarChar(160)
+  titleUz      String?           @map("title_uz") @db.VarChar(160)
   // URL/display slug for the admin category-tree console. Backfilled from `id`
   // by the migration (ids are already slug-shaped), unique so a slug names one
   // category. Nullable to keep the backfill safe on legacy rows.
