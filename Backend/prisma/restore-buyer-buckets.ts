@@ -9,8 +9,10 @@
  *   - restores mainCategory / iconKey / color from the canonical map IF they were
  *     cleared (never overwrites a value that is already set),
  *   - leaves parentId UNTOUCHED, so a bucket keeps its real tree position.
- * A bucket that no longer exists (hard-deleted) is REPORTED, not recreated — its
- * parent placement must be confirmed before re-adding it. Idempotent.
+ * A bucket that no longer exists (hard-deleted) is RECREATED under its natural
+ * root (PARENT map) at level 1 — never at level 0, so it can't leak into the
+ * systems list; the app already strips these ids from the reference drill.
+ * Idempotent.
  *
  * NOTE: reactivated buckets reappear as active children under their root, i.e.
  * next to the Russian subcategories in the drill again. Only run this if you need
@@ -45,10 +47,28 @@ const BUCKETS: {
   { id: 'exterior', name: 'Exterior', mainCategory: 'EXTERIOR', iconKey: 'exterior', color: '#5F6368' },
 ];
 
+/** Natural root to re-create a hard-deleted bucket under (level-1, kept out of
+ *  the systems list). Only used for buckets that no longer exist. */
+const PARENT: Record<string, string> = {
+  brakes: 'brake-system',
+  batteries: 'electrical-and-lighting',
+  filters: 'maintenance-and-fluids',
+  ignition: 'engine-system',
+  engine: 'engine-system',
+  'electrical-parts': 'electrical-and-lighting',
+  'oil-and-fluids': 'maintenance-and-fluids',
+  'belts-and-hoses': 'engine-system',
+  wipers: 'tuning-and-accessories',
+  lighting: 'electrical-and-lighting',
+  suspension: 'suspension-and-steering',
+  exterior: 'tuning-and-accessories',
+};
+
 async function main(): Promise<void> {
   console.log('\n=== BEFORE — bucket state ===');
   console.log('id'.padEnd(18), 'exists'.padEnd(7), 'active'.padEnd(7), 'mainCategory'.padEnd(16), 'parts');
   let reactivated = 0;
+  let recreated = 0;
   const missing: string[] = [];
 
   for (const b of BUCKETS) {
@@ -59,8 +79,31 @@ async function main(): Promise<void> {
     const parts = await prisma.catalogPart.count({ where: { categoryId: b.id } });
 
     if (!row) {
-      console.log(b.id.padEnd(18), 'NO'.padEnd(7), '-'.padEnd(7), '-'.padEnd(16), parts);
-      missing.push(b.id);
+      // Hard-deleted → recreate under its natural root at level 1.
+      const parentId = PARENT[b.id];
+      const parent = parentId
+        ? await prisma.partCategory.findUnique({ where: { id: parentId }, select: { level: true } })
+        : null;
+      if (!parent) {
+        console.log(b.id.padEnd(18), 'NO'.padEnd(7), `parent ${parentId} absent — SKIP`);
+        missing.push(b.id);
+        continue;
+      }
+      await prisma.partCategory.create({
+        data: {
+          id: b.id,
+          name: b.name,
+          slug: b.id,
+          mainCategory: b.mainCategory,
+          iconKey: b.iconKey,
+          color: b.color,
+          isActive: true,
+          level: parent.level + 1,
+          parent: { connect: { id: parentId } },
+        },
+      });
+      console.log(b.id.padEnd(18), 'RECREATED'.padEnd(7), `under ${parentId}`.padEnd(24), parts);
+      recreated++;
       continue;
     }
     console.log(
@@ -84,12 +127,9 @@ async function main(): Promise<void> {
     reactivated++;
   }
 
-  console.log(`\nDone. ${reactivated} bucket(s) reactivated.`);
+  console.log(`\nDone. ${reactivated} reactivated, ${recreated} recreated.`);
   if (missing.length) {
-    console.log(
-      `⚠ ${missing.length} bucket(s) were HARD-DELETED (need re-creation with a confirmed parent): ` +
-        missing.join(', '),
-    );
+    console.log(`⚠ ${missing.length} bucket(s) skipped (parent root absent): ${missing.join(', ')}`);
   }
   console.log('Reference caches expire within 300s; force with: redis-cli DEL cache:reference:categories');
 }
