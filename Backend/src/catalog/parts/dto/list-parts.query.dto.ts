@@ -73,6 +73,19 @@ export class ListPartsQueryDto {
   category?: string;
 
   @ApiPropertyOptional({
+    description:
+      'Macro-category ROLLUP: a PartMainCategory enum (e.g. BRAKES). Returns every ' +
+      'part in that system across ALL its subcategories, sorted bestseller-first by ' +
+      'default, and the response includes the subcategory chips for the system. ' +
+      'Case-insensitive; an unknown value is ignored (never 400s). To drill into a ' +
+      'single node instead, pass its id via `category` (e.g. category=front-brake-pads).',
+    example: 'BRAKES',
+  })
+  @IsOptional()
+  @IsString()
+  mainCategory?: string;
+
+  @ApiPropertyOptional({
     description: 'Vehicle-specific category enum value (e.g. BRAKE_SYSTEM).',
   })
   @IsOptional()
@@ -218,9 +231,9 @@ export class ListPartsQueryDto {
   @IsIn(['true', 'false'])
   in_stock_only?: string;
 
-  @ApiPropertyOptional({ enum: ['price_asc', 'price_desc', 'relevance'] })
+  @ApiPropertyOptional({ enum: ['price_asc', 'price_desc', 'relevance', 'bestseller'] })
   @IsOptional()
-  @IsIn(['price_asc', 'price_desc', 'relevance'])
+  @IsIn(['price_asc', 'price_desc', 'relevance', 'bestseller'])
   sort?: string;
 
   @ApiPropertyOptional({ minimum: 1 })

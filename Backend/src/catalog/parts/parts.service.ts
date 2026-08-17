@@ -8,6 +8,7 @@ import {
   OilType,
 } from '@prisma/client';
 import { OIL_TYPE_LABELS, formatVolume } from '../../common/motor-oil.util';
+import { MAIN_CATEGORY_TO_SLUG } from '../categories/category-map';
 import { PrismaService } from '../../prisma/prisma.service';
 import { clampLimit } from '../../common/pagination.util';
 import {
@@ -92,6 +93,9 @@ export class PartsService {
   async list(query: ListPartsQueryDto) {
     const vehicle = await this.loadVehicle(query.vehicle_id);
     const where = this.buildWhere(query, vehicle);
+    const rollup = this.rollupMainCategory(query);
+    // A macro-category rollup defaults to bestseller-first; an explicit sort wins.
+    const effectiveSort = query.sort ?? (rollup ? 'bestseller' : undefined);
     const page = query.page ?? 1;
     const pageSize = clampLimit(
       query.page_size,
@@ -104,7 +108,7 @@ export class PartsService {
       this.prisma.catalogPart.findMany({
         where,
         include: PART_INCLUDE,
-        orderBy: this.buildOrderBy(query.sort),
+        orderBy: this.buildOrderBy(effectiveSort),
         skip: (page - 1) * pageSize,
         take: pageSize,
       }),
@@ -138,6 +142,10 @@ export class PartsService {
         // (null otherwise) — a spare-part listing pays nothing for them.
         motor_oil: await this.motorOilFacet(query, where),
       },
+      // Subcategory chips for the macro-category rollup (the "Shop by system"
+      // screen renders these as quick filters). Null for a non-rollup listing so
+      // an ordinary query pays nothing for the extra grouping.
+      subcategories: rollup ? await this.subcategoryChips(where) : null,
       page,
       page_size: pageSize,
       total,
@@ -333,6 +341,11 @@ export class PartsService {
         and.push({ categoryId: q.category });
       }
     }
+    // Macro-category ROLLUP: filter every part in the system regardless of which
+    // subcategory it is filed under. Unknown values are ignored (never 400) —
+    // the same lenient rule the other filters follow.
+    const rollup = this.rollupMainCategory(q);
+    if (rollup) and.push({ mainCategory: rollup });
     if (q.vehicle_category) {
       const up = q.vehicle_category.toUpperCase();
       if (VEHICLE_CATEGORY_VALUES.has(up as PartVehicleCategory)) {
@@ -527,10 +540,72 @@ export class PartsService {
 
   private buildOrderBy(
     sort?: string,
-  ): Prisma.CatalogPartOrderByWithRelationInput {
-    if (sort === 'price_asc') return { priceUzs: 'asc' };
-    if (sort === 'price_desc') return { priceUzs: 'desc' };
-    return { createdAt: 'desc' };
+  ): Prisma.CatalogPartOrderByWithRelationInput[] {
+    if (sort === 'price_asc') return [{ priceUzs: 'asc' }];
+    if (sort === 'price_desc') return [{ priceUzs: 'desc' }];
+    // Bestsellers first, then most-sold, then best-reviewed/rated, newest last.
+    // The composite means the sort stays sensible before is_bestseller/sales_count
+    // are populated (they fall through to the rating/review tiebreakers).
+    if (sort === 'bestseller') {
+      return [
+        { isBestseller: 'desc' },
+        { salesCount: 'desc' },
+        { reviewCount: 'desc' },
+        { ratingAvg: { sort: 'desc', nulls: 'last' } },
+        { createdAt: 'desc' },
+      ];
+    }
+    return [{ createdAt: 'desc' }];
+  }
+
+  /**
+   * The macro-category this request rolls up, or null. Resolved from the explicit
+   * `mainCategory` param, or from a `category` value that is itself a
+   * PartMainCategory enum. Case-insensitive; an unknown value resolves to null.
+   */
+  private rollupMainCategory(q: ListPartsQueryDto): PartMainCategory | null {
+    for (const raw of [q.mainCategory, q.category]) {
+      if (!raw) continue;
+      const up = raw.toUpperCase();
+      if (MAIN_CATEGORY_VALUES.has(up as PartMainCategory)) {
+        return up as PartMainCategory;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Subcategory chips for a macro-category rollup: the real subcategories that
+   * actually have parts in the current result set, with counts — so the client
+   * renders quick filters that never lead to an empty page. The 12 mainCategory
+   * BUCKETS are excluded (they are the home-grid taxonomy, not drill chips).
+   */
+  private async subcategoryChips(where: Prisma.CatalogPartWhereInput) {
+    const grouped = await this.prisma.catalogPart.groupBy({
+      by: ['categoryId'],
+      where,
+      _count: { _all: true },
+    });
+    const ids = grouped.map((g) => g.categoryId);
+    if (ids.length === 0) return [];
+
+    const cats = await this.prisma.partCategory.findMany({
+      where: { id: { in: ids } },
+      select: { id: true, name: true, titleRu: true, titleUz: true, sortOrder: true },
+    });
+    const bucketIds = new Set<string>(Object.values(MAIN_CATEGORY_TO_SLUG));
+    const countById = new Map(grouped.map((g) => [g.categoryId, g._count._all]));
+
+    return cats
+      .filter((c) => !bucketIds.has(c.id))
+      .map((c) => ({
+        id: c.id,
+        name: c.name,
+        title_ru: c.titleRu,
+        title_uz: c.titleUz,
+        count: countById.get(c.id) ?? 0,
+      }))
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
   }
 
   private async loadVehicle(

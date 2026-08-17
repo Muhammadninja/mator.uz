@@ -1339,6 +1339,12 @@ model CatalogPart {
   // columns: NULL ratingAvg = unrated, reviewCount 0 = no ratings yet.
   ratingAvg          Decimal?             @map("rating_avg") @db.Decimal(2, 1)
   reviewCount        Int                  @default(0) @map("review_count")
+  // Bestseller signals for the macro-category ("Shop by system") rollup. Both are
+  // denormalized: `salesCount` is a periodically-updated order count, `isBestseller`
+  // an editorial/derived flag. Default 0/false so the bestseller sort degrades to
+  // rating/review tiebreakers until a population job (or admin toggle) fills them.
+  isBestseller       Boolean              @default(false) @map("is_bestseller")
+  salesCount         Int                  @default(0) @map("sales_count")
   createdAt          DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt          DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
   brand              PartBrand?           @relation(fields: [brandId], references: [id], onDelete: SetNull)
@@ -1359,6 +1365,8 @@ model CatalogPart {
   @@index([isOem])
   @@index([kind])
   @@index([stockQty])
+  // Hot path: filter by macro-category, order bestsellers first.
+  @@index([mainCategory, isBestseller, salesCount])
   @@map("catalog_parts")
 }
 

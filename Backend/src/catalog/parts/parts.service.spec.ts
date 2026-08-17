@@ -182,23 +182,23 @@ describe('PartsService — search and sort survive ProductKind', () => {
   it('price sorting is unchanged and never mentions kind', async () => {
     const { svc, prisma } = makeService();
     await svc.list({ sort: 'price_asc' });
-    expect((prisma.calls.findMany as { orderBy: unknown }).orderBy).toEqual({
-      priceUzs: 'asc',
-    });
+    expect((prisma.calls.findMany as { orderBy: unknown }).orderBy).toEqual([
+      { priceUzs: 'asc' },
+    ]);
 
     const desc = makeService();
     await desc.svc.list({ sort: 'price_desc' });
     expect(
       (desc.prisma.calls.findMany as { orderBy: unknown }).orderBy,
-    ).toEqual({ priceUzs: 'desc' });
+    ).toEqual([{ priceUzs: 'desc' }]);
   });
 
   it('the default sort is still newest-first', async () => {
     const { svc, prisma } = makeService();
     await svc.list({});
-    expect((prisma.calls.findMany as { orderBy: unknown }).orderBy).toEqual({
-      createdAt: 'desc',
-    });
+    expect((prisma.calls.findMany as { orderBy: unknown }).orderBy).toEqual([
+      { createdAt: 'desc' },
+    ]);
   });
 
   it('sorting works INSIDE an oil filter (the two compose)', async () => {
@@ -208,8 +208,38 @@ describe('PartsService — search and sort survive ProductKind', () => {
       sort: 'price_asc',
     });
     const args = prisma.calls.findMany as { orderBy: unknown; where: unknown };
-    expect(args.orderBy).toEqual({ priceUzs: 'asc' });
+    expect(args.orderBy).toEqual([{ priceUzs: 'asc' }]);
     expect(JSON.stringify(args.where)).toContain('MOTOR_OIL');
+  });
+
+  it('mainCategory rolls up the whole system and defaults to bestseller sort', async () => {
+    const { svc, prisma } = makeService();
+    const res = await svc.list({ mainCategory: 'BRAKES' });
+    const args = prisma.calls.findMany as { orderBy: any[]; where: unknown };
+    // rollup filter across all subcategories
+    expect(JSON.stringify(args.where)).toContain('"mainCategory":"BRAKES"');
+    // default order is bestseller-first (composite starts with isBestseller)
+    expect(args.orderBy[0]).toEqual({ isBestseller: 'desc' });
+    expect(args.orderBy[1]).toEqual({ salesCount: 'desc' });
+    // subcategory chips block is present (array, not null) for a rollup
+    expect(Array.isArray((res as { subcategories: unknown }).subcategories)).toBe(true);
+  });
+
+  it('mainCategory is case-insensitive and an explicit sort overrides bestseller', async () => {
+    const { svc, prisma } = makeService();
+    await svc.list({ mainCategory: 'brakes', sort: 'price_asc' });
+    const args = prisma.calls.findMany as { orderBy: any[]; where: unknown };
+    expect(JSON.stringify(args.where)).toContain('"mainCategory":"BRAKES"');
+    expect(args.orderBy).toEqual([{ priceUzs: 'asc' }]);
+  });
+
+  it('a non-rollup listing omits subcategory chips (null) and stays newest-first', async () => {
+    const { svc, prisma } = makeService();
+    const res = await svc.list({});
+    expect((res as { subcategories: unknown }).subcategories).toBeNull();
+    expect((prisma.calls.findMany as { orderBy: unknown }).orderBy).toEqual([
+      { createdAt: 'desc' },
+    ]);
   });
 
   it('free-text search still matches on title only, for every kind', async () => {

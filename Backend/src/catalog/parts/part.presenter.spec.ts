@@ -61,6 +61,8 @@ function part(over: Partial<PartWithRelations> = {}): PartWithRelations {
     // the state every row starts in. Tests that assert the rating override these.
     ratingAvg: null,
     reviewCount: 0,
+    isBestseller: false,
+    salesCount: 0,
     createdAt: new Date(),
     updatedAt: new Date(),
     brand: null,

@@ -163,6 +163,8 @@ export function presentPartItem(
     is_oem: part.isOem,
     is_gm: part.isGm,
     is_universal: part.isUniversal,
+    // Bestseller badge for the macro-category rollup (denormalized signal).
+    is_bestseller: part.isBestseller,
     oem_numbers: part.oemNumbers,
     gm_numbers: part.gmNumbers,
     // 'GM' | 'OEM' | 'UNKNOWN' for a spare part — never guessed; UNKNOWN means
