@@ -297,6 +297,10 @@ function makeService(
     // answerStaleCallback dedupes the chat nudge per user via this map; the
     // prototype-cast bypasses the field initializer, so provide it here.
     staleNoticeSentAt: new Map<number, number>(),
+    // The interface-language read cache; the prototype-cast bypasses the field
+    // initializer, so provide a real Map (an empty one falls back to the DB,
+    // which the `sellers` stub below answers).
+    langCache: new Map<number, 'ru' | 'uz' | 'en'>(),
     ...over,
   });
   return svc;
@@ -804,6 +808,8 @@ describe('buildSessionFromDraft', () => {
     expect(session).toEqual({
       step: WizardStep.PRICE,
       draftId: 'draft_1',
+      // No language was passed, so the dialogue is rebuilt in the default one.
+      lang: 'ru',
       kind: ProductKind.SPARE_PART,
       brand: 'Chevrolet',
       model: 'Nexia 3',
