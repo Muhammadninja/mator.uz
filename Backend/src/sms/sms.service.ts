@@ -7,13 +7,35 @@ import { EskizSmsProvider } from './providers/eskiz.provider';
 import { PlaymobileSmsProvider } from './providers/playmobile.provider';
 import { SayqalSmsProvider } from './providers/sayqal.provider';
 import { PrismaService } from '../prisma/prisma.service';
-import { SmsOperatorResolver, ResolvedOperator } from './resolver/sms-operator.resolver';
+import {
+  SmsOperatorResolver,
+  ResolvedOperator,
+} from './resolver/sms-operator.resolver';
+import {
+  mapEskizStatus,
+  isInterimStatus,
+  SmsDeliveryStatus,
+} from './eskiz-callback.util';
+
+/**
+ * What a delivery report did to the ledger. Returned for logging and tests —
+ * the webhook answers 200 regardless (see SmsService.applyEskizCallback).
+ */
+export interface SmsCallbackOutcome {
+  outcome: 'updated' | 'no_match' | 'ignored' | 'error';
+  status?: SmsDeliveryStatus;
+  reason?: 'missing_message_id' | 'interim_status' | 'unknown_status';
+}
 
 /**
  * Selects the active SMS provider from SMS_PROVIDER (eskiz | playmobile | sayqal
  * | log) and exposes a single send() to the rest of the app. Falls back to the
  * log provider when the chosen aggregator is missing credentials, so OTP flows
  * never hard-fail in dev.
+ *
+ * The one exception is `SMS_PROVIDER=eskiz` under `NODE_ENV=production`: missing
+ * credentials there throw at construction, so the app refuses to start rather
+ * than booting "healthy" while every OTP goes to the log and no user is reached.
  */
 @Injectable()
 export class SmsService {
@@ -33,21 +55,45 @@ export class SmsService {
     this.logger.log(`SMS provider: ${this.provider.name}`);
   }
 
+  /** True only for a real production boot — the fail-fast guard's trigger. */
+  private isProduction(): boolean {
+    return (
+      (this.config.get<string>('NODE_ENV') ?? '').toLowerCase() === 'production'
+    );
+  }
+
   private resolveProvider(): SmsProvider {
-    const choice = (this.config.get<string>('SMS_PROVIDER') ?? 'log').toLowerCase();
+    const choice = (
+      this.config.get<string>('SMS_PROVIDER') ?? 'log'
+    ).toLowerCase();
 
     if (choice === 'eskiz') {
       const email = this.config.get<string>('ESKIZ_EMAIL');
       const password = this.config.get<string>('ESKIZ_PASSWORD');
       if (email && password) {
         return new EskizSmsProvider({
-          baseUrl: this.config.get<string>('ESKIZ_BASE_URL') ?? 'https://notify.eskiz.uz/api',
+          baseUrl:
+            this.config.get<string>('ESKIZ_BASE_URL') ??
+            'https://notify.eskiz.uz/api',
           email,
           password,
           from: this.config.get<string>('ESKIZ_FROM'),
+          callbackUrl: this.config.get<string>('ESKIZ_CALLBACK_URL'),
         });
       }
-      this.logger.warn('SMS_PROVIDER=eskiz but credentials missing — falling back to log');
+      // In production a silent fallback means every OTP is written to the log
+      // and no user ever receives one, while the service reports itself healthy.
+      // Refuse to boot instead: a crash-looping deploy is far cheaper to notice
+      // than an auth flow that is quietly dead. Dev/test keep the log fallback.
+      if (this.isProduction()) {
+        throw new Error(
+          'SMS_PROVIDER=eskiz requires ESKIZ_EMAIL and ESKIZ_PASSWORD in production ' +
+            '(refusing to fall back to the log provider and silently drop every OTP)',
+        );
+      }
+      this.logger.warn(
+        'SMS_PROVIDER=eskiz but credentials missing — falling back to log',
+      );
     }
 
     if (choice === 'playmobile') {
@@ -56,13 +102,17 @@ export class SmsService {
       if (login && password) {
         return new PlaymobileSmsProvider({
           baseUrl:
-            this.config.get<string>('PLAYMOBILE_BASE_URL') ?? 'https://send.smsxabar.uz/broker-api',
+            this.config.get<string>('PLAYMOBILE_BASE_URL') ??
+            'https://send.smsxabar.uz/broker-api',
           login,
           password,
-          originator: this.config.get<string>('PLAYMOBILE_ORIGINATOR') ?? '3700',
+          originator:
+            this.config.get<string>('PLAYMOBILE_ORIGINATOR') ?? '3700',
         });
       }
-      this.logger.warn('SMS_PROVIDER=playmobile but credentials missing — falling back to log');
+      this.logger.warn(
+        'SMS_PROVIDER=playmobile but credentials missing — falling back to log',
+      );
     }
 
     if (choice === 'sayqal') {
@@ -71,7 +121,9 @@ export class SmsService {
       const serviceId = Number(this.config.get<string>('SAYQAL_SERVICE_ID'));
       if (username && secretKey && Number.isInteger(serviceId)) {
         return new SayqalSmsProvider({
-          baseUrl: this.config.get<string>('SAYQAL_BASE_URL') ?? 'https://routee.sayqal.uz',
+          baseUrl:
+            this.config.get<string>('SAYQAL_BASE_URL') ??
+            'https://routee.sayqal.uz',
           username,
           secretKey,
           serviceId,
@@ -94,7 +146,11 @@ export class SmsService {
    * Existing 2-argument callers are unaffected: it defaults to null and the
    * return type stays `void`, so callers that ignore accounting keep working.
    */
-  async sendSms(toE164: string, text: string, template?: string | null): Promise<void> {
+  async sendSms(
+    toE164: string,
+    text: string,
+    template?: string | null,
+  ): Promise<void> {
     // Resolve the operator BEFORE the send so bookkeeping never delays delivery.
     // Fully defensive: any resolver hiccup degrades to a null (unknown) operator
     // and the send proceeds exactly as before.
@@ -125,7 +181,9 @@ export class SmsService {
   }
 
   /** Resolve the operator without ever throwing into the send path. */
-  private async safeResolveOperator(toE164: string): Promise<ResolvedOperator | null> {
+  private async safeResolveOperator(
+    toE164: string,
+  ): Promise<ResolvedOperator | null> {
     try {
       return await this.operatorResolver.resolve(toE164);
     } catch (err) {
@@ -184,13 +242,90 @@ export class SmsService {
         stack?: string;
       };
       this.logger.warn(
-        `SMS accounting insert failed (send already succeeded): ${JSON.stringify({
-          message: prismaErr?.message ?? String(err),
-          code: prismaErr?.code,
-          meta: prismaErr?.meta,
-          stack: prismaErr?.stack,
-        })}`,
+        `SMS accounting insert failed (send already succeeded): ${JSON.stringify(
+          {
+            message: prismaErr?.message ?? String(err),
+            code: prismaErr?.code,
+            meta: prismaErr?.meta,
+            stack: prismaErr?.stack,
+          },
+        )}`,
       );
+    }
+  }
+
+  /**
+   * Apply an Eskiz delivery report to the accounting ledger.
+   *
+   * Closes the `pending` row that {@link recordAcceptedSms} inserted, flipping it
+   * to delivered / failed / undelivered and stamping `deliveredAt` on success.
+   *
+   * Never throws. The caller answers Eskiz 200 in every case on purpose: a
+   * non-2xx makes Eskiz redeliver the same report, and none of the failure modes
+   * here (unknown id, unmapped status, DB blip) are fixed by a retry. The return
+   * value reports what happened for logging and tests, not for the HTTP status.
+   */
+  async applyEskizCallback(payload: {
+    messageId?: string | null;
+    status?: string | null;
+    error?: string | null;
+  }): Promise<SmsCallbackOutcome> {
+    const messageId = payload.messageId?.trim();
+    if (!messageId) {
+      this.logger.warn('Eskiz callback ignored: no message id in payload');
+      return { outcome: 'ignored', reason: 'missing_message_id' };
+    }
+
+    const mapped = mapEskizStatus(payload.status);
+    if (!mapped) {
+      // Interim reports are expected and must NOT close the row; anything else
+      // is a vocabulary we have not seen and is worth a louder log.
+      if (isInterimStatus(payload.status)) {
+        this.logger.log(
+          `Eskiz callback for ${messageId}: interim status "${payload.status}" — leaving pending`,
+        );
+        return { outcome: 'ignored', reason: 'interim_status' };
+      }
+      this.logger.warn(
+        `Eskiz callback for ${messageId}: unrecognised status "${payload.status}" — leaving pending`,
+      );
+      return { outcome: 'ignored', reason: 'unknown_status' };
+    }
+
+    try {
+      // Scoped to provider='eskiz' so a providerSmsId that collides with another
+      // aggregator's id can never rewrite the wrong row, and to status='pending'
+      // so a duplicate report (Eskiz retries) is idempotent: the second delivery
+      // of the same callback matches nothing and updates 0 rows.
+      const { count } = await this.prisma.smsMessage.updateMany({
+        where: { provider: 'eskiz', providerSmsId: messageId, status: 'pending' },
+        data: {
+          status: mapped,
+          deliveredAt: mapped === 'delivered' ? new Date() : null,
+          errorMessage: mapped === 'delivered' ? null : (payload.error ?? payload.status ?? null),
+        },
+      });
+
+      if (count === 0) {
+        // Either an id we never recorded, or a row already closed by an earlier
+        // report. Both are benign — log and acknowledge.
+        this.logger.log(
+          `Eskiz callback for ${messageId}: no pending row matched (already closed or unknown id)`,
+        );
+        return { outcome: 'no_match', status: mapped };
+      }
+
+      this.logger.log(`Eskiz callback: ${messageId} → ${mapped}`);
+      return { outcome: 'updated', status: mapped };
+    } catch (err) {
+      // A DB failure must not bounce the webhook: Eskiz would redeliver and hit
+      // the same broken database. Swallow, log, and acknowledge.
+      this.logger.error(
+        `Eskiz callback for ${messageId} failed to persist: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return { outcome: 'error' };
     }
   }
 }
