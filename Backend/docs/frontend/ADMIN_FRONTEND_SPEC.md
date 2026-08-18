@@ -59,12 +59,24 @@ Also new: the delete-guard count is now split into buyer-catalog parts
 (`listingsCount` — previously products only), and there's a dedicated
 bulk-reassign endpoint for buyer-catalog parts.
 
+**NEW — a category now has THREE REQUIRED display names, one per language.**
+`nameRu`, `nameUz` and `nameEn` replace the single display `name`, and all
+three are `NOT NULL` in the database. The console's create/edit form therefore
+needs **three text inputs**, and must block submission until every one of them
+is filled — see [1.3](#13-the-three-localized-names) for the exact contract and
+the form rules. The old `name` field still exists but is **internal** (logging,
+ordering, slug derivation); it is no longer what any user sees, and the console
+does not need to send it.
+
 ### 1.2 Fields
 
 | Field | Type | Notes |
 |---|---|---|
 | `id` | `string` | **The id IS the slug.** Derived server-side on create; never sent by the client. |
-| `name` | `string` | Display name. Free-form, renameable. |
+| `nameRu` | `string` | **Display name in Russian. Always present.** Render this for a `ru` operator. |
+| `nameUz` | `string` | **Display name in Uzbek (Latin).** Always present. |
+| `nameEn` | `string` | **Display name in English.** Always present. Also what the slug is derived from on create. |
+| `name` | `string` | **Internal** canonical label — logging/ordering/legacy consumers. Do **not** show it to a user and do not offer it as an editable "name" field. |
 | `slug` | `string \| null` | Unique. Nullable only for legacy rows. |
 | `parentId` | `string \| null` | `null` = root. |
 | `level` | `number` | **Derived, never accepted from the client.** 0 = vehicle/root, 1 = main, 2 = subcategory. |
@@ -75,9 +87,69 @@ bulk-reassign endpoint for buyer-catalog parts.
 | `mainCategory` | `PartMainCategory \| null` | Legacy enum mirror. Only the 12 canonical buyer rows carry it. Leave `null` for "Другое" children. |
 | `mxik` | `string \| null` | MXIK / ИКПУ, exactly 17 digits. `null` = not configured. |
 | `packageCodeSingle` | `string \| null` | Tasnif package code for "Штука" (a single item). |
-| `packageCodeSet` | `string \| null` | Tasnif package code for "Комплект / набор" (a set). Optional even on a configured category — see [1.6](#16-the-fiscal-fields). |
+| `packageCodeSet` | `string \| null` | Tasnif package code for "Комплект / набор" (a set). Optional even on a configured category — see [1.7](#17-the-fiscal-fields). |
 | `fiscalConfigured` | `boolean` | **Derived.** Whether products in this category can be fiscalized (and therefore sold through Payme) at all. |
-| `fiscalByOilType` | `boolean` | **Derived.** `true` when this category's products are fiscalized from their own `oilType`, not from the category's codes — see [1.6](#16-the-fiscal-fields). |
+| `fiscalByOilType` | `boolean` | **Derived.** `true` when this category's products are fiscalized from their own `oilType`, not from the category's codes — see [1.7](#17-the-fiscal-fields). |
+
+### 1.3 The three localized names
+
+Every category is shown to Russian-, Uzbek- and English-speaking users: the
+buyer app in its active locale, the Telegram seller bot in the language the
+seller picked from its language menu, and this console. A category missing one
+of the three would render as a **blank button** for every user of that
+language, so the three names are required at every level of the stack:
+
+| Layer | What enforces it |
+|---|---|
+| Database | `name_ru`, `name_uz`, `name_en` are `NOT NULL` |
+| API (create) | `nameRu`, `nameUz`, `nameEn` are all required, and rejected when blank |
+| API (update) | Each is optional (patch one language at a time) but **cannot be set to `""`, `"   "` or `null`** |
+| Console | The form below must not submit until all three are filled |
+
+**Server-side rules — what produces a `400`:**
+
+- a missing name on `POST` (any of the three);
+- an empty string or a whitespace-only string, on `POST` **or** `PATCH` —
+  values are trimmed before validation, so `"   "` is treated as empty;
+- `null` on `PATCH` (there is no "clear a name" operation — unlike the fiscal
+  fields, which do accept `null`);
+- anything over 160 characters, or a non-string.
+
+Surrounding whitespace on an otherwise valid name is **trimmed and accepted**,
+so the console does not need to trim before sending.
+
+#### Form requirements (create + edit)
+
+Three separate text inputs, in this order:
+
+| Label to show | Field to send | Placeholder example |
+|---|---|---|
+| Название (RU) | `nameRu` | Турбокомпрессоры |
+| Nomi (UZ) | `nameUz` | Turbokompressorlar |
+| Name (EN) | `nameEn` | Turbochargers |
+
+- **All three are mandatory.** Mark each with the required indicator.
+- **Disable the submit button** while any of the three is empty or
+  whitespace-only, and highlight the offending input(s) inline (`red border` +
+  a message such as "Заполните название на этом языке"). This is a *client-side*
+  gate — do not rely on the server round-trip to discover it.
+- Validate on blur and on submit, not on every keystroke, so a half-typed name
+  is not flagged as an error.
+- Uzbek is written in **Latin script** (`Turbokompressorlar`, not
+  `Турбокомпрессорлар`) — it is the script both apps ship their `uz` locale in.
+- On **edit**, prefill each input from `nameRu` / `nameUz` / `nameEn` on the
+  node. Clearing an input and saving is a `400`, so treat it exactly like the
+  create case and block it in the form.
+- Do **not** render an input for `name`. It is internal; the API fills it from
+  `nameEn` when omitted.
+- The English name additionally seeds the slug (and therefore the `id`) on
+  create when no explicit `slug` is sent — worth a hint under that input.
+
+**Existing categories are already translated.** The migration renamed the old
+`title_ru`/`title_uz` columns into `name_ru`/`name_uz` (keeping every
+translation entered so far) and backfilled `name_en` from `name`. Nothing needs
+a data-entry pass before the new form ships.
+
 | `offersPackageChoice` | `boolean` | **Derived.** Whether the seller bot asks "Штука or Комплект?" for this category (`true` only when both package codes are set). |
 | `productsCount` | `number` | Buyer-catalog parts linked **directly** to this node (not recursive). |
 | `listingsCount` | `number` | Supply-side products **+ drafts** pointing here. **This is what blocks a hard delete.** |
@@ -90,7 +162,7 @@ There is still no `description` field on a category.
 `level`, `id`. All six are derived server-side; sending any of them is either
 ignored (not in a DTO) or a `400` (`level` — not whitelisted at all).
 
-### 1.3 Endpoints
+### 1.4 Endpoints
 
 All under `@Controller('v1/admin/categories')` unless noted.
 
@@ -144,14 +216,17 @@ Request (`CreateCategoryDto`):
 
 | Field | Required | Notes |
 |---|---|---|
-| `name` | ✅ | 1–160 chars |
-| `slug` | ❌ | ≤96 chars. Derived from `name` when omitted. Becomes the `id`. |
+| `nameRu` | ✅ | 1–160 chars, non-blank. Russian display name. |
+| `nameUz` | ✅ | 1–160 chars, non-blank. Uzbek (Latin) display name. |
+| `nameEn` | ✅ | 1–160 chars, non-blank. English display name. |
+| `name` | ❌ | Internal label. Defaults to `nameEn`; the console need not send it. |
+| `slug` | ❌ | ≤96 chars. Derived from `nameEn` when omitted (a Cyrillic-only name slugifies to nothing). Becomes the `id`. |
 | `parentId` | ❌ | `null`/omitted = root |
 | `iconKey` | ❌ | ≤48 |
 | `color` | ❌ | ≤16 |
 | `sortOrder` | ❌ | integer ≥ 0, default 0 |
 | `mainCategory` | ❌ | `PartMainCategory` enum — omit for "Другое" children |
-| `mxik` | ❌ | Exactly 17 digits. See [1.6](#16-the-fiscal-fields) for the combination rule. |
+| `mxik` | ❌ | Exactly 17 digits. See [1.7](#17-the-fiscal-fields) for the combination rule. |
 | `packageCodeSingle` | ❌ | 1–20 digits. |
 | `packageCodeSet` | ❌ | 1–20 digits. |
 
@@ -160,18 +235,22 @@ one is a `400` (not whitelisted).
 
 **Response** — `201`, the created node (all fields from [1.2](#12-fields)).
 
-**Errors:** `400` unslugifiable name, invalid body, or half-configured fiscal
-data (see [1.6](#16-the-fiscal-fields)) · `404` parent not found · `409` slug
-already in use.
+**Errors:** `400` a missing/blank localized name, an unslugifiable `nameEn`,
+invalid body, or half-configured fiscal data (see
+[1.7](#17-the-fiscal-fields)) · `404` parent not found · `409` slug already in
+use.
 
 ```http
 POST /v1/admin/categories
-{ "name": "Motorcycle Oil", "parentId": "other", "sortOrder": 1 }
+{ "nameRu": "Мотоциклетные масла", "nameUz": "Mototsikl moylari",
+  "nameEn": "Motorcycle Oil", "parentId": "other", "sortOrder": 1 }
 ```
 ```jsonc
 // 201
 { "success": true,
-  "data": { "id": "motorcycle-oil", "name": "Motorcycle Oil", "slug": "motorcycle-oil",
+  "data": { "id": "motorcycle-oil", "name": "Motorcycle Oil",
+            "nameRu": "Мотоциклетные масла", "nameUz": "Mototsikl moylari",
+            "nameEn": "Motorcycle Oil", "slug": "motorcycle-oil",
             "parentId": "other", "level": 1, "sortOrder": 1, "iconKey": null,
             "color": null, "isActive": true, "mainCategory": null,
             "mxik": null, "packageCodeSingle": null, "packageCodeSet": null,
@@ -183,20 +262,24 @@ POST /v1/admin/categories
 #### 5 — `PATCH /v1/admin/categories/:id`
 
 Body (`UpdateCategoryDto`), every field optional; only what you send is
-written: `name`, `slug`, `iconKey`, `color`, `parentId` (`null` promotes to
-root), `sortOrder`, `isActive`, `mainCategory`, `mxik`, `packageCodeSingle`,
-`packageCodeSet`.
+written: `nameRu`, `nameUz`, `nameEn`, `name`, `slug`, `iconKey`, `color`,
+`parentId` (`null` promotes to root), `sortOrder`, `isActive`, `mainCategory`,
+`mxik`, `packageCodeSingle`, `packageCodeSet`.
+
+The three localized names may be patched one at a time, but **none of them can
+be blanked or nulled** — see [1.3](#13-the-three-localized-names).
 
 Any of the three fiscal fields accepts an explicit `null` to **clear** it
 (distinct from omitting the field, which leaves it untouched). See
-[1.6](#16-the-fiscal-fields) for the rule the server enforces on the resulting
+[1.7](#17-the-fiscal-fields) for the rule the server enforces on the resulting
 combination.
 
 A `parentId` change goes through the same cycle guard as `/move` and
 re-derives `level` for the node **and its whole subtree**.
 
-**Errors:** `400` invalid body, would create a cycle, or leaves fiscal data
-half-configured · `404` no such category or target parent · `409` slug in use.
+**Errors:** `400` invalid body, a blank/`null` localized name, would create a
+cycle, or leaves fiscal data half-configured · `404` no such category or target
+parent · `409` slug in use.
 
 #### 6 / 7 — activate / deactivate
 
@@ -253,13 +336,13 @@ Body (`BulkMoveProductsDto`):
 Use this for a "move N selected products to category X" bulk action in the
 product list — it is **not** for reorganizing the category tree itself.
 
-### 1.4 Reordering
+### 1.5 Reordering
 
 There is still **no dedicated reorder endpoint and no bulk-reorder**. Set
 `sortOrder` per node via `PATCH /:id` or `PATCH /:id/move`. For drag-and-drop,
 issue one `PATCH` per moved sibling. Ties break by `name`.
 
-### 1.5 No audit trail for categories
+### 1.6 No audit trail for categories
 
 **Category writes are not audited.** Unlike dealers (see
 [Part 2](#25-audit-trail)), there is no `AdminAudit` entry, no actor, no
@@ -268,7 +351,7 @@ Do not design a "history" or "changed by" panel for categories — the data to
 back it does not exist. If the business needs one, that is a new backend
 requirement.
 
-### 1.6 The fiscal fields
+### 1.7 The fiscal fields
 
 **Why this exists.** Payme (the payment provider) requires every product line
 on a receipt to carry an MXIK/ИКПУ classification code and a Tasnif package
@@ -315,7 +398,7 @@ configured" warning for these categories, and do not let an operator type
 codes into fields that would be ignored.** Detect this case from
 `fiscalByOilType`, not by category name or id.
 
-### 1.7 What happens on edit / move / activate — and caching
+### 1.8 What happens on edit / move / activate — and caching
 
 | Admin action | Effect |
 |---|---|
@@ -334,11 +417,14 @@ cache-busting params, or delay the UI. After a successful `2xx`, a re-fetch
 returns fresh data. Do **not** implement your own category cache with a
 longer lifetime.
 
-### 1.8 Checklist — Categories
+### 1.9 Checklist — Categories
 
 - [ ] Render the tree from `GET /v1/admin/categories/tree`
+- [ ] **Three name inputs** (RU / UZ / EN) on both the create and the edit form
+- [ ] **Block submit + highlight the field** while any of the three is empty or whitespace-only
+- [ ] Display node names from `nameRu`/`nameUz`/`nameEn` — never from the internal `name`
 - [ ] Create a child: `POST /v1/admin/categories` — never send `level` or `id`
-- [ ] Edit: `PATCH /v1/admin/categories/:id` (partial)
+- [ ] Edit: `PATCH /v1/admin/categories/:id` (partial) — a name may be changed, never blanked
 - [ ] Move: `PATCH /v1/admin/categories/:id/move` — handle `400` cycle errors
 - [ ] Activate / deactivate: `POST /:id/activate` · `/deactivate` — prefer over delete
 - [ ] Ordering: `sortOrder` per node; one `PATCH` per moved sibling (no bulk endpoint)
@@ -346,7 +432,7 @@ longer lifetime.
 - [ ] Fiscal fields as one grouped control; show `fiscalConfigured` as a badge, don't re-derive it
 - [ ] Suppress the "not configured" warning when `fiscalByOilType: true`
 - [ ] No history/audit UI for categories — the data doesn't exist
-- [ ] Errors: `400` validation/cycle/half-configured-fiscal · `401` no token · `403` role · `404` missing · `409` slug in use / delete blocked
+- [ ] Errors: `400` validation (incl. a missing/blank localized name)/cycle/half-configured-fiscal · `401` no token · `403` role · `404` missing · `409` slug in use / delete blocked
 - [ ] Show `message` as a toast/banner + `requestId`, not a per-field error map — only one problem comes back at a time
 - [ ] Do not add a "product kind" control — OTHER children are taxonomy only
 - [ ] Do not cache categories beyond the request; server invalidates on write
@@ -586,7 +672,7 @@ the dealer list/detail views. Enforce this client-side only — do not expect a
 ### 2.5 Audit trail
 
 **Every dealer mutation is audited**, in sharp contrast to categories
-([1.5](#15-no-audit-trail-for-categories)). This asymmetry is intentional —
+([1.6](#16-no-audit-trail-for-categories)). This asymmetry is intentional —
 dealer changes are moderation actions with compliance weight; category edits
 are taxonomy housekeeping.
 
@@ -651,7 +737,7 @@ requested state.
 GET    /v1/admin/categories?parentId=&level=&isActive=
 GET    /v1/admin/categories/tree
 GET    /v1/admin/categories/:id
-POST   /v1/admin/categories        { name, slug?, parentId?, iconKey?, color?, sortOrder?,
+POST   /v1/admin/categories        { nameRu, nameUz, nameEn, name?, slug?, parentId?, iconKey?, color?, sortOrder?,
                                       mainCategory?, mxik?, packageCodeSingle?, packageCodeSet? }
 PATCH  /v1/admin/categories/:id    { …same fields, all optional; mxik/packageCodeSingle/
                                       packageCodeSet accept null to clear }
@@ -676,7 +762,7 @@ POST   /v1/admin/dealers/:id/suspend      { reason? }
 POST   /v1/admin/dealers/:id/reactivate
 ```
 
-**Category node:** `id, name, slug, parentId, level, sortOrder, iconKey,
+**Category node:** `id, nameRu, nameUz, nameEn, name, slug, parentId, level, sortOrder, iconKey,
 color, isActive, mainCategory, mxik, packageCodeSingle, packageCodeSet,
 fiscalConfigured, fiscalByOilType, offersPackageChoice, productsCount,
 listingsCount, children[]`
