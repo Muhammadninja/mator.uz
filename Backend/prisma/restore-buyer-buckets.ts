@@ -22,6 +22,7 @@
  *   (= ts-node --compiler-options '{"module":"commonjs"}' prisma/restore-buyer-buckets.ts)
  */
 import { PrismaClient, PartMainCategory } from '@prisma/client';
+import { localizedNamesFor } from '../src/prisma/seed-data/category-names.seed';
 
 const prisma = new PrismaClient();
 
@@ -99,6 +100,7 @@ async function main(): Promise<void> {
         data: {
           id: b.id,
           name: b.name,
+          ...localizedNamesFor(b.id, b.name),
           slug: b.id,
           mainCategory: b.mainCategory,
           iconKey: b.iconKey,

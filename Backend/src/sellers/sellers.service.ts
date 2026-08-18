@@ -1,5 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { SellerStatus } from '@prisma/client';
+import { BotLanguage, SellerStatus } from '@prisma/client';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { PrismaService } from '../prisma/prisma.service';
 import { SellerEvent, type SellerApprovedEvent } from './seller-events';
@@ -24,6 +24,16 @@ export class SellersService {
 
   findPending() {
     return this.findAll(SellerStatus.PENDING);
+  }
+
+  /**
+   * Record the interface language a seller picked in the bot. Keyed on tgId
+   * (the identity the bot has) rather than the numeric id, so the caller does
+   * not need a prior lookup. The row always exists by the time this is called —
+   * /start upserts the seller before the language menu is ever shown.
+   */
+  async setLanguage(tgId: bigint, lang: BotLanguage) {
+    return this.prisma.seller.update({ where: { tgId }, data: { lang } });
   }
 
   async upsertFromBot(tgId: bigint, storeName: string, phone = '') {

@@ -13,6 +13,11 @@ import { isFiscalizedByOilType } from '../../catalog/categories/category-map';
 export const ADMIN_CATEGORY_NODE_SELECT = {
   id: true,
   name: true,
+  // All three localized names — the console edits them as three inputs and
+  // needs every one of them on read to populate the form.
+  nameRu: true,
+  nameUz: true,
+  nameEn: true,
   slug: true,
   parentId: true,
   level: true,
@@ -38,7 +43,14 @@ export type AdminCategoryNodeRow = Prisma.PartCategoryGetPayload<{
 /** A category-tree node on the wire, with its nested children. */
 export interface AdminCategoryTreeNode {
   id: string;
+  /** Internal canonical label — not what the console displays to a user. */
   name: string;
+  /** Display name in Russian (always present). */
+  nameRu: string;
+  /** Display name in Uzbek, Latin script (always present). */
+  nameUz: string;
+  /** Display name in English (always present). */
+  nameEn: string;
   slug: string | null;
   parentId: string | null;
   /** Derived depth: 0 = vehicle category, 1 = main category, 2 = subcategory. */
@@ -82,6 +94,9 @@ export function presentAdminCategoryNode(
   return {
     id: row.id,
     name: row.name,
+    nameRu: row.nameRu,
+    nameUz: row.nameUz,
+    nameEn: row.nameEn,
     slug: row.slug,
     parentId: row.parentId,
     level: row.level,

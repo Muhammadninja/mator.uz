@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Prisma, PartCondition, PartNumberType } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { MAIN_CATEGORY_TO_SLUG } from '../categories/category-map';
+import { localizedNamesFor } from '../../prisma/seed-data/category-names.seed';
 
 /** Prefix of the synthetic Product.gmNumber key used when a listing has no real
  *  part number — such values must never be projected as searchable numbers. */
@@ -182,6 +183,13 @@ export class CatalogProjectionService {
         create: {
           id: CatalogProjectionService.UNCATEGORIZED_ID,
           name: 'Uncategorized',
+          // The three localized names are NOT NULL, and this fallback bucket is
+          // created by the projection itself — so it carries its own
+          // translations rather than depending on a seed having run first.
+          ...localizedNamesFor(
+            CatalogProjectionService.UNCATEGORIZED_ID,
+            'Uncategorized',
+          ),
         },
       }),
     );

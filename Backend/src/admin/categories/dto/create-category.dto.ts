@@ -1,8 +1,9 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   IsEnum,
   IsInt,
+  IsNotEmpty,
   IsOptional,
   IsString,
   Matches,
@@ -20,18 +21,63 @@ import {
 /**
  * Body of POST /v1/admin/categories. Creates a PartCategory node.
  *
- * `id` is derived from `slug` (or from `name` when slug is omitted), so a
- * category's slug names it uniquely. `parentId: null`/omitted makes a root.
+ * `id` is derived from `slug` (or from `nameEn` when slug is omitted — the
+ * English name is the only one guaranteed to slugify to something non-empty),
+ * so a category's slug names it uniquely. `parentId: null`/omitted makes a
+ * root.
  *
  * The global ValidationPipe runs with `whitelist: true,
  * forbidNonWhitelisted: true`, so this class IS the accepted-field whitelist.
  */
 export class CreateCategoryDto {
-  @ApiProperty({ description: 'Display name.', example: 'Turbochargers' })
+  // ── Localized names (ALL THREE REQUIRED) ──────────────────────────────────
+  // A category is displayed to Russian, Uzbek and English speakers alike, so it
+  // is not creatable until it has a name for each of them. `@Transform` trims
+  // first so that "   " is rejected by `@IsNotEmpty` — a whitespace-only name
+  // would otherwise pass validation and render as a blank button in the bot.
+  @ApiProperty({
+    description: 'Display name in Russian. Required, non-blank.',
+    example: 'Турбокомпрессоры',
+  })
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsString()
+  @IsNotEmpty({ message: 'nameRu is required and cannot be empty' })
+  @MaxLength(160)
+  nameRu!: string;
+
+  @ApiProperty({
+    description: 'Display name in Uzbek (Latin script). Required, non-blank.',
+    example: 'Turbokompressorlar',
+  })
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsString()
+  @IsNotEmpty({ message: 'nameUz is required and cannot be empty' })
+  @MaxLength(160)
+  nameUz!: string;
+
+  @ApiProperty({
+    description:
+      'Display name in English. Required, non-blank. Also the source the ' +
+      'slug/id is derived from when no explicit slug is given.',
+    example: 'Turbochargers',
+  })
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsString()
+  @IsNotEmpty({ message: 'nameEn is required and cannot be empty' })
+  @MaxLength(160)
+  nameEn!: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Internal canonical label (logs, ordering, legacy consumers). Defaults ' +
+      'to nameEn when omitted — the console does not need to send it.',
+    example: 'Turbochargers',
+  })
+  @IsOptional()
   @IsString()
   @MinLength(1)
   @MaxLength(160)
-  name!: string;
+  name?: string;
 
   @ApiPropertyOptional({
     description:

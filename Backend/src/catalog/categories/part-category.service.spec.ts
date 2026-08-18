@@ -15,8 +15,11 @@ import { RedisKeys } from '../../redis/redis.keys';
 /** A category row as Prisma would return it under CATEGORY_SELECT. */
 const row = (over: Partial<CategoryRow> & { id: string }): CategoryRow => ({
   name: over.id,
-  titleRu: null,
-  titleUz: null,
+  // All three localized names are NOT NULL in the schema; the id doubles as a
+  // readable stand-in for each of them in these tree-shape tests.
+  nameRu: over.id,
+  nameUz: over.id,
+  nameEn: over.id,
   slug: over.id,
   parentId: null,
   level: 0,

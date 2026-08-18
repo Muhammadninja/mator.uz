@@ -278,8 +278,13 @@ export const MAX_DEPTH = 4;
 const CATEGORY_SELECT = {
   id: true,
   name: true,
-  titleRu: true,
-  titleUz: true,
+  // All three localized names travel together, always: every consumer of a
+  // CategoryNode (bot keyboards, buyer grid, reference API) renders ONE of
+  // them, chosen per-request, and selecting only the "current" one would make
+  // the cached payload language-specific.
+  nameRu: true,
+  nameUz: true,
+  nameEn: true,
   slug: true,
   parentId: true,
   level: true,
@@ -299,8 +304,9 @@ const CATEGORY_SELECT = {
 export interface CategoryRow {
   id: string;
   name: string;
-  titleRu: string | null;
-  titleUz: string | null;
+  nameRu: string;
+  nameUz: string;
+  nameEn: string;
   slug: string | null;
   parentId: string | null;
   level: number;
@@ -314,9 +320,12 @@ export interface CategoryRow {
 /** The public (reference-API / bot) shape of one category. */
 export interface CategoryNode {
   id: string;
+  /** Internal canonical label. Kept on the wire for backwards compatibility;
+   *  clients should render one of the three localized names below. */
   name: string;
-  titleRu: string | null;
-  titleUz: string | null;
+  nameRu: string;
+  nameUz: string;
+  nameEn: string;
   slug: string;
   parentId: string | null;
   level: number;
@@ -332,8 +341,9 @@ export function toNode(row: CategoryRow): CategoryNode {
   return {
     id: row.id,
     name: row.name,
-    titleRu: row.titleRu,
-    titleUz: row.titleUz,
+    nameRu: row.nameRu,
+    nameUz: row.nameUz,
+    nameEn: row.nameEn,
     slug: row.slug ?? row.id,
     parentId: row.parentId,
     level: row.level,

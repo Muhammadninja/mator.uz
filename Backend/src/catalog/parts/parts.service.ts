@@ -591,7 +591,14 @@ export class PartsService {
 
     const cats = await this.prisma.partCategory.findMany({
       where: { id: { in: ids } },
-      select: { id: true, name: true, titleRu: true, titleUz: true, sortOrder: true },
+      select: {
+        id: true,
+        name: true,
+        nameRu: true,
+        nameUz: true,
+        nameEn: true,
+        sortOrder: true,
+      },
     });
     const bucketIds = new Set<string>(Object.values(MAIN_CATEGORY_TO_SLUG));
     const countById = new Map(grouped.map((g) => [g.categoryId, g._count._all]));
@@ -601,8 +608,12 @@ export class PartsService {
       .map((c) => ({
         id: c.id,
         name: c.name,
-        title_ru: c.titleRu,
-        title_uz: c.titleUz,
+        // Wire keys unchanged (the buyer app already reads title_ru/title_uz);
+        // only their SOURCE moved to the renamed, now-required columns.
+        // `title_en` joins them for the app's English locale.
+        title_ru: c.nameRu,
+        title_uz: c.nameUz,
+        title_en: c.nameEn,
         count: countById.get(c.id) ?? 0,
       }))
       .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
