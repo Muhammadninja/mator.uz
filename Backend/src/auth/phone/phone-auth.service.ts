@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { AuthProvider, OtpChannel, Role, type AppUser } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
-import { OtpService } from './otp.service';
+import { OtpService, OtpPurpose } from './otp.service';
 import { TokenService } from '../tokens/token.service';
 import { prefixedId, IdPrefix } from '../../common/ulid.util';
 import { RequestOtpDto } from './dto/request-otp.dto';
@@ -23,7 +23,15 @@ export class PhoneAuthService {
   async requestOtp(dto: RequestOtpDto) {
     const phoneE164 = dto.phone_e164.trim();
     const channel = (dto.channel?.toUpperCase() as OtpChannel) ?? OtpChannel.SMS;
-    const issued = await this.otp.request(phoneE164, channel);
+    // `dto.lang` is already normalized by RequestOtpDto's @Transform; passing it
+    // through (and passing `undefined` when the client sent nothing) lets
+    // OtpService apply the `uz` default in the single place that owns it.
+    const issued = await this.otp.request(
+      phoneE164,
+      channel,
+      OtpPurpose.LOGIN,
+      dto.lang,
+    );
     const existing = await this.prisma.appUser.findUnique({ where: { phoneE164 } });
 
     return {

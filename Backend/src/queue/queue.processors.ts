@@ -11,8 +11,9 @@ import {
 import type {
   ImageJobData,
   NotificationJobData,
-  SmsJobData,
+  SmsQueuePayload,
 } from './queue.service';
+import { isSmsOtpJob } from './queue.service';
 import { CloudinaryService } from '../cloudinary/cloudinary.service';
 import { ImageEnhanceService } from '../ai/image-enhance.service';
 import { ProductDraftService } from '../telegram/product-draft.service';
@@ -253,15 +254,22 @@ export class SmsProcessor extends WorkerHost {
     super();
   }
 
-  async process(job: Job<SmsJobData>): Promise<void> {
-    const { phone, message, template } = job.data;
-    this.logger.log(`Sending sms job ${job.id} to ${maskPhone(phone)}`);
+  async process(job: Job<SmsQueuePayload>): Promise<void> {
+    const data = job.data;
+    this.logger.log(`Sending sms job ${job.id} to ${maskPhone(data.phone)}`);
     // Throwing here is what triggers BullMQ's retry/backoff — do not swallow.
-    await this.sms.sendSms(phone, message, template ?? null);
+    if (isSmsOtpJob(data)) {
+      // OTP jobs carry the code + language; SmsService renders the approved
+      // template. Jobs enqueued before this payload existed have no `otp` key
+      // and still take the rendered-text branch below.
+      await this.sms.sendOtp(data.phone, data.otp.code, data.otp.lang);
+      return;
+    }
+    await this.sms.sendSms(data.phone, data.message, data.template ?? null);
   }
 
   @OnWorkerEvent('completed')
-  onCompleted(job: Job<SmsJobData>): void {
+  onCompleted(job: Job<SmsQueuePayload>): void {
     this.logger.log(`Sms job ${job.id} completed`);
     this.metrics?.observeJob(QUEUE_NAMES.SMS, 'success', jobDurationSeconds(job));
   }
@@ -274,7 +282,7 @@ export class SmsProcessor extends WorkerHost {
    * business state to roll back.
    */
   @OnWorkerEvent('failed')
-  onFailed(job: Job<SmsJobData> | undefined, err: Error): void {
+  onFailed(job: Job<SmsQueuePayload> | undefined, err: Error): void {
     const maxAttempts = job?.opts.attempts ?? 1;
     const attemptsMade = job?.attemptsMade ?? 0;
     if (job && attemptsMade < maxAttempts) {

@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue, type Job, type JobsOptions } from 'bullmq';
 import { QUEUE_NAMES } from './queue.constants';
+import type { SmsLang } from '../sms/otp-message.i18n';
 
 /**
  * Job payload shapes. These are intentionally minimal — this PR is queue
@@ -28,6 +29,35 @@ export interface SmsJobData {
    * `SmsService.sendSms`. Never the rendered text.
    */
   template?: string | null;
+}
+
+/**
+ * OTP delivery job. Carries the CODE and the LANGUAGE instead of a rendered
+ * body, so the aggregator-approved template is rendered in exactly one place —
+ * `SmsService.sendOtp` — at the moment of sending. Sensitivity is unchanged: a
+ * rendered OTP body already contained the code in the payload.
+ */
+export interface SmsOtpJobData {
+  /** E.164 destination number. */
+  phone: string;
+  otp: {
+    /** Plaintext OTP. Lives only in the job payload — never persisted. */
+    code: string;
+    /** Already normalized by the producer; see `resolveSmsLang`. */
+    lang: SmsLang;
+  };
+}
+
+/**
+ * What the SMS queue actually carries. A union, not a widened `SmsJobData`, so
+ * every text producer keeps its required `message` and jobs enqueued by a
+ * previous release (which have no `otp` key) still narrow to the text branch.
+ */
+export type SmsQueuePayload = SmsJobData | SmsOtpJobData;
+
+/** Narrow the SMS payload union. The `otp` key is the discriminator. */
+export function isSmsOtpJob(data: SmsQueuePayload): data is SmsOtpJobData {
+  return 'otp' in data && data.otp != null;
 }
 
 export interface NotificationJobData {
@@ -69,7 +99,7 @@ export class QueueService {
     @InjectQueue(QUEUE_NAMES.IMAGE_PROCESSING)
     private readonly imageQueue: Queue<ImageJobData>,
     @InjectQueue(QUEUE_NAMES.SMS)
-    private readonly smsQueue: Queue<SmsJobData>,
+    private readonly smsQueue: Queue<SmsQueuePayload>,
     @InjectQueue(QUEUE_NAMES.NOTIFICATIONS)
     private readonly notificationQueue: Queue<NotificationJobData>,
   ) {}
@@ -162,8 +192,23 @@ export class QueueService {
   async enqueueSms(
     data: SmsJobData,
     opts?: JobsOptions,
-  ): Promise<Job<SmsJobData>> {
+  ): Promise<Job<SmsQueuePayload>> {
     this.logger.debug(`Enqueue sms job for ${data.phone}`);
+    return this.smsQueue.add('send', data, opts);
+  }
+
+  /**
+   * Enqueue an OTP delivery on the SAME queue (same worker, concurrency and
+   * retry policy) with the structured `{ code, lang }` payload.
+   *
+   * Idempotency is unchanged and still the caller's job — OtpService passes
+   * `opts.jobId` from {@link otpSmsJobId}.
+   */
+  async enqueueOtpSms(
+    data: SmsOtpJobData,
+    opts?: JobsOptions,
+  ): Promise<Job<SmsQueuePayload>> {
+    this.logger.debug(`Enqueue otp sms job for ${data.phone}`);
     return this.smsQueue.add('send', data, opts);
   }
 

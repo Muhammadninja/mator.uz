@@ -16,6 +16,14 @@ import {
   isInterimStatus,
   SmsDeliveryStatus,
 } from './eskiz-callback.util';
+import { renderOtpMessage } from './otp-message.i18n';
+
+/**
+ * Accounting-only template label for OTP sends. Deliberately language-agnostic:
+ * the SmsMessage ledger and the cost metrics group by this value, so splitting
+ * it per language (`otp_ru`, …) would fragment every existing dashboard.
+ */
+export const OTP_SMS_TEMPLATE = 'otp';
 
 /**
  * What a delivery report did to the ledger. Returned for logging and tests —
@@ -178,6 +186,29 @@ export class SmsService {
     // already accepted, so a persistence failure is logged and swallowed instead
     // of surfacing to the OTP flow.
     await this.recordAcceptedSms(toE164, operator, result, template ?? null);
+  }
+
+  /**
+   * Send a login OTP in the user's language.
+   *
+   * The one place an OTP body is rendered: callers pass the CODE, never text, so
+   * the aggregator-approved template can never drift between call sites. An
+   * unknown or missing `lang` falls back to `uz` (see `resolveSmsLang` in
+   * ./otp-message.i18n) — a locale we do not translate must never block a
+   * login. Typed as a loose `string` on purpose: the value usually arrives from
+   * an HTTP client or a queue payload, so normalization belongs here rather than
+   * at every caller.
+   *
+   * Delivery, retries, metrics and the accounting row are unchanged — this is a
+   * thin rendering layer over {@link sendSms}, which still receives only the
+   * `'otp'` label and never persists the rendered text (and therefore the code).
+   */
+  async sendOtp(
+    phone: string,
+    code: string,
+    lang?: string | null,
+  ): Promise<void> {
+    await this.sendSms(phone, renderOtpMessage(code, lang), OTP_SMS_TEMPLATE);
   }
 
   /** Resolve the operator without ever throwing into the send path. */

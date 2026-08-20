@@ -18,6 +18,7 @@ import { RedisService } from '../../redis/redis.service';
 import type { RateLimiter } from '../../redis/rate-limiter.service';
 import { RATE_LIMITER } from '../../redis/rate-limiter.service';
 import { RedisKeys } from '../../redis/redis.keys';
+import { resolveSmsLang, type SmsLang } from '../../sms/otp-message.i18n';
 
 const OTP_LENGTH = 6;
 const OTP_TTL_MS = 5 * 60 * 1000; // 5 min
@@ -77,6 +78,13 @@ interface OtpRecord {
   codeHash: string; // sha256(plaintext) — never the plaintext OTP
   channel: OtpChannel;
   purpose: string;
+  /**
+   * Language of the OTP SMS, normalized at issue time. Stored so a RESEND —
+   * which only knows the request_id — reaches the user in the same language as
+   * the first send. Records written before this field existed read as
+   * `undefined` and are re-resolved to the default on use.
+   */
+  lang: SmsLang;
   attempts: number;
   resendCount: number;
   createdAt: number; // epoch ms
@@ -171,21 +179,20 @@ export class OtpService {
    *
    * `jobId` is keyed on (requestId, sendCount) so a retried request cannot
    * double-send the same code while a genuine resend still delivers.
-   * The 'otp' template is an accounting-only label — the rendered text (and
-   * therefore the code) is never persisted by SmsService.
+   * The job carries the CODE and the LANGUAGE, not a rendered body: the
+   * aggregator-approved template is rendered by `SmsService.sendOtp` on the
+   * worker. The 'otp' template label it passes on is accounting-only — the
+   * rendered text (and therefore the code) is never persisted by SmsService.
    */
   private async deliver(
     phoneE164: string,
     code: string,
     requestId: string,
     sendCount: number,
+    lang: SmsLang,
   ): Promise<void> {
-    await this.queue.enqueueSms(
-      {
-        phone: phoneE164,
-        message: `Mator ilovasi: tasdiqlash kodingiz ${code}. Hech kimga bermang. Amal qilish muddati 5 daqiqa.`,
-        template: 'otp',
-      },
+    await this.queue.enqueueOtpSms(
+      { phone: phoneE164, otp: { code, lang } },
       { jobId: this.queue.otpSmsJobId(requestId, sendCount) },
     );
   }
@@ -206,13 +213,14 @@ export class OtpService {
     code: string,
     requestId: string,
     sendCount: number,
+    lang: SmsLang,
   ): Promise<string | undefined> {
     if (this.devMode) {
       this.logger.warn(`[AUTH_DEV_MODE] OTP for ${phoneE164}: ${code} (SMS skipped)`);
       return code;
     }
     try {
-      await this.deliver(phoneE164, code, requestId, sendCount);
+      await this.deliver(phoneE164, code, requestId, sendCount, lang);
     } catch (err) {
       this.logger.error(
         `Failed to enqueue OTP SMS for ${maskPhone(phoneE164)} (code is still valid; user can resend): ${
@@ -229,11 +237,17 @@ export class OtpService {
    * `purpose` defaults to `login`, so the phone sign-in flow is unchanged. Other
    * flows (e.g. changing the account phone number) pass a distinct purpose so
    * their codes are namespaced and can only be verified by the matching flow.
+   *
+   * `lang` is the client's requested SMS language and is normalized HERE, at the
+   * boundary: everything downstream (the Redis record, the queue payload, the
+   * resend) then carries a value that is guaranteed to be supported. Omitting it
+   * — as every existing caller does — yields the default (`uz`).
    */
   async request(
     phoneE164: string,
     channel: OtpChannel = OtpChannel.SMS,
     purpose: OtpPurpose = OtpPurpose.LOGIN,
+    lang?: string | null,
   ): Promise<OtpIssued> {
     await this.enforceHourlyCeiling(phoneE164);
 
@@ -247,6 +261,7 @@ export class OtpService {
       codeHash: this.hash(code),
       channel,
       purpose,
+      lang: resolveSmsLang(lang),
       attempts: 0,
       resendCount: 0,
       createdAt: now,
@@ -256,7 +271,13 @@ export class OtpService {
     await this.persist(record);
 
     // sendCount 0 — the initial issue for this requestId.
-    const devOtpCode = await this.dispatch(phoneE164, code, requestId, 0);
+    const devOtpCode = await this.dispatch(
+      phoneE164,
+      code,
+      requestId,
+      0,
+      record.lang,
+    );
     this.logger.log(`OTP issued ${requestId} for ${maskPhone(phoneE164)}`);
     return {
       requestId,
@@ -306,6 +327,9 @@ export class OtpService {
       code,
       record.requestId,
       updated.resendCount,
+      // Re-resolved rather than trusted: a record issued by the previous release
+      // carries no `lang`, and a resend must not crash on it.
+      resolveSmsLang(record.lang),
     );
     return {
       requestId: record.requestId,

@@ -2,6 +2,7 @@ import { SmsService } from './sms.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SmsOperatorResolver } from './resolver/sms-operator.resolver';
 import { ConfigService } from '@nestjs/config';
+import { EMPTY_SMS_RESULT, type SmsSendResult } from './sms-provider.interface';
 
 // ConfigService with no SMS_* vars → SmsService picks the log provider. The
 // provider is then overridden per test with a fake so we control the returned
@@ -338,5 +339,70 @@ describe('SmsService.applyEskizCallback', () => {
   it('trims a padded message id before matching', async () => {
     await service.applyEskizCallback({ messageId: '  msg-9  ', status: 'delivered' });
     expect(lastWhere().providerSmsId).toBe('msg-9');
+  });
+});
+
+describe('SmsService.sendOtp — language selection', () => {
+  // Typed mocks: the assertions below read the recorded arguments, and an
+  // untyped jest.Mock would make every one of them an unchecked `any`.
+  type SendMock = jest.Mock<Promise<SmsSendResult>, [string, string]>;
+  type CreateMock = jest.Mock<
+    Promise<unknown>,
+    [{ data: Record<string, unknown> }]
+  >;
+
+  let providerSend: SendMock;
+  let service: SmsService;
+
+  beforeEach(() => {
+    const prisma = {
+      smsMessage: { create: jest.fn().mockResolvedValue({}) },
+    } as unknown as PrismaService;
+    const resolver = {
+      resolve: jest.fn().mockResolvedValue(null),
+    } as unknown as SmsOperatorResolver;
+
+    service = new SmsService(makeConfig(), prisma, resolver);
+    providerSend = jest.fn().mockResolvedValue(EMPTY_SMS_RESULT) as SendMock;
+    (
+      service as unknown as { provider: { name: string; send: SendMock } }
+    ).provider = { name: 'log', send: providerSend };
+  });
+
+  /** The body the provider was actually handed. */
+  const sentText = (): string => providerSend.mock.calls[0][1];
+
+  it('renders the requested language', async () => {
+    await service.sendOtp('+998901234567', '123456', 'ru');
+    expect(sentText()).toBe(
+      'Prilojeniye Mator: kod podtverzhdeniya dlya vhoda 123456. Nikomu ne peredavayte. Srok deystviya 5 minut.',
+    );
+  });
+
+  it('falls back to uz when no language is given', async () => {
+    await service.sendOtp('+998901234567', '654321');
+    expect(sentText()).toBe(
+      'Mator ilovasi: tasdiqlash kodingiz 654321. Hech kimga bermang. Amal qilish muddati 5 daqiqa.',
+    );
+  });
+
+  it('falls back to uz for a language we have no copy for', async () => {
+    await service.sendOtp('+998901234567', '111222', 'de');
+    expect(sentText()).toContain('Mator ilovasi');
+  });
+
+  it("labels the accounting row 'otp' regardless of language", async () => {
+    const create = jest.fn().mockResolvedValue({}) as CreateMock;
+    (service as unknown as { prisma: unknown }).prisma = {
+      smsMessage: { create },
+    };
+
+    await service.sendOtp('+998901234567', '333444', 'en');
+
+    // The label must stay language-agnostic — the SmsMessage ledger and the cost
+    // metrics group by it, and the rendered text (with the code) is never stored.
+    const row = create.mock.calls[0][0].data;
+    expect(row.template).toBe('otp');
+    expect(JSON.stringify(row)).not.toContain('333444');
   });
 });

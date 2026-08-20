@@ -12,7 +12,11 @@
 
 import 'reflect-metadata';
 import { SmsProcessor, NotificationsProcessor } from './queue.processors';
-import type { SmsJobData, NotificationJobData } from './queue.service';
+import type {
+  SmsJobData,
+  SmsOtpJobData,
+  NotificationJobData,
+} from './queue.service';
 
 /** Silence a processor's logger so failure-path tests don't spam output. */
 function muteLogger(p: unknown): void {
@@ -66,6 +70,41 @@ describe('SmsProcessor — the only caller of the SMS provider', () => {
       'Mator: tasdiqlash kodingiz 123456.',
       'otp',
     );
+  });
+
+  it('renders an OTP job through sendOtp with the job language', async () => {
+    const sms = {
+      sendSms: jest.fn().mockResolvedValue(undefined),
+      sendOtp: jest.fn().mockResolvedValue(undefined),
+    };
+    const p = new SmsProcessor(sms as never);
+    muteLogger(p);
+
+    const otpJob: SmsOtpJobData = {
+      phone: '+998901234567',
+      otp: { code: '123456', lang: 'ru' },
+    };
+    await p.process(makeJob(otpJob));
+
+    // The worker never renders text itself — SmsService owns the approved copy.
+    expect(sms.sendOtp).toHaveBeenCalledWith('+998901234567', '123456', 'ru');
+    expect(sms.sendSms).not.toHaveBeenCalled();
+  });
+
+  it('still delivers a rendered-text job enqueued by a previous release', async () => {
+    // Jobs already in Redis at deploy time have no `otp` key; they must keep
+    // taking the text branch rather than throwing on the new payload shape.
+    const sms = {
+      sendSms: jest.fn().mockResolvedValue(undefined),
+      sendOtp: jest.fn().mockResolvedValue(undefined),
+    };
+    const p = new SmsProcessor(sms as never);
+    muteLogger(p);
+
+    await p.process(makeJob(smsJob));
+
+    expect(sms.sendSms).toHaveBeenCalledTimes(1);
+    expect(sms.sendOtp).not.toHaveBeenCalled();
   });
 
   it('passes a null template when the job carries none', async () => {

@@ -10,6 +10,7 @@ import { OtpChannel } from '@prisma/client';
 import { OtpService, OtpPurpose } from './otp.service';
 import { FixedWindowRateLimiter } from '../../redis/rate-limiter.service';
 import { RedisKeys } from '../../redis/redis.keys';
+import type { SmsOtpJobData } from '../../queue/queue.service';
 
 /**
  * Minimal in-memory RedisService stand-in. Values are stored JSON-parsed (as the
@@ -55,9 +56,19 @@ function makeRedisMock() {
  * what the production-mode tests assert against. `otpSmsJobId` mirrors the real
  * implementation so the idempotency-key assertions are meaningful.
  */
+type OtpEnqueueMock = jest.Mock<
+  Promise<{ id: string }>,
+  [SmsOtpJobData, { jobId: string }]
+>;
+
 function makeQueueMock() {
   return {
     enqueueSms: jest.fn().mockResolvedValue({ id: 'sms_job_1' }),
+    // Typed: the tests below read the enqueued payload (code, language, jobId),
+    // and an untyped mock would make every one of those assertions an `any`.
+    enqueueOtpSms: jest
+      .fn()
+      .mockResolvedValue({ id: 'sms_job_1' }) as OtpEnqueueMock,
     otpSmsJobId: jest.fn(
       (requestId: string, sendCount: number) =>
         `sms_otp_${requestId}_${sendCount}`,
@@ -108,7 +119,7 @@ describe('OtpService — AUTH_DEV_MODE', () => {
       expect(persisted.attempts).toBe(0);
 
       // Nothing is queued either — dev mode short-circuits before delivery.
-      expect(queue.enqueueSms).not.toHaveBeenCalled();
+      expect(queue.enqueueOtpSms).not.toHaveBeenCalled();
 
       // Plaintext code is returned, is 6 digits, and its hash matches storage.
       expect(issued.devOtpCode).toMatch(/^\d{6}$/);
@@ -121,13 +132,15 @@ describe('OtpService — AUTH_DEV_MODE', () => {
 
       const issued = await service.request('+998901234567');
 
-      expect(queue.enqueueSms).toHaveBeenCalledTimes(1);
-      const [data, opts] = queue.enqueueSms.mock.calls[0];
+      expect(queue.enqueueOtpSms).toHaveBeenCalledTimes(1);
+      const [data, opts] = queue.enqueueOtpSms.mock.calls[0];
       expect(data.phone).toBe('+998901234567');
-      expect(data.template).toBe('otp');
-      // The rendered message carries the plaintext code (it lives only in the
-      // job payload) but is never exposed on the API result.
-      expect(data.message).toMatch(/\d{6}/);
+      // The job carries the plaintext code + language (both live only in the job
+      // payload, never on the API result). The approved template is rendered by
+      // SmsService.sendOtp on the worker.
+      expect(data.otp.code).toMatch(/\d{6}/);
+      // No lang requested → the uz default.
+      expect(data.otp.lang).toBe('uz');
       expect(issued.devOtpCode).toBeUndefined();
       // Idempotency: keyed on (requestId, sendCount=0) for the initial issue.
       expect(opts.jobId).toBe(`sms_otp_${issued.requestId}_0`);
@@ -135,7 +148,7 @@ describe('OtpService — AUTH_DEV_MODE', () => {
 
     it('issues a usable OTP even when the enqueue fails (code stays valid)', async () => {
       const { service, redis, queue } = build(false);
-      queue.enqueueSms.mockRejectedValueOnce(new Error('redis down'));
+      queue.enqueueOtpSms.mockRejectedValueOnce(new Error('redis down'));
 
       // The request must still succeed: the code is already persisted and
       // redeemable, and the user can resend. A queue hiccup is not a 500.
@@ -166,7 +179,7 @@ describe('OtpService — AUTH_DEV_MODE', () => {
       const { service, redis, queue } = build(true);
       const first = await service.request('+998901234567');
       const beforeHash = storedRecord(redis, '+998901234567').codeHash;
-      queue.enqueueSms.mockClear();
+      queue.enqueueOtpSms.mockClear();
 
       // Elapse the cooldown by rewriting lastSentAt into the past.
       const rec = storedRecord(redis, '+998901234567') as Record<string, unknown>;
@@ -182,7 +195,7 @@ describe('OtpService — AUTH_DEV_MODE', () => {
       expect(issued.requestId).toBe(first.requestId);
 
       // Delivery skipped, plaintext returned and consistent with the stored hash.
-      expect(queue.enqueueSms).not.toHaveBeenCalled();
+      expect(queue.enqueueOtpSms).not.toHaveBeenCalled();
       expect(issued.devOtpCode).toMatch(/^\d{6}$/);
       const { createHash } = require('crypto') as typeof import('crypto');
       expect(createHash('sha256').update(issued.devOtpCode!).digest('hex')).toBe(afterHash);
@@ -205,15 +218,48 @@ describe('OtpService — AUTH_DEV_MODE', () => {
     it('production mode QUEUES the resent OTP and never returns dev_otp_code', async () => {
       const { service, redis, queue } = build(false);
       const first = await service.request('+998901234567');
-      queue.enqueueSms.mockClear();
+      queue.enqueueOtpSms.mockClear();
       const rec = storedRecord(redis, '+998901234567') as Record<string, unknown>;
       rec.lastSentAt = Date.now() - 10 * 60 * 1000;
       redis.store.set(RedisKeys.otp('+998901234567'), rec);
 
       const issued = await service.resend(first.requestId);
 
-      expect(queue.enqueueSms).toHaveBeenCalledTimes(1);
+      expect(queue.enqueueOtpSms).toHaveBeenCalledTimes(1);
       expect(issued.devOtpCode).toBeUndefined();
+    });
+
+    it('resends in the SAME language as the first send', async () => {
+      // A resend only knows the request_id, so the language has to survive on the
+      // stored record — otherwise the second SMS silently switches to uz.
+      const { service, redis, queue } = build(false);
+      const first = await service.request(
+        '+998901234567',
+        OtpChannel.SMS,
+        OtpPurpose.LOGIN,
+        'ru',
+      );
+      expect(queue.enqueueOtpSms.mock.calls[0][0].otp.lang).toBe('ru');
+
+      const rec = storedRecord(redis, '+998901234567') as Record<string, unknown>;
+      rec.lastSentAt = Date.now() - 10 * 60 * 1000;
+      redis.store.set(RedisKeys.otp('+998901234567'), rec);
+      await service.resend(first.requestId);
+
+      expect(queue.enqueueOtpSms.mock.calls[1][0].otp.lang).toBe('ru');
+    });
+
+    it('resends a pre-upgrade record (no stored lang) in the default language', async () => {
+      const { service, redis, queue } = build(false);
+      const first = await service.request('+998901234567');
+      const rec = storedRecord(redis, '+998901234567') as Record<string, unknown>;
+      rec.lastSentAt = Date.now() - 10 * 60 * 1000;
+      delete rec.lang; // record written by the previous release
+      redis.store.set(RedisKeys.otp('+998901234567'), rec);
+
+      await service.resend(first.requestId);
+
+      expect(queue.enqueueOtpSms.mock.calls[1][0].otp.lang).toBe('uz');
     });
 
     it('gives a resend a DISTINCT jobId so it is never collapsed into the first send', async () => {
@@ -221,14 +267,14 @@ describe('OtpService — AUTH_DEV_MODE', () => {
       // resend: a resend mints a NEW code, so it has to reach the user.
       const { service, redis, queue } = build(false);
       const first = await service.request('+998901234567');
-      const firstJobId = queue.enqueueSms.mock.calls[0][1].jobId;
+      const firstJobId = queue.enqueueOtpSms.mock.calls[0][1].jobId;
 
       const rec = storedRecord(redis, '+998901234567') as Record<string, unknown>;
       rec.lastSentAt = Date.now() - 10 * 60 * 1000;
       redis.store.set(RedisKeys.otp('+998901234567'), rec);
       await service.resend(first.requestId);
 
-      const resendJobId = queue.enqueueSms.mock.calls[1][1].jobId;
+      const resendJobId = queue.enqueueOtpSms.mock.calls[1][1].jobId;
       expect(firstJobId).toBe(`sms_otp_${first.requestId}_0`);
       expect(resendJobId).toBe(`sms_otp_${first.requestId}_1`);
       expect(resendJobId).not.toBe(firstJobId);
