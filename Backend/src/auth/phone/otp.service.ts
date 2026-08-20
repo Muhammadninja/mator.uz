@@ -183,7 +183,7 @@ export class OtpService {
     await this.queue.enqueueSms(
       {
         phone: phoneE164,
-        message: `Mator: tasdiqlash kodingiz ${code}. Hech kimga bermang. Amal qilish muddati 5 daqiqa.`,
+        message: `Mator ilovasi: tasdiqlash kodingiz ${code}. Hech kimga bermang. Amal qilish muddati 5 daqiqa.`,
         template: 'otp',
       },
       { jobId: this.queue.otpSmsJobId(requestId, sendCount) },
