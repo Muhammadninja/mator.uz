@@ -8,6 +8,7 @@ import {
   OilType,
 } from '@prisma/client';
 import { OIL_TYPE_LABELS, formatVolume } from '../../common/motor-oil.util';
+import { normalizeOem } from '../../common/normalize-oem.util';
 import { MAIN_CATEGORY_TO_SLUG } from '../categories/category-map';
 import { PrismaService } from '../../prisma/prisma.service';
 import { clampLimit } from '../../common/pagination.util';
@@ -383,7 +384,22 @@ export class PartsService {
     if (q.gm_only === 'true') and.push({ isGm: true });
     if (q.oem_only === 'true') and.push({ isOem: true });
     if (q.in_stock_only === 'true') and.push({ inStock: true });
-    if (q.q) and.push({ title: { contains: q.q, mode: 'insensitive' } });
+    // Free-text search: fuzzy title match OR exact article match. Article search
+    // normalizes the query (strip separators, uppercase) and looks it up inside
+    // the `oemNumbers` / `gmNumbers` arrays with `has` (exact membership → uses
+    // the GIN indexes). The `has` clauses are added only when the normalized
+    // query is non-empty, so a punctuation-only `q` stays a pure title search.
+    if (q.q) {
+      const normalized = normalizeOem(q.q);
+      const or: Prisma.CatalogPartWhereInput[] = [
+        { title: { contains: q.q, mode: 'insensitive' } },
+      ];
+      if (normalized.length > 0) {
+        or.push({ oemNumbers: { has: normalized } });
+        or.push({ gmNumbers: { has: normalized } });
+      }
+      and.push({ OR: or });
+    }
 
     // Listing kind + the kind-specific attribute filters (motor oils).
     for (const cond of this.kindWhere(q)) and.push(cond);
