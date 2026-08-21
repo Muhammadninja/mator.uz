@@ -25,6 +25,7 @@
     "seed": "ts-node --compiler-options '{\"module\":\"commonjs\"}' src/prisma/seed.ts",
     "seed:categories": "ts-node --compiler-options '{\"module\":\"commonjs\"}' prisma/seed-categories.ts",
     "seed:oem": "ts-node --compiler-options '{\"module\":\"commonjs\"}' prisma/seed-oem.ts",
+    "seed:oem:csv": "ts-node --compiler-options '{\"module\":\"commonjs\"}' prisma/seed-oem-from-csv.ts",
     "fix:category-slugs": "ts-node --compiler-options '{\"module\":\"commonjs\"}' prisma/fix-category-slugs.ts",
     "seed:category-titles": "ts-node --compiler-options '{\"module\":\"commonjs\"}' prisma/seed-category-titles.ts",
     "restore:buyer-buckets": "ts-node --compiler-options '{\"module\":\"commonjs\"}' prisma/restore-buyer-buckets.ts",

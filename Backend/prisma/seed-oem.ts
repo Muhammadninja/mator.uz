@@ -20,20 +20,10 @@
  *
  * Run:  npm run seed:oem
  */
-import { PrismaClient, PartMainCategory, ProductKind, PartNumberType } from '@prisma/client';
-import { normalizeOem } from '../src/common/normalize-oem.util';
+import { PrismaClient, PartMainCategory } from '@prisma/client';
+import { ensureOemSeller, upsertOemPart, type OemSeedRecord } from './oem-seed.helpers';
 
 const prisma = new PrismaClient();
-
-/** The launch seller these listings hang off (FK CatalogPart.sellerId → CatalogSeller). */
-const SELLER = {
-  id: 'dealer_mator_market',
-  name: 'Mator Market',
-  initial: 'M',
-  color: '#4F46E5',
-  isCurated: true,
-  ratingAvg: 4.8,
-};
 
 type SeedOemPart = {
   id: string;
@@ -105,78 +95,37 @@ const SEED_OEM_PARTS: SeedOemPart[] = [
   { id: 'oem_tracker_headlight', title: 'Фара передняя правая Tracker 2', brand: 'Chevrolet GM', vehicle: 'Tracker 2', categorySlug: 'headlights-and-bulbs', mainCategory: 'LIGHTING', oemNumbers: ['42678115'], priceUzs: 1450000, isOem: true },
 ];
 
-async function ensureSeller() {
-  await prisma.catalogSeller.upsert({
-    where: { id: SELLER.id },
-    update: { name: SELLER.name, isCurated: SELLER.isCurated, ratingAvg: SELLER.ratingAvg },
-    create: {
-      id: SELLER.id,
-      name: SELLER.name,
-      initial: SELLER.initial,
-      color: SELLER.color,
-      isCurated: SELLER.isCurated,
-      ratingAvg: SELLER.ratingAvg,
-    },
-  });
-}
-
-/** Resolve a subcategory slug → PartCategory (ids are slug-shaped; `slug` is unique). */
-async function resolveCategory(slug: string) {
-  return prisma.partCategory.findFirst({
-    where: { OR: [{ slug }, { id: slug }] },
-    select: { id: true, mainCategory: true },
-  });
-}
-
 async function main() {
-  await ensureSeller();
+  await ensureOemSeller(prisma);
 
   let created = 0;
   let updated = 0;
   let skipped = 0;
 
   for (const part of SEED_OEM_PARTS) {
-    const category = await resolveCategory(part.categorySlug);
-    if (!category) {
+    // The `vehicle` field ("Cobalt/Gentra", "Nexia 3/Spark") is the fitment set;
+    // split it into models so upsertOemPart writes CatalogPartFit rows and the
+    // part shows under `?make=Chevrolet&model=<...>` (the garage "fit" filter).
+    const record: OemSeedRecord = {
+      id: part.id,
+      title: part.title,
+      brand: part.brand,
+      make: 'Chevrolet',
+      models: part.vehicle.split('/').map((m) => m.trim()).filter(Boolean),
+      categorySlug: part.categorySlug,
+      mainCategory: part.mainCategory,
+      oemNumbers: part.oemNumbers,
+      priceUzs: part.priceUzs,
+      isOem: part.isOem,
+    };
+    const result = await upsertOemPart(prisma, record);
+    if (result === 'created') created += 1;
+    else if (result === 'updated') updated += 1;
+    else {
       // eslint-disable-next-line no-console
       console.warn(`✗ skip "${part.id}": category slug "${part.categorySlug}" not found (run seed:categories first)`);
       skipped += 1;
-      continue;
     }
-
-    // Prefer the taxonomy's own bucket; fall back to the record's declared one.
-    const mainCategory = category.mainCategory ?? part.mainCategory;
-    // Normalize every code and dedupe; store in BOTH arrays so the part is
-    // findable by an OEM or a GM article search (UNKNOWN label ⇒ both, per schema).
-    const codes = Array.from(new Set(part.oemNumbers.map(normalizeOem).filter(Boolean)));
-
-    const data = {
-      title: part.title,
-      categoryId: category.id,
-      sellerId: SELLER.id,
-      partBrandName: part.brand,
-      oemNumbers: codes,
-      gmNumbers: codes,
-      partNumberType: PartNumberType.UNKNOWN,
-      priceUzs: part.priceUzs,
-      currency: 'UZS',
-      mainCategory,
-      kind: ProductKind.SPARE_PART,
-      isOem: part.isOem ?? false,
-      isGm: true,
-      inStock: true,
-      stockQty: 10,
-      images: [] as string[],
-    };
-
-    const existed = await prisma.catalogPart.findUnique({ where: { id: part.id }, select: { id: true } });
-    await prisma.catalogPart.upsert({
-      where: { id: part.id },
-      update: data,
-      create: { id: part.id, ...data },
-    });
-    if (existed) updated += 1;
-    else created += 1;
   }
 
   const total = await prisma.catalogPart.count();

@@ -1,0 +1,13 @@
+title,brand,make,models,categorySlug,mainCategory,oemNumbers,priceUzs,stockQty,isOem
+Тормозные колодки передние,Hi-Q,Chevrolet,Cobalt|Gentra,front-brake-pads,BRAKES,95939923|SP1362|95233442,210000,10,false
+Тормозные колодки передние (оригинал GM),Chevrolet GM,Chevrolet,Cobalt,front-brake-pads,BRAKES,95939923|96475028,385000,10,true
+Тормозной диск передний,Mando,Chevrolet,Tracker 2,brake-discs,BRAKES,13502045|42423892,410000,10,false
+Амортизатор передний,Mando,Chevrolet,Cobalt|Gentra,shock-absorbers,SUSPENSION,95459741|96980817,520000,10,false
+Опора шаровая,CTR,Chevrolet,Cobalt|Gentra,ball-joints,SUSPENSION,94566212|CBKD11|96391851,145000,10,false
+Масляный фильтр,Hi-Q,Chevrolet,Cobalt|Gentra|Spark,oil-filters,FILTERS,25183779|96570765|96565412,42000,20,false
+Воздушный фильтр,Hi-Q,Chevrolet,Cobalt|Gentra,air-filters,FILTERS,13501194|96950990,58000,20,false
+Свеча зажигания (к-т 4 шт),NGK,Chevrolet,Cobalt|Gentra,spark-plugs,IGNITION,25186681|BKR6E|96307100,110000,30,false
+Комплект ГРМ 1.5,Gates,Chevrolet,Cobalt|Gentra,timing-belt-kits,BELTS_AND_HOSES,K015603XS|25190262,720000,10,false
+Помпа водяная 1.5,Hi-Q,Chevrolet,Cobalt|Gentra,water-pumps,ENGINE,25195119|96473689,340000,10,false
+Генератор 1.5,Mando,Chevrolet,Cobalt|Gentra,alternators,ELECTRICAL_PARTS,42438568|25191875,1250000,5,false
+ШРУС наружный,CTR,Chevrolet,Damas,cv-joints-driveshafts,ENGINE,96286097,310000,10,false
