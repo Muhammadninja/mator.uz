@@ -1,0 +1,521 @@
+title,brand,make,models,categorySlug,mainCategory,oemNumbers,priceUzs,stockQty,isOem
+Передние тормозные колодки Cobalt,,Chevrolet,Cobalt,front-brake-pads,,,,10,false
+Задние тормозные колодки Cobalt,,Chevrolet,Cobalt,rear-brake-pads,,,,10,false
+Тормозные диски Cobalt,,Chevrolet,Cobalt,brake-discs,,,,10,false
+Суппорты и ремкомплекты Cobalt,,Chevrolet,Cobalt,brake-calipers-kits,,,,10,false
+Тормозные цилиндры Cobalt,,Chevrolet,Cobalt,brake-cylinders,,,,10,false
+Шланги и тросы Cobalt,,Chevrolet,Cobalt,brake-hoses-cables,,,,10,false
+Амортизаторы Cobalt,,Chevrolet,Cobalt,shock-absorbers,,,,10,false
+Пружины и опоры Cobalt,,Chevrolet,Cobalt,springs-and-mounts,,,,10,false
+Стойки и втулки стабилизатора Cobalt,,Chevrolet,Cobalt,stabilizer-links-bushings,,,,10,false
+Рычаги и сайлентблоки Cobalt,,Chevrolet,Cobalt,control-arms-bushings,,,,10,false
+Шаровые опоры Cobalt,,Chevrolet,Cobalt,ball-joints,,,,10,false
+Рулевые рейки и наконечники Cobalt,,Chevrolet,Cobalt,steering-racks-tie-rods,,,,10,false
+Ступицы и подшипники Cobalt,,Chevrolet,Cobalt,wheel-hubs-bearings,,,,10,false
+Комплекты ГРМ и ролики Cobalt,,Chevrolet,Cobalt,timing-belt-kits,,,,10,false
+Ремни навесного оборудования Cobalt,,Chevrolet,Cobalt,accessory-drive-belts,,,,10,false
+Прокладки и сальники Cobalt,,Chevrolet,Cobalt,gaskets-and-seals,,,,10,false
+Поршневая группа Cobalt,,Chevrolet,Cobalt,piston-group,,,,10,false
+Клапаны и ГБЦ Cobalt,,Chevrolet,Cobalt,valves-and-cylinder-head,,,,10,false
+Подушки двигателя Cobalt,,Chevrolet,Cobalt,engine-mounts,,,,10,false
+Радиаторы охлаждения Cobalt,,Chevrolet,Cobalt,cooling-radiators,,,,10,false
+Радиаторы печки Cobalt,,Chevrolet,Cobalt,heater-cores,,,,10,false
+Водяные помпы Cobalt,,Chevrolet,Cobalt,water-pumps,,,,10,false
+Термостаты Cobalt,,Chevrolet,Cobalt,thermostats,,,,10,false
+Патрубки и бачки Cobalt,,Chevrolet,Cobalt,coolant-hoses-tanks,,,,10,false
+Вентиляторы охлаждения Cobalt,,Chevrolet,Cobalt,cooling-fans,,,,10,false
+Масляные фильтры Cobalt,,Chevrolet,Cobalt,oil-filters,,,,10,false
+Воздушные фильтры Cobalt,,Chevrolet,Cobalt,air-filters,,,,10,false
+Салонные фильтры Cobalt,,Chevrolet,Cobalt,cabin-filters,,,,10,false
+Топливные фильтры Cobalt,,Chevrolet,Cobalt,fuel-filters,,,,10,false
+Антифризы Cobalt,,Chevrolet,Cobalt,antifreeze,,,,10,false
+Технические жидкости Cobalt,,Chevrolet,Cobalt,technical-fluids,,,,10,false
+Свечи зажигания Cobalt,,Chevrolet,Cobalt,spark-plugs,,,,10,false
+Катушки и провода Cobalt,,Chevrolet,Cobalt,ignition-coils-wires,,,,10,false
+Генераторы Cobalt,,Chevrolet,Cobalt,alternators,,,,10,false
+Стартеры Cobalt,,Chevrolet,Cobalt,starters,,,,10,false
+Датчики двигателя Cobalt,,Chevrolet,Cobalt,engine-sensors,,,,10,false
+Оптика и лампы Cobalt,,Chevrolet,Cobalt,headlights-and-bulbs,,,,10,false
+Комплекты сцепления Cobalt,,Chevrolet,Cobalt,clutch-kits,,,,10,false
+ШРУСы и приводы Cobalt,,Chevrolet,Cobalt,cv-joints-driveshafts,,,,10,false
+Пыльники ШРУСа Cobalt,,Chevrolet,Cobalt,cv-joint-boots,,,,10,false
+Маховики Cobalt,,Chevrolet,Cobalt,flywheels,,,,10,false
+Кулисы и тросы Cobalt,,Chevrolet,Cobalt,gear-linkages-cables,,,,10,false
+Коврики Cobalt,,Chevrolet,Cobalt,floor-mats,,,,10,false
+Защита картера Cobalt,,Chevrolet,Cobalt,skid-plates,,,,10,false
+Ветровики и брызговики Cobalt,,Chevrolet,Cobalt,wind-deflectors-mudflaps,,,,10,false
+Чехлы Cobalt,,Chevrolet,Cobalt,seat-covers,,,,10,false
+Масло 5W-30 Cobalt,,Chevrolet,Cobalt,motor-oil-5w30,,,,10,false
+Масло 5W-40 Cobalt,,Chevrolet,Cobalt,motor-oil-5w40,,,,10,false
+Масло 10W-40 Cobalt,,Chevrolet,Cobalt,motor-oil-10w40,,,,10,false
+Трансмиссионное масло Cobalt,,Chevrolet,Cobalt,transmission-oil,,,,10,false
+Крепеж и клипсы Cobalt,,Chevrolet,Cobalt,fasteners-and-clips,,,,10,false
+Щетки стеклоочистителя Cobalt,,Chevrolet,Cobalt,wiper-blades,,,,10,false
+Передние тормозные колодки Gentra,,Chevrolet,Gentra,front-brake-pads,,,,10,false
+Задние тормозные колодки Gentra,,Chevrolet,Gentra,rear-brake-pads,,,,10,false
+Тормозные диски Gentra,,Chevrolet,Gentra,brake-discs,,,,10,false
+Суппорты и ремкомплекты Gentra,,Chevrolet,Gentra,brake-calipers-kits,,,,10,false
+Тормозные цилиндры Gentra,,Chevrolet,Gentra,brake-cylinders,,,,10,false
+Шланги и тросы Gentra,,Chevrolet,Gentra,brake-hoses-cables,,,,10,false
+Амортизаторы Gentra,,Chevrolet,Gentra,shock-absorbers,,,,10,false
+Пружины и опоры Gentra,,Chevrolet,Gentra,springs-and-mounts,,,,10,false
+Стойки и втулки стабилизатора Gentra,,Chevrolet,Gentra,stabilizer-links-bushings,,,,10,false
+Рычаги и сайлентблоки Gentra,,Chevrolet,Gentra,control-arms-bushings,,,,10,false
+Шаровые опоры Gentra,,Chevrolet,Gentra,ball-joints,,,,10,false
+Рулевые рейки и наконечники Gentra,,Chevrolet,Gentra,steering-racks-tie-rods,,,,10,false
+Ступицы и подшипники Gentra,,Chevrolet,Gentra,wheel-hubs-bearings,,,,10,false
+Комплекты ГРМ и ролики Gentra,,Chevrolet,Gentra,timing-belt-kits,,,,10,false
+Ремни навесного оборудования Gentra,,Chevrolet,Gentra,accessory-drive-belts,,,,10,false
+Прокладки и сальники Gentra,,Chevrolet,Gentra,gaskets-and-seals,,,,10,false
+Поршневая группа Gentra,,Chevrolet,Gentra,piston-group,,,,10,false
+Клапаны и ГБЦ Gentra,,Chevrolet,Gentra,valves-and-cylinder-head,,,,10,false
+Подушки двигателя Gentra,,Chevrolet,Gentra,engine-mounts,,,,10,false
+Радиаторы охлаждения Gentra,,Chevrolet,Gentra,cooling-radiators,,,,10,false
+Радиаторы печки Gentra,,Chevrolet,Gentra,heater-cores,,,,10,false
+Водяные помпы Gentra,,Chevrolet,Gentra,water-pumps,,,,10,false
+Термостаты Gentra,,Chevrolet,Gentra,thermostats,,,,10,false
+Патрубки и бачки Gentra,,Chevrolet,Gentra,coolant-hoses-tanks,,,,10,false
+Вентиляторы охлаждения Gentra,,Chevrolet,Gentra,cooling-fans,,,,10,false
+Масляные фильтры Gentra,,Chevrolet,Gentra,oil-filters,,,,10,false
+Воздушные фильтры Gentra,,Chevrolet,Gentra,air-filters,,,,10,false
+Салонные фильтры Gentra,,Chevrolet,Gentra,cabin-filters,,,,10,false
+Топливные фильтры Gentra,,Chevrolet,Gentra,fuel-filters,,,,10,false
+Антифризы Gentra,,Chevrolet,Gentra,antifreeze,,,,10,false
+Технические жидкости Gentra,,Chevrolet,Gentra,technical-fluids,,,,10,false
+Свечи зажигания Gentra,,Chevrolet,Gentra,spark-plugs,,,,10,false
+Катушки и провода Gentra,,Chevrolet,Gentra,ignition-coils-wires,,,,10,false
+Генераторы Gentra,,Chevrolet,Gentra,alternators,,,,10,false
+Стартеры Gentra,,Chevrolet,Gentra,starters,,,,10,false
+Датчики двигателя Gentra,,Chevrolet,Gentra,engine-sensors,,,,10,false
+Оптика и лампы Gentra,,Chevrolet,Gentra,headlights-and-bulbs,,,,10,false
+Комплекты сцепления Gentra,,Chevrolet,Gentra,clutch-kits,,,,10,false
+ШРУСы и приводы Gentra,,Chevrolet,Gentra,cv-joints-driveshafts,,,,10,false
+Пыльники ШРУСа Gentra,,Chevrolet,Gentra,cv-joint-boots,,,,10,false
+Маховики Gentra,,Chevrolet,Gentra,flywheels,,,,10,false
+Кулисы и тросы Gentra,,Chevrolet,Gentra,gear-linkages-cables,,,,10,false
+Коврики Gentra,,Chevrolet,Gentra,floor-mats,,,,10,false
+Защита картера Gentra,,Chevrolet,Gentra,skid-plates,,,,10,false
+Ветровики и брызговики Gentra,,Chevrolet,Gentra,wind-deflectors-mudflaps,,,,10,false
+Чехлы Gentra,,Chevrolet,Gentra,seat-covers,,,,10,false
+Масло 5W-30 Gentra,,Chevrolet,Gentra,motor-oil-5w30,,,,10,false
+Масло 5W-40 Gentra,,Chevrolet,Gentra,motor-oil-5w40,,,,10,false
+Масло 10W-40 Gentra,,Chevrolet,Gentra,motor-oil-10w40,,,,10,false
+Трансмиссионное масло Gentra,,Chevrolet,Gentra,transmission-oil,,,,10,false
+Крепеж и клипсы Gentra,,Chevrolet,Gentra,fasteners-and-clips,,,,10,false
+Щетки стеклоочистителя Gentra,,Chevrolet,Gentra,wiper-blades,,,,10,false
+Передние тормозные колодки Nexia,,Chevrolet,Nexia,front-brake-pads,,,,10,false
+Задние тормозные колодки Nexia,,Chevrolet,Nexia,rear-brake-pads,,,,10,false
+Тормозные диски Nexia,,Chevrolet,Nexia,brake-discs,,,,10,false
+Суппорты и ремкомплекты Nexia,,Chevrolet,Nexia,brake-calipers-kits,,,,10,false
+Тормозные цилиндры Nexia,,Chevrolet,Nexia,brake-cylinders,,,,10,false
+Шланги и тросы Nexia,,Chevrolet,Nexia,brake-hoses-cables,,,,10,false
+Амортизаторы Nexia,,Chevrolet,Nexia,shock-absorbers,,,,10,false
+Пружины и опоры Nexia,,Chevrolet,Nexia,springs-and-mounts,,,,10,false
+Стойки и втулки стабилизатора Nexia,,Chevrolet,Nexia,stabilizer-links-bushings,,,,10,false
+Рычаги и сайлентблоки Nexia,,Chevrolet,Nexia,control-arms-bushings,,,,10,false
+Шаровые опоры Nexia,,Chevrolet,Nexia,ball-joints,,,,10,false
+Рулевые рейки и наконечники Nexia,,Chevrolet,Nexia,steering-racks-tie-rods,,,,10,false
+Ступицы и подшипники Nexia,,Chevrolet,Nexia,wheel-hubs-bearings,,,,10,false
+Комплекты ГРМ и ролики Nexia,,Chevrolet,Nexia,timing-belt-kits,,,,10,false
+Ремни навесного оборудования Nexia,,Chevrolet,Nexia,accessory-drive-belts,,,,10,false
+Прокладки и сальники Nexia,,Chevrolet,Nexia,gaskets-and-seals,,,,10,false
+Поршневая группа Nexia,,Chevrolet,Nexia,piston-group,,,,10,false
+Клапаны и ГБЦ Nexia,,Chevrolet,Nexia,valves-and-cylinder-head,,,,10,false
+Подушки двигателя Nexia,,Chevrolet,Nexia,engine-mounts,,,,10,false
+Радиаторы охлаждения Nexia,,Chevrolet,Nexia,cooling-radiators,,,,10,false
+Радиаторы печки Nexia,,Chevrolet,Nexia,heater-cores,,,,10,false
+Водяные помпы Nexia,,Chevrolet,Nexia,water-pumps,,,,10,false
+Термостаты Nexia,,Chevrolet,Nexia,thermostats,,,,10,false
+Патрубки и бачки Nexia,,Chevrolet,Nexia,coolant-hoses-tanks,,,,10,false
+Вентиляторы охлаждения Nexia,,Chevrolet,Nexia,cooling-fans,,,,10,false
+Масляные фильтры Nexia,,Chevrolet,Nexia,oil-filters,,,,10,false
+Воздушные фильтры Nexia,,Chevrolet,Nexia,air-filters,,,,10,false
+Салонные фильтры Nexia,,Chevrolet,Nexia,cabin-filters,,,,10,false
+Топливные фильтры Nexia,,Chevrolet,Nexia,fuel-filters,,,,10,false
+Антифризы Nexia,,Chevrolet,Nexia,antifreeze,,,,10,false
+Технические жидкости Nexia,,Chevrolet,Nexia,technical-fluids,,,,10,false
+Свечи зажигания Nexia,,Chevrolet,Nexia,spark-plugs,,,,10,false
+Катушки и провода Nexia,,Chevrolet,Nexia,ignition-coils-wires,,,,10,false
+Генераторы Nexia,,Chevrolet,Nexia,alternators,,,,10,false
+Стартеры Nexia,,Chevrolet,Nexia,starters,,,,10,false
+Датчики двигателя Nexia,,Chevrolet,Nexia,engine-sensors,,,,10,false
+Оптика и лампы Nexia,,Chevrolet,Nexia,headlights-and-bulbs,,,,10,false
+Комплекты сцепления Nexia,,Chevrolet,Nexia,clutch-kits,,,,10,false
+ШРУСы и приводы Nexia,,Chevrolet,Nexia,cv-joints-driveshafts,,,,10,false
+Пыльники ШРУСа Nexia,,Chevrolet,Nexia,cv-joint-boots,,,,10,false
+Маховики Nexia,,Chevrolet,Nexia,flywheels,,,,10,false
+Кулисы и тросы Nexia,,Chevrolet,Nexia,gear-linkages-cables,,,,10,false
+Коврики Nexia,,Chevrolet,Nexia,floor-mats,,,,10,false
+Защита картера Nexia,,Chevrolet,Nexia,skid-plates,,,,10,false
+Ветровики и брызговики Nexia,,Chevrolet,Nexia,wind-deflectors-mudflaps,,,,10,false
+Чехлы Nexia,,Chevrolet,Nexia,seat-covers,,,,10,false
+Масло 5W-30 Nexia,,Chevrolet,Nexia,motor-oil-5w30,,,,10,false
+Масло 5W-40 Nexia,,Chevrolet,Nexia,motor-oil-5w40,,,,10,false
+Масло 10W-40 Nexia,,Chevrolet,Nexia,motor-oil-10w40,,,,10,false
+Трансмиссионное масло Nexia,,Chevrolet,Nexia,transmission-oil,,,,10,false
+Крепеж и клипсы Nexia,,Chevrolet,Nexia,fasteners-and-clips,,,,10,false
+Щетки стеклоочистителя Nexia,,Chevrolet,Nexia,wiper-blades,,,,10,false
+Передние тормозные колодки Spark,,Chevrolet,Spark,front-brake-pads,,,,10,false
+Задние тормозные колодки Spark,,Chevrolet,Spark,rear-brake-pads,,,,10,false
+Тормозные диски Spark,,Chevrolet,Spark,brake-discs,,,,10,false
+Суппорты и ремкомплекты Spark,,Chevrolet,Spark,brake-calipers-kits,,,,10,false
+Тормозные цилиндры Spark,,Chevrolet,Spark,brake-cylinders,,,,10,false
+Шланги и тросы Spark,,Chevrolet,Spark,brake-hoses-cables,,,,10,false
+Амортизаторы Spark,,Chevrolet,Spark,shock-absorbers,,,,10,false
+Пружины и опоры Spark,,Chevrolet,Spark,springs-and-mounts,,,,10,false
+Стойки и втулки стабилизатора Spark,,Chevrolet,Spark,stabilizer-links-bushings,,,,10,false
+Рычаги и сайлентблоки Spark,,Chevrolet,Spark,control-arms-bushings,,,,10,false
+Шаровые опоры Spark,,Chevrolet,Spark,ball-joints,,,,10,false
+Рулевые рейки и наконечники Spark,,Chevrolet,Spark,steering-racks-tie-rods,,,,10,false
+Ступицы и подшипники Spark,,Chevrolet,Spark,wheel-hubs-bearings,,,,10,false
+Комплекты ГРМ и ролики Spark,,Chevrolet,Spark,timing-belt-kits,,,,10,false
+Ремни навесного оборудования Spark,,Chevrolet,Spark,accessory-drive-belts,,,,10,false
+Прокладки и сальники Spark,,Chevrolet,Spark,gaskets-and-seals,,,,10,false
+Поршневая группа Spark,,Chevrolet,Spark,piston-group,,,,10,false
+Клапаны и ГБЦ Spark,,Chevrolet,Spark,valves-and-cylinder-head,,,,10,false
+Подушки двигателя Spark,,Chevrolet,Spark,engine-mounts,,,,10,false
+Радиаторы охлаждения Spark,,Chevrolet,Spark,cooling-radiators,,,,10,false
+Радиаторы печки Spark,,Chevrolet,Spark,heater-cores,,,,10,false
+Водяные помпы Spark,,Chevrolet,Spark,water-pumps,,,,10,false
+Термостаты Spark,,Chevrolet,Spark,thermostats,,,,10,false
+Патрубки и бачки Spark,,Chevrolet,Spark,coolant-hoses-tanks,,,,10,false
+Вентиляторы охлаждения Spark,,Chevrolet,Spark,cooling-fans,,,,10,false
+Масляные фильтры Spark,,Chevrolet,Spark,oil-filters,,,,10,false
+Воздушные фильтры Spark,,Chevrolet,Spark,air-filters,,,,10,false
+Салонные фильтры Spark,,Chevrolet,Spark,cabin-filters,,,,10,false
+Топливные фильтры Spark,,Chevrolet,Spark,fuel-filters,,,,10,false
+Антифризы Spark,,Chevrolet,Spark,antifreeze,,,,10,false
+Технические жидкости Spark,,Chevrolet,Spark,technical-fluids,,,,10,false
+Свечи зажигания Spark,,Chevrolet,Spark,spark-plugs,,,,10,false
+Катушки и провода Spark,,Chevrolet,Spark,ignition-coils-wires,,,,10,false
+Генераторы Spark,,Chevrolet,Spark,alternators,,,,10,false
+Стартеры Spark,,Chevrolet,Spark,starters,,,,10,false
+Датчики двигателя Spark,,Chevrolet,Spark,engine-sensors,,,,10,false
+Оптика и лампы Spark,,Chevrolet,Spark,headlights-and-bulbs,,,,10,false
+Комплекты сцепления Spark,,Chevrolet,Spark,clutch-kits,,,,10,false
+ШРУСы и приводы Spark,,Chevrolet,Spark,cv-joints-driveshafts,,,,10,false
+Пыльники ШРУСа Spark,,Chevrolet,Spark,cv-joint-boots,,,,10,false
+Маховики Spark,,Chevrolet,Spark,flywheels,,,,10,false
+Кулисы и тросы Spark,,Chevrolet,Spark,gear-linkages-cables,,,,10,false
+Коврики Spark,,Chevrolet,Spark,floor-mats,,,,10,false
+Защита картера Spark,,Chevrolet,Spark,skid-plates,,,,10,false
+Ветровики и брызговики Spark,,Chevrolet,Spark,wind-deflectors-mudflaps,,,,10,false
+Чехлы Spark,,Chevrolet,Spark,seat-covers,,,,10,false
+Масло 5W-30 Spark,,Chevrolet,Spark,motor-oil-5w30,,,,10,false
+Масло 5W-40 Spark,,Chevrolet,Spark,motor-oil-5w40,,,,10,false
+Масло 10W-40 Spark,,Chevrolet,Spark,motor-oil-10w40,,,,10,false
+Трансмиссионное масло Spark,,Chevrolet,Spark,transmission-oil,,,,10,false
+Крепеж и клипсы Spark,,Chevrolet,Spark,fasteners-and-clips,,,,10,false
+Щетки стеклоочистителя Spark,,Chevrolet,Spark,wiper-blades,,,,10,false
+Передние тормозные колодки Tracker,,Chevrolet,Tracker,front-brake-pads,,,,10,false
+Задние тормозные колодки Tracker,,Chevrolet,Tracker,rear-brake-pads,,,,10,false
+Тормозные диски Tracker,,Chevrolet,Tracker,brake-discs,,,,10,false
+Суппорты и ремкомплекты Tracker,,Chevrolet,Tracker,brake-calipers-kits,,,,10,false
+Тормозные цилиндры Tracker,,Chevrolet,Tracker,brake-cylinders,,,,10,false
+Шланги и тросы Tracker,,Chevrolet,Tracker,brake-hoses-cables,,,,10,false
+Амортизаторы Tracker,,Chevrolet,Tracker,shock-absorbers,,,,10,false
+Пружины и опоры Tracker,,Chevrolet,Tracker,springs-and-mounts,,,,10,false
+Стойки и втулки стабилизатора Tracker,,Chevrolet,Tracker,stabilizer-links-bushings,,,,10,false
+Рычаги и сайлентблоки Tracker,,Chevrolet,Tracker,control-arms-bushings,,,,10,false
+Шаровые опоры Tracker,,Chevrolet,Tracker,ball-joints,,,,10,false
+Рулевые рейки и наконечники Tracker,,Chevrolet,Tracker,steering-racks-tie-rods,,,,10,false
+Ступицы и подшипники Tracker,,Chevrolet,Tracker,wheel-hubs-bearings,,,,10,false
+Комплекты ГРМ и ролики Tracker,,Chevrolet,Tracker,timing-belt-kits,,,,10,false
+Ремни навесного оборудования Tracker,,Chevrolet,Tracker,accessory-drive-belts,,,,10,false
+Прокладки и сальники Tracker,,Chevrolet,Tracker,gaskets-and-seals,,,,10,false
+Поршневая группа Tracker,,Chevrolet,Tracker,piston-group,,,,10,false
+Клапаны и ГБЦ Tracker,,Chevrolet,Tracker,valves-and-cylinder-head,,,,10,false
+Подушки двигателя Tracker,,Chevrolet,Tracker,engine-mounts,,,,10,false
+Радиаторы охлаждения Tracker,,Chevrolet,Tracker,cooling-radiators,,,,10,false
+Радиаторы печки Tracker,,Chevrolet,Tracker,heater-cores,,,,10,false
+Водяные помпы Tracker,,Chevrolet,Tracker,water-pumps,,,,10,false
+Термостаты Tracker,,Chevrolet,Tracker,thermostats,,,,10,false
+Патрубки и бачки Tracker,,Chevrolet,Tracker,coolant-hoses-tanks,,,,10,false
+Вентиляторы охлаждения Tracker,,Chevrolet,Tracker,cooling-fans,,,,10,false
+Масляные фильтры Tracker,,Chevrolet,Tracker,oil-filters,,,,10,false
+Воздушные фильтры Tracker,,Chevrolet,Tracker,air-filters,,,,10,false
+Салонные фильтры Tracker,,Chevrolet,Tracker,cabin-filters,,,,10,false
+Топливные фильтры Tracker,,Chevrolet,Tracker,fuel-filters,,,,10,false
+Антифризы Tracker,,Chevrolet,Tracker,antifreeze,,,,10,false
+Технические жидкости Tracker,,Chevrolet,Tracker,technical-fluids,,,,10,false
+Свечи зажигания Tracker,,Chevrolet,Tracker,spark-plugs,,,,10,false
+Катушки и провода Tracker,,Chevrolet,Tracker,ignition-coils-wires,,,,10,false
+Генераторы Tracker,,Chevrolet,Tracker,alternators,,,,10,false
+Стартеры Tracker,,Chevrolet,Tracker,starters,,,,10,false
+Датчики двигателя Tracker,,Chevrolet,Tracker,engine-sensors,,,,10,false
+Оптика и лампы Tracker,,Chevrolet,Tracker,headlights-and-bulbs,,,,10,false
+Комплекты сцепления Tracker,,Chevrolet,Tracker,clutch-kits,,,,10,false
+ШРУСы и приводы Tracker,,Chevrolet,Tracker,cv-joints-driveshafts,,,,10,false
+Пыльники ШРУСа Tracker,,Chevrolet,Tracker,cv-joint-boots,,,,10,false
+Маховики Tracker,,Chevrolet,Tracker,flywheels,,,,10,false
+Кулисы и тросы Tracker,,Chevrolet,Tracker,gear-linkages-cables,,,,10,false
+Коврики Tracker,,Chevrolet,Tracker,floor-mats,,,,10,false
+Защита картера Tracker,,Chevrolet,Tracker,skid-plates,,,,10,false
+Ветровики и брызговики Tracker,,Chevrolet,Tracker,wind-deflectors-mudflaps,,,,10,false
+Чехлы Tracker,,Chevrolet,Tracker,seat-covers,,,,10,false
+Масло 5W-30 Tracker,,Chevrolet,Tracker,motor-oil-5w30,,,,10,false
+Масло 5W-40 Tracker,,Chevrolet,Tracker,motor-oil-5w40,,,,10,false
+Масло 10W-40 Tracker,,Chevrolet,Tracker,motor-oil-10w40,,,,10,false
+Трансмиссионное масло Tracker,,Chevrolet,Tracker,transmission-oil,,,,10,false
+Крепеж и клипсы Tracker,,Chevrolet,Tracker,fasteners-and-clips,,,,10,false
+Щетки стеклоочистителя Tracker,,Chevrolet,Tracker,wiper-blades,,,,10,false
+Передние тормозные колодки Malibu,,Chevrolet,Malibu,front-brake-pads,,,,10,false
+Задние тормозные колодки Malibu,,Chevrolet,Malibu,rear-brake-pads,,,,10,false
+Тормозные диски Malibu,,Chevrolet,Malibu,brake-discs,,,,10,false
+Суппорты и ремкомплекты Malibu,,Chevrolet,Malibu,brake-calipers-kits,,,,10,false
+Тормозные цилиндры Malibu,,Chevrolet,Malibu,brake-cylinders,,,,10,false
+Шланги и тросы Malibu,,Chevrolet,Malibu,brake-hoses-cables,,,,10,false
+Амортизаторы Malibu,,Chevrolet,Malibu,shock-absorbers,,,,10,false
+Пружины и опоры Malibu,,Chevrolet,Malibu,springs-and-mounts,,,,10,false
+Стойки и втулки стабилизатора Malibu,,Chevrolet,Malibu,stabilizer-links-bushings,,,,10,false
+Рычаги и сайлентблоки Malibu,,Chevrolet,Malibu,control-arms-bushings,,,,10,false
+Шаровые опоры Malibu,,Chevrolet,Malibu,ball-joints,,,,10,false
+Рулевые рейки и наконечники Malibu,,Chevrolet,Malibu,steering-racks-tie-rods,,,,10,false
+Ступицы и подшипники Malibu,,Chevrolet,Malibu,wheel-hubs-bearings,,,,10,false
+Комплекты ГРМ и ролики Malibu,,Chevrolet,Malibu,timing-belt-kits,,,,10,false
+Ремни навесного оборудования Malibu,,Chevrolet,Malibu,accessory-drive-belts,,,,10,false
+Прокладки и сальники Malibu,,Chevrolet,Malibu,gaskets-and-seals,,,,10,false
+Поршневая группа Malibu,,Chevrolet,Malibu,piston-group,,,,10,false
+Клапаны и ГБЦ Malibu,,Chevrolet,Malibu,valves-and-cylinder-head,,,,10,false
+Подушки двигателя Malibu,,Chevrolet,Malibu,engine-mounts,,,,10,false
+Радиаторы охлаждения Malibu,,Chevrolet,Malibu,cooling-radiators,,,,10,false
+Радиаторы печки Malibu,,Chevrolet,Malibu,heater-cores,,,,10,false
+Водяные помпы Malibu,,Chevrolet,Malibu,water-pumps,,,,10,false
+Термостаты Malibu,,Chevrolet,Malibu,thermostats,,,,10,false
+Патрубки и бачки Malibu,,Chevrolet,Malibu,coolant-hoses-tanks,,,,10,false
+Вентиляторы охлаждения Malibu,,Chevrolet,Malibu,cooling-fans,,,,10,false
+Масляные фильтры Malibu,,Chevrolet,Malibu,oil-filters,,,,10,false
+Воздушные фильтры Malibu,,Chevrolet,Malibu,air-filters,,,,10,false
+Салонные фильтры Malibu,,Chevrolet,Malibu,cabin-filters,,,,10,false
+Топливные фильтры Malibu,,Chevrolet,Malibu,fuel-filters,,,,10,false
+Антифризы Malibu,,Chevrolet,Malibu,antifreeze,,,,10,false
+Технические жидкости Malibu,,Chevrolet,Malibu,technical-fluids,,,,10,false
+Свечи зажигания Malibu,,Chevrolet,Malibu,spark-plugs,,,,10,false
+Катушки и провода Malibu,,Chevrolet,Malibu,ignition-coils-wires,,,,10,false
+Генераторы Malibu,,Chevrolet,Malibu,alternators,,,,10,false
+Стартеры Malibu,,Chevrolet,Malibu,starters,,,,10,false
+Датчики двигателя Malibu,,Chevrolet,Malibu,engine-sensors,,,,10,false
+Оптика и лампы Malibu,,Chevrolet,Malibu,headlights-and-bulbs,,,,10,false
+Комплекты сцепления Malibu,,Chevrolet,Malibu,clutch-kits,,,,10,false
+ШРУСы и приводы Malibu,,Chevrolet,Malibu,cv-joints-driveshafts,,,,10,false
+Пыльники ШРУСа Malibu,,Chevrolet,Malibu,cv-joint-boots,,,,10,false
+Маховики Malibu,,Chevrolet,Malibu,flywheels,,,,10,false
+Кулисы и тросы Malibu,,Chevrolet,Malibu,gear-linkages-cables,,,,10,false
+Коврики Malibu,,Chevrolet,Malibu,floor-mats,,,,10,false
+Защита картера Malibu,,Chevrolet,Malibu,skid-plates,,,,10,false
+Ветровики и брызговики Malibu,,Chevrolet,Malibu,wind-deflectors-mudflaps,,,,10,false
+Чехлы Malibu,,Chevrolet,Malibu,seat-covers,,,,10,false
+Масло 5W-30 Malibu,,Chevrolet,Malibu,motor-oil-5w30,,,,10,false
+Масло 5W-40 Malibu,,Chevrolet,Malibu,motor-oil-5w40,,,,10,false
+Масло 10W-40 Malibu,,Chevrolet,Malibu,motor-oil-10w40,,,,10,false
+Трансмиссионное масло Malibu,,Chevrolet,Malibu,transmission-oil,,,,10,false
+Крепеж и клипсы Malibu,,Chevrolet,Malibu,fasteners-and-clips,,,,10,false
+Щетки стеклоочистителя Malibu,,Chevrolet,Malibu,wiper-blades,,,,10,false
+Передние тормозные колодки Onix,,Chevrolet,Onix,front-brake-pads,,,,10,false
+Задние тормозные колодки Onix,,Chevrolet,Onix,rear-brake-pads,,,,10,false
+Тормозные диски Onix,,Chevrolet,Onix,brake-discs,,,,10,false
+Суппорты и ремкомплекты Onix,,Chevrolet,Onix,brake-calipers-kits,,,,10,false
+Тормозные цилиндры Onix,,Chevrolet,Onix,brake-cylinders,,,,10,false
+Шланги и тросы Onix,,Chevrolet,Onix,brake-hoses-cables,,,,10,false
+Амортизаторы Onix,,Chevrolet,Onix,shock-absorbers,,,,10,false
+Пружины и опоры Onix,,Chevrolet,Onix,springs-and-mounts,,,,10,false
+Стойки и втулки стабилизатора Onix,,Chevrolet,Onix,stabilizer-links-bushings,,,,10,false
+Рычаги и сайлентблоки Onix,,Chevrolet,Onix,control-arms-bushings,,,,10,false
+Шаровые опоры Onix,,Chevrolet,Onix,ball-joints,,,,10,false
+Рулевые рейки и наконечники Onix,,Chevrolet,Onix,steering-racks-tie-rods,,,,10,false
+Ступицы и подшипники Onix,,Chevrolet,Onix,wheel-hubs-bearings,,,,10,false
+Комплекты ГРМ и ролики Onix,,Chevrolet,Onix,timing-belt-kits,,,,10,false
+Ремни навесного оборудования Onix,,Chevrolet,Onix,accessory-drive-belts,,,,10,false
+Прокладки и сальники Onix,,Chevrolet,Onix,gaskets-and-seals,,,,10,false
+Поршневая группа Onix,,Chevrolet,Onix,piston-group,,,,10,false
+Клапаны и ГБЦ Onix,,Chevrolet,Onix,valves-and-cylinder-head,,,,10,false
+Подушки двигателя Onix,,Chevrolet,Onix,engine-mounts,,,,10,false
+Радиаторы охлаждения Onix,,Chevrolet,Onix,cooling-radiators,,,,10,false
+Радиаторы печки Onix,,Chevrolet,Onix,heater-cores,,,,10,false
+Водяные помпы Onix,,Chevrolet,Onix,water-pumps,,,,10,false
+Термостаты Onix,,Chevrolet,Onix,thermostats,,,,10,false
+Патрубки и бачки Onix,,Chevrolet,Onix,coolant-hoses-tanks,,,,10,false
+Вентиляторы охлаждения Onix,,Chevrolet,Onix,cooling-fans,,,,10,false
+Масляные фильтры Onix,,Chevrolet,Onix,oil-filters,,,,10,false
+Воздушные фильтры Onix,,Chevrolet,Onix,air-filters,,,,10,false
+Салонные фильтры Onix,,Chevrolet,Onix,cabin-filters,,,,10,false
+Топливные фильтры Onix,,Chevrolet,Onix,fuel-filters,,,,10,false
+Антифризы Onix,,Chevrolet,Onix,antifreeze,,,,10,false
+Технические жидкости Onix,,Chevrolet,Onix,technical-fluids,,,,10,false
+Свечи зажигания Onix,,Chevrolet,Onix,spark-plugs,,,,10,false
+Катушки и провода Onix,,Chevrolet,Onix,ignition-coils-wires,,,,10,false
+Генераторы Onix,,Chevrolet,Onix,alternators,,,,10,false
+Стартеры Onix,,Chevrolet,Onix,starters,,,,10,false
+Датчики двигателя Onix,,Chevrolet,Onix,engine-sensors,,,,10,false
+Оптика и лампы Onix,,Chevrolet,Onix,headlights-and-bulbs,,,,10,false
+Комплекты сцепления Onix,,Chevrolet,Onix,clutch-kits,,,,10,false
+ШРУСы и приводы Onix,,Chevrolet,Onix,cv-joints-driveshafts,,,,10,false
+Пыльники ШРУСа Onix,,Chevrolet,Onix,cv-joint-boots,,,,10,false
+Маховики Onix,,Chevrolet,Onix,flywheels,,,,10,false
+Кулисы и тросы Onix,,Chevrolet,Onix,gear-linkages-cables,,,,10,false
+Коврики Onix,,Chevrolet,Onix,floor-mats,,,,10,false
+Защита картера Onix,,Chevrolet,Onix,skid-plates,,,,10,false
+Ветровики и брызговики Onix,,Chevrolet,Onix,wind-deflectors-mudflaps,,,,10,false
+Чехлы Onix,,Chevrolet,Onix,seat-covers,,,,10,false
+Масло 5W-30 Onix,,Chevrolet,Onix,motor-oil-5w30,,,,10,false
+Масло 5W-40 Onix,,Chevrolet,Onix,motor-oil-5w40,,,,10,false
+Масло 10W-40 Onix,,Chevrolet,Onix,motor-oil-10w40,,,,10,false
+Трансмиссионное масло Onix,,Chevrolet,Onix,transmission-oil,,,,10,false
+Крепеж и клипсы Onix,,Chevrolet,Onix,fasteners-and-clips,,,,10,false
+Щетки стеклоочистителя Onix,,Chevrolet,Onix,wiper-blades,,,,10,false
+Передние тормозные колодки Lacetti,,Chevrolet,Lacetti,front-brake-pads,,,,10,false
+Задние тормозные колодки Lacetti,,Chevrolet,Lacetti,rear-brake-pads,,,,10,false
+Тормозные диски Lacetti,,Chevrolet,Lacetti,brake-discs,,,,10,false
+Суппорты и ремкомплекты Lacetti,,Chevrolet,Lacetti,brake-calipers-kits,,,,10,false
+Тормозные цилиндры Lacetti,,Chevrolet,Lacetti,brake-cylinders,,,,10,false
+Шланги и тросы Lacetti,,Chevrolet,Lacetti,brake-hoses-cables,,,,10,false
+Амортизаторы Lacetti,,Chevrolet,Lacetti,shock-absorbers,,,,10,false
+Пружины и опоры Lacetti,,Chevrolet,Lacetti,springs-and-mounts,,,,10,false
+Стойки и втулки стабилизатора Lacetti,,Chevrolet,Lacetti,stabilizer-links-bushings,,,,10,false
+Рычаги и сайлентблоки Lacetti,,Chevrolet,Lacetti,control-arms-bushings,,,,10,false
+Шаровые опоры Lacetti,,Chevrolet,Lacetti,ball-joints,,,,10,false
+Рулевые рейки и наконечники Lacetti,,Chevrolet,Lacetti,steering-racks-tie-rods,,,,10,false
+Ступицы и подшипники Lacetti,,Chevrolet,Lacetti,wheel-hubs-bearings,,,,10,false
+Комплекты ГРМ и ролики Lacetti,,Chevrolet,Lacetti,timing-belt-kits,,,,10,false
+Ремни навесного оборудования Lacetti,,Chevrolet,Lacetti,accessory-drive-belts,,,,10,false
+Прокладки и сальники Lacetti,,Chevrolet,Lacetti,gaskets-and-seals,,,,10,false
+Поршневая группа Lacetti,,Chevrolet,Lacetti,piston-group,,,,10,false
+Клапаны и ГБЦ Lacetti,,Chevrolet,Lacetti,valves-and-cylinder-head,,,,10,false
+Подушки двигателя Lacetti,,Chevrolet,Lacetti,engine-mounts,,,,10,false
+Радиаторы охлаждения Lacetti,,Chevrolet,Lacetti,cooling-radiators,,,,10,false
+Радиаторы печки Lacetti,,Chevrolet,Lacetti,heater-cores,,,,10,false
+Водяные помпы Lacetti,,Chevrolet,Lacetti,water-pumps,,,,10,false
+Термостаты Lacetti,,Chevrolet,Lacetti,thermostats,,,,10,false
+Патрубки и бачки Lacetti,,Chevrolet,Lacetti,coolant-hoses-tanks,,,,10,false
+Вентиляторы охлаждения Lacetti,,Chevrolet,Lacetti,cooling-fans,,,,10,false
+Масляные фильтры Lacetti,,Chevrolet,Lacetti,oil-filters,,,,10,false
+Воздушные фильтры Lacetti,,Chevrolet,Lacetti,air-filters,,,,10,false
+Салонные фильтры Lacetti,,Chevrolet,Lacetti,cabin-filters,,,,10,false
+Топливные фильтры Lacetti,,Chevrolet,Lacetti,fuel-filters,,,,10,false
+Антифризы Lacetti,,Chevrolet,Lacetti,antifreeze,,,,10,false
+Технические жидкости Lacetti,,Chevrolet,Lacetti,technical-fluids,,,,10,false
+Свечи зажигания Lacetti,,Chevrolet,Lacetti,spark-plugs,,,,10,false
+Катушки и провода Lacetti,,Chevrolet,Lacetti,ignition-coils-wires,,,,10,false
+Генераторы Lacetti,,Chevrolet,Lacetti,alternators,,,,10,false
+Стартеры Lacetti,,Chevrolet,Lacetti,starters,,,,10,false
+Датчики двигателя Lacetti,,Chevrolet,Lacetti,engine-sensors,,,,10,false
+Оптика и лампы Lacetti,,Chevrolet,Lacetti,headlights-and-bulbs,,,,10,false
+Комплекты сцепления Lacetti,,Chevrolet,Lacetti,clutch-kits,,,,10,false
+ШРУСы и приводы Lacetti,,Chevrolet,Lacetti,cv-joints-driveshafts,,,,10,false
+Пыльники ШРУСа Lacetti,,Chevrolet,Lacetti,cv-joint-boots,,,,10,false
+Маховики Lacetti,,Chevrolet,Lacetti,flywheels,,,,10,false
+Кулисы и тросы Lacetti,,Chevrolet,Lacetti,gear-linkages-cables,,,,10,false
+Коврики Lacetti,,Chevrolet,Lacetti,floor-mats,,,,10,false
+Защита картера Lacetti,,Chevrolet,Lacetti,skid-plates,,,,10,false
+Ветровики и брызговики Lacetti,,Chevrolet,Lacetti,wind-deflectors-mudflaps,,,,10,false
+Чехлы Lacetti,,Chevrolet,Lacetti,seat-covers,,,,10,false
+Масло 5W-30 Lacetti,,Chevrolet,Lacetti,motor-oil-5w30,,,,10,false
+Масло 5W-40 Lacetti,,Chevrolet,Lacetti,motor-oil-5w40,,,,10,false
+Масло 10W-40 Lacetti,,Chevrolet,Lacetti,motor-oil-10w40,,,,10,false
+Трансмиссионное масло Lacetti,,Chevrolet,Lacetti,transmission-oil,,,,10,false
+Крепеж и клипсы Lacetti,,Chevrolet,Lacetti,fasteners-and-clips,,,,10,false
+Щетки стеклоочистителя Lacetti,,Chevrolet,Lacetti,wiper-blades,,,,10,false
+Передние тормозные колодки Captiva,,Chevrolet,Captiva,front-brake-pads,,,,10,false
+Задние тормозные колодки Captiva,,Chevrolet,Captiva,rear-brake-pads,,,,10,false
+Тормозные диски Captiva,,Chevrolet,Captiva,brake-discs,,,,10,false
+Суппорты и ремкомплекты Captiva,,Chevrolet,Captiva,brake-calipers-kits,,,,10,false
+Тормозные цилиндры Captiva,,Chevrolet,Captiva,brake-cylinders,,,,10,false
+Шланги и тросы Captiva,,Chevrolet,Captiva,brake-hoses-cables,,,,10,false
+Амортизаторы Captiva,,Chevrolet,Captiva,shock-absorbers,,,,10,false
+Пружины и опоры Captiva,,Chevrolet,Captiva,springs-and-mounts,,,,10,false
+Стойки и втулки стабилизатора Captiva,,Chevrolet,Captiva,stabilizer-links-bushings,,,,10,false
+Рычаги и сайлентблоки Captiva,,Chevrolet,Captiva,control-arms-bushings,,,,10,false
+Шаровые опоры Captiva,,Chevrolet,Captiva,ball-joints,,,,10,false
+Рулевые рейки и наконечники Captiva,,Chevrolet,Captiva,steering-racks-tie-rods,,,,10,false
+Ступицы и подшипники Captiva,,Chevrolet,Captiva,wheel-hubs-bearings,,,,10,false
+Комплекты ГРМ и ролики Captiva,,Chevrolet,Captiva,timing-belt-kits,,,,10,false
+Ремни навесного оборудования Captiva,,Chevrolet,Captiva,accessory-drive-belts,,,,10,false
+Прокладки и сальники Captiva,,Chevrolet,Captiva,gaskets-and-seals,,,,10,false
+Поршневая группа Captiva,,Chevrolet,Captiva,piston-group,,,,10,false
+Клапаны и ГБЦ Captiva,,Chevrolet,Captiva,valves-and-cylinder-head,,,,10,false
+Подушки двигателя Captiva,,Chevrolet,Captiva,engine-mounts,,,,10,false
+Радиаторы охлаждения Captiva,,Chevrolet,Captiva,cooling-radiators,,,,10,false
+Радиаторы печки Captiva,,Chevrolet,Captiva,heater-cores,,,,10,false
+Водяные помпы Captiva,,Chevrolet,Captiva,water-pumps,,,,10,false
+Термостаты Captiva,,Chevrolet,Captiva,thermostats,,,,10,false
+Патрубки и бачки Captiva,,Chevrolet,Captiva,coolant-hoses-tanks,,,,10,false
+Вентиляторы охлаждения Captiva,,Chevrolet,Captiva,cooling-fans,,,,10,false
+Масляные фильтры Captiva,,Chevrolet,Captiva,oil-filters,,,,10,false
+Воздушные фильтры Captiva,,Chevrolet,Captiva,air-filters,,,,10,false
+Салонные фильтры Captiva,,Chevrolet,Captiva,cabin-filters,,,,10,false
+Топливные фильтры Captiva,,Chevrolet,Captiva,fuel-filters,,,,10,false
+Антифризы Captiva,,Chevrolet,Captiva,antifreeze,,,,10,false
+Технические жидкости Captiva,,Chevrolet,Captiva,technical-fluids,,,,10,false
+Свечи зажигания Captiva,,Chevrolet,Captiva,spark-plugs,,,,10,false
+Катушки и провода Captiva,,Chevrolet,Captiva,ignition-coils-wires,,,,10,false
+Генераторы Captiva,,Chevrolet,Captiva,alternators,,,,10,false
+Стартеры Captiva,,Chevrolet,Captiva,starters,,,,10,false
+Датчики двигателя Captiva,,Chevrolet,Captiva,engine-sensors,,,,10,false
+Оптика и лампы Captiva,,Chevrolet,Captiva,headlights-and-bulbs,,,,10,false
+Комплекты сцепления Captiva,,Chevrolet,Captiva,clutch-kits,,,,10,false
+ШРУСы и приводы Captiva,,Chevrolet,Captiva,cv-joints-driveshafts,,,,10,false
+Пыльники ШРУСа Captiva,,Chevrolet,Captiva,cv-joint-boots,,,,10,false
+Маховики Captiva,,Chevrolet,Captiva,flywheels,,,,10,false
+Кулисы и тросы Captiva,,Chevrolet,Captiva,gear-linkages-cables,,,,10,false
+Коврики Captiva,,Chevrolet,Captiva,floor-mats,,,,10,false
+Защита картера Captiva,,Chevrolet,Captiva,skid-plates,,,,10,false
+Ветровики и брызговики Captiva,,Chevrolet,Captiva,wind-deflectors-mudflaps,,,,10,false
+Чехлы Captiva,,Chevrolet,Captiva,seat-covers,,,,10,false
+Масло 5W-30 Captiva,,Chevrolet,Captiva,motor-oil-5w30,,,,10,false
+Масло 5W-40 Captiva,,Chevrolet,Captiva,motor-oil-5w40,,,,10,false
+Масло 10W-40 Captiva,,Chevrolet,Captiva,motor-oil-10w40,,,,10,false
+Трансмиссионное масло Captiva,,Chevrolet,Captiva,transmission-oil,,,,10,false
+Крепеж и клипсы Captiva,,Chevrolet,Captiva,fasteners-and-clips,,,,10,false
+Щетки стеклоочистителя Captiva,,Chevrolet,Captiva,wiper-blades,,,,10,false
+Передние тормозные колодки Damas,,Chevrolet,Damas,front-brake-pads,,,,10,false
+Задние тормозные колодки Damas,,Chevrolet,Damas,rear-brake-pads,,,,10,false
+Тормозные диски Damas,,Chevrolet,Damas,brake-discs,,,,10,false
+Суппорты и ремкомплекты Damas,,Chevrolet,Damas,brake-calipers-kits,,,,10,false
+Тормозные цилиндры Damas,,Chevrolet,Damas,brake-cylinders,,,,10,false
+Шланги и тросы Damas,,Chevrolet,Damas,brake-hoses-cables,,,,10,false
+Амортизаторы Damas,,Chevrolet,Damas,shock-absorbers,,,,10,false
+Пружины и опоры Damas,,Chevrolet,Damas,springs-and-mounts,,,,10,false
+Стойки и втулки стабилизатора Damas,,Chevrolet,Damas,stabilizer-links-bushings,,,,10,false
+Рычаги и сайлентблоки Damas,,Chevrolet,Damas,control-arms-bushings,,,,10,false
+Шаровые опоры Damas,,Chevrolet,Damas,ball-joints,,,,10,false
+Рулевые рейки и наконечники Damas,,Chevrolet,Damas,steering-racks-tie-rods,,,,10,false
+Ступицы и подшипники Damas,,Chevrolet,Damas,wheel-hubs-bearings,,,,10,false
+Комплекты ГРМ и ролики Damas,,Chevrolet,Damas,timing-belt-kits,,,,10,false
+Ремни навесного оборудования Damas,,Chevrolet,Damas,accessory-drive-belts,,,,10,false
+Прокладки и сальники Damas,,Chevrolet,Damas,gaskets-and-seals,,,,10,false
+Поршневая группа Damas,,Chevrolet,Damas,piston-group,,,,10,false
+Клапаны и ГБЦ Damas,,Chevrolet,Damas,valves-and-cylinder-head,,,,10,false
+Подушки двигателя Damas,,Chevrolet,Damas,engine-mounts,,,,10,false
+Радиаторы охлаждения Damas,,Chevrolet,Damas,cooling-radiators,,,,10,false
+Радиаторы печки Damas,,Chevrolet,Damas,heater-cores,,,,10,false
+Водяные помпы Damas,,Chevrolet,Damas,water-pumps,,,,10,false
+Термостаты Damas,,Chevrolet,Damas,thermostats,,,,10,false
+Патрубки и бачки Damas,,Chevrolet,Damas,coolant-hoses-tanks,,,,10,false
+Вентиляторы охлаждения Damas,,Chevrolet,Damas,cooling-fans,,,,10,false
+Масляные фильтры Damas,,Chevrolet,Damas,oil-filters,,,,10,false
+Воздушные фильтры Damas,,Chevrolet,Damas,air-filters,,,,10,false
+Салонные фильтры Damas,,Chevrolet,Damas,cabin-filters,,,,10,false
+Топливные фильтры Damas,,Chevrolet,Damas,fuel-filters,,,,10,false
+Антифризы Damas,,Chevrolet,Damas,antifreeze,,,,10,false
+Технические жидкости Damas,,Chevrolet,Damas,technical-fluids,,,,10,false
+Свечи зажигания Damas,,Chevrolet,Damas,spark-plugs,,,,10,false
+Катушки и провода Damas,,Chevrolet,Damas,ignition-coils-wires,,,,10,false
+Генераторы Damas,,Chevrolet,Damas,alternators,,,,10,false
+Стартеры Damas,,Chevrolet,Damas,starters,,,,10,false
+Датчики двигателя Damas,,Chevrolet,Damas,engine-sensors,,,,10,false
+Оптика и лампы Damas,,Chevrolet,Damas,headlights-and-bulbs,,,,10,false
+Комплекты сцепления Damas,,Chevrolet,Damas,clutch-kits,,,,10,false
+ШРУСы и приводы Damas,,Chevrolet,Damas,cv-joints-driveshafts,,,,10,false
+Пыльники ШРУСа Damas,,Chevrolet,Damas,cv-joint-boots,,,,10,false
+Маховики Damas,,Chevrolet,Damas,flywheels,,,,10,false
+Кулисы и тросы Damas,,Chevrolet,Damas,gear-linkages-cables,,,,10,false
+Коврики Damas,,Chevrolet,Damas,floor-mats,,,,10,false
+Защита картера Damas,,Chevrolet,Damas,skid-plates,,,,10,false
+Ветровики и брызговики Damas,,Chevrolet,Damas,wind-deflectors-mudflaps,,,,10,false
+Чехлы Damas,,Chevrolet,Damas,seat-covers,,,,10,false
+Масло 5W-30 Damas,,Chevrolet,Damas,motor-oil-5w30,,,,10,false
+Масло 5W-40 Damas,,Chevrolet,Damas,motor-oil-5w40,,,,10,false
+Масло 10W-40 Damas,,Chevrolet,Damas,motor-oil-10w40,,,,10,false
+Трансмиссионное масло Damas,,Chevrolet,Damas,transmission-oil,,,,10,false
+Крепеж и клипсы Damas,,Chevrolet,Damas,fasteners-and-clips,,,,10,false
+Щетки стеклоочистителя Damas,,Chevrolet,Damas,wiper-blades,,,,10,false
