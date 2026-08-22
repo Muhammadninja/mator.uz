@@ -233,6 +233,23 @@ describe('PartsService — search and sort survive ProductKind', () => {
     expect(args.orderBy).toEqual([{ priceUzs: 'asc' }]);
   });
 
+  it('a multi-word main-category SLUG rolls up the whole system (not an exact categoryId)', async () => {
+    // Regression: the home grid ships buckets by slug ('belts-and-hoses'), whose
+    // UPPERCASE doesn't match the enum ('BELTS_AND_HOSES'). It must still roll up
+    // by mainCategory (incl. subcategory-filed parts) so the listing count equals
+    // the grid count — otherwise "count 2, list empty". It must NOT add an exact
+    // categoryId clause that drops sub-filed parts.
+    const { and } = await whereFor({ category: 'belts-and-hoses' });
+    expect(hasCond(and, { mainCategory: 'BELTS_AND_HOSES' })).toBe(true);
+    expect(hasCond(and, { categoryId: 'belts-and-hoses' })).toBe(false);
+  });
+
+  it('a real subcategory id still matches exactly on categoryId', async () => {
+    const { and } = await whereFor({ category: 'v-belts' });
+    expect(hasCond(and, { categoryId: 'v-belts' })).toBe(true);
+    expect(hasCond(and, { mainCategory: 'BELTS_AND_HOSES' })).toBe(false);
+  });
+
   it('a non-rollup listing omits subcategory chips (null) and stays newest-first', async () => {
     const { svc, prisma } = makeService();
     const res = await svc.list({});

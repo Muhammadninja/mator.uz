@@ -41,6 +41,16 @@ const REGION_BY_WIRE: Record<string, PartOriginRegion> = {
 
 const MAIN_CATEGORY_VALUES = new Set(Object.values(PartMainCategory));
 const VEHICLE_CATEGORY_VALUES = new Set(Object.values(PartVehicleCategory));
+// Reverse of MAIN_CATEGORY_TO_SLUG: the home grid ships each bucket by its slug
+// id ('belts-and-hoses'), whose UPPERCASE ('BELTS-AND-HOSES') does NOT match the
+// underscored enum ('BELTS_AND_HOSES'). This map lets the listing recognise a
+// main-category SLUG and roll up the whole system (all subcategories), so the
+// listing count matches the home grid's mainCategory-grouped count.
+const SLUG_TO_MAIN_CATEGORY = new Map<string, PartMainCategory>(
+  (Object.entries(MAIN_CATEGORY_TO_SLUG) as [PartMainCategory, string][]).map(
+    ([main, slug]) => [slug, main],
+  ),
+);
 
 /** Garage-vehicle context for compatibility: trim/engine (fine) + make/model names. */
 interface VehicleFilterContext extends VehicleCompatContext {
@@ -335,10 +345,16 @@ export class PartsService {
     if (q.category) {
       const up = q.category.toUpperCase();
       if (MAIN_CATEGORY_VALUES.has(up as PartMainCategory)) {
-        and.push({ mainCategory: up as PartMainCategory });
+        // Main-category enum ('BRAKES') → handled by the rollup clause below so
+        // the whole system (incl. subcategory-filed parts) is returned.
       } else if (VEHICLE_CATEGORY_VALUES.has(up as PartVehicleCategory)) {
         and.push({ vehicleCategory: up as PartVehicleCategory });
+      } else if (SLUG_TO_MAIN_CATEGORY.has(q.category.toLowerCase())) {
+        // Main-category SLUG ('belts-and-hoses') → also a rollup; the exact
+        // categoryId path below would match only the bucket row itself and drop
+        // every part filed on a subcategory (the "count 2, list empty" bug).
       } else {
+        // A real subcategory / custom category id → exact FK match.
         and.push({ categoryId: q.category });
       }
     }
@@ -586,6 +602,10 @@ export class PartsService {
       if (MAIN_CATEGORY_VALUES.has(up as PartMainCategory)) {
         return up as PartMainCategory;
       }
+      // Also accept the canonical SLUG form ('belts-and-hoses'), which the home
+      // grid ships as the category id but which doesn't uppercase to the enum.
+      const bySlug = SLUG_TO_MAIN_CATEGORY.get(raw.toLowerCase());
+      if (bySlug) return bySlug;
     }
     return null;
   }
