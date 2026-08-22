@@ -275,6 +275,15 @@ enum DeliveryMethod {
   PICKUP
 }
 
+// How the customer chose to pay at checkout. PAYME = online (Payme), CASH =
+// cash on delivery, TERMINAL = card reader the courier brings. Recorded on the
+// order so the payment webhook and reporting know the intended method.
+enum PaymentType {
+  PAYME
+  TERMINAL
+  CASH
+}
+
 // Who performed an order status change, recorded on each OrderStatusHistory row.
 // SYSTEM covers automated transitions (order creation, payment webhooks); the
 // remaining values map to the acting AppUser's role at write time.
@@ -1457,6 +1466,7 @@ model Order {
   vehicleId         String?              @map("vehicle_id") @db.VarChar(64)
   deliveryAddressId String?              @map("delivery_address_id") @db.VarChar(64)
   deliveryMethod    DeliveryMethod?      @map("delivery_method")
+  paymentType       PaymentType?         @map("payment_type")
   contactPhoneE164  String?              @map("contact_phone_e164") @db.VarChar(20)
   promoCode         String?              @map("promo_code") @db.VarChar(60)
   yandexClaimId     String?              @map("yandex_claim_id") @db.VarChar(100)

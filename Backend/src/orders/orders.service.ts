@@ -1,6 +1,12 @@
 import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { DeliveryMethod, NotificationType, OrderStatus, Prisma } from '@prisma/client';
+import {
+  DeliveryMethod,
+  NotificationType,
+  OrderStatus,
+  PaymentType,
+  Prisma,
+} from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
@@ -85,6 +91,15 @@ export class OrdersService {
       deliveryMethod === DeliveryMethod.PICKUP
         ? 0
         : Number(this.config.get<string>('DELIVERY_COURIER_UZS') ?? 25000);
+    // Persist the chosen payment method (optional — older clients omit it).
+    const PAYMENT_TYPE_MAP: Record<string, PaymentType> = {
+      payme: PaymentType.PAYME,
+      terminal: PaymentType.TERMINAL,
+      cash: PaymentType.CASH,
+    };
+    const paymentType = dto.payment_type
+      ? PAYMENT_TYPE_MAP[dto.payment_type]
+      : undefined;
     const serviceFeeUzs = Number(this.config.get<string>('SERVICE_FEE_UZS') ?? 5000);
     const discount = cart.promoCode ? resolvePromo(cart.promoCode, subtotal).discountUzs : 0;
     const total = Math.max(0, subtotal + deliveryUzs + serviceFeeUzs - discount);
@@ -124,6 +139,7 @@ export class OrdersService {
           vehicleId: dto.vehicle_id,
           deliveryAddressId: snap.delivery_address_id ?? undefined,
           deliveryMethod,
+          paymentType,
           contactPhoneE164: contactPhone,
           promoCode: cart.promoCode ?? undefined,
           expiresAt,
