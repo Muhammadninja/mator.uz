@@ -227,25 +227,64 @@ describe('CatalogToolsService', () => {
   });
 
   describe('get_categories', () => {
+    /** One grid row as CategoriesService now returns it (label = localized). */
+    const gridRow = (label: string) => ({
+      id: 'brakes',
+      name: 'Brakes',
+      label,
+      slug: 'brakes',
+      count: 12,
+      iconKey: 'b',
+      color: '#f00',
+    });
+
     it('returns categories with live inventory counts', async () => {
       categories.list.mockResolvedValue({
-        items: [
-          {
-            id: 'brakes',
-            name: 'Brakes',
-            slug: 'brakes',
-            count: 12,
-            iconKey: 'b',
-            color: '#f00',
-          },
-        ],
+        items: [gridRow('Тормоза')],
         total: 1,
       });
 
       const res = await tools.run('get_categories', { scope: 'main' });
+      // `name` is the LOCALIZED label — the model must reason in the user's
+      // language, not in the internal English one ('Brakes').
       expect(JSON.parse(res.content).items).toEqual([
-        { id: 'brakes', name: 'Brakes', part_count: 12 },
+        { id: 'brakes', name: 'Тормоза', part_count: 12 },
       ]);
+    });
+
+    // The session's language reaches CategoriesService, which is what picks the
+    // label; the tool must forward it rather than defaulting silently.
+    it.each(['ru', 'uz', 'en'] as const)(
+      'asks the catalogue for %s names',
+      async (lang) => {
+        categories.list.mockResolvedValue({ items: [], total: 0 });
+        await tools.run('get_categories', { scope: 'main' }, lang);
+        expect(categories.list).toHaveBeenCalledWith(
+          expect.objectContaining({ scope: 'main' }),
+          lang,
+        );
+      },
+    );
+
+    it('falls back to the default language when the caller passes none', async () => {
+      categories.list.mockResolvedValue({ items: [], total: 0 });
+      await tools.run('get_categories', { scope: 'main' });
+      expect(categories.list).toHaveBeenCalledWith(expect.anything(), 'ru');
+    });
+
+    // The id is what `search_catalog` must be given back, so it may never
+    // follow the display language.
+    it('keeps the category id stable across languages', async () => {
+      for (const [lang, label] of [
+        ['ru', 'Тормоза'],
+        ['uz', 'Tormozlar'],
+        ['en', 'Brakes'],
+      ] as const) {
+        categories.list.mockResolvedValue({ items: [gridRow(label)], total: 1 });
+        const res = await tools.run('get_categories', { scope: 'main' }, lang);
+        const [item] = JSON.parse(res.content).items;
+        expect(item).toEqual({ id: 'brakes', name: label, part_count: 12 });
+      }
     });
 
     it('defaults an unrecognised scope to main rather than failing', async () => {

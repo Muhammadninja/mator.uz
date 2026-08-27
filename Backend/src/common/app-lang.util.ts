@@ -62,6 +62,84 @@ export function parseAppLang(raw: string | null | undefined): AppLang | null {
   return APP_LANGS.includes(value as AppLang) ? (value as AppLang) : null;
 }
 
+/**
+ * Widen a BCP-47 tag to its primary subtag: `ru-RU` → `ru`, `uz-Latn-UZ` →
+ * `uz`. Region and script are dropped because Mator ships ONE variant per
+ * language (Uzbek is Latin-only here), so `uz-Cyrl` cannot be honoured as
+ * anything but `uz` — and answering `uz` beats answering the default.
+ */
+function primarySubtag(tag: string): string {
+  return tag.split('-', 1)[0];
+}
+
+/**
+ * The best supported language for an `Accept-Language` header value.
+ *
+ * Implements the parts of RFC 9110 §12.5.4 that can actually change the answer
+ * for a three-language set: comma-separated tags, `;q=` weights, the `*`
+ * wildcard, and region/script subtags. Ordering is by DESCENDING q, and ties
+ * keep the order the client listed them in — a stable sort, so `ru,uz` prefers
+ * Russian while `uz,ru` prefers Uzbek, both at the implied q=1.
+ *
+ * A `q=0` tag means "explicitly not this one" and is dropped rather than
+ * ranked last, which is the one place a naive sort silently serves a language
+ * the client just refused.
+ *
+ * @returns the matched language, or null when the header is absent, malformed,
+ *   or names only unsupported languages — the caller applies the default. It
+ *   never throws and never returns an unsupported code, so a hostile header
+ *   costs a fallback, not a 500.
+ */
+export function parseAcceptLanguage(
+  header: string | null | undefined,
+): AppLang | null {
+  if (typeof header !== 'string' || !header.trim()) return null;
+
+  const ranked = header
+    .split(',')
+    .map((part, index) => {
+      const [tag, ...params] = part.trim().split(';');
+      // Only `q` is meaningful here; any other parameter is ignored, as is a
+      // malformed weight (NaN), which RFC-wise defaults back to 1.
+      const q = params
+        .map((p) => /^\s*q\s*=\s*([0-9.]+)\s*$/i.exec(p))
+        .find((m) => m !== null)?.[1];
+      const weight = q === undefined ? 1 : Number.parseFloat(q);
+      return {
+        tag: tag.trim().toLowerCase(),
+        // An unparseable q is treated as the default 1, not as 0 — a typo in a
+        // weight should not silently delete the client's preferred language.
+        weight: Number.isFinite(weight) ? weight : 1,
+        index,
+      };
+    })
+    .filter((e) => e.tag !== '' && e.weight > 0)
+    .sort((a, b) => b.weight - a.weight || a.index - b.index);
+
+  for (const { tag } of ranked) {
+    // `*` means "anything you have" — answer with the platform default rather
+    // than the first language that happens to sort first.
+    if (tag === '*') return DEFAULT_APP_LANG;
+    const match = parseAppLang(primarySubtag(tag));
+    if (match) return match;
+  }
+  return null;
+}
+
+/**
+ * The language to serve a request in: the client's `Accept-Language` when it
+ * names one Mator ships, else {@link DEFAULT_APP_LANG}.
+ *
+ * The total function every buyer-facing caller should use — it cannot return
+ * null, so no endpoint has to invent its own fallback and no category label can
+ * come back blank for a missing or unsupported header.
+ */
+export function resolveRequestLang(
+  header: string | null | undefined,
+): AppLang {
+  return parseAcceptLanguage(header) ?? DEFAULT_APP_LANG;
+}
+
 /** The three localized names every category carries. */
 export interface LocalizedNames {
   nameRu: string;

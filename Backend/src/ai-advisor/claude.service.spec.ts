@@ -154,9 +154,13 @@ describe('ClaudeService', () => {
 
       const res = await svc.reply('sys', [{ role: 'user', content: 'tormoz' }]);
 
-      expect(toolRun).toHaveBeenCalledWith('search_catalog', {
-        q: 'brake pads',
-      });
+      // The third argument is the language the tools label categories in; it
+      // defaults to the platform default when `reply` is called without one.
+      expect(toolRun).toHaveBeenCalledWith(
+        'search_catalog',
+        { q: 'brake pads' },
+        'ru',
+      );
       expect(res.citedItems).toBe(1);
       expect(res.toolRounds).toBe(1);
       expect(res.outcome).toBe('ok');

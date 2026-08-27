@@ -7,6 +7,7 @@ import {
   CatalogToolsService,
   MAX_TOOL_ROUNDS,
 } from './catalog-tools.service';
+import { AppLang, DEFAULT_APP_LANG } from '../common/app-lang.util';
 
 export interface VehicleContext {
   vehicle_id: string;
@@ -133,6 +134,7 @@ export class ClaudeService {
   async reply(
     system: string,
     messages: Anthropic.MessageParam[],
+    lang: AppLang = DEFAULT_APP_LANG,
   ): Promise<ReplyResult> {
     if (!this.client) {
       return {
@@ -189,7 +191,7 @@ export class ClaudeService {
         );
         const results: Anthropic.ToolResultBlockParam[] = [];
         for (const call of calls) {
-          const run = await this.tools.run(call.name, call.input);
+          const run = await this.tools.run(call.name, call.input, lang);
           citedItems += run.itemCount;
           results.push({
             type: 'tool_result',

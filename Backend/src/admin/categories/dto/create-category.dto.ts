@@ -13,6 +13,7 @@ import {
   ValidateIf,
 } from 'class-validator';
 import { PartMainCategory } from '@prisma/client';
+import { IsUzbekLatin } from '../../../common/is-uzbek-latin.validator';
 import {
   MXIK_PATTERN,
   PACKAGE_CODE_PATTERN,
@@ -45,13 +46,24 @@ export class CreateCategoryDto {
   @MaxLength(160)
   nameRu!: string;
 
+  // Script-checked, unlike its RU/EN siblings: "Uzbek (Latin)" is a real
+  // constraint, and the mistake that actually happens is a Russian name pasted
+  // into this field. `@IsUzbekLatin` rejects that (see uzbek-latin.util for the
+  // alphabet); presence is still `@IsNotEmpty`'s job, so a blank and a
+  // wrong-script value report under their own constraint keys.
   @ApiProperty({
-    description: 'Display name in Uzbek (Latin script). Required, non-blank.',
+    description:
+      'Display name in Uzbek (LATIN script). Required, non-blank. Cyrillic ' +
+      'and any other non-Latin script are rejected; digits, hyphens and the ' +
+      "O'/G' apostrophe forms are allowed.",
     example: 'Turbokompressorlar',
   })
   @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsString()
   @IsNotEmpty({ message: 'nameUz is required and cannot be empty' })
+  @IsUzbekLatin({
+    message: 'nameUz must contain only Uzbek Latin characters',
+  })
   @MaxLength(160)
   nameUz!: string;
 

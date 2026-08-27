@@ -66,7 +66,13 @@ function part(over: Partial<PartWithRelations> = {}): PartWithRelations {
     createdAt: new Date(),
     updatedAt: new Date(),
     brand: null,
-    category: { id: 'cat-1', name: 'Filters' } as never,
+    category: {
+      id: 'cat-1',
+      name: 'Filters',
+      nameRu: 'Фильтры',
+      nameUz: 'Filtrlar',
+      nameEn: 'Filters',
+    } as never,
     seller: {
       id: 'seller-1',
       name: 'AutoPro',
@@ -387,5 +393,60 @@ describe('presentPartItem — curated rating', () => {
     );
     // JSON round-trip is what the client actually receives.
     expect(JSON.parse(JSON.stringify(out)).rating_avg).toBe(3.5);
+  });
+
+  // The card's category is rendered to a buyer, so it must travel with a name
+  // in every language the app ships — `name` alone is the internal English
+  // label and would show "Filters" to a Russian buyer.
+  it('carries all three localized category names for the client to pick from', () => {
+    const out = presentPartItem(part(), null);
+
+    expect(out.category).toEqual({
+      id: 'cat-1',
+      name: 'Filters',
+      // Defaulted to `ru` — see the localization block below.
+      label: 'Фильтры',
+      name_ru: 'Фильтры',
+      name_uz: 'Filtrlar',
+      name_en: 'Filters',
+    });
+  });
+});
+
+/**
+ * `label` is the field a UI renders. It resolves server-side from the request's
+ * language so the client needs no locale logic; the three explicit names stay
+ * beside it for a client that re-renders a CACHED part after a language switch.
+ */
+describe('presentPartItem — category label follows the request language', () => {
+  it.each([
+    ['ru', 'Фильтры'],
+    ['uz', 'Filtrlar'],
+    ['en', 'Filters'],
+  ] as const)('renders the %s label', (lang, expected) => {
+    expect(presentPartItem(part(), null, null, lang).category.label).toBe(
+      expected,
+    );
+  });
+
+  // A caller that passes no language (any pre-existing call site) must keep
+  // working and get the platform default rather than an empty label.
+  it('defaults to Russian when no language is given', () => {
+    expect(presentPartItem(part(), null).category.label).toBe('Фильтры');
+  });
+
+  // The whole point of separating label from identity: switching language must
+  // move ONE string and leave every identifier untouched.
+  it('changes only the label — ids and the internal name are language-stable', () => {
+    const ru = presentPartItem(part(), null, null, 'ru');
+    const uz = presentPartItem(part(), null, null, 'uz');
+
+    expect(uz.category.label).not.toBe(ru.category.label);
+    expect(uz.category.id).toBe(ru.category.id);
+    expect(uz.category.name).toBe(ru.category.name);
+    expect(uz.id).toBe(ru.id);
+    expect(uz.main_category).toBe(ru.main_category);
+    // Everything except the label is byte-identical across languages.
+    expect({ ...uz, category: null }).toEqual({ ...ru, category: null });
   });
 });

@@ -1,6 +1,11 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import {
+  AppLang,
+  DEFAULT_APP_LANG,
+  localizedCategoryName,
+} from '../../common/app-lang.util';
 import { ListCategoriesQueryDto } from './dto/list-categories.query.dto';
 import { VEHICLE_CATEGORIES } from './part-categories.catalog';
 
@@ -15,7 +20,11 @@ import { VEHICLE_CATEGORIES } from './part-categories.catalog';
 export class CategoriesService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async list(query: ListCategoriesQueryDto) {
+  /**
+   * The category grid. `lang` picks each row's display `label`; ids, slugs,
+   * counts and ordering are identical in every language.
+   */
+  async list(query: ListCategoriesQueryDto, lang: AppLang = DEFAULT_APP_LANG) {
     const scope = query.scope ?? 'main';
     const vehicleWhere = await this.vehicleScopeWhere(query.vehicle_id);
 
@@ -30,6 +39,11 @@ export class CategoriesService {
         items: VEHICLE_CATEGORIES.map((c) => ({
           id: c.id,
           name: c.name,
+          // The vehicle scope is served from the hardcoded VEHICLE_CATEGORIES
+          // table, which carries ONE name — so `label` mirrors it rather than
+          // pretending to be localized. It is present so a client can read
+          // `label` uniformly across both scopes instead of branching.
+          label: c.name,
           slug: c.slug,
           count: counts.get(c.id) ?? 0,
           iconKey: c.iconKey,
@@ -78,6 +92,8 @@ export class CategoriesService {
         // `name` stays for backwards compatibility; a localized client renders
         // the name matching its active locale from the three fields below.
         name: c.name,
+        // The display name for THIS request's language — what the grid shows.
+        label: localizedCategoryName(c, lang),
         name_ru: c.nameRu,
         name_uz: c.nameUz,
         name_en: c.nameEn,

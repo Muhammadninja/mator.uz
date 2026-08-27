@@ -1,6 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { AppLang, localizedCategoryName } from '../common/app-lang.util';
+import { SupportedLang } from '../common/i18n.util';
 import { formatUzs } from '../catalog/parts/part.presenter';
 import { ActiveSale, DiscountService } from '../sales/discount.service';
 import { expandToken } from './part-synonyms.util';
@@ -11,7 +13,14 @@ export interface StockItem {
   title: string;
   /** Display-formatted retail price ("250 000 сум") — sale-adjusted. */
   price: string;
+  /**
+   * The category's display name in the CHAT's language — this string is shown
+   * to the buyer and goes into the model's context, so it must not be the
+   * internal English label. Null when the part carries no category.
+   */
   category: string | null;
+  /** The stable category id. Language-independent; safe to key logic on. */
+  categoryId: string | null;
 }
 
 export interface RagSearchResult {
@@ -64,7 +73,16 @@ export class RagSearchService {
     private readonly discounts: DiscountService,
   ) {}
 
-  async searchInStock(query: RagQuery): Promise<RagSearchResult> {
+  /**
+   * @param lang the language the buyer is writing in, as already detected by
+   *   the chat (see common/i18n.util). Only the category LABEL depends on it;
+   *   matching, ranking and pricing are language-independent, so the same
+   *   request returns the same parts in every language.
+   */
+  async searchInStock(
+    query: RagQuery,
+    lang: SupportedLang | AppLang = 'ru',
+  ): Promise<RagSearchResult> {
     const tokens = this.tokenize(query.partName);
     if (tokens.length === 0) return { found: false, items: [] };
 
@@ -108,6 +126,11 @@ export class RagSearchService {
     // Price the matched parts against the active sales in one query, so the chat
     // quotes what checkout will actually charge.
     const sales = await this.discounts.loadActiveSales();
+    // The chat detects Uzbek's TWO scripts, but a category has one Uzbek name
+    // (Latin) — so both Uzbek variants resolve to the same `uz` column. A
+    // Cyrillic-writing buyer gets the Latin name because that is the only Uzbek
+    // name that exists; the alternative is showing them Russian.
+    const categoryLang = toCategoryLang(lang);
     const items: StockItem[] = ranked.map(({ row }) => {
       const { finalPrice } = this.discounts.calculateDiscount(
         Number(row.priceUzs),
@@ -118,7 +141,13 @@ export class RagSearchService {
         id: row.id,
         title: row.title,
         price: formatUzs(finalPrice),
-        category: row.category?.name ?? null,
+        // Localized (was the internal `category.name` — English for every
+        // seeded bucket, which is what the model was being told the category
+        // was called regardless of the language the buyer wrote in).
+        category: row.category
+          ? localizedCategoryName(row.category, categoryLang)
+          : null,
+        categoryId: row.categoryId ?? null,
       };
     });
 
@@ -134,6 +163,16 @@ export class RagSearchService {
       .filter((t) => t.length >= 2 && !STOP_WORDS.has(t));
     return Array.from(new Set(parts.length > 0 ? parts : [raw]));
   }
+}
+
+/**
+ * Narrow the chat's detected language to the three a category is NAMED in.
+ * `uz_cyr` and `uz_lat` both map to `uz`: the column stores Uzbek Latin only.
+ * Anything already an AppLang passes through unchanged.
+ */
+function toCategoryLang(lang: SupportedLang | AppLang): AppLang {
+  if (lang === 'uz_lat' || lang === 'uz_cyr') return 'uz';
+  return lang;
 }
 
 // Re-exported so tests can assert the loaded sales type without importing from

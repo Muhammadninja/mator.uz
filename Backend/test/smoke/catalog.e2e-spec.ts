@@ -40,16 +40,38 @@ describe('Catalog/Search smoke', () => {
       .mockResolvedValueOnce(1) // 200k–500k
       .mockResolvedValueOnce(0); // 4★+
     prisma.catalogPart.findMany.mockResolvedValue([
-      { id: 'part_belt', title: 'Timing belt', priceUzs: 185000, category: { id: 'cat_belts', name: 'Timing belts' } },
+      {
+        id: 'part_belt',
+        title: 'Timing belt',
+        priceUzs: 185000,
+        categoryId: 'cat_belts',
+        category: {
+          id: 'cat_belts',
+          name: 'Timing belts',
+          nameRu: 'Ремни ГРМ',
+          nameUz: 'GRM tasmalari',
+          nameEn: 'Timing belts',
+        },
+      },
     ]);
     prisma.catalogPart.groupBy.mockResolvedValue([{ categoryId: 'cat_belts', _count: { _all: 2 } }]);
-    prisma.partCategory.findMany.mockResolvedValue([{ id: 'cat_belts', name: 'Timing belts' }]);
+    prisma.partCategory.findMany.mockResolvedValue([
+      {
+        id: 'cat_belts',
+        name: 'Timing belts',
+        nameRu: 'Ремни ГРМ',
+        nameUz: 'GRM tasmalari',
+        nameEn: 'Timing belts',
+      },
+    ]);
 
+    // No language given → the platform default (ru), so the facet is keyed by
+    // the RUSSIAN label rather than the internal English one.
     const res = await svc.search({ query: 'belt' } as any);
 
     expect(res.total).toBe(2);
     expect(res.results[0].price).toBe('UZS 185 000');
-    expect(res.facetCounts.categories['Timing belts']).toBe(2);
+    expect(res.facetCounts.categories['Ремни ГРМ']).toBe(2);
   });
 
   it('typeahead suggests the query plus matching products', async () => {
@@ -174,8 +196,10 @@ describe('Catalog/Categories smoke', () => {
   it('main scope returns the active PartCategory rows with live counts, unmatched → 0', async () => {
     // Main scope is served from the admin-editable PartCategory table (the
     // single source of truth), NOT the hardcoded MAIN_CATEGORIES: the rows come
-    // from `partCategory.findMany` and counts group by `categoryId`. The wire
-    // shape (id, name, slug, count, iconKey, color) is unchanged.
+    // from `partCategory.findMany`. Counts group by `mainCategory` (the ENUM),
+    // not by `categoryId`, so that a part filed on a SUBCATEGORY still rolls up
+    // into its bucket here — see the rollup case below. The wire shape
+    // (id, name, slug, count, iconKey, color) is unchanged.
     const svc = new CategoriesService(prisma);
     const rows = [
       { id: 'brakes', name: 'Brakes', slug: 'brakes', iconKey: 'brake', color: '#f00', mainCategory: 'BRAKES' },
@@ -183,9 +207,10 @@ describe('Catalog/Categories smoke', () => {
       { id: 'batteries', name: 'Batteries', slug: 'batteries', iconKey: 'bat', color: '#00f', mainCategory: 'BATTERIES' },
     ];
     prisma.partCategory.findMany.mockResolvedValue(rows);
+    // Keyed by the mainCategory ENUM — what `groupBy: ['mainCategory']` returns.
     prisma.catalogPart.groupBy.mockResolvedValue([
-      { categoryId: 'brakes', _count: { _all: 12 } },
-      { categoryId: 'engine', _count: { _all: 25 } },
+      { mainCategory: 'BRAKES', _count: { _all: 12 } },
+      { mainCategory: 'ENGINE', _count: { _all: 25 } },
     ]);
 
     const res = await svc.list({});
@@ -194,12 +219,37 @@ describe('Catalog/Categories smoke', () => {
       isActive: true,
       mainCategory: { not: null },
     });
+    // The grouping key is the enum column, not the category FK.
+    expect(prisma.catalogPart.groupBy.mock.calls[0][0].by).toEqual([
+      'mainCategory',
+    ]);
     expect(res.total).toBe(rows.length);
     expect(res.items).toHaveLength(rows.length);
     const brakes = res.items.find((c) => c.id === 'brakes')!;
     expect(brakes).toMatchObject({ name: 'Brakes', slug: 'brakes', count: 12 });
+    const engine = res.items.find((c) => c.id === 'engine')!;
+    expect(engine.count).toBe(25);
     const batteries = res.items.find((c) => c.id === 'batteries')!;
     expect(batteries.count).toBe(0); // unmatched category → 0
+  });
+
+  // The REASON counts group by the enum rather than the category FK: a part
+  // filed on a subcategory ('oil-filters') carries mainCategory FILTERS, so it
+  // must still be counted in the Filters bucket on the home grid. Grouping by
+  // categoryId would report 0 for the bucket row and drop the part entirely.
+  it('main scope rolls subcategory-filed parts up into their bucket', async () => {
+    const svc = new CategoriesService(prisma);
+    prisma.partCategory.findMany.mockResolvedValue([
+      { id: 'filters', name: 'Filters', slug: 'filters', iconKey: 'f', color: '#00f', mainCategory: 'FILTERS' },
+    ]);
+    // No part is filed on the bucket row 'filters' itself; the 7 parts sit on
+    // its subcategories and reach the bucket via their mainCategory enum.
+    prisma.catalogPart.groupBy.mockResolvedValue([
+      { mainCategory: 'FILTERS', _count: { _all: 7 } },
+    ]);
+
+    const res = await svc.list({});
+    expect(res.items.find((c) => c.id === 'filters')!.count).toBe(7);
   });
 
   it('vehicle scope returns the 8 vehicle-specific categories', async () => {
