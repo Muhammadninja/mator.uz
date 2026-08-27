@@ -163,9 +163,14 @@ export class AdminCategoriesService {
    * slug/id uniqueness up front; the DB unique constraints are the backstop.
    */
   async create(dto: CreateCategoryDto) {
-    const slug = this.slugify(dto.slug ?? dto.name);
+    // Derived from the ENGLISH name when no slug is given: `slugify` keeps only
+    // [a-z0-9], so a Russian or Uzbek-Cyrillic name would slugify to nothing.
+    // nameEn is required, which is what makes this derivation always possible.
+    const slug = this.slugify(dto.slug ?? dto.nameEn);
     if (!slug)
-      throw new BadRequestException('Could not derive a slug from name');
+      throw new BadRequestException(
+        'Could not derive a slug from nameEn — pass an explicit latin slug',
+      );
 
     const existing = await this.prisma.partCategory.findFirst({
       where: { OR: [{ id: slug }, { slug }] },
@@ -193,7 +198,12 @@ export class AdminCategoriesService {
     const created = await this.prisma.partCategory.create({
       data: {
         id: slug,
-        name: dto.name,
+        // `name` is internal: it defaults to the English name rather than
+        // being a fourth thing an admin must keep in step.
+        name: dto.name ?? dto.nameEn,
+        nameRu: dto.nameRu,
+        nameUz: dto.nameUz,
+        nameEn: dto.nameEn,
         slug,
         level,
         iconKey: dto.iconKey ?? null,
@@ -239,6 +249,9 @@ export class AdminCategoriesService {
     );
 
     if (dto.name !== undefined) data.name = dto.name;
+    if (dto.nameRu !== undefined) data.nameRu = dto.nameRu;
+    if (dto.nameUz !== undefined) data.nameUz = dto.nameUz;
+    if (dto.nameEn !== undefined) data.nameEn = dto.nameEn;
     if (dto.iconKey !== undefined) data.iconKey = dto.iconKey;
     if (dto.color !== undefined) data.color = dto.color;
     if (dto.sortOrder !== undefined) data.sortOrder = dto.sortOrder;

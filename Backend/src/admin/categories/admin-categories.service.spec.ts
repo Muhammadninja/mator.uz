@@ -108,7 +108,13 @@ describe('POST /v1/admin/categories (create)', () => {
     const { service, prisma, categories } = makeService();
     categories.validateParent.mockResolvedValue(2);
 
-    await service.create({ name: 'Brake Pads', parentId: 'brakes' });
+    await service.create({
+      nameRu: 'Brake Pads',
+      nameUz: 'Brake Pads',
+      nameEn: 'Brake Pads',
+      name: 'Brake Pads',
+      parentId: 'brakes',
+    });
 
     expect(categories.validateParent).toHaveBeenCalledWith('brakes');
     expect(prisma.partCategory.create).toHaveBeenCalledWith(
@@ -122,7 +128,12 @@ describe('POST /v1/admin/categories (create)', () => {
   it('creates a root at level 0', async () => {
     const { service, prisma, categories } = makeService();
     categories.validateParent.mockResolvedValue(0);
-    await service.create({ name: 'Body' });
+    await service.create({
+      nameRu: 'Body',
+      nameUz: 'Body',
+      nameEn: 'Body',
+      name: 'Body',
+    });
     expect(prisma.partCategory.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({ level: 0 }),
@@ -133,16 +144,27 @@ describe('POST /v1/admin/categories (create)', () => {
   it('rejects a duplicate slug under the same tree', async () => {
     const { service, prisma } = makeService();
     prisma.partCategory.findFirst.mockResolvedValue({ id: 'brakes' });
-    await expect(service.create({ name: 'Brakes' })).rejects.toBeInstanceOf(
-      ConflictException,
-    );
+    await expect(
+      service.create({
+        nameRu: 'Brakes',
+        nameUz: 'Brakes',
+        nameEn: 'Brakes',
+        name: 'Brakes',
+      }),
+    ).rejects.toBeInstanceOf(ConflictException);
   });
 
   it('propagates an unknown parent as 404', async () => {
     const { service, categories } = makeService();
     categories.validateParent.mockRejectedValue(new NotFoundException());
     await expect(
-      service.create({ name: 'X', parentId: 'ghost' }),
+      service.create({
+        nameRu: 'X',
+        nameUz: 'X',
+        nameEn: 'X',
+        name: 'X',
+        parentId: 'ghost',
+      }),
     ).rejects.toBeInstanceOf(NotFoundException);
   });
 });
@@ -279,6 +301,9 @@ describe('fiscal configuration', () => {
   it('creates a category with one package code', async () => {
     const { service, prisma } = makeService();
     await service.create({
+      nameRu: 'Filters',
+      nameUz: 'Filters',
+      nameEn: 'Filters',
       name: 'Filters',
       mxik: '08421002001000000',
       packageCodeSingle: '1499205',
@@ -293,14 +318,20 @@ describe('fiscal configuration', () => {
     );
     // The set code is not named, so nothing is written for it — the column's
     // own null is what "sold in one form" means.
-    expect(
-      prisma.partCategory.create.mock.calls[0][0].data,
-    ).not.toHaveProperty('packageCodeSet');
+    expect(prisma.partCategory.create.mock.calls[0][0].data).not.toHaveProperty(
+      'packageCodeSet',
+    );
   });
 
   it('creates a category with two package codes', async () => {
     const { service, prisma } = makeService();
-    await service.create({ name: 'Brakes', ...FISCAL });
+    await service.create({
+      nameRu: 'Brakes',
+      nameUz: 'Brakes',
+      nameEn: 'Brakes',
+      name: 'Brakes',
+      ...FISCAL,
+    });
     expect(prisma.partCategory.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining(FISCAL),
@@ -310,7 +341,12 @@ describe('fiscal configuration', () => {
 
   it('creates an UNCONFIGURED category, writing no fiscal columns', async () => {
     const { service, prisma } = makeService();
-    await service.create({ name: 'Turbochargers' });
+    await service.create({
+      nameRu: 'Turbochargers',
+      nameUz: 'Turbochargers',
+      nameEn: 'Turbochargers',
+      name: 'Turbochargers',
+    });
     const data = prisma.partCategory.create.mock.calls[0][0].data;
     expect(data).not.toHaveProperty('mxik');
     expect(data).not.toHaveProperty('packageCodeSingle');
@@ -319,14 +355,26 @@ describe('fiscal configuration', () => {
   it('rejects a package code with no MXIK', async () => {
     const { service } = makeService();
     await expect(
-      service.create({ name: 'Brakes', packageCodeSingle: '1417722' }),
+      service.create({
+        nameRu: 'Brakes',
+        nameUz: 'Brakes',
+        nameEn: 'Brakes',
+        name: 'Brakes',
+        packageCodeSingle: '1417722',
+      }),
     ).rejects.toBeInstanceOf(BadRequestException);
   });
 
   it('rejects an MXIK with no single package code', async () => {
     const { service } = makeService();
     await expect(
-      service.create({ name: 'Brakes', mxik: '08708005011000000' }),
+      service.create({
+        nameRu: 'Brakes',
+        nameUz: 'Brakes',
+        nameEn: 'Brakes',
+        name: 'Brakes',
+        mxik: '08708005011000000',
+      }),
     ).rejects.toBeInstanceOf(BadRequestException);
   });
 
@@ -334,6 +382,9 @@ describe('fiscal configuration', () => {
     const { service } = makeService();
     await expect(
       service.create({
+        nameRu: 'Brakes',
+        nameUz: 'Brakes',
+        nameEn: 'Brakes',
         name: 'Brakes',
         mxik: '08708005011000000',
         packageCodeSet: '1417723',

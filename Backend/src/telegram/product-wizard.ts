@@ -48,7 +48,6 @@ import { capabilitiesOf, isUniversalFor } from '../common/product-kind';
 import { offersPackageChoice } from '../common/fiscal.util';
 import {
   OIL_TYPES,
-  OIL_TYPE_LABELS,
   OIL_VISCOSITIES,
   OIL_VOLUMES,
   formatVolume,
@@ -56,7 +55,10 @@ import {
   parseVolumeLitres,
 } from './motor-oil-catalog';
 import { CategoryAnchor } from '../catalog/categories/category-map';
-import { OTHER_BRAND_LABEL, WIZARD_BRANDS } from './wizard-catalog';
+import { WIZARD_BRANDS } from './wizard-catalog';
+import { DEFAULT_APP_LANG, type AppLang } from '../common/app-lang.util';
+import { oilTypeLabel, packageFormLabel, t } from './i18n';
+import type { BotStringKey } from './i18n';
 
 export enum WizardStep {
   /** Entry state: the very first thing the seller does is upload photos. Once they
@@ -316,6 +318,14 @@ export interface WizardSession {
    */
   categoryOptions: CategoryOption[];
   /**
+   * The seller's interface language, copied onto the session when the dialogue
+   * starts (or is rebuilt from a draft). Carried HERE rather than looked up per
+   * prompt because this module is pure and synchronous — it renders a keyboard
+   * without touching the database, and it must still render it in the seller's
+   * language.
+   */
+  lang: AppLang;
+  /**
    * Whether the seller still owes an answer at the current category level. Set
    * when a step is opened with a non-empty option list; cleared when the chosen
    * category turns out to be a leaf. This — not the presence of `categoryId` —
@@ -538,19 +548,24 @@ export function isStaleCatalogPayload(payload: string): boolean {
 }
 
 /** User-facing notice for a tap on a button from an outdated catalog version. */
-export const STALE_CATALOG_MESSAGE =
-  'Каталог был обновлён.\n' +
-  'Чтобы продолжить создание объявления, пожалуйста, нажмите /start.';
+export function staleCatalogMessage(lang: AppLang): string {
+  return t(lang, 'stale.catalog');
+}
 
 /**
  * Notice for a tap on a category button that is no longer valid — the admin
  * deactivated, moved or removed that category after the keyboard was sent.
- * Unlike STALE_CATALOG_MESSAGE this does NOT ask the seller to restart: only the
- * one category question is re-asked, with the current tree.
+ * Unlike {@link staleCatalogMessage} this does NOT ask the seller to restart:
+ * only the one category question is re-asked, with the current tree.
  */
-export const STALE_CATEGORY_MESSAGE =
-  'Эта категория больше недоступна — каталог был обновлён.\n' +
-  'Пожалуйста, выберите категорию из обновлённого списка.';
+export function staleCategoryMessage(lang: AppLang): string {
+  return t(lang, 'stale.category');
+}
+
+// The Russian wordings, kept as named constants for callers (and tests) that
+// refer to the message rather than to a seller's language.
+export const STALE_CATALOG_MESSAGE = staleCatalogMessage('ru');
+export const STALE_CATEGORY_MESSAGE = staleCategoryMessage('ru');
 
 // ── Input bounds ────────────────────────────────────────────────────────────
 // Title mirrors the historical guard (≥3 chars) plus the DB column cap.
@@ -575,10 +590,11 @@ export class WizardSessionStore {
    * photos before any question. Once photos arrive the service creates the draft
    * (setting `draftId`) and advances to BRAND.
    */
-  start(tgUserId: number): WizardSession {
+  start(tgUserId: number, lang: AppLang = DEFAULT_APP_LANG): WizardSession {
     const session: WizardSession = {
       step: WizardStep.PHOTOS_FIRST,
       draftId: null,
+      lang,
       // Every session begins on the spare-parts flow; "Другое" switches it.
       kind: ProductKind.SPARE_PART,
       brand: null,
@@ -921,9 +937,7 @@ export function inputOilViscosity(
   if (session.step !== WizardStep.OIL_VISCOSITY_CUSTOM) return STALE;
   const viscosity = normalizeViscosity(raw);
   if (viscosity === null) {
-    return invalid(
-      '❌ Не удалось распознать вязкость. Введите её в формате 5W-30 (например: 0W-16 или 20W-50).',
-    );
+    return invalid(t(session.lang, 'invalid.viscosity'));
   }
   session.oilViscosity = viscosity;
   return advance(session);
@@ -965,9 +979,7 @@ export function inputOilVolume(
   if (session.step !== WizardStep.OIL_VOLUME_CUSTOM) return STALE;
   const ml = parseVolumeLitres(raw);
   if (ml === null) {
-    return invalid(
-      '❌ Не удалось распознать объём. Введите его в литрах, например: 3 или 0,5',
-    );
+    return invalid(t(session.lang, 'invalid.volume'));
   }
   session.oilVolumeMl = ml;
   return advance(session);
@@ -979,19 +991,15 @@ export function inputTitle(session: WizardSession, raw: string): WizardResult {
   // internal whitespace/newlines the seller typed.
   const title = raw.replace(/\s+/g, ' ').trim();
   if (title.startsWith('/')) {
-    return invalid(
-      '❌ Это похоже на команду. Введите название товара текстом.',
-    );
+    return invalid(t(session.lang, 'invalid.titleIsCommand'));
   }
   if (title.length < TITLE_MIN) {
     return invalid(
-      `❌ Название слишком короткое — минимум ${TITLE_MIN} символа. Введите название ещё раз.`,
+      t(session.lang, 'invalid.titleTooShort', { min: TITLE_MIN }),
     );
   }
   if (title.length > TITLE_MAX) {
-    return invalid(
-      `❌ Название слишком длинное — максимум ${TITLE_MAX} символов. Введите короче.`,
-    );
+    return invalid(t(session.lang, 'invalid.titleTooLong', { max: TITLE_MAX }));
   }
   session.title = title;
   return advance(session);
@@ -1004,14 +1012,10 @@ export function inputDescription(
   if (session.step !== WizardStep.DESCRIPTION) return STALE;
   const description = raw.trim();
   if (description.startsWith('/')) {
-    return invalid(
-      '❌ Это похоже на команду. Введите описание текстом или нажмите «Пропустить».',
-    );
+    return invalid(t(session.lang, 'invalid.descriptionIsCommand'));
   }
   if (description.length === 0) {
-    return invalid(
-      '❌ Описание не может быть пустым. Введите текст или нажмите «Пропустить».',
-    );
+    return invalid(t(session.lang, 'invalid.descriptionEmpty'));
   }
   session.description = description;
   return advance(session);
@@ -1053,9 +1057,7 @@ export function inputPartNumber(
     !PART_NUMBER_RE.test(number) ||
     !/\d/.test(number)
   ) {
-    return invalid(
-      '❌ Неверный формат номера. Введите 3–50 символов: буквы, цифры, пробел, «-», «.», «/». Например: 96535062 или 58101-2VA00',
-    );
+    return invalid(t(session.lang, 'invalid.partNumber'));
   }
   session.partNumber = number;
   return advance(session);
@@ -1066,14 +1068,10 @@ export function inputPrice(session: WizardSession, raw: string): WizardResult {
   // Same shared parser the whole backend uses ("250 000", "250.000 сум", …).
   const price = parsePrice(raw);
   if (price === null) {
-    return invalid(
-      '❌ Не удалось распознать цену. Введите число в сумах, например: 250 000',
-    );
+    return invalid(t(session.lang, 'invalid.price'));
   }
   if (price > MAX_PRICE_UZS) {
-    return invalid(
-      '❌ Слишком большая цена. Проверьте значение и введите ещё раз.',
-    );
+    return invalid(t(session.lang, 'invalid.priceTooLarge'));
   }
   session.price = price;
   // PRICE is the last QUESTION of every flow, so `advance` lands on
@@ -1134,9 +1132,9 @@ export function goBack(session: WizardSession): WizardResult {
 type InlineButton = ReturnType<typeof Markup.button.callback>;
 type InlineKeyboard = ReturnType<typeof Markup.inlineKeyboard>;
 
-/** The "⬅️ Назад" button, shown on every step that has a previous one. */
-const backButton = (): InlineButton =>
-  Markup.button.callback('⬅️ Назад', WIZ_BACK_ACTION);
+/** The "Back" button, shown on every step that has a previous one. */
+const backButton = (lang: AppLang): InlineButton =>
+  Markup.button.callback(t(lang, 'btn.back'), WIZ_BACK_ACTION);
 
 /**
  * Assemble an inline keyboard from `rows`, appending a "⬅️ Назад" row iff the
@@ -1148,7 +1146,10 @@ function withBack(
   session: WizardSession,
   rows: InlineButton[][],
 ): InlineKeyboard {
-  const all = previousStep(session) !== null ? [...rows, [backButton()]] : rows;
+  const all =
+    previousStep(session) !== null
+      ? [...rows, [backButton(session.lang)]]
+      : rows;
   return Markup.inlineKeyboard(all);
 }
 
@@ -1171,7 +1172,12 @@ export function brandKeyboard(session: WizardSession): InlineKeyboard {
   );
   return withBack(session, [
     ...grid(buttons, 2),
-    [Markup.button.callback(OTHER_BRAND_LABEL, WIZ_OTHER_BRAND_ACTION)],
+    [
+      Markup.button.callback(
+        t(session.lang, 'btn.other'),
+        WIZ_OTHER_BRAND_ACTION,
+      ),
+    ],
   ]);
 }
 
@@ -1197,14 +1203,22 @@ export function oilViscosityKeyboard(session: WizardSession): InlineKeyboard {
   );
   return withBack(session, [
     ...grid(buttons, 3),
-    [Markup.button.callback(OTHER_BRAND_LABEL, buildAction('ov', 'custom'))],
+    [
+      Markup.button.callback(
+        t(session.lang, 'btn.other'),
+        buildAction('ov', 'custom'),
+      ),
+    ],
   ]);
 }
 
 /** Oil type — a closed set, so one button per row and no free-text option. */
 export function oilTypeKeyboard(session: WizardSession): InlineKeyboard {
-  const buttons = OIL_TYPES.map((t, i) =>
-    Markup.button.callback(t.label, buildAction('ot', i)),
+  const buttons = OIL_TYPES.map((type, i) =>
+    Markup.button.callback(
+      oilTypeLabel(type.value, session.lang),
+      buildAction('ot', i),
+    ),
   );
   return withBack(session, grid(buttons, 1));
 }
@@ -1216,7 +1230,12 @@ export function oilVolumeKeyboard(session: WizardSession): InlineKeyboard {
   );
   return withBack(session, [
     ...grid(buttons, 2),
-    [Markup.button.callback(OTHER_BRAND_LABEL, buildAction('ol', 'custom'))],
+    [
+      Markup.button.callback(
+        t(session.lang, 'btn.other'),
+        buildAction('ol', 'custom'),
+      ),
+    ],
   ]);
 }
 
@@ -1263,23 +1282,32 @@ export function packageFormKeyboard(session: WizardSession): InlineKeyboard {
   return withBack(session, [
     [
       Markup.button.callback(
-        PACKAGE_FORM_LABELS.SINGLE,
+        packageFormLabel(PackageForm.SINGLE, session.lang),
         buildAction('pf', 'single'),
       ),
     ],
-    [Markup.button.callback(PACKAGE_FORM_LABELS.SET, buildAction('pf', 'set'))],
+    [
+      Markup.button.callback(
+        packageFormLabel(PackageForm.SET, session.lang),
+        buildAction('pf', 'set'),
+      ),
+    ],
   ]);
 }
 
-/** Seller-facing names of the two sale forms (also used by the preview/tests). */
+/**
+ * The RUSSIAN names of the two sale forms, kept for callers (and tests) that
+ * refer to the label rather than to a seller's language. Localized rendering
+ * goes through {@link packageFormLabel}.
+ */
 export const PACKAGE_FORM_LABELS: Record<PackageForm, string> = {
-  [PackageForm.SINGLE]: 'Штука',
-  [PackageForm.SET]: 'Комплект / набор',
+  [PackageForm.SINGLE]: packageFormLabel(PackageForm.SINGLE, 'ru'),
+  [PackageForm.SET]: packageFormLabel(PackageForm.SET, 'ru'),
 };
 
 export function descriptionKeyboard(session: WizardSession): InlineKeyboard {
   return withBack(session, [
-    [Markup.button.callback('⏭ Пропустить', WIZ_DESCRIPTION_SKIP)],
+    [Markup.button.callback(t(session.lang, 'btn.skip'), WIZ_DESCRIPTION_SKIP)],
   ]);
 }
 
@@ -1289,7 +1317,12 @@ export function partNumberTypeKeyboard(session: WizardSession): InlineKeyboard {
       Markup.button.callback('OEM', buildAction('t', 'OEM')),
       Markup.button.callback('GM', buildAction('t', 'GM')),
     ],
-    [Markup.button.callback('⏭ Пропустить', buildAction('t', 'SKIP'))],
+    [
+      Markup.button.callback(
+        t(session.lang, 'btn.skip'),
+        buildAction('t', 'SKIP'),
+      ),
+    ],
   ]);
 }
 
@@ -1310,114 +1343,105 @@ export interface StepPrompt {
 /**
  * The TITLE step is shared by every flow but its EXAMPLE is kind-specific — a
  * seller listing oil should not be shown "Передний амортизатор". Kept as a table
- * so a new kind supplies its example here instead of branching in stepPrompt.
+ * so a new kind names its string key here instead of branching in stepPrompt.
  */
-const TITLE_PROMPTS: Record<ProductKind, string> = {
-  [ProductKind.SPARE_PART]:
-    '✏️ Введите название товара.\nПример: Передний амортизатор',
-  [ProductKind.MOTOR_OIL]:
-    '✏️ Введите название товара.\n' +
-    'Примеры:\n' +
-    '• Mobil 1 ESP 5W-30 4L\n' +
-    '• Shell Helix Ultra 5W-40\n' +
-    '• ZIC X9 5W-30',
+const TITLE_PROMPT_KEYS: Record<ProductKind, BotStringKey> = {
+  [ProductKind.SPARE_PART]: 'step.title.sparePart',
+  [ProductKind.MOTOR_OIL]: 'step.title.motorOil',
 };
 
 /** The message (and inline keyboard, if any) that asks for the current step. */
 export function stepPrompt(session: WizardSession): StepPrompt {
+  const lang = session.lang;
   switch (session.step) {
     case WizardStep.BRAND:
       // First step — brandKeyboard() carries no Back button (nothing to go back to).
       return {
-        text: '🚗 Выберите марку автомобиля:',
+        text: t(lang, 'step.brand'),
         keyboard: brandKeyboard(session),
       };
     case WizardStep.MODEL:
       return {
-        text: `🚗 Марка: ${session.brand}.\nТеперь выберите модель:`,
+        text: t(lang, 'step.model', { brand: session.brand ?? '' }),
         keyboard: modelKeyboard(session, session.brand ?? ''),
       };
     case WizardStep.CATEGORY:
       return {
-        text: '🗂 Выберите категорию запчасти:',
+        text: t(lang, 'step.category'),
         keyboard: categoryKeyboard(session),
       };
     case WizardStep.SUBCATEGORY:
       return {
-        text: '🗂 Выберите подкатегорию:',
+        text: t(lang, 'step.subcategory'),
         keyboard: subcategoryKeyboard(session),
       };
     case WizardStep.OTHER_CATEGORY:
       return {
-        text: '🗂 Выберите категорию товара:',
+        text: t(lang, 'step.otherCategory'),
         keyboard: otherCategoryKeyboard(session),
       };
     case WizardStep.PACKAGE_FORM:
       return {
-        text: '📦 Как продаётся товар?',
+        text: t(lang, 'step.packageForm'),
         keyboard: packageFormKeyboard(session),
       };
     case WizardStep.OIL_VISCOSITY:
       return {
-        text: '🛢 Выберите вязкость масла:',
+        text: t(lang, 'step.oilViscosity'),
         keyboard: oilViscosityKeyboard(session),
       };
     case WizardStep.OIL_VISCOSITY_CUSTOM:
       return {
-        text: '🛢 Введите вязкость масла.\nПример: 0W-16',
+        text: t(lang, 'step.oilViscosityCustom'),
         keyboard: backOnlyKeyboard(session),
       };
     case WizardStep.OIL_TYPE:
       return {
-        text: '🛢 Выберите тип масла:',
+        text: t(lang, 'step.oilType'),
         keyboard: oilTypeKeyboard(session),
       };
     case WizardStep.OIL_VOLUME:
       return {
-        text: '🛢 Выберите объём:',
+        text: t(lang, 'step.oilVolume'),
         keyboard: oilVolumeKeyboard(session),
       };
     case WizardStep.OIL_VOLUME_CUSTOM:
       return {
-        text: '🛢 Введите объём в литрах.\nПример: 3',
+        text: t(lang, 'step.oilVolumeCustom'),
         keyboard: backOnlyKeyboard(session),
       };
     case WizardStep.TITLE:
       return {
-        text: TITLE_PROMPTS[session.kind],
+        text: t(lang, TITLE_PROMPT_KEYS[session.kind]),
         keyboard: backOnlyKeyboard(session),
       };
     case WizardStep.DESCRIPTION:
       return {
-        text: '📝 Введите описание товара или нажмите «Пропустить».',
+        text: t(lang, 'step.description'),
         keyboard: descriptionKeyboard(session),
       };
     case WizardStep.PART_NUMBER_TYPE:
       return {
-        text: '🔢 Укажите тип номера детали или нажмите «Пропустить».',
+        text: t(lang, 'step.partNumberType'),
         keyboard: partNumberTypeKeyboard(session),
       };
     case WizardStep.PART_NUMBER:
       return {
-        text: `🔢 Введите ${session.partNumberType} номер детали.\nПример: 96535062`,
+        text: t(lang, 'step.partNumber', { type: session.partNumberType }),
         keyboard: backOnlyKeyboard(session),
       };
     case WizardStep.PRICE:
       return {
-        text: '💰 Введите цену в сумах.\nПример: 250 000',
+        text: t(lang, 'step.price'),
         keyboard: backOnlyKeyboard(session),
       };
     case WizardStep.PHOTOS_FIRST:
       // Entry step: photos before any question. No Back button.
-      return {
-        text:
-          '📸 Сначала отправьте фотографии товара — одно фото или альбом до 10 фото.\n' +
-          'Пока мы их обрабатываем, вы заполните информацию о товаре.',
-      };
+      return { text: t(lang, 'step.photosFirst') };
     case WizardStep.QUESTIONNAIRE_DONE:
       // Form finished; the coordinator shows the preview as soon as the photos are
       // ready. This holding message only appears if processing is still running.
-      return { text: '⏳ Завершаем обработку фото…' };
+      return { text: t(lang, 'step.questionnaireDone') };
   }
 }
 
@@ -1447,6 +1471,7 @@ export function previewLines(
     isUniversal?: boolean;
   },
   vehicleLine: string,
+  lang: AppLang = DEFAULT_APP_LANG,
 ): string[] {
   const caps = capabilitiesOf(listing.kind);
   const lines: string[] = [];
@@ -1461,9 +1486,13 @@ export function previewLines(
   // "Другое" shows none. Capability alone cannot express that, because both are
   // MOTOR_OIL.
   const showsVehicle = caps.hasVehicleFitment && listing.isUniversal !== true;
-  if (showsVehicle) lines.push(`🚗 *Автомобиль:* ${vehicleLine}`);
+  if (showsVehicle) {
+    lines.push(`🚗 *${t(lang, 'preview.vehicle')}:* ${vehicleLine}`);
+  }
   if (caps.hasVehicleCategory) {
-    lines.push(`🗂 *Категория:* ${listing.vehicleCategoryLabel}`);
+    lines.push(
+      `🗂 *${t(lang, 'preview.category')}:* ${listing.vehicleCategoryLabel}`,
+    );
   }
   if (caps.hasPartNumbers) {
     lines.push(`🔢 *${listing.partNumberLabel}:* ${listing.partNumber ?? '—'}`);
@@ -1475,9 +1504,13 @@ export function previewLines(
   switch (listing.kind) {
     case ProductKind.MOTOR_OIL:
       lines.push(
-        `🛢 *Вязкость:* ${listing.oilViscosity ?? '—'}`,
-        `🧪 *Тип масла:* ${listing.oilType ? OIL_TYPE_LABELS[listing.oilType] : '—'}`,
-        `🧴 *Объём:* ${listing.oilVolumeMl !== null ? formatVolume(listing.oilVolumeMl) : '—'}`,
+        `🛢 *${t(lang, 'preview.viscosity')}:* ${listing.oilViscosity ?? '—'}`,
+        `🧪 *${t(lang, 'preview.oilType')}:* ${
+          listing.oilType ? oilTypeLabel(listing.oilType, lang) : '—'
+        }`,
+        `🧴 *${t(lang, 'preview.volume')}:* ${
+          listing.oilVolumeMl !== null ? formatVolume(listing.oilVolumeMl) : '—'
+        }`,
       );
       break;
     case ProductKind.SPARE_PART:

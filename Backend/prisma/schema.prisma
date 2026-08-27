@@ -33,6 +33,15 @@ enum SellerStatus {
   REJECTED
 }
 
+/// The interface language a seller picked in the Telegram bot. Stored as an
+/// enum (not a free string) so an unsupported code cannot reach the DB; the
+/// wire/bot representation is the lowercase ISO code ('ru' | 'uz' | 'en').
+enum BotLanguage {
+  RU
+  UZ
+  EN
+}
+
 enum Role {
   USER
   SELLER
@@ -344,6 +353,10 @@ model Seller {
   locationLat    Float?       @map("location_lat")
   locationLng    Float?       @map("location_lng")
   status         SellerStatus @default(PENDING)
+  // Bot interface language. NULLABLE on purpose: null means "never chose one",
+  // which is precisely what makes /start show the language picker exactly once.
+  // A default would erase that distinction and the picker could never fire.
+  lang           BotLanguage? @map("lang")
   createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
   stocks         Stock[]
 
@@ -1110,13 +1123,24 @@ model BookingService {
 // ── Parts catalog (buyer-facing) ──────────────────────────────────────────────
 model PartCategory {
   id           String            @id @db.VarChar(64)
+  // INTERNAL canonical label. NOT a display field any more: every audience
+  // (buyer app, seller bot, admin console) reads one of the three localized
+  // names below. `name` survives because it is what slugs/ids are derived from,
+  // what list ordering is stable on, and what a handful of internal tools log —
+  // renaming it out would touch far more than localization does.
   name         String            @db.VarChar(160)
-  // Localized display titles. `name` stays as the canonical/legacy label (and
-  // the fallback); `title_ru` / `title_uz` are what the buyer app renders for the
-  // active language (uz → title_uz, else title_ru, each falling back to `name`).
-  // Nullable so existing rows and any future category stay valid until translated.
-  titleRu      String?           @map("title_ru") @db.VarChar(160)
-  titleUz      String?           @map("title_uz") @db.VarChar(160)
+  // ── Localized display names (REQUIRED, one per supported language) ────────
+  // The display name in each of the three languages Mator ships: Russian,
+  // Uzbek (Latin script) and English. All three are NOT NULL — a category
+  // without a name in one language would render blank for every user of that
+  // language, so the admin write path rejects a missing/blank value rather than
+  // silently falling back. `name_ru` / `name_uz` are the former `title_ru` /
+  // `title_uz` columns (renamed in place, so no translation was lost);
+  // `name_en` was backfilled from `name`, which was already English for the
+  // seeded buyer buckets.
+  nameRu       String            @map("name_ru") @db.VarChar(160)
+  nameUz       String            @map("name_uz") @db.VarChar(160)
+  nameEn       String            @map("name_en") @db.VarChar(160)
   // URL/display slug for the admin category-tree console. Backfilled from `id`
   // by the migration (ids are already slug-shaped), unique so a slug names one
   // category. Nullable to keep the backfill safe on legacy rows.

@@ -1,9 +1,10 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   IsBoolean,
   IsEnum,
   IsInt,
+  IsNotEmpty,
   IsOptional,
   IsString,
   Matches,
@@ -27,7 +28,54 @@ import {
  * forbidNonWhitelisted: true`, so this class IS the accepted-field whitelist.
  */
 export class UpdateCategoryDto {
-  @ApiPropertyOptional({ description: 'Display name.', example: 'Turbochargers' })
+  // ── Localized names ───────────────────────────────────────────────────────
+  // Each is optional (a patch may touch one language only) but NEVER clearable:
+  // the columns are NOT NULL, so sending a name means sending a real one. The
+  // trim-then-`@IsNotEmpty` pair rejects "" and "   " alike — an admin who
+  // blanks an input in the console gets a 400 instead of erasing a translation.
+  //
+  // `@ValidateIf(value !== undefined)` rather than `@IsOptional()`: IsOptional
+  // skips validation for null AS WELL AS undefined, which would let
+  // `{"nameRu": null}` through the pipe and into a NOT NULL column — a 500
+  // where the console deserves a 400. Only an ABSENT key is optional here.
+  @ApiPropertyOptional({
+    description: 'Display name in Russian. Cannot be set to an empty value.',
+    example: 'Турбокомпрессоры',
+  })
+  @ValidateIf((_, value) => value !== undefined)
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsString()
+  @IsNotEmpty({ message: 'nameRu cannot be empty' })
+  @MaxLength(160)
+  nameRu?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Display name in Uzbek (Latin script). Cannot be set to an empty value.',
+    example: 'Turbokompressorlar',
+  })
+  @ValidateIf((_, value) => value !== undefined)
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsString()
+  @IsNotEmpty({ message: 'nameUz cannot be empty' })
+  @MaxLength(160)
+  nameUz?: string;
+
+  @ApiPropertyOptional({
+    description: 'Display name in English. Cannot be set to an empty value.',
+    example: 'Turbochargers',
+  })
+  @ValidateIf((_, value) => value !== undefined)
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsString()
+  @IsNotEmpty({ message: 'nameEn cannot be empty' })
+  @MaxLength(160)
+  nameEn?: string;
+
+  @ApiPropertyOptional({
+    description: 'Internal canonical label (not displayed to users).',
+    example: 'Turbochargers',
+  })
   @IsOptional()
   @IsString()
   @MinLength(1)

@@ -71,6 +71,10 @@ function makeService(over: Record<string, unknown> = {}): AnyService {
     pending: new Map(),
     sessionExpiry: new Map(),
     staleNoticeSentAt: new Map(),
+    // The interface-language read cache; the prototype-cast bypasses the field
+    // initializer, so provide a real Map (an empty one falls back to the DB,
+    // which the `sellers` stub below answers).
+    langCache: new Map<number, 'ru' | 'uz' | 'en'>(),
     draftTtlMs: 24 * 60 * 60 * 1000,
     sellers: {
       findByTgId: jest.fn().mockResolvedValue({ id: 1, status: 'ACTIVE' }),

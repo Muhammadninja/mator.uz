@@ -51,6 +51,9 @@ export class CategoriesService {
       select: {
         id: true,
         name: true,
+        nameRu: true,
+        nameUz: true,
+        nameEn: true,
         slug: true,
         iconKey: true,
         color: true,
@@ -72,7 +75,12 @@ export class CategoriesService {
     return {
       items: categories.map((c) => ({
         id: c.id,
+        // `name` stays for backwards compatibility; a localized client renders
+        // the name matching its active locale from the three fields below.
         name: c.name,
+        name_ru: c.nameRu,
+        name_uz: c.nameUz,
+        name_en: c.nameEn,
         slug: c.slug ?? c.id,
         count: c.mainCategory ? (counts.get(c.mainCategory) ?? 0) : 0,
         iconKey: c.iconKey,

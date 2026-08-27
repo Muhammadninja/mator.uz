@@ -23,8 +23,8 @@ via `parentId`, with a derived `level`:
 | Field | Purpose |
 |---|---|
 | `id` | PK **and** slug (id === slug; slug-shaped, admin `slugify` strips non-`[a-z0-9]`) |
-| `name` | canonical/legacy label + fallback |
-| `title_ru` / `title_uz` | localized labels the app renders (nullable) |
+| `name` | **internal** canonical label (slug derivation, ordering, logs) — not shown to users |
+| `name_ru` / `name_uz` / `name_en` | the display names, one per shipped language. **All three `NOT NULL`** (migration `20260818000000_category_i18n_and_seller_lang` renamed `title_ru`/`title_uz` into the first two and backfilled `name_en` from `name`) |
 | `parentId` | tree edge (self-relation `PartCategoryTree`) |
 | `level` | **derived** root=0 → child=parent.level+1; never client-supplied |
 | `sortOrder` | sibling order (home grid = importance order) |
@@ -106,8 +106,10 @@ CatalogPart.mainCategory = product.mainCategory   // always kept — powers the 
 
 **App plumbing** (`matorui`):
 - `services/reference-catalog.ts` — `fetchReferenceCategories()` maps the tree,
-  exposes `title_ru`/`title_uz`, and **filters the 12 bucket ids** (`MAIN_CATEGORY_BUCKET_IDS`)
-  out of the drill. `localizedCategoryName()` picks `title_uz` (uz) / `title_ru` (else) / `name`.
+  exposes the localized names, and **filters the 12 bucket ids** (`MAIN_CATEGORY_BUCKET_IDS`)
+  out of the drill. The backend's own `localizedCategoryName()`
+  (`src/common/app-lang.util.ts`) picks `nameRu`/`nameUz`/`nameEn` by the active
+  language, falling back down the chain rather than rendering an empty label.
 - `hooks/use-system-categories.ts` — the after-brand systems list (roots), localized,
   hides `cat_uncategorized`.
 - Home grid stays on `GET /v1/categories` (`hooks/use-categories.ts`) — the buckets.
@@ -121,10 +123,26 @@ CatalogPart.mainCategory = product.mainCategory   // always kept — powers the 
 
 ## 5. Localization
 
-`name` is the canonical fallback; `title_ru` / `title_uz` are the display titles
-(added by migration `20260816000000_add_category_titles`, exposed on the public
-`CategoryNode`). App renders `uz → title_uz`, else `title_ru`, else `name`. The
-admin panel does not yet edit these — they are seeded.
+Three shipped languages: **ru**, **uz** (Latin script), **en**. The vocabulary
+lives in `src/common/app-lang.util.ts` (`AppLang`, `toAppLang`/`toBotLanguage`,
+`localizedCategoryName`).
+
+- **Category names** — `name_ru` / `name_uz` / `name_en`, all `NOT NULL`. The
+  admin API requires all three on create and refuses to blank any of them on
+  update (`CreateCategoryDto` / `UpdateCategoryDto`); the DB `NOT NULL`
+  constraints are the backstop. `name` is internal and no longer displayed.
+- **Translations for the seeded tree** live in ONE table,
+  `src/prisma/seed-data/category-names.seed.ts`, which every seed path writes
+  from (`seed.ts`, `seed-categories.ts`, `restore-buyer-buckets.ts`, and the
+  projection's fallback bucket), so no two entry points can name a category
+  differently.
+- **Seller bot** — a seller picks a language from `/start` (first run) or
+  `/language`, stored as `sellers.lang` (`BotLanguage?`; `null` = never chose,
+  which is what makes the picker fire exactly once). Every bot string lives in
+  `src/telegram/i18n/{ru,uz,en}.ts` against the `BotStrings` interface, so a
+  missing translation is a compile error. Category BUTTONS are localized at
+  render time from the tree — the cached payload carries all three names, and
+  the wizard session carries the language.
 
 ---
 
@@ -154,7 +172,7 @@ admin panel does not yet edit these — they are seeded.
 | Command | Does |
 |---|---|
 | `npm run seed:categories` | create the 52 subcategories under the roots |
-| `npm run seed:category-titles` | backfill `title_ru`/`title_uz` (roots + subs) — needs the migration |
+| `npm run seed:category-titles` | backfill `name_ru`/`name_uz`/`name_en` from the shared translation table (roots, buckets + subs) |
 | `npm run fix:category-slugs` | diagnose + repair root slugs to canonical unique values |
 | `npm run restore:buyer-buckets` | reactivate/recreate the 12 home-grid buckets, ordered by importance |
 | `npm run reclassify:subcategories` | **dry-run** — re-file existing parts onto subcategories |
@@ -170,6 +188,8 @@ After any of these that change the tree: `redis-cli DEL cache:reference:categori
   Моторные масла configured). Official TASNIF codes — operator-supplied. Fiscal fields:
   `mxik`, `packageCodeSingle`, `packageCodeSet` (a category is fiscally configured when
   `mxik && packageCodeSingle`, see `common/fiscal.util.ts`).
-- Admin panel cannot yet **edit** `title_ru`/`title_uz`.
+- Admin panel: the three localized name inputs are specified in
+  `docs/frontend/ADMIN_FRONTEND_SPEC.md` §1.3 and served by the API; the console
+  UI itself lives in the separate admin-panel repo.
 - Buckets and subs coexist under each root in the raw table (invisible to users). A strict
   cleanup would reparent the buckets to a hidden anchor.

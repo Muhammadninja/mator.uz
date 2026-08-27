@@ -215,7 +215,15 @@ describe('CatalogProjectionService — mapping', () => {
       svc.buildProjectionOps(buildStock());
       const cat = upsertArg(prisma, 'partCategory');
       expect(cat.where).toEqual({ id: CatalogProjectionService.UNCATEGORIZED_ID });
-      expect(cat.create).toEqual({ id: CatalogProjectionService.UNCATEGORIZED_ID, name: 'Uncategorized' });
+      // The three localized names are NOT NULL, so the fallback bucket carries
+      // its own translations rather than depending on a seed having run.
+      expect(cat.create).toEqual({
+        id: CatalogProjectionService.UNCATEGORIZED_ID,
+        name: 'Uncategorized',
+        nameRu: 'Без категории',
+        nameUz: 'Turkumlanmagan',
+        nameEn: 'Uncategorized',
+      });
     });
 
     it('projects the parent seller, falling back through storeName → marketName → id', () => {

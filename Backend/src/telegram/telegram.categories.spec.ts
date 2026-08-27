@@ -18,6 +18,13 @@ function makeService(over: Partial<Record<string, unknown>> = {}): AnyService {
   Object.assign(svc, {
     logger: { log() {}, warn() {}, error() {}, debug() {} },
     wizard: new WizardSessionStore(),
+    // The interface-language read cache; the prototype-cast bypasses the field
+    // initializer, so provide a real Map (an empty one falls back to the DB,
+    // which the `sellers` stub below answers).
+    langCache: new Map<number, 'ru' | 'uz' | 'en'>(),
+    sellers: {
+      findByTgId: jest.fn().mockResolvedValue({ id: 1, status: 'ACTIVE' }),
+    },
     categories: {
       findRootCategories: jest.fn().mockResolvedValue([
         { id: 'brake-system', name: 'Brake System' },

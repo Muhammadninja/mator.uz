@@ -13,6 +13,7 @@ import {
   SEED_DEALERS,
   fiscalDataFor,
 } from './seed-data/catalog-reference.seed';
+import { localizedNamesFor } from './seed-data/category-names.seed';
 import { NODE_SEED as FITMENT_NODE_SEED } from '../admin/fitment-studio/fitment-node.config';
 import {
   seedLaunchCatalog,
@@ -142,6 +143,7 @@ async function seedCategories() {
       where: { id: c.id },
       update: {
         name: c.name,
+        ...localizedNamesFor(c.id, c.name),
         slug: c.slug,
         color: c.color,
         iconKey: c.iconKey,
@@ -157,6 +159,7 @@ async function seedCategories() {
       create: {
         id: c.id,
         name: c.name,
+        ...localizedNamesFor(c.id, c.name),
         slug: c.slug,
         color: c.color,
         iconKey: c.iconKey,
@@ -173,6 +176,7 @@ async function seedCategories() {
       where: { id: c.id },
       update: {
         name: c.name,
+        ...localizedNamesFor(c.id, c.name),
         slug: c.slug,
         color: c.color,
         iconKey: c.iconKey,
@@ -188,6 +192,7 @@ async function seedCategories() {
       create: {
         id: c.id,
         name: c.name,
+        ...localizedNamesFor(c.id, c.name),
         slug: c.slug,
         color: c.color,
         iconKey: c.iconKey,
@@ -208,6 +213,7 @@ async function seedCategories() {
       where: { id: c.id },
       update: {
         name: c.name,
+        ...localizedNamesFor(c.id, c.name),
         slug: c.id,
         sortOrder: c.sortOrder,
         parentId: 'other',
@@ -217,6 +223,7 @@ async function seedCategories() {
       create: {
         id: c.id,
         name: c.name,
+        ...localizedNamesFor(c.id, c.name),
         slug: c.id,
         sortOrder: c.sortOrder,
         parentId: 'other',
@@ -235,6 +242,7 @@ async function seedCategories() {
     create: {
       id: 'cat_uncategorized',
       name: 'Uncategorized',
+      ...localizedNamesFor('cat_uncategorized', 'Uncategorized'),
       slug: 'uncategorized',
       sortOrder: 999,
       level: 1,

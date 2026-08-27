@@ -15,6 +15,13 @@ import {
   ProductKind,
   SellerStatus,
 } from '@prisma/client';
+import {
+  DEFAULT_APP_LANG,
+  localizedCategoryName,
+  toAppLang,
+  toBotLanguage,
+  type AppLang,
+} from '../common/app-lang.util';
 import { Decimal } from '@prisma/client/runtime/library';
 import { Context, Markup, Telegraf } from 'telegraf';
 import { message } from 'telegraf/filters';
@@ -67,8 +74,8 @@ import {
   WIZ_BACK_ACTION,
   WIZ_ANY_ACTION,
   isStaleCatalogPayload,
-  STALE_CATALOG_MESSAGE,
-  STALE_CATEGORY_MESSAGE,
+  staleCatalogMessage,
+  staleCategoryMessage,
   selectBrand,
   selectOtherBrand,
   selectOtherCategory,
@@ -106,6 +113,11 @@ import {
 } from '../catalog/categories/part-category.service';
 import { OIL_VISCOSITIES, OIL_VOLUMES } from './motor-oil-catalog';
 import { WIZARD_CATEGORIES } from './wizard-catalog';
+import {
+  LANG_ACTION,
+  languageKeyboard,
+  t,
+} from './i18n';
 
 // Telegram delivers an album as N separate photo updates sharing a
 // media_group_id, arriving back-to-back; only one carries the caption. We
@@ -179,50 +191,26 @@ const DRAFT_RESTART = 'draft:restart';
 const DRAFT_RETRY_IMAGES = 'draft:retry_images';
 const DRAFT_CANCEL = 'draft:cancel';
 
-// Nudge shown to anyone interacting outside an active wizard session.
-const START_HINT = '👋 Чтобы добавить товар, нажмите /start';
+// Nudge shown to anyone interacting outside an active wizard session, in
+// RUSSIAN. Kept for callers and tests that refer to the message itself; every
+// send site localizes through `t(lang, 'start.hint')`.
+export const START_HINT = t('ru', 'start.hint');
 
 // Shown when a seller tries to START A NEW listing while their previous one's
 // photos are still being processed. The block is lifted automatically the moment
 // the batch settles, so this asks for nothing but patience.
-export const IMAGES_PROCESSING_MESSAGE =
-  '📸 Фото обрабатывается, пожалуйста, подождите.';
+export const IMAGES_PROCESSING_MESSAGE = t('ru', 'images.processing');
 
 // Sent unprompted the moment an administrator approves a seller, so they learn
 // their account is live without having to poll the bot with /start.
-export const SELLER_APPROVED_MESSAGE =
-  '✅ Ваша заявка успешно одобрена!\n\n' +
-  'Теперь вы можете публиковать товары в Mator.\n\n' +
-  'Нажмите /start, чтобы открыть меню и начать добавление товаров.';
+export const SELLER_APPROVED_MESSAGE = t('ru', 'seller.approved');
 
 // Russian label for a stored PartVehicleCategory, from the wizard catalog (the
-// single source of truth for these labels). Used in the preview so the seller
-// sees the category they picked.
+// single source of truth for these labels). Used as the preview's category line
+// when the listing carries no dynamic category id to localize from.
 const CATEGORY_LABELS = new Map(
   WIZARD_CATEGORIES.map((c) => [c.value, c.label]),
 );
-
-// Guide describing the new step-by-step wizard, reachable via /help. Purely
-// informational — it does NOT touch the wizard or listing pipeline.
-const HELP_MESSAGE =
-  '📦 Как добавить товар\n\n' +
-  'Нажмите /start — бот проведёт вас по шагам:\n\n' +
-  '1️⃣ Фотографии — одно фото или альбом до 10 фото\n' +
-  '2️⃣ Марка автомобиля (кнопка)\n' +
-  '3️⃣ Модель (кнопка)\n' +
-  '4️⃣ Категория запчасти (кнопка)\n' +
-  '5️⃣ Подкатегория (кнопка) — если у выбранной категории она есть\n' +
-  '6️⃣ Название товара (текст)\n' +
-  '7️⃣ Описание — можно пропустить\n' +
-  '8️⃣ Тип номера: OEM, GM или пропустить\n' +
-  '9️⃣ Номер детали (если выбрали OEM/GM)\n' +
-  '🔟 Цена в сумах\n\n' +
-  '🛢 Продаёте не запчасть, а моторное масло? На шаге выбора марки нажмите «Другое» → «Моторные масла»:\n' +
-  'бот спросит вязкость, тип и объём вместо марки, модели и номера детали.\n\n' +
-  '⚡ Фото обрабатываются в фоне, пока вы заполняете информацию — ждать не нужно.\n' +
-  '✅ Когда всё готово, бот покажет предпросмотр — проверьте и нажмите «Добавить товар».\n\n' +
-  '💡 Марку и модель выбирайте только кнопками — вводить их вручную не нужно.\n' +
-  '🔎 Если указать OEM или GM номер, покупателям будет намного проще найти вашу деталь через поиск.';
 
 /**
  * A fully-processed listing awaiting the seller's confirmation — the in-memory
@@ -283,8 +271,11 @@ interface PendingProduct {
  * single-brand listing reads exactly as before ("Chevrolet Cobalt, Gentra")
  * while a cross-brand one stays unambiguous ("Chevrolet Cobalt; Hyundai Solaris").
  */
-export function formatVehicleLine(metadata: ParseOutcome): string {
-  if (metadata.isUniversal) return 'Все автомобили (универсальная деталь)';
+export function formatVehicleLine(
+  metadata: ParseOutcome,
+  lang: AppLang = DEFAULT_APP_LANG,
+): string {
+  if (metadata.isUniversal) return t(lang, 'preview.universalVehicle');
 
   if (metadata.vehicles.length > 0) {
     const byBrand = new Map<string, string[]>();
@@ -342,10 +333,15 @@ export function buildSessionFromDraft(
     priceUzs: Decimal | null;
   },
   step: WizardStep,
+  lang: AppLang = DEFAULT_APP_LANG,
 ): WizardSession {
   return {
     step,
     draftId: draft.id,
+    // A resumed dialogue speaks the seller's CURRENT language, not the one the
+    // draft was started in: the language is a property of the person, and a
+    // draft carries no copy of it to go stale.
+    lang,
     kind: draft.kind,
     brand: draft.brand,
     model: draft.model,
@@ -420,6 +416,14 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   // notice. Rapid repeat taps on stale buttons share one notice within
   // STALE_NOTICE_DEDUP_MS instead of piling up identical messages.
   private readonly staleNoticeSentAt = new Map<number, number>();
+
+  // Chosen interface language per Telegram user. A pure READ CACHE in front of
+  // sellers.lang (the source of truth): the bot answers dozens of updates per
+  // listing and every one of them needs a language, but a language changes at
+  // most a handful of times in a seller's life. Only a CHOSEN language is
+  // cached — an unset one must keep reaching the DB, or a seller who picks a
+  // language on another device would be stuck with the default until restart.
+  private readonly langCache = new Map<number, AppLang>();
 
   constructor(
     private readonly config: ConfigService,
@@ -496,6 +500,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     this.offerFlow.clear();
     this.wizard.clear();
     this.staleNoticeSentAt.clear();
+    this.langCache.clear();
     for (const session of this.pending.values()) clearTimeout(session.expiry);
     this.pending.clear();
     this.bot?.stop('SIGTERM');
@@ -527,31 +532,70 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         from.username ?? from.first_name,
       );
 
-      if (seller.status === SellerStatus.ACTIVE) {
-        // New session: forget any prior stale-notice dedup marker so the first
-        // stale tap after this restart is acknowledged in chat again.
-        this.staleNoticeSentAt.delete(from.id);
-        // A restart abandons the current dialogue position. The draft it pointed at
-        // is NOT discarded here — startProductCreation offers to resume it (or, if
-        // the seller chooses "Начать заново", cancels it explicitly).
-        this.wizard.delete(from.id);
-        await this.startProductCreation(ctx, from.id, seller.id);
+      // FIRST /start of a seller who has never chosen a language: ask, and stop
+      // here. Everything below this point — the status messages, the wizard —
+      // is written in a language, so it must not be sent before we know which.
+      // The language button then re-enters this same flow (see LANG_ACTION).
+      if (!seller.lang) {
+        this.langCache.delete(from.id);
+        await this.promptLanguage(ctx, DEFAULT_APP_LANG);
         return;
       }
-      if (seller.status === SellerStatus.REJECTED) {
-        await ctx.reply('⛔ Ваша заявка отклонена администратором.');
-        return;
+
+      const lang = toAppLang(seller.lang);
+      this.langCache.set(from.id, lang);
+      await this.startForSeller(ctx, from.id, seller.id, seller.status, lang);
+    });
+
+    // Change the interface language at any time — the "settings" entry point.
+    // Deliberately available in every state (mid-wizard included): the picker
+    // only writes a preference, so nothing about the dialogue changes except
+    // the language its next message is written in.
+    this.bot.command('language', async (ctx) => {
+      const from = ctx.from;
+      if (!from) return;
+      await this.promptLanguage(ctx, await this.resolveLang(from.id));
+    });
+
+    // A language button. Saves the choice, confirms in the NEW language, then
+    // continues wherever the seller was: a first-time seller lands in the flow
+    // /start would have taken them to, while one who is mid-listing simply gets
+    // their current step re-prompted, translated.
+    this.bot.action(LANG_ACTION, async (ctx) => {
+      try {
+        await ctx.answerCbQuery();
+      } catch {
+        // Expired callback (~15 s window) — the choice is still honoured.
       }
-      await ctx.reply(
-        '⏳ Ваша заявка на регистрацию принята и ожидает одобрения администратора.\n' +
-          'Как только аккаунт будет активирован, вы сможете добавлять товары.',
+      const from = ctx.from;
+      if (!from) return;
+      const lang = (ctx.match[1] as AppLang) ?? DEFAULT_APP_LANG;
+
+      const seller = await this.sellers.upsertFromBot(
+        BigInt(from.id),
+        from.username ?? from.first_name,
       );
+      await this.setLang(from.id, lang);
+      await this.removeInlineKeyboard(ctx);
+      await ctx.reply(t(lang, 'lang.changed'));
+
+      const session = this.wizard.get(from.id);
+      if (session) {
+        // Mid-dialogue: re-ask the current question in the new language rather
+        // than restarting — the seller loses nothing they already answered.
+        await this.sendStepPrompt(ctx, session);
+        return;
+      }
+      await this.startForSeller(ctx, from.id, seller.id, seller.status, lang);
     });
 
     // Informational guide describing the wizard flow. Sends static text and
     // touches nothing in the wizard/listing pipeline (does not start a session).
     this.bot.command('help', async (ctx) => {
-      await ctx.reply(HELP_MESSAGE);
+      const from = ctx.from;
+      await ctx.reply(
+        t(from ? await this.resolveLang(from.id) : DEFAULT_APP_LANG, 'help.message'),
+      );
     });
 
     // ── Wizard button steps ─────────────────────────────────────────────────
@@ -589,7 +633,11 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         await this.rejectStaleCategoryTap(ctx);
         return;
       }
-      const children = await this.loadCategoryOptions(categoryId);
+      const session = ctx.from ? this.wizard.get(ctx.from.id) : undefined;
+      const children = await this.loadCategoryOptions(
+        categoryId,
+        session?.lang ?? DEFAULT_APP_LANG,
+      );
       await this.handleWizardAction(ctx, (session) =>
         selectCategory(session, categoryId, children, category),
       );
@@ -608,7 +656,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         await this.rejectStaleCategoryTap(ctx);
         return;
       }
-      const children = await this.loadCategoryOptions(categoryId);
+      const children = await this.loadCategoryOptions(
+        categoryId,
+        session?.lang ?? DEFAULT_APP_LANG,
+      );
       await this.handleWizardAction(ctx, (session) =>
         selectSubcategory(session, categoryId, children, category),
       );
@@ -719,7 +770,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
       const session = this.wizard.get(from.id);
       if (!session) {
-        await ctx.reply(START_HINT);
+        await ctx.reply(t(await this.langOf(from.id), 'start.hint'));
         return;
       }
 
@@ -811,15 +862,16 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       // Remove the keyboard first so a second tap can't re-trigger the action.
       await this.removeInlineKeyboard(ctx);
       const from = ctx.from;
+      // Resolved BEFORE the dialogue is cleared, so the session's language is
+      // still available and the cancel notice does not cost a DB read.
+      const lang = from ? await this.resolveLang(from.id) : DEFAULT_APP_LANG;
       if (from) {
         // Terminal: delete the preview's assets, mark the backing draft CANCELLED,
         // and clear the dialogue so the flow ends fully.
         await this.cancelPendingDraft(from.id);
         this.wizard.delete(from.id);
       }
-      await ctx.reply(
-        '❌ Добавление товара отменено.\nНажмите /start, чтобы начать заново.',
-      );
+      await ctx.reply(t(lang, 'draft.addCancelled'));
     });
 
     // "⬅️ Назад" on the preview: reopen the DRAFT at the PRICE step to edit
@@ -855,8 +907,9 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       const from = ctx.from;
       if (!from) return;
       const seller = await this.sellers.findByTgId(BigInt(from.id));
+      const lang = toAppLang(seller?.lang);
       if (!seller || seller.status !== SellerStatus.ACTIVE) {
-        await ctx.reply(START_HINT);
+        await ctx.reply(t(lang, 'start.hint'));
         return;
       }
       // The prompt's keyboard may have been sent BEFORE a batch started (or a
@@ -864,12 +917,12 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       // here rather than trusting the tap. Otherwise this path would cancel a
       // draft whose worker is mid-write, deleting assets from under it.
       if (await this.drafts.findImagesInFlight(seller.id)) {
-        await ctx.reply(IMAGES_PROCESSING_MESSAGE);
+        await ctx.reply(t(lang, 'images.processing'));
         return;
       }
       // Discard the old draft (assets + jobs) and begin a brand-new flow.
       await this.cancelActiveDraft(from.id);
-      await this.startProductCreation(ctx, from.id, seller.id);
+      await this.startProductCreation(ctx, from.id, seller.id, lang);
     });
 
     // ── Image-failure recovery ──────────────────────────────────────────────
@@ -884,10 +937,9 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       await this.removeInlineKeyboard(ctx);
       const from = ctx.from;
       if (!from) return;
+      const lang = await this.resolveLang(from.id);
       await this.cancelActiveDraft(from.id);
-      await ctx.reply(
-        '❌ Создание товара отменено.\nНажмите /start, чтобы начать заново.',
-      );
+      await ctx.reply(t(lang, 'draft.createCancelled'));
     });
   }
 
@@ -901,10 +953,36 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
    * its TTL), offer to continue or start over; otherwise begin a fresh session at
    * PHOTOS_FIRST and ask for photos first.
    */
+  private async startForSeller(
+    ctx: Context,
+    tgUserId: number,
+    sellerId: number,
+    status: SellerStatus,
+    lang: AppLang,
+  ): Promise<void> {
+    if (status === SellerStatus.ACTIVE) {
+      // New session: forget any prior stale-notice dedup marker so the first
+      // stale tap after this restart is acknowledged in chat again.
+      this.staleNoticeSentAt.delete(tgUserId);
+      // A restart abandons the current dialogue position. The draft it pointed
+      // at is NOT discarded here — startProductCreation offers to resume it (or,
+      // if the seller chooses "start over", cancels it explicitly).
+      this.wizard.delete(tgUserId);
+      await this.startProductCreation(ctx, tgUserId, sellerId, lang);
+      return;
+    }
+    if (status === SellerStatus.REJECTED) {
+      await ctx.reply(t(lang, 'start.rejected'));
+      return;
+    }
+    await ctx.reply(t(lang, 'start.pending'));
+  }
+
   private async startProductCreation(
     ctx: Context,
     tgUserId: number,
     sellerId: number,
+    lang: AppLang,
   ): Promise<void> {
     // Recovery: a draft that is READY_FOR_PREVIEW but whose preview delivery was
     // lost (crash after the coordinator flipped it, before the message was sent) is
@@ -930,7 +1008,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     // same rows and replies with the same message, creating nothing.
     const inFlight = await this.drafts.findImagesInFlight(sellerId);
     if (inFlight) {
-      await ctx.reply(IMAGES_PROCESSING_MESSAGE);
+      await ctx.reply(t(lang, 'images.processing'));
       // Refusing to start a new listing must not also strand THIS one. A row can
       // sit PROCESSING with no live job (the enqueue loop crashed, or the job was
       // lost), and that row is what the block keys on — so without this the draft
@@ -944,17 +1022,17 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     const resumable = await this.drafts.findResumable(sellerId);
     if (resumable) {
       await ctx.reply(
-        'У вас есть незавершённое объявление.\nПродолжить или начать заново?',
+        t(lang, 'draft.resumePrompt'),
         Markup.inlineKeyboard([
           [
-            Markup.button.callback('▶️ Продолжить', DRAFT_RESUME),
-            Markup.button.callback('🆕 Начать заново', DRAFT_RESTART),
+            Markup.button.callback(t(lang, 'btn.continue'), DRAFT_RESUME),
+            Markup.button.callback(t(lang, 'btn.startOver'), DRAFT_RESTART),
           ],
         ]),
       );
       return;
     }
-    const session = this.wizard.start(tgUserId);
+    const session = this.wizard.start(tgUserId, lang);
     await this.sendStepPrompt(ctx, session);
   }
 
@@ -973,16 +1051,17 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   ): Promise<void> {
     // Re-gate the seller (status may have changed since /start).
     const seller = await this.sellers.findByTgId(BigInt(tgUserId));
+    const lang = session.lang;
     if (!seller) {
-      await ctx.reply('👋 Сначала зарегистрируйтесь: введите /start');
+      await ctx.reply(t(lang, 'start.notRegistered'));
       return;
     }
     if (seller.status === SellerStatus.PENDING) {
-      await ctx.reply('⏳ Ваша заявка ещё не одобрена. Пожалуйста, подождите.');
+      await ctx.reply(t(lang, 'start.awaitingApproval'));
       return;
     }
     if (seller.status === SellerStatus.REJECTED) {
-      await ctx.reply('⛔ Ваш аккаунт отклонён администратором.');
+      await ctx.reply(t(lang, 'start.accountRejected'));
       return;
     }
 
@@ -1011,7 +1090,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       );
       // Roll the FSM back so the seller can retry the upload.
       session.step = WizardStep.PHOTOS_FIRST;
-      await ctx.reply('⚠️ Не удалось принять фото. Попробуйте ещё раз.');
+      await ctx.reply(t(lang, 'photos.notAccepted'));
       return;
     }
 
@@ -1048,9 +1127,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    await ctx.reply(
-      `✅ Фото получены (${images.length} шт.). Пока мы их обрабатываем, заполните информацию о товаре.`,
-    );
+    await ctx.reply(t(lang, 'photos.received', { count: images.length }));
     // Start the questionnaire immediately (images process in parallel).
     await this.sendStepPrompt(ctx, session);
   }
@@ -1074,8 +1151,9 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       this.logger.error(
         `Wizard session for ${tgUserId} has no draftId — restarting.`,
       );
+      const lang = session.lang;
       this.wizard.delete(tgUserId);
-      await ctx.reply(START_HINT);
+      await ctx.reply(t(lang, 'start.hint'));
       return;
     }
 
@@ -1122,7 +1200,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       // failed yet, to avoid contradicting the failure notice.
       const anyFailed = draft.images.some((img) => img.status === 'FAILED');
       if (!anyFailed) {
-        await ctx.reply('⏳ Завершаем обработку фото…');
+        await ctx.reply(t(session.lang, 'photos.finishing'));
       }
     }
   }
@@ -1167,7 +1245,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     try {
       await this.bot.telegram.sendMessage(
         Number(event.tgId),
-        SELLER_APPROVED_MESSAGE,
+        t(await this.langOf(Number(event.tgId)), 'seller.approved'),
       );
     } catch (err) {
       this.logger.error(
@@ -1184,13 +1262,14 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   @OnEvent(DraftEvent.IMAGES_FAILED)
   async onDraftImagesFailed(event: DraftImagesFailedEvent): Promise<void> {
     try {
+      const tgUserId = Number(event.tgId);
+      const lang = await this.resolveLang(tgUserId);
       await this.bot.telegram.sendMessage(
-        Number(event.tgId),
-        `⚠️ Не удалось обработать ${event.failedCount} фото. ` +
-          'Ваши данные сохранены — можно повторить обработку.',
+        tgUserId,
+        t(lang, 'draft.imagesFailed', { count: event.failedCount }),
         Markup.inlineKeyboard([
-          [Markup.button.callback('🔁 Повторить', DRAFT_RETRY_IMAGES)],
-          [Markup.button.callback('❌ Отмена', DRAFT_CANCEL)],
+          [Markup.button.callback(t(lang, 'btn.retry'), DRAFT_RETRY_IMAGES)],
+          [Markup.button.callback(t(lang, 'btn.cancel'), DRAFT_CANCEL)],
         ]),
       );
     } catch (err) {
@@ -1394,15 +1473,14 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
    */
   private async resumeDraft(ctx: Context, tgUserId: number): Promise<void> {
     const seller = await this.sellers.findByTgId(BigInt(tgUserId));
+    const lang = toAppLang(seller?.lang);
     if (!seller || seller.status !== SellerStatus.ACTIVE) {
-      await ctx.reply(START_HINT);
+      await ctx.reply(t(lang, 'start.hint'));
       return;
     }
     const draft = await this.drafts.findResumable(seller.id);
     if (!draft) {
-      await ctx.reply(
-        '⌛ Незавершённое объявление больше недоступно. Нажмите /start, чтобы начать заново.',
-      );
+      await ctx.reply(t(lang, 'draft.expired'));
       return;
     }
 
@@ -1410,6 +1488,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     const session = buildSessionFromDraft(
       draft,
       (draft.formStep as WizardStep) ?? WizardStep.BRAND,
+      lang,
     );
     this.wizard.restore(tgUserId, session);
 
@@ -1425,10 +1504,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     if (anyFailed) {
       await this.bot.telegram.sendMessage(
         tgUserId,
-        '⚠️ Часть фото не обработалась. Можно повторить обработку.',
+        t(lang, 'draft.imagesPartiallyFailed'),
         Markup.inlineKeyboard([
-          [Markup.button.callback('🔁 Повторить', DRAFT_RETRY_IMAGES)],
-          [Markup.button.callback('❌ Отмена', DRAFT_CANCEL)],
+          [Markup.button.callback(t(lang, 'btn.retry'), DRAFT_RETRY_IMAGES)],
+          [Markup.button.callback(t(lang, 'btn.cancel'), DRAFT_CANCEL)],
         ]),
       );
       return;
@@ -1436,10 +1515,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     if (session.step === WizardStep.QUESTIONNAIRE_DONE) {
       // Form already complete — either images are still going or just finished.
       await this.draftCoordinator.onFormStep(draft.id);
-      await ctx.reply('⏳ Завершаем обработку фото…');
+      await ctx.reply(t(lang, 'photos.finishing'));
       return;
     }
-    await ctx.reply('▶️ Продолжаем. Заполните оставшиеся поля.');
+    await ctx.reply(t(lang, 'draft.resumed'));
     await this.sendStepPrompt(ctx, session);
   }
 
@@ -1475,15 +1554,14 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     tgUserId: number,
   ): Promise<void> {
     const seller = await this.sellers.findByTgId(BigInt(tgUserId));
+    const lang = toAppLang(seller?.lang);
     if (!seller) {
-      await ctx.reply(START_HINT);
+      await ctx.reply(t(lang, 'start.hint'));
       return;
     }
     const draft = await this.drafts.findResumable(seller.id);
     if (!draft) {
-      await ctx.reply(
-        '⌛ Незавершённое объявление больше недоступно. Нажмите /start, чтобы начать заново.',
-      );
+      await ctx.reply(t(lang, 'draft.expired'));
       return;
     }
     const reset = await this.drafts.resetFailedImages(draft.id);
@@ -1491,7 +1569,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       (img) => img.status === 'PROCESSING' && !img.processedUrl,
     );
     if (toReenqueue.length === 0) {
-      await ctx.reply('Нет фото для повторной обработки.');
+      await ctx.reply(t(lang, 'photos.noneToRetry'));
       return;
     }
     for (const img of toReenqueue) {
@@ -1505,9 +1583,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         );
       }
     }
-    await ctx.reply(
-      '🔁 Повторяем обработку фото. Мы сообщим, когда будет готово.',
-    );
+    await ctx.reply(t(lang, 'photos.retrying'));
   }
 
   /**
@@ -1639,13 +1715,12 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     ctx: Context,
     tgUserId: number,
   ): Promise<void> {
+    const lang = await this.langOf(tgUserId);
     const pending =
       this.takePending(tgUserId) ??
       (await this.rebuildPendingFromDraft(tgUserId));
     if (!pending) {
-      await ctx.reply(
-        '⌛ Нет товара для редактирования (возможно, время истекло). Нажмите /start, чтобы начать заново.',
-      );
+      await ctx.reply(t(lang, 'edit.noProduct'));
       return;
     }
 
@@ -1667,20 +1742,16 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     );
     if (!reopened) {
       // The draft was published/cancelled/expired, or a double-tap won the race.
-      await ctx.reply(
-        '⌛ Это объявление больше нельзя изменить. Нажмите /start, чтобы начать заново.',
-      );
+      await ctx.reply(t(lang, 'edit.notEditable'));
       return;
     }
 
     const draft = await this.drafts.findWithImages(pending.draftId);
     if (!draft) {
-      await ctx.reply(
-        '⌛ Это объявление больше нельзя изменить. Нажмите /start, чтобы начать заново.',
-      );
+      await ctx.reply(t(lang, 'edit.notEditable'));
       return;
     }
-    const session = buildSessionFromDraft(draft, WizardStep.PRICE);
+    const session = buildSessionFromDraft(draft, WizardStep.PRICE, lang);
     this.wizard.restore(tgUserId, session);
     await this.sendStepPrompt(ctx, session);
   }
@@ -1702,13 +1773,12 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     ctx: Context,
     tgUserId: number,
   ): Promise<void> {
+    const lang = await this.langOf(tgUserId);
     const pending =
       this.takePending(tgUserId) ??
       (await this.rebuildPendingFromDraft(tgUserId));
     if (!pending) {
-      await ctx.reply(
-        '⌛ Нет товара для редактирования (возможно, время истекло). Нажмите /start, чтобы начать заново.',
-      );
+      await ctx.reply(t(lang, 'edit.noProduct'));
       return;
     }
 
@@ -1750,19 +1820,15 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
     if (!clone) {
       // Either the DB rejected it, or a concurrent tap holds the lock (undefined).
-      await ctx.reply(
-        '⌛ Это объявление больше нельзя изменить. Нажмите /start, чтобы начать заново.',
-      );
+      await ctx.reply(t(lang, 'edit.notEditable'));
       return;
     }
 
     // Open the dialogue on the clone at PHOTOS_FIRST: the next album creates its
     // image rows and enqueues them like any first upload.
-    const session = buildSessionFromDraft(clone, WizardStep.PHOTOS_FIRST);
+    const session = buildSessionFromDraft(clone, WizardStep.PHOTOS_FIRST, lang);
     this.wizard.restore(tgUserId, session);
-    await ctx.reply(
-      '🖼 Отправьте новые фотографии — остальные данные товара сохранены.',
-    );
+    await ctx.reply(t(lang, 'photos.sendNew'));
     await this.sendStepPrompt(ctx, session);
   }
 
@@ -1848,6 +1914,61 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   }
 
   // ── Wizard plumbing ─────────────────────────────────────────────────────────
+  // ── Interface language ────────────────────────────────────────────────────
+  /**
+   * The seller's chosen language, or the default when they have not chosen one.
+   *
+   * Reads the cache first, then `sellers.lang`. A DB failure falls back to the
+   * default instead of throwing: a handler that cannot determine a language
+   * must still answer the seller, in *some* language.
+   */
+  private async langOf(tgUserId: number): Promise<AppLang> {
+    const cached = this.langCache.get(tgUserId);
+    if (cached) return cached;
+    try {
+      const seller = await this.sellers.findByTgId(BigInt(tgUserId));
+      if (!seller?.lang) return DEFAULT_APP_LANG;
+      const lang = toAppLang(seller.lang);
+      this.langCache.set(tgUserId, lang);
+      return lang;
+    } catch (err) {
+      this.logger.warn(
+        `Could not read language for ${tgUserId}: ${
+          err instanceof Error ? err.message : String(err)
+        } — using ${DEFAULT_APP_LANG}.`,
+      );
+      return DEFAULT_APP_LANG;
+    }
+  }
+
+  /**
+   * Like {@link langOf} but free when a dialogue is open: an active wizard
+   * session already carries the language it was started in (and the /language
+   * handler updates it in place), so no read is needed.
+   */
+  private async resolveLang(tgUserId: number): Promise<AppLang> {
+    const session = this.wizard.get(tgUserId);
+    if (session) return session.lang;
+    return this.langOf(tgUserId);
+  }
+
+  /**
+   * Persist a seller's language choice and make it effective immediately: the
+   * cache, and any dialogue already in progress, both move to the new language
+   * so the very next message is in it.
+   */
+  private async setLang(tgUserId: number, lang: AppLang): Promise<void> {
+    await this.sellers.setLanguage(BigInt(tgUserId), toBotLanguage(lang));
+    this.langCache.set(tgUserId, lang);
+    const session = this.wizard.get(tgUserId);
+    if (session) session.lang = lang;
+  }
+
+  /** Show the language picker. Its header is trilingual by design. */
+  private async promptLanguage(ctx: Context, lang: AppLang): Promise<void> {
+    await ctx.reply(t(lang, 'lang.prompt'), languageKeyboard());
+  }
+
   /**
    * Answer a tap on a button from an OUTDATED catalog version. The button's
    * brand/model index can no longer be trusted, so instead of resolving it we
@@ -1863,10 +1984,15 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
    * swallowed so the nudge still sends.
    */
   private async answerStaleCallback(ctx: Context): Promise<void> {
+    const tgUserId = ctx.from?.id;
+    const lang =
+      tgUserId === undefined
+        ? DEFAULT_APP_LANG
+        : await this.resolveLang(tgUserId);
     try {
       // show_alert renders the text as a modal popup rather than a transient
       // toast, so the seller can't miss that the catalog changed.
-      await ctx.answerCbQuery(STALE_CATALOG_MESSAGE, { show_alert: true });
+      await ctx.answerCbQuery(staleCatalogMessage(lang), { show_alert: true });
     } catch {
       // Expired callback — proceed to the follow-up nudge anyway.
     }
@@ -1874,9 +2000,8 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
     // Deduplicate the chat nudge: skip it if we already sent one to this user
     // within the window (rapid repeat taps on stale buttons).
-    const tgUserId = ctx.from?.id;
     if (tgUserId !== undefined && !this.shouldSendStaleNotice(tgUserId)) return;
-    await ctx.reply(STALE_CATALOG_MESSAGE);
+    await ctx.reply(staleCatalogMessage(lang));
   }
 
   /**
@@ -1913,7 +2038,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
     const session = this.wizard.get(from.id);
     if (!session) {
-      await ctx.reply(START_HINT);
+      await ctx.reply(t(await this.langOf(from.id), 'start.hint'));
       return;
     }
 
@@ -1948,7 +2073,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
    */
   private async ensureCategoryOptions(session: WizardSession): Promise<void> {
     if (session.step === WizardStep.CATEGORY) {
-      session.categoryOptions = await this.loadCategoryOptions(null);
+      session.categoryOptions = await this.loadCategoryOptions(
+        null,
+        session.lang,
+      );
       return;
     }
     // The "Другое" menu is the admin-managed children of the `other` root, so it
@@ -1958,6 +2086,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     if (session.step === WizardStep.OTHER_CATEGORY) {
       session.categoryOptions = await this.loadCategoryOptions(
         CategoryAnchor.OTHER,
+        session.lang,
       );
     }
   }
@@ -2011,15 +2140,16 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       // Expired callback — proceed to the message below regardless.
     }
     await this.removeInlineKeyboard(ctx);
-    await ctx.reply(STALE_CATEGORY_MESSAGE);
     const from = ctx.from;
     const session = from ? this.wizard.get(from.id) : undefined;
+    await ctx.reply(staleCategoryMessage(session?.lang ?? DEFAULT_APP_LANG));
     // Re-render the step with the CURRENT tree so the seller can carry on.
     if (session) await this.sendStepPrompt(ctx, session);
   }
 
   private async loadCategoryOptions(
     parentId: string | null,
+    lang: AppLang,
   ): Promise<CategoryOption[]> {
     try {
       const rows =
@@ -2035,7 +2165,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         .filter((row) => !MAIN_CATEGORY_BY_SLUG.has(row.id))
         .map((row) => ({
         id: row.id,
-        name: row.name,
+        // The BUTTON label, in the seller's language. Resolved here (not in the
+        // pure wizard module) because the cached tree carries all three names
+        // and only this side knows whose dialogue is being rendered.
+        name: localizedCategoryName(row, lang),
         vehicleCategoryEnum: VEHICLE_CATEGORY_BY_SLUG.get(row.id) ?? null,
         mainCategoryEnum: MAIN_CATEGORY_BY_SLUG.get(row.id) ?? null,
         // Resolved from the category's STABLE ID, never its name, so renaming
@@ -2086,7 +2219,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   ): Promise<void> {
     const session = this.wizard.get(tgUserId);
     if (!session) {
-      await ctx.reply(START_HINT);
+      await ctx.reply(t(await this.langOf(tgUserId), 'start.hint'));
       return;
     }
     if (session.step !== WizardStep.PHOTOS_FIRST) {
@@ -2159,7 +2292,15 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     listing: Omit<PendingProduct, 'expiry'>,
     processedUrls: string[],
   ): Promise<void> {
-    const { caption, buttons } = this.buildPreview(listing);
+    // The preview is composed here rather than in `buildPreview` because both
+    // the language and the category's localized name are I/O — and buildPreview
+    // is a pure formatter shared with the tests.
+    const lang = await this.langOf(chatId);
+    const { caption, buttons } = this.buildPreview(
+      listing,
+      lang,
+      await this.categoryLabel(listing, lang),
+    );
     try {
       if (processedUrls.length === 1) {
         await this.bot.telegram.sendPhoto(chatId, processedUrls[0], {
@@ -2189,13 +2330,45 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * The preview's category line, in the seller's language.
+   *
+   * Read from the DYNAMIC tree by the id the seller actually picked, so a
+   * category the admin renamed or translated shows its current name. Falls back
+   * to the legacy enum label map when the listing carries no category id (a
+   * pre-migration draft) or the row has gone — the preview must render either
+   * way, and a missing translation is not worth failing a listing over.
+   */
+  private async categoryLabel(
+    listing: Omit<PendingProduct, 'expiry'>,
+    lang: AppLang,
+  ): Promise<string | undefined> {
+    const id = listing.vehicleCategoryId;
+    if (!id) return undefined;
+    try {
+      const row = await this.categories.findById(id);
+      return row ? localizedCategoryName(row, lang) : undefined;
+    } catch (err) {
+      this.logger.warn(
+        `Could not localize category "${id}" for the preview: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return undefined;
+    }
+  }
+
+  /**
    * Build the preview caption + confirmation keyboard (shared by both senders).
    * The shared lines (title, description, price) are rendered here; the lines
    * peculiar to the listing's KIND come from `previewLines`, so a motor oil shows
    * viscosity / type / volume where a spare part shows vehicle / category /
    * number, and neither kind renders the other's fields.
    */
-  private buildPreview(listing: Omit<PendingProduct, 'expiry'>): {
+  private buildPreview(
+    listing: Omit<PendingProduct, 'expiry'>,
+    lang: AppLang = DEFAULT_APP_LANG,
+    categoryLabel?: string,
+  ): {
     caption: string;
     buttons: ReturnType<typeof Markup.inlineKeyboard>;
   } {
@@ -2212,9 +2385,11 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     const kindLines = previewLines(
       {
         kind: listing.kind,
-        vehicleCategoryLabel: listing.vehicleCategory
-          ? (CATEGORY_LABELS.get(listing.vehicleCategory) ?? '—')
-          : '—',
+        vehicleCategoryLabel:
+          categoryLabel ??
+          (listing.vehicleCategory
+            ? (CATEGORY_LABELS.get(listing.vehicleCategory) ?? '—')
+            : '—'),
         partNumberLabel: numberLabel,
         partNumber: metadata.gm_number,
         oilViscosity: listing.oilViscosity,
@@ -2224,27 +2399,28 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         // shows that car in the preview while a "Другое" oil shows none.
         isUniversal: metadata.isUniversal,
       },
-      formatVehicleLine(metadata),
+      formatVehicleLine(metadata, lang),
+      lang,
     );
 
     const caption = [
-      `📋 *Проверьте товар перед добавлением.*\n`,
-      `🔩 *Название:* ${metadata.title}`,
-      `📝 *Описание:* ${metadata.description ?? '—'}`,
+      `${t(lang, 'preview.header')}\n`,
+      `🔩 *${t(lang, 'preview.title')}:* ${metadata.title}`,
+      `📝 *${t(lang, 'preview.description')}:* ${metadata.description ?? '—'}`,
       ...kindLines,
-      `💰 *Цена:* ${price.toFixed(0)} UZS`,
+      `💰 *${t(lang, 'preview.price')}:* ${price.toFixed(0)} UZS`,
     ].join('\n');
 
     const buttons = Markup.inlineKeyboard([
       [
-        Markup.button.callback('✅ Добавить товар', CONFIRM_ADD),
-        Markup.button.callback('❌ Отменить', CONFIRM_CANCEL),
+        Markup.button.callback(t(lang, 'btn.addProduct'), CONFIRM_ADD),
+        Markup.button.callback(t(lang, 'btn.cancelProduct'), CONFIRM_CANCEL),
       ],
-      // "⬅️ Назад" edits text/price reusing these photos (no re-processing);
-      // "🖼 Изменить фото" replaces the photos (re-runs the image pipeline).
+      // Back edits text/price reusing these photos (no re-processing);
+      // "change photos" replaces them (re-runs the image pipeline).
       [
-        Markup.button.callback('⬅️ Назад', CONFIRM_BACK),
-        Markup.button.callback('🖼 Изменить фото', CONFIRM_CHANGE_PHOTOS),
+        Markup.button.callback(t(lang, 'btn.back'), CONFIRM_BACK),
+        Markup.button.callback(t(lang, 'btn.changePhotos'), CONFIRM_CHANGE_PHOTOS),
       ],
     ]);
     return { caption, buttons };
@@ -2260,13 +2436,12 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     // product keeps them). A cache miss (TTL eviction / restart) falls back to the
     // draft: the `pending` map is a UX cache, so losing it must not cost the seller
     // a confirmed listing.
+    const lang = await this.langOf(tgUserId);
     const session =
       this.takePending(tgUserId) ??
       (await this.rebuildPendingFromDraft(tgUserId));
     if (!session) {
-      await ctx.reply(
-        '⌛ Нет товара для подтверждения (возможно, время истекло). Нажмите /start, чтобы начать заново.',
-      );
+      await ctx.reply(t(lang, 'confirm.nothingPending'));
       return;
     }
 
@@ -2289,9 +2464,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       session.draftVersion,
     );
     if (!claimed) {
-      await ctx.reply(
-        '⌛ Это объявление уже обработано. Нажмите /start, чтобы добавить следующий товар.',
-      );
+      await ctx.reply(t(lang, 'confirm.alreadyProcessed'));
       return;
     }
     // The claim bumped the row's version; the PUBLISHED transition below must
@@ -2495,9 +2668,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
       // The preview already served as the confirmation UI — the success message
       // only needs to confirm the write completed. Do not resend product details.
-      await ctx.reply(
-        '✅ Товар успешно добавлен.\nНажмите /start, чтобы добавить следующий товар.',
-      );
+      await ctx.reply(t(lang, 'confirm.success'));
     } catch (error: unknown) {
       const errMsg =
         error instanceof Error
@@ -2509,10 +2680,9 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         `Commit error: ${errMsg}`,
         error instanceof Error ? error.stack : undefined,
       );
-      await ctx.reply(
-        `⚠️ Произошла ошибка при добавлении товара.\n\`${errMsg}\``,
-        { parse_mode: 'Markdown' },
-      );
+      await ctx.reply(t(lang, 'confirm.failed', { error: errMsg }), {
+        parse_mode: 'Markdown',
+      });
     }
   }
 
