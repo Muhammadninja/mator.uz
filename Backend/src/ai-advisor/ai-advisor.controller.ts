@@ -29,6 +29,7 @@ import { ClaudeService } from './claude.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CreateAiSessionDto } from './dto/create-session.dto';
 import { SendMessageDto } from './dto/send-message.dto';
+import { resolveRequestLang } from '../common/app-lang.util';
 
 @ApiTags('AI Advisor')
 @ApiBearerAuth('jwt')
@@ -121,7 +122,10 @@ export class AiAdvisorController {
     @Body() dto: SendMessageDto,
     @Res() res: Response,
   ) {
-    const { context } = await this.ai.assertSessionWithVehicle(req.user.id, id);
+    const { session, context } = await this.ai.assertSessionWithVehicle(
+      req.user.id,
+      id,
+    );
 
     // Re-check the size against the RUNTIME limit. The DTO's @MaxLength pins the
     // published default; this honours an env override without a redeploy.
@@ -144,7 +148,16 @@ export class AiAdvisorController {
       id,
       this.claude.historyLimit,
     );
-    const reply = await this.claude.reply(system, messages);
+    // The catalogue tools name categories in the SESSION's language — the
+    // locale the client chose at createSession, already persisted on the row.
+    // Reusing it (rather than reading a header here) keeps ONE language context
+    // for the conversation, so a mid-chat request cannot switch the model's
+    // vocabulary. An unset/unsupported locale falls back to the default.
+    const reply = await this.claude.reply(
+      system,
+      messages,
+      resolveRequestLang(session.locale),
+    );
     const structured = this.ai.buildStructured(reply.citedItems, reply.outcome);
     const saved = await this.ai.persistAssistantMessage(
       id,

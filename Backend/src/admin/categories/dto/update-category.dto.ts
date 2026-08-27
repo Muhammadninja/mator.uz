@@ -14,6 +14,7 @@ import {
   ValidateIf,
 } from 'class-validator';
 import { PartMainCategory } from '@prisma/client';
+import { IsUzbekLatin } from '../../../common/is-uzbek-latin.validator';
 import {
   MXIK_PATTERN,
   PACKAGE_CODE_PATTERN,
@@ -49,15 +50,22 @@ export class UpdateCategoryDto {
   @MaxLength(160)
   nameRu?: string;
 
+  // Script-checked (see CreateCategoryDto.nameUz). The `@ValidateIf` above it
+  // is what keeps the field OPTIONAL: an absent key runs no constraint at all,
+  // so `PATCH {}` stays valid, while a supplied value must be Uzbek Latin.
   @ApiPropertyOptional({
     description:
-      'Display name in Uzbek (Latin script). Cannot be set to an empty value.',
+      'Display name in Uzbek (LATIN script). Cannot be set to an empty ' +
+      'value. Cyrillic and any other non-Latin script are rejected.',
     example: 'Turbokompressorlar',
   })
   @ValidateIf((_, value) => value !== undefined)
   @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsString()
   @IsNotEmpty({ message: 'nameUz cannot be empty' })
+  @IsUzbekLatin({
+    message: 'nameUz must contain only Uzbek Latin characters',
+  })
   @MaxLength(160)
   nameUz?: string;
 

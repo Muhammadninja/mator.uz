@@ -5,6 +5,10 @@ import { plainToInstance } from 'class-transformer';
 import { validateSync } from 'class-validator';
 import { PartsService } from '../catalog/parts/parts.service';
 import { CategoriesService } from '../catalog/categories/categories.service';
+import {
+  AppLang,
+  DEFAULT_APP_LANG,
+} from '../common/app-lang.util';
 import { ListPartsQueryDto } from '../catalog/parts/dto/list-parts.query.dto';
 
 /**
@@ -207,14 +211,18 @@ export class CatalogToolsService {
    * too, so a model that hallucinates a tool gets a corrective answer instead of
    * a 500.
    */
-  async run(name: string, rawInput: unknown): Promise<ToolRunResult> {
+  async run(
+    name: string,
+    rawInput: unknown,
+    lang: AppLang = DEFAULT_APP_LANG,
+  ): Promise<ToolRunResult> {
     const input = (rawInput ?? {}) as Record<string, unknown>;
     try {
       switch (name) {
         case 'search_catalog':
           return await this.searchCatalog(input);
         case 'get_categories':
-          return await this.getCategories(input);
+          return await this.getCategories(input, lang);
         case 'get_product':
           return await this.getProduct(input);
         case 'find_motor_oil':
@@ -277,20 +285,31 @@ export class CatalogToolsService {
     );
   }
 
+  /**
+   * The category list the model reasons over. Names are given in the SESSION's
+   * language so the model can echo a category back to the user in the words
+   * they will see in the app; `id` stays the stable identifier it must pass to
+   * `search_catalog`.
+   */
   private async getCategories(
     input: Record<string, unknown>,
+    lang: AppLang,
   ): Promise<ToolRunResult> {
     const scope = input.scope === 'vehicle' ? 'vehicle' : 'main';
     const vehicleId =
       typeof input.vehicle_id === 'string' ? input.vehicle_id : undefined;
-    const result = await this.categories.list({
-      scope,
-      vehicle_id: vehicleId,
-    } as never);
+    const result = await this.categories.list(
+      {
+        scope,
+        vehicle_id: vehicleId,
+      } as never,
+      lang,
+    );
     const items = result.items.map(
-      (c: { id: string; name: string; count: number }) => ({
+      (c: { id: string; label: string; count: number }) => ({
         id: c.id,
-        name: c.name,
+        // The localized label, NOT the internal `name` the model used to get.
+        name: c.label,
         part_count: c.count,
       }),
     );

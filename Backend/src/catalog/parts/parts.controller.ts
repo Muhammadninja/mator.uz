@@ -2,13 +2,15 @@ import {
   Body,
   Controller,
   Get,
+  Headers,
   Param,
   Post,
   Query,
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
-import { ApiTags, ApiOperation } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiHeader } from '@nestjs/swagger';
+import { resolveRequestLang } from '../../common/app-lang.util';
 import { PartsService } from './parts.service';
 import { ListPartsQueryDto } from './dto/list-parts.query.dto';
 import { CheckCompatibilityDto } from './dto/check-compatibility.dto';
@@ -27,14 +29,35 @@ export class PartsController {
       'Listing kind: `kind=spare_part|motor_oil` (repeatable). Omitting it returns EVERY kind, which is the pre-ProductKind behaviour.\n\n' +
       'Motor oils additionally filter by `viscosity` (SAE grade, exact match, repeatable), `oil_type` (synthetic|semi_synthetic|mineral, repeatable) and volume — either exact values via `volume_ml` (repeatable, MILLILITRES: 4 л = 4000) or a range via `volume_ml_min`/`volume_ml_max`. Any of these implies `kind=motor_oil`. When the query concerns oils, `facets.motor_oil` returns the available viscosity/type/volume values with counts.',
   })
-  list(@Query() query: ListPartsQueryDto) {
-    return this.parts.list(query);
+  @ApiHeader({
+    name: 'Accept-Language',
+    required: false,
+    description:
+      'Display language for category labels: ru | uz | en (regional tags ' +
+      'like ru-RU accepted). Defaults to ru.',
+  })
+  list(
+    @Query() query: ListPartsQueryDto,
+    @Headers('accept-language') acceptLanguage?: string,
+  ) {
+    return this.parts.list(query, resolveRequestLang(acceptLanguage));
   }
 
   @Get(':id')
   @HttpCode(HttpStatus.OK)
-  detail(@Param('id') id: string, @Query('vehicle_id') vehicleId?: string) {
-    return this.parts.detail(id, vehicleId);
+  @ApiHeader({
+    name: 'Accept-Language',
+    required: false,
+    description:
+      'Display language for category labels: ru | uz | en (regional tags ' +
+      'like ru-RU accepted). Defaults to ru.',
+  })
+  detail(
+    @Param('id') id: string,
+    @Query('vehicle_id') vehicleId?: string,
+    @Headers('accept-language') acceptLanguage?: string,
+  ) {
+    return this.parts.detail(id, vehicleId, resolveRequestLang(acceptLanguage));
   }
 
   @Get(':id/compatibility')

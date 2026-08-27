@@ -110,11 +110,17 @@ export class AiChatService {
 
     // From here on part_name is guaranteed → RAG → FOUND_IN_STOCK | CREATE_SOURCING_TICKET.
     try {
-      const rag = await this.rag.searchInStock({
-        partName,
-        brand: base.extracted_data.brand,
-        model: base.extracted_data.model,
-      });
+      // Same `lang` the canonical replies use — the chat detects the buyer's
+      // language ONCE and the category labels in the results follow it, so the
+      // model is never told a category is called something the buyer cannot read.
+      const rag = await this.rag.searchInStock(
+        {
+          partName,
+          brand: base.extracted_data.brand,
+          model: base.extracted_data.model,
+        },
+        lang,
+      );
 
       if (rag.found) {
         return {

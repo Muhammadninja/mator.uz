@@ -2,6 +2,11 @@ import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { clampLimit } from '../../common/pagination.util';
+import {
+  AppLang,
+  DEFAULT_APP_LANG,
+  localizedCategoryName,
+} from '../../common/app-lang.util';
 import { formatUzs } from '../parts/part.presenter';
 import { SearchDto } from './dto/search.dto';
 
@@ -13,8 +18,14 @@ const MAX_QUICK_FILTERS = 20;
 export class SearchService {
   constructor(private readonly prisma: PrismaService) {}
 
-  /** Universal parts search with facet counts (POST /v1/search). */
-  async search(dto: SearchDto) {
+  /**
+   * Universal parts search with facet counts (POST /v1/search).
+   *
+   * `lang` decides only how categories are LABELLED; it never reaches the
+   * where-clause, the grouping or the filter contract, all of which stay keyed
+   * on stable category ids.
+   */
+  async search(dto: SearchDto, lang: AppLang = DEFAULT_APP_LANG) {
     const startedAt = Date.now();
     const q = dto.query?.trim() ?? '';
     const limit = clampLimit(dto.limit, 20, MAX_SEARCH_LIMIT);
@@ -50,16 +61,47 @@ export class SearchService {
       ]);
 
     const catIds = catGroup.map((g) => g.categoryId);
+    // All three names in the SAME query the facet already made — the label is
+    // chosen below, in presentation, so no language is baked into the read.
     const cats = await this.prisma.partCategory.findMany({
       where: { id: { in: catIds } },
+      select: {
+        id: true,
+        name: true,
+        nameRu: true,
+        nameUz: true,
+        nameEn: true,
+      },
     });
-    const catNames = new Map(cats.map((c) => [c.id, c.name]));
+    const catById = new Map(cats.map((c) => [c.id, c]));
+    /** The display label of a category in the request's language. */
+    const labelFor = (categoryId: string): string => {
+      const row = catById.get(categoryId);
+      return row ? localizedCategoryName(row, lang) : categoryId;
+    };
+
+    // `facetCounts.categories` keeps its historical shape — an object keyed by
+    // the category LABEL — but the label is now localized, so a `uz` request no
+    // longer reads English keys. The keys were never usable as identifiers
+    // anyway: `filters.categories` has always taken category IDS (see the
+    // where-clause above), so nothing round-trips a key back into a filter.
+    // `categories` below is the ordered, id-carrying form clients should move
+    // to; both are derived from the same counts, so they cannot disagree.
     const categoriesFacet = Object.fromEntries(
-      catGroup.map((g) => [
-        catNames.get(g.categoryId) ?? g.categoryId,
-        g._count._all,
-      ]),
+      catGroup.map((g) => [labelFor(g.categoryId), g._count._all]),
     );
+
+    // Descending by count so "suggested" means the biggest buckets, and the
+    // order is stable rather than whatever the group-by returned.
+    const rankedCategories = [...catGroup]
+      .sort((a, b) => b._count._all - a._count._all)
+      .map((g) => ({
+        // The STABLE identifier — what `filters.categories` accepts.
+        id: g.categoryId,
+        // The localized display label. Never use this as an identifier.
+        name: labelFor(g.categoryId),
+        count: g._count._all,
+      }));
 
     return {
       requestId: dto.requestId ?? null,
@@ -67,7 +109,12 @@ export class SearchService {
         id: p.id,
         title: p.title,
         price: formatUzs(p.priceUzs),
-        category: p.category.name,
+        // Localized display label (was the internal `category.name`, which is
+        // English for every seeded bucket and rendered as-is by the app).
+        category: localizedCategoryName(p.category, lang),
+        // The stable id alongside it, so a client that was parsing the label to
+        // identify a category has an identifier to move to.
+        category_id: p.categoryId,
       })),
       total,
       durationMs: Date.now() - startedAt,
@@ -77,9 +124,16 @@ export class SearchService {
         price: { under_200k: under200k, '200k_to_500k': between },
         minRating: { '4plus': highRated },
       },
+      // The id+label form of the same facet, ordered by count. Additive: it is
+      // what a client should read to filter by category without guessing an id
+      // from a display string.
+      categories: rankedCategories,
       appliedFilters: dto.filters ?? {},
       didYouMean: null,
-      suggestedCategories: Object.keys(categoriesFacet).slice(0, 5),
+      // Localized display names, biggest buckets first. Historically these were
+      // the internal English names; they are labels, not identifiers, and
+      // `categories` above carries the ids for the same buckets.
+      suggestedCategories: rankedCategories.slice(0, 5).map((c) => c.name),
     };
   }
 

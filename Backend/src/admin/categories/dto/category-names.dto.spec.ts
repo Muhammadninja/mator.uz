@@ -114,3 +114,110 @@ describe('UpdateCategoryDto — localized names', () => {
     expect(validate(UpdateCategoryDto, { nameRu: null })).not.toHaveLength(0);
   });
 });
+
+/**
+ * `nameUz` carries a CONTENT rule its RU/EN siblings do not: the column stores
+ * Uzbek in LATIN script, and the mistake that actually happens in the console is
+ * a Russian name pasted into the Uzbek field. The alphabet itself is covered
+ * exhaustively in common/uzbek-latin.util.spec; these tests prove the DTO
+ * WIRING — that the rule fires on POST, fires on PATCH only when the key is
+ * present, and reports under `nameUz` with the documented message.
+ */
+describe('nameUz — Uzbek Latin script validation', () => {
+  /** The `isUzbekLatin` constraint messages for `nameUz`, if any fired. */
+  const scriptErrors = (errors: ReturnType<typeof validateSync>) =>
+    errors
+      .filter((e) => e.property === 'nameUz')
+      .flatMap((e) => Object.values(e.constraints ?? {}))
+      .filter((m) => m.includes('Uzbek Latin'));
+
+  describe('CreateCategoryDto (POST — required AND script-checked)', () => {
+    it.each([
+      'Tormoz kolodkalari',
+      'Tormoz tizimi',
+      'Oldingi tormoz kolodkalari',
+      'Motor moyi',
+      'ABS',
+      '4WD ehtiyot qismi',
+      "O'zbekiston",
+      'Oʻzbekiston',
+      'Gʻildirak',
+    ])('accepts %p', (nameUz) => {
+      expect(validate(CreateCategoryDto, { ...NAMES, nameUz })).toHaveLength(0);
+    });
+
+    it.each(['Тормоз колодкалари', 'Тормоз', 'Тест', 'колодки'])(
+      'rejects the Cyrillic name %p',
+      (nameUz) => {
+        const errors = validate(CreateCategoryDto, { ...NAMES, nameUz });
+        expect(failedFields(errors)).toEqual(['nameUz']);
+        expect(scriptErrors(errors)).toEqual([
+          'nameUz must contain only Uzbek Latin characters',
+        ]);
+      },
+    );
+
+    it.each(['Tormoz колодкалari', 'Motor масло', "O'zбек тормоз"])(
+      'rejects the half-translated name %p',
+      (nameUz) => {
+        expect(failedFields(validate(CreateCategoryDto, { ...NAMES, nameUz }))).toEqual(
+          ['nameUz'],
+        );
+      },
+    );
+
+    // The script rule must not weaken the presence rule, nor stand in for it:
+    // a blank value fails as EMPTY (its own constraint), so the console still
+    // gets "cannot be empty" rather than a confusing script complaint.
+    it('still reports a blank nameUz as empty, not as a script error', () => {
+      const errors = validate(CreateCategoryDto, { ...NAMES, nameUz: '   ' });
+      expect(failedFields(errors)).toEqual(['nameUz']);
+      const messages = errors.flatMap((e) => Object.values(e.constraints ?? {}));
+      expect(messages).toContain('nameUz is required and cannot be empty');
+    });
+
+    it('leaves the Russian and English names unconstrained by the script rule', () => {
+      expect(
+        validate(CreateCategoryDto, {
+          nameRu: 'Тормозные колодки',
+          nameUz: 'Tormoz kolodkalari',
+          nameEn: 'Brake pads',
+        }),
+      ).toHaveLength(0);
+    });
+  });
+
+  describe('UpdateCategoryDto (PATCH — optional, but checked when sent)', () => {
+    it('accepts an empty patch', () => {
+      expect(validate(UpdateCategoryDto, {})).toHaveLength(0);
+    });
+
+    it('accepts a patch that omits nameUz entirely', () => {
+      expect(validate(UpdateCategoryDto, { nameRu: 'Тормоза' })).toHaveLength(0);
+    });
+
+    it.each(['Tormoz kolodkalari', "O'zbekiston", 'Oʻzbekiston', '4WD ehtiyot qismi'])(
+      'accepts the valid patch value %p',
+      (nameUz) => {
+        expect(validate(UpdateCategoryDto, { nameUz })).toHaveLength(0);
+      },
+    );
+
+    it('rejects { nameUz: "Тормоз" } — a supplied value must be Latin', () => {
+      const errors = validate(UpdateCategoryDto, { nameUz: 'Тормоз' });
+      expect(failedFields(errors)).toEqual(['nameUz']);
+      expect(scriptErrors(errors)).toEqual([
+        'nameUz must contain only Uzbek Latin characters',
+      ]);
+    });
+
+    it.each(['Tormoz колодкалari', 'Motor масло', "O'zбек тормоз"])(
+      'rejects the half-translated patch %p',
+      (nameUz) => {
+        expect(failedFields(validate(UpdateCategoryDto, { nameUz }))).toEqual([
+          'nameUz',
+        ]);
+      },
+    );
+  });
+});

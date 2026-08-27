@@ -10,6 +10,11 @@ import {
 import { OIL_TYPE_LABELS, formatVolume } from '../../common/motor-oil.util';
 import { normalizeOem } from '../../common/normalize-oem.util';
 import { MAIN_CATEGORY_TO_SLUG } from '../categories/category-map';
+import {
+  AppLang,
+  DEFAULT_APP_LANG,
+  localizedCategoryName,
+} from '../../common/app-lang.util';
 import { PrismaService } from '../../prisma/prisma.service';
 import { clampLimit } from '../../common/pagination.util';
 import {
@@ -101,7 +106,12 @@ export class PartsService {
     );
   }
 
-  async list(query: ListPartsQueryDto) {
+  /**
+   * Faceted parts listing. `lang` reaches presentation only — the where-clause,
+   * the facets' grouping keys and the sort are all language-independent, so the
+   * same query returns the same rows in the same order in every language.
+   */
+  async list(query: ListPartsQueryDto, lang: AppLang = DEFAULT_APP_LANG) {
     const vehicle = await this.loadVehicle(query.vehicle_id);
     const where = this.buildWhere(query, vehicle);
     const rollup = this.rollupMainCategory(query);
@@ -139,7 +149,9 @@ export class PartsService {
     const sales = items.length ? await this.discounts.loadActiveSales() : [];
 
     return {
-      items: items.map((p) => presentPartItem(p, vehicle, this.discountFor(p, sales))),
+      items: items.map((p) =>
+        presentPartItem(p, vehicle, this.discountFor(p, sales), lang),
+      ),
       facets: {
         brands: await this.brandFacet(brandFacet),
         price_range_uzs: {
@@ -156,7 +168,7 @@ export class PartsService {
       // Subcategory chips for the macro-category rollup (the "Shop by system"
       // screen renders these as quick filters). Null for a non-rollup listing so
       // an ordinary query pays nothing for the extra grouping.
-      subcategories: rollup ? await this.subcategoryChips(where) : null,
+      subcategories: rollup ? await this.subcategoryChips(where, lang) : null,
       page,
       page_size: pageSize,
       total,
@@ -164,7 +176,11 @@ export class PartsService {
     };
   }
 
-  async detail(partId: string, vehicleId?: string) {
+  async detail(
+    partId: string,
+    vehicleId?: string,
+    lang: AppLang = DEFAULT_APP_LANG,
+  ) {
     const part = await this.prisma.catalogPart.findUnique({
       where: { id: partId },
       include: PART_INCLUDE,
@@ -172,7 +188,7 @@ export class PartsService {
     if (!part) throw new NotFoundException('Part not found');
     const vehicle = await this.loadVehicle(vehicleId);
     const sales = await this.discounts.loadActiveSales();
-    return presentPartItem(part, vehicle, this.discountFor(part, sales));
+    return presentPartItem(part, vehicle, this.discountFor(part, sales), lang);
   }
 
   async compatibility(partId: string, vehicleId: string) {
@@ -616,7 +632,10 @@ export class PartsService {
    * renders quick filters that never lead to an empty page. The 12 mainCategory
    * BUCKETS are excluded (they are the home-grid taxonomy, not drill chips).
    */
-  private async subcategoryChips(where: Prisma.CatalogPartWhereInput) {
+  private async subcategoryChips(
+    where: Prisma.CatalogPartWhereInput,
+    lang: AppLang,
+  ) {
     const grouped = await this.prisma.catalogPart.groupBy({
       by: ['categoryId'],
       where,
@@ -644,6 +663,9 @@ export class PartsService {
       .map((c) => ({
         id: c.id,
         name: c.name,
+        // The chip's display text in the REQUEST's language. `title_*` below
+        // stay for a client that re-renders a cached chip on a language switch.
+        label: localizedCategoryName(c, lang),
         // Wire keys unchanged (the buyer app already reads title_ru/title_uz);
         // only their SOURCE moved to the renamed, now-required columns.
         // `title_en` joins them for the app's English locale.

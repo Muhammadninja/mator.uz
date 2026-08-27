@@ -1,4 +1,9 @@
 import { Prisma, CompatibilityStatus, ProductKind } from '@prisma/client';
+import {
+  AppLang,
+  DEFAULT_APP_LANG,
+  localizedCategoryName,
+} from '../../common/app-lang.util';
 import { OIL_TYPE_LABELS, formatVolume } from '../../common/motor-oil.util';
 import type { DiscountResult } from '../../sales/discount.service';
 // The kind capability table — the SINGLE source of truth for what a kind is.
@@ -140,11 +145,18 @@ function presentPricing(
   };
 }
 
-/** Map a CatalogPart row to the contract's list-item shape. */
+/**
+ * Map a CatalogPart row to the contract's list-item shape.
+ *
+ * `lang` affects ONE thing: which of the category's three names becomes the
+ * display `label`. Every identifier, enum and number is language-independent,
+ * so two locales of the same part differ only in that string.
+ */
 export function presentPartItem(
   part: PartWithRelations,
   vehicle: VehicleCompatContext | null,
   discount?: DiscountResult | null,
+  lang: AppLang = DEFAULT_APP_LANG,
 ) {
   return {
     id: part.id,
@@ -154,7 +166,23 @@ export function presentPartItem(
     kind: part.kind,
     motor_oil: presentKindAttributes(part),
     brand: part.brand ? { id: part.brand.id, name: part.brand.name } : null,
-    category: { id: part.category.id, name: part.category.name },
+    // `name` is the INTERNAL canonical label, kept on the wire so existing
+    // clients keep working; it is English for every seeded bucket and must not
+    // be rendered. `label` is the one to render: the name in the REQUEST's
+    // language, resolved server-side so a client needs no locale logic. The
+    // three explicit names stay for a client that caches a part and re-renders
+    // it after the user switches language without re-fetching.
+    category: {
+      id: part.category.id,
+      name: part.category.name,
+      // The display name for THIS request's language — what a UI should show.
+      label: localizedCategoryName(part.category, lang),
+      // snake_case to match this payload's convention (main_category, is_oem…)
+      // and the buyer grid's category keys.
+      name_ru: part.category.nameRu,
+      name_uz: part.category.nameUz,
+      name_en: part.category.nameEn,
+    },
     // Classified taxonomy + attributes (enum values; null until classified).
     main_category: part.mainCategory,
     vehicle_category: part.vehicleCategory,
