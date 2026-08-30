@@ -74,9 +74,6 @@ export const SUBCATEGORY_RULES: SubcategoryRule[] = [
   { id: 'skid-plates', root: 'tuning-and-accessories', keywords: ['защита картера', 'защита двигателя', 'защита поддона', 'картер защита', 'skid plate', 'engine guard', 'zashita kartera', 'защита двс', 'стальная защита картера', 'himoya kartera', 'защита картера двигателя'] },
   { id: 'wind-deflectors-mudflaps', root: 'tuning-and-accessories', keywords: ['ветровик', 'брызговик', 'ветровики', 'брызговики', 'wind deflector', 'mud flap', 'vetrovik', 'дефлектор окна', 'bryzgovik', 'дефлекторы окон', 'mud guard', 'ветровики на окна'] },
   { id: 'seat-covers', root: 'tuning-and-accessories', keywords: ['чехлы', 'чехлы на сиденья', 'авточехлы', 'чехол сиденья', 'seat cover', 'seat covers', 'chexol', 'чехлы модельные', 'чехлы сидений', 'chexol sedeniya', 'накидка на сиденье', 'чехлы автомобильные'] },
-  { id: 'motor-oil-5w30', root: 'motor-oil', keywords: ['масло 5w-30', '5w30', '5w-30', 'моторное масло 5w30', '5w30 oil', 'engine oil 5w30', 'масло 5в30', 'синтетика 5w30', 'motor moyi 5w30', 'масло моторное 5w-30', 'oil 5w30'] },
-  { id: 'motor-oil-5w40', root: 'motor-oil', keywords: ['масло 5w-40', '5w40', '5w-40', 'моторное масло 5w40', '5w40 oil', 'engine oil 5w40', 'масло 5в40', 'синтетика 5w40', 'motor moyi 5w40', 'масло моторное 5w-40', 'oil 5w40'] },
-  { id: 'motor-oil-10w40', root: 'motor-oil', keywords: ['масло 10w-40', '10w40', '10w-40', 'моторное масло 10w40', '10w40 oil', 'engine oil 10w40', 'масло 10в40', 'полусинтетика 10w40', 'motor moyi 10w40', 'масло моторное 10w-40', 'oil 10w40'] },
   { id: 'transmission-oil', root: 'motor-oil', keywords: ['трансмиссионное масло', 'масло кпп', 'масло в коробку', 'масло акпп', 'transmission oil', 'gear oil', 'atf', 'масло трансмиссионное', '75w90', 'transmission moyi', 'масло мкпп', 'масло для коробки передач'] },
   { id: 'fasteners-and-clips', root: 'cat_uncategorized', keywords: ['крепеж', 'клипса', 'клипсы', 'пистоны', 'fastener', 'clip', 'krepej', 'клипсы обшивки', 'pistony', 'клипса бампера', 'саморез'] },
   { id: 'wiper-blades', root: 'cat_uncategorized', keywords: ['щетки стеклоочистителя', 'дворники', 'щетка стеклоочистителя', 'щетки дворников', 'wiper blade', 'wiper', 'dvorniki', 'щетки дворники', 'стеклоочиститель', 'shetki', 'бескаркасные дворники', 'щетка дворника'] },
@@ -94,8 +91,30 @@ export interface SubMatch {
 }
 
 /**
+ * The motor-oil grade named by `text`, or null.
+ *
+ * Re-exported here — beside the subcategory rules — because it REPLACES three of
+ * them. "масло 5W-40" used to classify to a `motor-oil-5w40` CATEGORY; those
+ * nodes are retired, so the same text now yields an ATTRIBUTE and the listing
+ * stays on `motor-oil`:
+ *
+ *     classifyOilViscosity('масло 5W-40')  →  '5W-40'   (Product.oilViscosity)
+ *     classifySubcategory('масло 5W-40')   →  null      (no category to move to)
+ *
+ * The recognition itself is unchanged vocabulary — it just has a new destination.
+ * The oil TYPE is NOT derived here: "синтетика 5w30" names a grade for certain,
+ * while its base composition decides the MXIK and must come from the seller.
+ */
+export { extractViscosity as classifyOilViscosity } from '../telegram/motor-oil-catalog';
+
+/**
  * Best subcategory for `text`, scoped to `rootHint` first when given.
  * Returns null when no keyword matches.
+ *
+ * VISCOSITY IS NOT A SUBCATEGORY. The three `motor-oil-5w*` rules were removed
+ * with their categories; use {@link classifyOilViscosity} for the grade. A
+ * motor-oil listing therefore classifies to `transmission-oil` or to nothing,
+ * and "nothing" correctly leaves it on `motor-oil`.
  */
 export function classifySubcategory(
   text: string,

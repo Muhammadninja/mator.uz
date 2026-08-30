@@ -142,12 +142,15 @@ export const TAXONOMY: RootGroup[] = [
     friendlySlug: 'oil-motor',
     parentId: 'motor-oil',
     parentName: 'Моторные масла',
-    subs: [
-      { name: 'Масло 5W-30', slug: 'motor-oil-5w30' },
-      { name: 'Масло 5W-40', slug: 'motor-oil-5w40' },
-      { name: 'Масло 10W-40', slug: 'motor-oil-10w40' },
-      { name: 'Трансмиссионное масло', slug: 'transmission-oil' },
-    ],
+    // NO VISCOSITY NODES. "Масло 5W-30" and its siblings were retired (see
+    // migrations/20260830020000_retire_viscosity_categories): a SAE grade is an
+    // ATTRIBUTE of a listing (Product.oilViscosity), not a place in the tree —
+    // one 5W-40 may be synthetic and another mineral, and it is the oil TYPE,
+    // not the grade, that decides the MXIK. Re-adding one here would recreate
+    // the very rows that migration deletes.
+    //
+    // Transmission oil stays: it is a product TYPE, not a grade.
+    subs: [{ name: 'Трансмиссионное масло', slug: 'transmission-oil' }],
   },
   {
     friendlySlug: 'other',

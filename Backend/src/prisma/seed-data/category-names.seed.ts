@@ -329,13 +329,9 @@ export const CATEGORY_NAMES: Readonly<Record<string, CategoryNames>> = {
   'seat-covers': { ru: 'Чехлы', uz: 'Chexollar', en: 'Seat Covers' },
 
   // ── Motor oil ─────────────────────────────────────────────────────────────
-  'motor-oil-5w30': { ru: 'Масло 5W-30', uz: '5W-30 moy', en: '5W-30 Oil' },
-  'motor-oil-5w40': { ru: 'Масло 5W-40', uz: '5W-40 moy', en: '5W-40 Oil' },
-  'motor-oil-10w40': {
-    ru: 'Масло 10W-40',
-    uz: '10W-40 moy',
-    en: '10W-40 Oil',
-  },
+  // The per-viscosity entries ('motor-oil-5w30' …) were removed with the
+  // categories themselves: a SAE grade is Product.oilViscosity, not a node in
+  // the tree. Transmission oil is a product TYPE and keeps its names.
   'transmission-oil': {
     ru: 'Трансмиссионное масло',
     uz: 'Transmissiya moyi',

@@ -59,6 +59,14 @@ export const CategoryAnchor = {
    * MXIK / package codes come from that node's own fiscal columns.
    */
   ANTIFREEZE: 'antifreeze',
+  /**
+   * Transmission oil — a child of {@link CategoryAnchor.MOTOR_OIL} and the ONE
+   * category the oil-type screen offers beside the three OIL_TYPES. It is a
+   * product TYPE, not a base composition and not a viscosity, so a listing filed
+   * here carries NO oilType and is fiscalized from this node's own MXIK /
+   * package codes — never from the motor-oil codes, which are per oil type.
+   */
+  TRANSMISSION_OIL: 'transmission-oil',
 } as const;
 
 /**

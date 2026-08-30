@@ -874,6 +874,9 @@ describe('buildSessionFromDraft', () => {
       // resumed dialogue is standing on.
       categoryOptionsParentId: null,
       categoryStepPending: false,
+      // Re-loaded from the live tree when OIL_TYPE is next rendered, never
+      // restored from the draft (see buildSessionFromDraft).
+      transmissionOption: null,
       // No sale form was answered, so the question is not on this dialogue's
       // path either — the category's single package code applies.
       packageForm: null,

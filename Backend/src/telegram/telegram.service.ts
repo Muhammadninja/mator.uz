@@ -72,6 +72,7 @@ import {
   WIZ_OTHER_CATEGORY_ACTION,
   WIZ_OIL_VISCOSITY_ACTION,
   WIZ_OIL_TYPE_ACTION,
+  WIZ_TRANSMISSION_OIL_ACTION,
   WIZ_OIL_VOLUME_ACTION,
   WIZ_ANTIFREEZE_WEIGHT_ACTION,
   WIZ_BACK_ACTION,
@@ -90,6 +91,7 @@ import {
   selectOilViscosity,
   inputOilViscosity,
   selectOilType,
+  selectTransmissionOil,
   selectOilVolume,
   inputOilVolume,
   selectAntifreezeWeight,
@@ -372,6 +374,10 @@ export function buildSessionFromDraft(
     // A resumed draft is past its category questions when it already has a
     // category; anything further is re-asked from the live tree.
     categoryStepPending: false,
+    // Re-loaded from the live tree when the OIL_TYPE step is next rendered, for
+    // the same reason categoryOptions is: a resumed session must never carry a
+    // category snapshot taken before an admin renamed or deactivated it.
+    transmissionOption: null,
     // The seller's answered sale form is PRESERVED across a resume/edit — the
     // category has not changed, so neither has the question's answer.
     packageForm: draft.packageForm,
@@ -765,6 +771,35 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     this.bot.action(WIZ_OIL_TYPE_ACTION, async (ctx) => {
       await this.handleWizardAction(ctx, (session) =>
         selectOilType(session, Number(ctx.match[1])),
+      );
+    });
+
+    // "Трансмиссионное масло" on the oil-type screen. Re-validated against the
+    // live tree exactly like a category-step tap — the button is a category, so
+    // a node deactivated while the keyboard sat in the chat must be rejected
+    // rather than filed against. Its parent MUST be motor-oil, which is what
+    // stops a stale keyboard from filing the listing under a foreign node.
+    this.bot.action(WIZ_TRANSMISSION_OIL_ACTION, async (ctx) => {
+      const category = await this.selectableCategory(
+        CategoryAnchor.TRANSMISSION_OIL,
+        CategoryAnchor.MOTOR_OIL,
+      );
+      if (!category) {
+        await this.rejectStaleCategoryTap(ctx);
+        return;
+      }
+      const session = ctx.from ? this.wizard.get(ctx.from.id) : undefined;
+      const option = {
+        id: category.id,
+        name: localizedCategoryName(
+          category,
+          session?.lang ?? DEFAULT_APP_LANG,
+        ),
+        vehicleCategoryEnum: null,
+        mainCategoryEnum: MAIN_CATEGORY_BY_SLUG.get(category.id) ?? null,
+      };
+      await this.handleWizardAction(ctx, (s) =>
+        selectTransmissionOil(s, option, category),
       );
     });
 
@@ -2173,8 +2208,48 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       case WizardStep.SUBCATEGORY:
         await this.openCategoryLevel(session, session.categoryOptionsParentId);
         return;
+      // The oil-type screen is not a category level — it offers the three
+      // OIL_TYPES — but it carries ONE category button ("Трансмиссионное
+      // масло"), which is loaded from the live tree here for the same reason
+      // every other option is: an admin may rename or deactivate that node, and
+      // the button must reflect the tree rather than a constant in the code.
+      case WizardStep.OIL_TYPE:
+        session.transmissionOption = await this.loadTransmissionOption(
+          session.lang,
+        );
+        return;
       default:
         return;
+    }
+  }
+
+  /**
+   * The `transmission-oil` category as a pickable option, or null when it is
+   * missing or deactivated.
+   *
+   * Read through the same cached tree as every category step. Returning null (as
+   * a load failure also does) simply drops the button: the seller then sees the
+   * three oil types, which is a coherent screen — strictly better than a button
+   * whose category cannot be resolved when tapped.
+   */
+  private async loadTransmissionOption(
+    lang: AppLang,
+  ): Promise<CategoryOption | null> {
+    try {
+      const options = await this.loadCategoryOptions(
+        CategoryAnchor.MOTOR_OIL,
+        lang,
+      );
+      return (
+        options.find((o) => o.id === CategoryAnchor.TRANSMISSION_OIL) ?? null
+      );
+    } catch (err) {
+      this.logger.warn(
+        `Could not load the transmission-oil option: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return null;
     }
   }
 

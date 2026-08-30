@@ -35,7 +35,9 @@
     "admin:create": "ts-node --compiler-options '{\"module\":\"commonjs\"}' scripts/create-admin.ts",
     "blueprint:graph": "ts-node --compiler-options '{\"module\":\"commonjs\"}' scripts/parse-schema.ts",
     "payme:fixture": "ts-node --compiler-options '{\"module\":\"commonjs\"}' scripts/create-payme-test-fixture.ts",
-    "qa:sourcing": "bash scripts/qa/ai-sourcing-smoke.sh"
+    "qa:sourcing": "bash scripts/qa/ai-sourcing-smoke.sh",
+    "report:viscosity-categories": "ts-node --compiler-options '{\"module\":\"commonjs\"}' prisma/report-viscosity-categories.ts",
+    "migrate:viscosity-categories": "ts-node --compiler-options '{\"module\":\"commonjs\"}' prisma/migrate-viscosity-categories.ts"
   },
   "prisma": {
     "seed": "ts-node --compiler-options {\"module\":\"commonjs\"} src/prisma/seed.ts"

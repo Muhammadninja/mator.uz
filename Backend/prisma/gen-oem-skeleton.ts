@@ -68,9 +68,9 @@ const SUBCATEGORIES: Array<{ slug: string; ru: string }> = [
   { slug: 'skid-plates', ru: 'Защита картера' },
   { slug: 'wind-deflectors-mudflaps', ru: 'Ветровики и брызговики' },
   { slug: 'seat-covers', ru: 'Чехлы' },
-  { slug: 'motor-oil-5w30', ru: 'Масло 5W-30' },
-  { slug: 'motor-oil-5w40', ru: 'Масло 5W-40' },
-  { slug: 'motor-oil-10w40', ru: 'Масло 10W-40' },
+  // No per-viscosity rows: those categories were retired (a SAE grade is
+  // Product.oilViscosity, not a node). seed:oem:csv skips a row whose category
+  // slug does not exist, so any old CSV still naming one is simply ignored.
   { slug: 'transmission-oil', ru: 'Трансмиссионное масло' },
   { slug: 'fasteners-and-clips', ru: 'Крепеж и клипсы' },
   { slug: 'wiper-blades', ru: 'Щетки стеклоочистителя' },

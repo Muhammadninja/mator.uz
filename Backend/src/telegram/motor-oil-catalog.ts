@@ -68,6 +68,29 @@ export function normalizeViscosity(raw: string): string | null {
   return normalized.length <= OIL_VISCOSITY_MAX ? normalized : null;
 }
 
+/**
+ * Pull a SAE grade OUT of free listing text ("Mobil 1 5W-40 4л" → "5W-40").
+ *
+ * The companion to {@link normalizeViscosity}, which validates a string that is
+ * ALREADY meant to be a grade (what the wizard's free-text step receives). This
+ * one scans prose, and exists because a grade used to be recorded by filing the
+ * listing under a "Масло 5W-30" CATEGORY. Those categories are gone — a grade is
+ * an attribute — so the same keywords now have to yield the attribute instead.
+ *
+ * Deliberately conservative: it matches a grade only on a token boundary, so a
+ * part number that happens to contain "5W40" is not read as a viscosity. Returns
+ * the canonical display form, or null when the text names no grade — never a
+ * guess, and never a default.
+ */
+export function extractViscosity(text: string): string | null {
+  // \b would not fire between a digit and a preceding letter (e.g. "W5W30"), so
+  // the boundaries are stated explicitly as "not an alphanumeric".
+  const match = /(?:^|[^a-z0-9])(\d{1,2}\s*W\s*-?\s*\d{1,2})(?:$|[^a-z0-9])/i.exec(
+    text,
+  );
+  return match ? normalizeViscosity(match[1]) : null;
+}
+
 // ── Oil type (base composition) ─────────────────────────────────────────────
 // Button order; the labels themselves come from the shared vocabulary, so the
 // wizard and the buyer catalog can never disagree about what a type is called.
