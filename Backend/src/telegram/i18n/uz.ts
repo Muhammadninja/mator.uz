@@ -86,6 +86,7 @@ export const UZ: BotStrings = {
   'preview.viscosity': 'Qovushqoqlik',
   'preview.oilType': 'Moy turi',
   'preview.volume': 'Hajmi',
+  'preview.weight': 'Og‘irligi',
   'preview.universalVehicle': 'Barcha avtomobillar (universal detal)',
   'confirm.nothingPending':
     '⌛ Tasdiqlash uchun mahsulot yo‘q (vaqt tugagan bo‘lishi mumkin). Boshidan boshlash uchun /start ni bosing.',
@@ -98,6 +99,8 @@ export const UZ: BotStrings = {
   'btn.back': '⬅️ Orqaga',
   'btn.skip': '⏭ O‘tkazib yuborish',
   'btn.other': 'Boshqa',
+  'btn.kind.motorOil': '🛢 Motor moyi',
+  'btn.kind.antifreeze': '🧊 Antifriz',
   'btn.continue': '▶️ Davom etish',
   'btn.startOver': '🆕 Boshidan boshlash',
   'btn.retry': '🔁 Qayta urinish',
@@ -115,6 +118,7 @@ export const UZ: BotStrings = {
   'step.model': '🚗 Marka: {brand}.\nEndi modelni tanlang:',
   'step.category': '🗂 Ehtiyot qism turkumini tanlang:',
   'step.subcategory': '🗂 Ichki turkumni tanlang:',
+  'step.otherKind': '🛒 Nima sotyapsiz?',
   'step.otherCategory': '🗂 Mahsulot turkumini tanlang:',
   'step.packageForm': '📦 Mahsulot qanday sotiladi?',
   'step.oilViscosity': '🛢 Moy qovushqoqligini tanlang:',
@@ -122,8 +126,17 @@ export const UZ: BotStrings = {
   'step.oilType': '🛢 Moy turini tanlang:',
   'step.oilVolume': '🛢 Hajmini tanlang:',
   'step.oilVolumeCustom': '🛢 Hajmini litrda kiriting.\nMasalan: 3',
+  'step.antifreezeWeight': '⚖️ Qadoq og‘irligini tanlang (kg):',
+  'step.antifreezeWeightCustom':
+    '⚖️ Og‘irligini kilogrammda kiriting.\nMasalan: 2.5 yoki 10',
   'step.title.sparePart':
     '✏️ Mahsulot nomini kiriting.\nMasalan: Old amortizator',
+  'step.title.antifreeze':
+    '✏️ Mahsulot nomini kiriting.\n' +
+    'Masalan:\n' +
+    '• Felix Carbox G12 qizil\n' +
+    '• Coolstream A-110\n' +
+    '• Antifriz G11 yashil',
   'step.title.motorOil':
     '✏️ Mahsulot nomini kiriting.\n' +
     'Masalan:\n' +
@@ -142,6 +155,8 @@ export const UZ: BotStrings = {
     '❌ Qovushqoqlikni aniqlab bo‘lmadi. Uni 5W-30 ko‘rinishida kiriting (masalan: 0W-16 yoki 20W-50).',
   'invalid.volume':
     '❌ Hajmni aniqlab bo‘lmadi. Uni litrda kiriting, masalan: 3 yoki 0,5',
+  'invalid.weight':
+    '❌ Og‘irlikni aniqlab bo‘lmadi. Uni kilogrammda kiriting, masalan: 2,5 yoki 10',
   'invalid.titleIsCommand':
     '❌ Bu buyruqqa o‘xshaydi. Mahsulot nomini matn sifatida kiriting.',
   'invalid.titleTooShort':

@@ -80,6 +80,7 @@ export const EN: BotStrings = {
   'preview.viscosity': 'Viscosity',
   'preview.oilType': 'Oil type',
   'preview.volume': 'Volume',
+  'preview.weight': 'Weight',
   'preview.universalVehicle': 'All vehicles (universal part)',
   'confirm.nothingPending':
     '⌛ There is no product to confirm (it may have expired). Press /start to begin again.',
@@ -93,6 +94,8 @@ export const EN: BotStrings = {
   'btn.back': '⬅️ Back',
   'btn.skip': '⏭ Skip',
   'btn.other': 'Other',
+  'btn.kind.motorOil': '🛢 Motor oil',
+  'btn.kind.antifreeze': '🧊 Antifreeze',
   'btn.continue': '▶️ Continue',
   'btn.startOver': '🆕 Start over',
   'btn.retry': '🔁 Retry',
@@ -110,6 +113,7 @@ export const EN: BotStrings = {
   'step.model': '🚗 Brand: {brand}.\nNow choose the model:',
   'step.category': '🗂 Choose the part category:',
   'step.subcategory': '🗂 Choose the subcategory:',
+  'step.otherKind': '🛒 What are you selling?',
   'step.otherCategory': '🗂 Choose the product category:',
   'step.packageForm': '📦 How is the product sold?',
   'step.oilViscosity': '🛢 Choose the oil viscosity:',
@@ -117,8 +121,17 @@ export const EN: BotStrings = {
   'step.oilType': '🛢 Choose the oil type:',
   'step.oilVolume': '🛢 Choose the volume:',
   'step.oilVolumeCustom': '🛢 Enter the volume in litres.\nExample: 3',
+  'step.antifreezeWeight': '⚖️ Choose the package weight (kg):',
+  'step.antifreezeWeightCustom':
+    '⚖️ Enter the weight in kilograms.\nExamples: 2.5 or 10',
   'step.title.sparePart':
     '✏️ Enter the product title.\nExample: Front shock absorber',
+  'step.title.antifreeze':
+    '✏️ Enter the product name.\n' +
+    'Examples:\n' +
+    '• Felix Carbox G12 red\n' +
+    '• Coolstream A-110\n' +
+    '• Antifreeze G11 green',
   'step.title.motorOil':
     '✏️ Enter the product title.\n' +
     'Examples:\n' +
@@ -135,6 +148,8 @@ export const EN: BotStrings = {
     '❌ Could not read the viscosity. Enter it in the 5W-30 format (for example: 0W-16 or 20W-50).',
   'invalid.volume':
     '❌ Could not read the volume. Enter it in litres, for example: 3 or 0.5',
+  'invalid.weight':
+    '❌ Could not read the weight. Enter it in kilograms, for example: 2.5 or 10',
   'invalid.titleIsCommand':
     '❌ That looks like a command. Enter the product title as text.',
   'invalid.titleTooShort':

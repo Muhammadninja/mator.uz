@@ -186,6 +186,32 @@ describe('isFiscalizedByOilType', () => {
       }),
     ).toBe(false);
   });
+
+  it('leaves ANTIFREEZE on the category path — it has its own IKPU', () => {
+    // The `antifreeze` node is an ordinary leaf under maintenance-and-fluids, so
+    // its listings are fiscalized from ITS columns. Reporting it as
+    // oil-fiscalized would tell the admin console it needs no codes, and its
+    // products would then resolve to a motor-oil MXIK.
+    expect(
+      isFiscalizedByOilType({
+        id: 'antifreeze',
+        parentId: 'maintenance-and-fluids',
+      }),
+    ).toBe(false);
+  });
+});
+
+describe('the three oil codes are exactly the ones the registry issued', () => {
+  // Pinned literally, not derived: the whole point of the table is that the
+  // synthetic code can never end up on a mineral oil, so a typo here must fail
+  // loudly rather than be re-derived from the same source it is checking.
+  it.each([
+    [OilType.SYNTHETIC, '02710005001000000', '1282037'],
+    [OilType.SEMI_SYNTHETIC, '02710005002000000', '1282031'],
+    [OilType.MINERAL, '02710005003000000', '1282581'],
+  ])('%s → %s / %s', (type, mxik, packageCode) => {
+    expect(resolveOilFiscalCodes(type)).toEqual({ mxik, packageCode });
+  });
 });
 
 describe('formats', () => {

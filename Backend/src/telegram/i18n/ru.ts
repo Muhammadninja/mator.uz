@@ -81,6 +81,7 @@ export const RU: BotStrings = {
   'preview.viscosity': 'Вязкость',
   'preview.oilType': 'Тип масла',
   'preview.volume': 'Объём',
+  'preview.weight': 'Вес',
   'preview.universalVehicle': 'Все автомобили (универсальная деталь)',
   'confirm.nothingPending':
     '⌛ Нет товара для подтверждения (возможно, время истекло). Нажмите /start, чтобы начать заново.',
@@ -93,6 +94,8 @@ export const RU: BotStrings = {
   'btn.back': '⬅️ Назад',
   'btn.skip': '⏭ Пропустить',
   'btn.other': 'Другое',
+  'btn.kind.motorOil': '🛢 Моторное масло',
+  'btn.kind.antifreeze': '🧊 Антифриз',
   'btn.continue': '▶️ Продолжить',
   'btn.startOver': '🆕 Начать заново',
   'btn.retry': '🔁 Повторить',
@@ -110,6 +113,7 @@ export const RU: BotStrings = {
   'step.model': '🚗 Марка: {brand}.\nТеперь выберите модель:',
   'step.category': '🗂 Выберите категорию запчасти:',
   'step.subcategory': '🗂 Выберите подкатегорию:',
+  'step.otherKind': '🛒 Что продаёте?',
   'step.otherCategory': '🗂 Выберите категорию товара:',
   'step.packageForm': '📦 Как продаётся товар?',
   'step.oilViscosity': '🛢 Выберите вязкость масла:',
@@ -117,8 +121,17 @@ export const RU: BotStrings = {
   'step.oilType': '🛢 Выберите тип масла:',
   'step.oilVolume': '🛢 Выберите объём:',
   'step.oilVolumeCustom': '🛢 Введите объём в литрах.\nПример: 3',
+  'step.antifreezeWeight': '⚖️ Выберите вес упаковки (кг):',
+  'step.antifreezeWeightCustom':
+    '⚖️ Введите вес в килограммах.\nПримеры: 2.5 или 10',
   'step.title.sparePart':
     '✏️ Введите название товара.\nПример: Передний амортизатор',
+  'step.title.antifreeze':
+    '✏️ Введите название товара.\n' +
+    'Примеры:\n' +
+    '• Felix Carbox G12 красный\n' +
+    '• Coolstream A-110\n' +
+    '• Антифриз G11 зелёный',
   'step.title.motorOil':
     '✏️ Введите название товара.\n' +
     'Примеры:\n' +
@@ -136,6 +149,8 @@ export const RU: BotStrings = {
     '❌ Не удалось распознать вязкость. Введите её в формате 5W-30 (например: 0W-16 или 20W-50).',
   'invalid.volume':
     '❌ Не удалось распознать объём. Введите его в литрах, например: 3 или 0,5',
+  'invalid.weight':
+    '❌ Не удалось распознать вес. Введите его в килограммах, например: 2,5 или 10',
   'invalid.titleIsCommand':
     '❌ Это похоже на команду. Введите название товара текстом.',
   'invalid.titleTooShort':

@@ -799,13 +799,17 @@ describe('photos-first entry', () => {
         'PACKAGE_FORM',
         'PART_NUMBER_TYPE',
         'PART_NUMBER',
-        // "Другое" branch: the menu, then the motor-oil questionnaire.
+        // "Другое" branch: the kind question, the oil menu, then each kind's
+        // own questionnaire.
+        'OTHER_KIND',
         'OTHER_CATEGORY',
         'OIL_VISCOSITY',
         'OIL_VISCOSITY_CUSTOM',
         'OIL_TYPE',
         'OIL_VOLUME',
         'OIL_VOLUME_CUSTOM',
+        'ANTIFREEZE_WEIGHT',
+        'ANTIFREEZE_WEIGHT_CUSTOM',
         // Shared tail.
         'TITLE',
         'DESCRIPTION',

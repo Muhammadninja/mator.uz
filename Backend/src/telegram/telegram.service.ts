@@ -67,10 +67,12 @@ import {
   WIZ_DESCRIPTION_SKIP,
   WIZ_PART_NUMBER_TYPE_ACTION,
   WIZ_OTHER_BRAND_ACTION,
+  WIZ_OTHER_KIND_ACTION,
   WIZ_OTHER_CATEGORY_ACTION,
   WIZ_OIL_VISCOSITY_ACTION,
   WIZ_OIL_TYPE_ACTION,
   WIZ_OIL_VOLUME_ACTION,
+  WIZ_ANTIFREEZE_WEIGHT_ACTION,
   WIZ_BACK_ACTION,
   WIZ_ANY_ACTION,
   isStaleCatalogPayload,
@@ -78,6 +80,7 @@ import {
   staleCategoryMessage,
   selectBrand,
   selectOtherBrand,
+  selectOtherKind,
   selectOtherCategory,
   selectModel,
   selectCategory,
@@ -88,6 +91,10 @@ import {
   selectOilType,
   selectOilVolume,
   inputOilVolume,
+  selectAntifreezeWeight,
+  inputAntifreezeWeight,
+  OTHER_KIND_BY_WIRE,
+  isCategoryLevelStep,
   inputTitle,
   inputDescription,
   skipDescription,
@@ -100,8 +107,9 @@ import {
   previewLines,
   isUniversalFor,
 } from './product-wizard';
-import type { CategoryOption } from './product-wizard';
+import type { CategoryOption, CategoryAnchorSelection } from './product-wizard';
 import {
+  ANTIFREEZE_ROOT_ID,
   CATEGORY_ID_TO_KIND,
   CategoryAnchor,
   MAIN_CATEGORY_BY_SLUG,
@@ -112,6 +120,7 @@ import {
   type CategoryRow,
 } from '../catalog/categories/part-category.service';
 import { OIL_VISCOSITIES, OIL_VOLUMES } from './motor-oil-catalog';
+import { ANTIFREEZE_WEIGHTS } from './antifreeze-catalog';
 import { WIZARD_CATEGORIES } from './wizard-catalog';
 import {
   LANG_ACTION,
@@ -250,6 +259,9 @@ interface PendingProduct {
   oilViscosity: string | null;
   oilType: OilType | null;
   oilVolumeMl: number | null;
+  /** ANTIFREEZE attribute — packaged net weight in GRAMS; null for every other
+   *  kind. Kilograms are what the seller typed; grams are what is stored. */
+  antifreezeWeightG: number | null;
   processedUrls: string[];
   /** Cloudinary public_ids of the uploaded preview assets, for cleanup on
    *  cancel/expiry/replacement (kept on successful confirmation). */
@@ -330,6 +342,7 @@ export function buildSessionFromDraft(
     oilViscosity: string | null;
     oilType: OilType | null;
     oilVolumeMl: number | null;
+    antifreezeWeightG: number | null;
     priceUzs: Decimal | null;
   },
   step: WizardStep,
@@ -352,6 +365,9 @@ export function buildSessionFromDraft(
     // Options are re-loaded when a category step is (re-)rendered, so a resumed
     // session starts with none rather than a stale snapshot of the tree.
     categoryOptions: [],
+    // Nor does it remember WHICH level was last offered: a resumed dialogue
+    // re-derives that from the step it is standing on (see openCategoryLevel).
+    categoryOptionsParentId: null,
     // A resumed draft is past its category questions when it already has a
     // category; anything further is re-asked from the live tree.
     categoryStepPending: false,
@@ -384,6 +400,16 @@ export function buildSessionFromDraft(
     volumeIsCustom:
       draft.oilVolumeMl !== null &&
       !OIL_VOLUMES.some((v) => v.value === draft.oilVolumeMl),
+    antifreezeWeightG: draft.antifreezeWeightG,
+    // Same rule as the two above: recomputed from the stored value rather than
+    // persisted, since a weight that is not one of the presets is exactly what
+    // the free-text branch produces.
+    // `!= null`, so a row read without the column (a partial select, or one
+    // fetched before the migration landed) reads as "no weight" rather than as
+    // a value that matches no preset and therefore looks hand-typed.
+    weightIsCustom:
+      draft.antifreezeWeightG != null &&
+      !ANTIFREEZE_WEIGHTS.some((w) => w.value === draft.antifreezeWeightG),
     // Decimal → number: the wizard collects price as an integer sum, so the
     // draft's Decimal has no fractional part.
     price: draft.priceUzs ? draft.priceUzs.toNumber() : null,
@@ -646,11 +672,16 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     this.bot.action(WIZ_SUBCATEGORY_ACTION, async (ctx) => {
       const categoryId = ctx.match[1];
       const session = ctx.from ? this.wizard.get(ctx.from.id) : undefined;
-      // A deeper pick must still hang off the category the seller is standing
-      // on, so the parent is pinned to the session's current node — a stale
-      // keyboard from a DIFFERENT branch cannot select a foreign subcategory
-      // even when the id itself is a real, active category.
-      const expectedParent = session?.categoryId ?? null;
+      // A deeper pick must still hang off the LEVEL the seller is standing on,
+      // so the parent is pinned to the node whose children were offered — a
+      // stale keyboard from a DIFFERENT branch cannot select a foreign
+      // subcategory even when the id itself is a real, active category.
+      //
+      // Read from `categoryOptionsParentId`, NOT from `categoryId`: the two
+      // agree while walking forward, but after a "⬅️ Назад" back onto this step
+      // `categoryId` holds the node the seller PICKED, and pinning the parent to
+      // that would reject every option on the re-rendered keyboard as stale.
+      const expectedParent = session?.categoryOptionsParentId ?? null;
       const category = await this.selectableCategory(categoryId, expectedParent);
       if (!category) {
         await this.rejectStaleCategoryTap(ctx);
@@ -675,10 +706,27 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       );
     });
 
-    // ── "Другое": leave the spare-parts flow and pick another category ───────
+    // ── "Другое": leave the spare-parts flow and pick what is being sold ─────
     this.bot.action(WIZ_OTHER_BRAND_ACTION, async (ctx) => {
       await this.handleWizardAction(ctx, (session) =>
         selectOtherBrand(session),
+      );
+    });
+
+    // "Что продаёте?" — the KIND question. Motor oil goes on to pick its
+    // taxonomy from the admin-managed "Другое" menu; antifreeze has a FIXED
+    // category (the existing `antifreeze` node), so that node is read from the
+    // live tree here and handed to the transition — which is also where its
+    // package codes come from, exactly like any other category pick.
+    this.bot.action(WIZ_OTHER_KIND_ACTION, async (ctx) => {
+      const kind = OTHER_KIND_BY_WIRE[ctx.match[1]];
+      if (!kind) return; // shape-checked by the regex; defensive only
+      const anchor =
+        kind === ProductKind.ANTIFREEZE
+          ? await this.loadAntifreezeAnchor()
+          : null;
+      await this.handleWizardAction(ctx, (session) =>
+        selectOtherKind(session, kind, anchor),
       );
     });
 
@@ -723,6 +771,19 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       const choice = ctx.match[1];
       await this.handleWizardAction(ctx, (session) =>
         selectOilVolume(
+          session,
+          choice === 'custom' ? 'custom' : Number(choice),
+        ),
+      );
+    });
+
+    // ── Antifreeze step ─────────────────────────────────────────────────────
+    // The packaged weight: an index into ANTIFREEZE_WEIGHTS, or "custom" for the
+    // free-text (fractional kilograms) branch.
+    this.bot.action(WIZ_ANTIFREEZE_WEIGHT_ACTION, async (ctx) => {
+      const choice = ctx.match[1];
+      await this.handleWizardAction(ctx, (session) =>
+        selectAntifreezeWeight(
           session,
           choice === 'custom' ? 'custom' : Number(choice),
         ),
@@ -790,6 +851,9 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
           break;
         case WizardStep.OIL_VOLUME_CUSTOM:
           result = inputOilVolume(session, msg.text);
+          break;
+        case WizardStep.ANTIFREEZE_WEIGHT_CUSTOM:
+          result = inputAntifreezeWeight(session, msg.text);
           break;
         case WizardStep.PRICE:
           result = inputPrice(session, msg.text);
@@ -1375,6 +1439,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       oilViscosity: draft.oilViscosity,
       oilType: draft.oilType,
       oilVolumeMl: draft.oilVolumeMl,
+      antifreezeWeightG: draft.antifreezeWeightG,
       processedUrls: delivery.processedUrls,
       publicIds: delivery.publicIds,
       price: new Decimal(draft.priceUzs as Decimal),
@@ -2062,33 +2127,99 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Make sure a session standing on the CATEGORY step has the ROOT categories
-   * loaded before its keyboard is built. The deeper levels are already loaded by
-   * the tap that opened them, and every other step needs nothing — so this only
-   * fires for the root step (including after a "⬅️ Назад" back onto it, which is
-   * why it lives here rather than at the single point of entry).
+   * Load the options of EVERY category step before its keyboard is built.
+   *
+   * This runs on every render of such a step — the first time it is opened AND
+   * after a "⬅️ Назад" back onto it. Reloading is not an optimization detail: a
+   * pick REPLACES `categoryOptions` with the next level's list (or empties it at
+   * a leaf), so a step returned to would otherwise render the wrong buttons, or
+   * — the reported bug — none at all. The list is therefore never reused across
+   * a step boundary; it is re-read from the live tree, which also picks up any
+   * admin change made while the seller was deeper in the flow.
+   *
+   * Which level to load is read from `categoryOptionsParentId` for the deeper
+   * steps and is a constant for the other two: the ROOT level (null) for
+   * CATEGORY, and the `other` root for the "Другое" menu.
+   */
+  private async ensureCategoryOptions(session: WizardSession): Promise<void> {
+    switch (session.step) {
+      case WizardStep.CATEGORY:
+        await this.openCategoryLevel(session, null);
+        return;
+      // The "Другое" menu is the admin-managed children of the `other` root, so
+      // it is loaded from the same tree as every other category step rather than
+      // from a hardcoded list — an admin adding a category makes it appear here
+      // on the next render, with no redeploy.
+      case WizardStep.OTHER_CATEGORY:
+        await this.openCategoryLevel(session, CategoryAnchor.OTHER);
+        return;
+      // A deeper level: whose children to show is remembered on the session,
+      // because `categoryId` has by then moved to the node that was PICKED and
+      // would yield that node's own children (or none) instead of the level the
+      // seller is standing on.
+      case WizardStep.SUBCATEGORY:
+        await this.openCategoryLevel(session, session.categoryOptionsParentId);
+        return;
+      default:
+        return;
+    }
+  }
+
+  /**
+   * (Re-)open ONE category level: load `parentId`'s children (the roots when
+   * null), and record on the session both the list and the level it belongs to,
+   * so a tap can be re-validated against the right parent and a later "⬅️ Назад"
+   * can re-open exactly this level.
+   *
+   * `categoryStepPending` follows the list: a level with options is a question
+   * the seller still owes an answer to, whatever it was before they walked back.
+   * That is what stops a step from staying marked as settled while it is being
+   * asked again.
    *
    * A load failure leaves the options empty rather than throwing: the seller then
    * sees the step with only "Назад" instead of the bot dying mid-dialogue.
    */
-  private async ensureCategoryOptions(session: WizardSession): Promise<void> {
-    if (session.step === WizardStep.CATEGORY) {
-      session.categoryOptions = await this.loadCategoryOptions(
-        null,
-        session.lang,
+  private async openCategoryLevel(
+    session: WizardSession,
+    parentId: string | null,
+  ): Promise<void> {
+    session.categoryOptions = await this.loadCategoryOptions(
+      parentId,
+      session.lang,
+    );
+    session.categoryOptionsParentId = parentId;
+    session.categoryStepPending = session.categoryOptions.length > 0;
+  }
+
+  /**
+   * The category an ANTIFREEZE listing is filed under, read from the LIVE tree:
+   * the `antifreeze` node, the root it hangs under, and its package codes (which
+   * decide whether the sale-form question follows).
+   *
+   * Returns null when the node is missing or deactivated — the listing then
+   * carries no category ids, exactly as a motor oil did before the dynamic tree
+   * existed, rather than pointing at a category that is not there. Its MXIK is
+   * then reported as a gap at fiscalization time instead of being invented,
+   * which is the same rule every other unconfigured category follows.
+   */
+  private async loadAntifreezeAnchor(): Promise<CategoryAnchorSelection | null> {
+    const category = await this.selectableCategory(
+      CategoryAnchor.ANTIFREEZE,
+      ANTIFREEZE_ROOT_ID,
+    );
+    if (!category) {
+      this.logger.warn(
+        `Antifreeze anchor category "${CategoryAnchor.ANTIFREEZE}" is missing ` +
+          `or inactive under "${ANTIFREEZE_ROOT_ID}" — the listing will carry ` +
+          'no category ids.',
       );
-      return;
+      return null;
     }
-    // The "Другое" menu is the admin-managed children of the `other` root, so it
-    // is loaded from the same tree as every other category step rather than from
-    // a hardcoded list — an admin adding a category makes it appear here on the
-    // next render, with no redeploy.
-    if (session.step === WizardStep.OTHER_CATEGORY) {
-      session.categoryOptions = await this.loadCategoryOptions(
-        CategoryAnchor.OTHER,
-        session.lang,
-      );
-    }
+    return {
+      vehicleCategoryId: ANTIFREEZE_ROOT_ID,
+      categoryId: category.id,
+      fiscal: category,
+    };
   }
 
   /**
@@ -2704,9 +2835,14 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     oilViscosity: string | null;
     oilType: OilType | null;
     oilVolumeMl: number | null;
+    antifreezeWeightG: number | null;
     mainCategory?: PartMainCategory;
     vehicleCategory?: PartVehicleCategory;
   } {
+    // Every branch states EVERY attribute column, so no value of a kind the
+    // listing no longer is can survive the upsert's update branch. Written out
+    // per case (rather than spread from a "blank" object) so the compiler still
+    // reports a missing column in each one.
     switch (listing.kind) {
       case ProductKind.MOTOR_OIL:
         return {
@@ -2714,10 +2850,28 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
           oilViscosity: listing.oilViscosity,
           oilType: listing.oilType,
           oilVolumeMl: listing.oilVolumeMl,
+          antifreezeWeightG: null,
           // A motor oil's taxonomy is known from the kind itself, so both
           // category columns are stated rather than classified — this is what
           // makes an oil filterable in the buyer catalog even though its
           // questionnaire never asked a category question.
+          mainCategory: PartMainCategory.OIL_AND_FLUIDS,
+          vehicleCategory: PartVehicleCategory.MAINTENANCE_AND_FLUIDS,
+        };
+      case ProductKind.ANTIFREEZE:
+        return {
+          kind: ProductKind.ANTIFREEZE,
+          // The oil columns are explicitly nulled: an antifreeze listing must
+          // NEVER carry an oilType, because that column is what selects an
+          // oil's MXIK / package code. A stray value there would fiscalize
+          // antifreeze under a motor-oil code.
+          oilViscosity: null,
+          oilType: null,
+          oilVolumeMl: null,
+          antifreezeWeightG: listing.antifreezeWeightG,
+          // Same rule as the oil above: the taxonomy follows from the kind, and
+          // it matches the `antifreeze` category the wizard files it under
+          // (a leaf of the maintenance-and-fluids root).
           mainCategory: PartMainCategory.OIL_AND_FLUIDS,
           vehicleCategory: PartVehicleCategory.MAINTENANCE_AND_FLUIDS,
         };
@@ -2727,6 +2881,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
           oilViscosity: null,
           oilType: null,
           oilVolumeMl: null,
+          antifreezeWeightG: null,
         };
     }
   }

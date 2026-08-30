@@ -1,14 +1,24 @@
-import { Prisma, CompatibilityStatus, ProductKind } from '@prisma/client';
+import {
+  Prisma,
+  CompatibilityStatus,
+  OilType,
+  ProductKind,
+} from '@prisma/client';
 import {
   AppLang,
   DEFAULT_APP_LANG,
   localizedCategoryName,
 } from '../../common/app-lang.util';
 import { OIL_TYPE_LABELS, formatVolume } from '../../common/motor-oil.util';
+import { formatWeight } from '../../common/antifreeze.util';
 import type { DiscountResult } from '../../sales/discount.service';
 // The kind capability table — the SINGLE source of truth for what a kind is.
 // The card must never re-derive these from a local `kind === MOTOR_OIL` check.
-import { hasCompatibility, hasPartNumbers } from '../../common/product-kind';
+import {
+  hasCompatibility,
+  hasPartNumbers,
+  unitOf,
+} from '../../common/product-kind';
 
 export const PART_INCLUDE = {
   brand: true,
@@ -86,32 +96,63 @@ export function computeCompatibility(
 }
 
 /**
- * The attributes peculiar to a part's KIND, or null when the kind has none of
- * its own. Nested under one key rather than spread across the item so a client
- * can switch on `kind` and read one object, and so a future kind adds a branch
- * here without widening every part's payload with more always-null fields.
+ * The attributes peculiar to a part's KIND — one key per kind that has any, each
+ * null unless the part IS that kind.
+ *
+ * Nested under a key rather than spread across the item so a client can switch
+ * on `kind` and read one object, and so a future kind adds a key here without
+ * widening every part's payload with more always-null fields. `motor_oil` keeps
+ * its exact existing shape: clients read it today, and a kind added later must
+ * not move an oil's attributes.
  *
  * Each value is returned both raw (for filtering/sorting) and as a display label
  * (`*_label`), matching how `price_uzs` / `price_label` already pair up.
  */
-function presentKindAttributes(part: PartWithRelations) {
+function presentKindAttributes(part: PartWithRelations): {
+  motor_oil: {
+    viscosity: string | null;
+    oil_type: OilType | null;
+    oil_type_label: string | null;
+    volume_ml: number | null;
+    volume_label: string | null;
+  } | null;
+  antifreeze: { weight_g: number | null; weight_label: string | null } | null;
+} {
+  const empty = { motor_oil: null, antifreeze: null };
   // Exhaustive switch, not an early `kind !== MOTOR_OIL` return: a future kind
   // with its own attributes would silently fall through that check and present
   // nothing. Here it fails to compile until its branch is written.
   switch (part.kind) {
     case ProductKind.MOTOR_OIL:
       return {
-        viscosity: part.oilViscosity,
-        oil_type: part.oilType,
-        oil_type_label: part.oilType ? OIL_TYPE_LABELS[part.oilType] : null,
-        volume_ml: part.oilVolumeMl,
-        volume_label:
-          part.oilVolumeMl !== null ? formatVolume(part.oilVolumeMl) : null,
+        ...empty,
+        motor_oil: {
+          viscosity: part.oilViscosity,
+          oil_type: part.oilType,
+          oil_type_label: part.oilType ? OIL_TYPE_LABELS[part.oilType] : null,
+          volume_ml: part.oilVolumeMl,
+          volume_label:
+            part.oilVolumeMl !== null ? formatVolume(part.oilVolumeMl) : null,
+        },
+      };
+    case ProductKind.ANTIFREEZE:
+      return {
+        ...empty,
+        antifreeze: {
+          // GRAMS on the wire (exact, sortable), with the "2.5 кг" label beside
+          // it — the same raw/label pairing the oil volume uses. A client shows
+          // the label and must never append "шт" to it: `unit` says KG.
+          weight_g: part.antifreezeWeightG,
+          weight_label:
+            part.antifreezeWeightG !== null
+              ? formatWeight(part.antifreezeWeightG)
+              : null,
+        },
       };
     case ProductKind.SPARE_PART:
       // A spare part's attributes are the shared ones (numbers, fitment,
       // category), already present at the top level of the item.
-      return null;
+      return empty;
   }
 }
 
@@ -161,10 +202,15 @@ export function presentPartItem(
   return {
     id: part.id,
     title: part.title,
-    // What this listing IS ('SPARE_PART' | 'MOTOR_OIL'). Drives which card the
-    // client renders; `motor_oil` below carries the oil-specific attributes.
+    // What this listing IS ('SPARE_PART' | 'MOTOR_OIL' | 'ANTIFREEZE'). Drives
+    // which card the client renders; the kind blocks below carry the
+    // kind-specific attributes (exactly one of them is non-null).
     kind: part.kind,
-    motor_oil: presentKindAttributes(part),
+    // The UNIT this listing is quantified in — 'PCS' | 'L' | 'KG', read from the
+    // kind capability table. A client renders quantities with THIS, never with a
+    // hardcoded "шт": antifreeze is sold by the kilogram.
+    unit: unitOf(part.kind),
+    ...presentKindAttributes(part),
     brand: part.brand ? { id: part.brand.id, name: part.brand.name } : null,
     // `name` is the INTERNAL canonical label, kept on the wire so existing
     // clients keep working; it is English for every seeded bucket and must not

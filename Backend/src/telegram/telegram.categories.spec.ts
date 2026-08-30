@@ -5,8 +5,23 @@
 
 import { Decimal } from '@prisma/client/runtime/library';
 import { BadRequestException } from '@nestjs/common';
+import { ProductKind } from '@prisma/client';
 import { TelegramService } from './telegram.service';
-import { WizardSessionStore, WizardStep } from './product-wizard';
+import {
+  WizardSessionStore,
+  WizardStep,
+  beginQuestionnaire,
+  goBack,
+  selectBrand,
+  selectModel,
+  selectCategory,
+  selectSubcategory,
+  selectOtherBrand,
+  selectOtherKind,
+  selectOtherCategory,
+  stepPrompt,
+} from './product-wizard';
+import type { WizardSession } from './product-wizard';
 
 // The private methods under test are reached through an index signature: these
 // are unit tests of TelegramService's own internals, exercised exactly as the
@@ -121,6 +136,191 @@ describe('ensureCategoryOptions', () => {
 
     expect(svc.categories.findRootCategories).not.toHaveBeenCalled();
     expect(session.categoryOptions).toEqual([]);
+  });
+
+  it('loads the SUBCATEGORY level from the parent the session is standing on', async () => {
+    const svc: AnyService = makeService();
+    svc.categories.findChildren.mockResolvedValue([
+      { id: 'front-brake-pads', name: 'Передние колодки' },
+      { id: 'brake-discs', name: 'Тормозные диски' },
+    ]);
+    const session = svc.wizard.start(1);
+    session.step = WizardStep.SUBCATEGORY;
+    session.categoryOptionsParentId = 'brake-system';
+
+    await svc.ensureCategoryOptions(session);
+
+    expect(svc.categories.findChildren).toHaveBeenCalledWith('brake-system');
+    expect(session.categoryOptions.map((o: { id: string }) => o.id)).toEqual([
+      'front-brake-pads',
+      'brake-discs',
+    ]);
+    // A level with options is a question that is being ASKED, whatever the
+    // session was marked as before.
+    expect(session.categoryStepPending).toBe(true);
+  });
+});
+
+/**
+ * THE REPORTED BUG: pick a category, pick a subcategory, move on, tap
+ * "⬅️ Назад" — and the subcategory screen comes back with NO buttons on it.
+ *
+ * Two independent causes, both fixed and both covered here:
+ *   1. the pick REPLACED `categoryOptions` with the chosen node's own children
+ *      (an empty list for a leaf), so the returned-to step rendered from the
+ *      wrong list — or from nothing at all;
+ *   2. the session was left marked as settled (`categoryStepPending: false`)
+ *      and the live re-validation pinned the tapped id's expected parent to the
+ *      node that was PICKED, so every button on the re-rendered keyboard would
+ *      have been rejected as stale even if it had been drawn.
+ *
+ * These assert the RENDERED keyboard, not the flow tables — the buttons are
+ * what went missing.
+ */
+describe('back navigation into a category level restores its buttons', () => {
+  const ROOT_CHILDREN = [
+    { id: 'front-brake-pads', name: 'Передние колодки' },
+    { id: 'brake-discs', name: 'Тормозные диски' },
+  ];
+
+  /** Service whose tree answers `brake-system` with two leaf children. */
+  function svcWithTree(): AnyService {
+    const svc: AnyService = makeService();
+    svc.categories.findChildren.mockImplementation((parentId: string) =>
+      Promise.resolve(parentId === 'brake-system' ? ROOT_CHILDREN : []),
+    );
+    return svc;
+  }
+
+  /** Button labels of the keyboard the session's CURRENT step renders. */
+  function renderedButtons(session: WizardSession): string[] {
+    const prompt = stepPrompt(session);
+    return (prompt.keyboard?.reply_markup.inline_keyboard ?? [])
+      .flat()
+      .map((b: { text: string }) => b.text);
+  }
+
+  /**
+   * Walk to just past the subcategory question: brand → model → category →
+   * subcategory (a leaf) → TITLE.
+   */
+  async function sessionPastSubcategory(svc: AnyService) {
+    const session = svc.wizard.start(1);
+    beginQuestionnaire(session);
+    selectBrand(session, 0);
+    selectModel(session, 0);
+    await svc.ensureCategoryOptions(session); // CATEGORY: the roots
+    selectCategory(session, 'brake-system', ROOT_CHILDREN);
+    expect(session.step).toBe(WizardStep.SUBCATEGORY);
+    selectSubcategory(session, 'front-brake-pads', []);
+    expect(session.step).toBe(WizardStep.TITLE);
+    return session;
+  }
+
+  it('re-renders the subcategory buttons after "⬅️ Назад"', async () => {
+    const svc = svcWithTree();
+    const session = await sessionPastSubcategory(svc);
+
+    goBack(session); // TITLE → SUBCATEGORY
+    expect(session.step).toBe(WizardStep.SUBCATEGORY);
+    await svc.ensureCategoryOptions(session);
+
+    expect(renderedButtons(session)).toEqual([
+      'Передние колодки',
+      'Тормозные диски',
+      '⬅️ Назад',
+    ]);
+  });
+
+  it('does not leave the returned-to step marked as already answered', async () => {
+    const svc = svcWithTree();
+    const session = await sessionPastSubcategory(svc);
+    expect(session.categoryStepPending).toBe(false); // settled by the leaf pick
+
+    goBack(session);
+    await svc.ensureCategoryOptions(session);
+
+    // Being asked again ⇒ pending again. This is the flag that would otherwise
+    // let a downstream reader treat the open question as complete.
+    expect(session.categoryStepPending).toBe(true);
+  });
+
+  it('accepts a re-pick after Back: the expected parent is the LEVEL, not the pick', async () => {
+    const svc = svcWithTree();
+    const session = await sessionPastSubcategory(svc);
+    goBack(session);
+    await svc.ensureCategoryOptions(session);
+
+    // What the WIZ_SUBCATEGORY_ACTION handler pins the live re-validation to.
+    // Before the fix this was `categoryId` — by now 'front-brake-pads', the
+    // node that ANSWERED the level — so every sibling tap was rejected.
+    expect(session.categoryOptionsParentId).toBe('brake-system');
+
+    // And the re-pick actually lands.
+    expect(selectSubcategory(session, 'brake-discs', []).status).toBe('ok');
+    expect(session.categoryId).toBe('brake-discs');
+    expect(session.step).toBe(WizardStep.TITLE);
+  });
+
+  it('survives several forward → back → forward → back cycles', async () => {
+    const svc = svcWithTree();
+    const session = await sessionPastSubcategory(svc);
+
+    for (let i = 0; i < 3; i++) {
+      // Back into the subcategory question…
+      goBack(session);
+      await svc.ensureCategoryOptions(session);
+      expect(session.step).toBe(WizardStep.SUBCATEGORY);
+      expect(renderedButtons(session)).toEqual([
+        'Передние колодки',
+        'Тормозные диски',
+        '⬅️ Назад',
+      ]);
+
+      // …back once more into the category question…
+      goBack(session);
+      await svc.ensureCategoryOptions(session);
+      expect(session.step).toBe(WizardStep.CATEGORY);
+      expect(renderedButtons(session)).toEqual([
+        'Brake System',
+        'Engine',
+        '⬅️ Назад',
+      ]);
+
+      // …then forward again through both, alternating the leaf each time so a
+      // stale answer would show up as the wrong stored category.
+      selectCategory(session, 'brake-system', ROOT_CHILDREN);
+      expect(session.step).toBe(WizardStep.SUBCATEGORY);
+      const leaf = i % 2 === 0 ? 'brake-discs' : 'front-brake-pads';
+      expect(selectSubcategory(session, leaf, []).status).toBe('ok');
+      expect(session.step).toBe(WizardStep.TITLE);
+      expect(session.categoryId).toBe(leaf);
+      expect(session.vehicleCategoryId).toBe('brake-system');
+    }
+  });
+
+  it('re-renders the "Другое" menu after Back, from the live tree', async () => {
+    // The same rule for the other admin-managed level: the menu is re-read, so a
+    // seller who walks back into it still sees every option.
+    const svc: AnyService = makeService();
+    svc.categories.findChildren.mockResolvedValue([
+      { id: 'motorcycle-oil', name: 'Мотоциклетные масла' },
+    ]);
+    const session = svc.wizard.start(1);
+    beginQuestionnaire(session);
+    selectOtherBrand(session);
+    selectOtherKind(session, ProductKind.MOTOR_OIL);
+    await svc.ensureCategoryOptions(session);
+    selectOtherCategory(session, 'motorcycle-oil');
+    expect(session.categoryOptions).toEqual([]); // consumed by the pick
+
+    goBack(session); // OIL_TYPE → OTHER_CATEGORY
+    expect(session.step).toBe(WizardStep.OTHER_CATEGORY);
+    await svc.ensureCategoryOptions(session);
+    expect(renderedButtons(session)).toEqual([
+      'Мотоциклетные масла',
+      '⬅️ Назад',
+    ]);
   });
 });
 

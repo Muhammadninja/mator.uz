@@ -318,15 +318,17 @@ export function hasSubcategories(category: PartVehicleCategory): boolean {
 // ── The "Другое" branch: listings that are NOT spare parts ──────────────────
 //
 // The brand step ends with a "Другое" button. It does not select a vehicle — it
-// leaves the spare-parts flow entirely and opens the menu below, whose entries
-// each map to a ProductKind with its OWN questionnaire (see product-wizard.ts's
-// flow definitions). Nothing about the spare-parts path changes.
+// leaves the spare-parts flow entirely and opens the "Что продаёте?" question,
+// whose answers each map to a ProductKind with its OWN questionnaire (see
+// product-wizard.ts's flow definitions). Nothing about the spare-parts path
+// changes.
 //
-// TO ADD A CATEGORY (Антифриз, Тормозная жидкость, Аккумуляторы, …):
+// TO ADD A KIND (Тормозная жидкость, Аккумуляторы, …):
 //   1. add a ProductKind value + its attribute columns in schema.prisma,
-//   2. add its steps and a FLOW entry in product-wizard.ts,
-//   3. append one row here,
-//   4. bump CATALOG_VERSION (this list is index-addressed, like WIZARD_BRANDS).
+//   2. add its capability entry in common/product-kind.ts (unit included),
+//   3. add its steps and a FLOWS entry in product-wizard.ts, plus its label in
+//      OTHER_KIND_LABEL_KEYS — it then appears on the "Что продаёте?" keyboard,
+//   4. bump CATALOG_VERSION (the session shape changes).
 // No existing kind is touched by any of those steps.
 
 /** The brand-step button that leaves the spare-parts flow. */
@@ -339,6 +341,13 @@ export interface WizardOtherCategory {
   label: string;
 }
 
+/**
+ * LEGACY, and no longer read by anything. The "Другое" menu became the
+ * ADMIN-MANAGED children of the `other` category (loaded live from the tree),
+ * and the kind is now chosen at the "Что продаёте?" step from
+ * OTHER_KIND_BY_WIRE. Kept only so an old import does not break; do not add to
+ * it — a new kind goes in the recipe above.
+ */
 export const WIZARD_OTHER_CATEGORIES: WizardOtherCategory[] = [
   { kind: ProductKind.MOTOR_OIL, label: 'Моторные масла' },
 ];

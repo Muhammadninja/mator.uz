@@ -8,10 +8,17 @@
 //                         │                    → DESCRIPTION → PART_NUMBER_TYPE
 //                         │                    → [PART_NUMBER] → PRICE → DONE
 //                         │
-//                         └─ ("Другое")     → OTHER_CATEGORY ─ (Моторные масла)
-//                                              → OIL_VISCOSITY → OIL_TYPE
-//                                              → OIL_VOLUME → TITLE
-//                                              → DESCRIPTION → PRICE → DONE
+//                         └─ ("Другое")     → OTHER_KIND ("Что продаёте?")
+//                              ├─ (Моторное масло) → OTHER_CATEGORY
+//                              │      → OIL_TYPE → OIL_VISCOSITY → OIL_VOLUME
+//                              │      → TITLE → DESCRIPTION → PRICE → DONE
+//                              └─ (Антифриз)       → ANTIFREEZE_WEIGHT
+//                                     → TITLE → DESCRIPTION → PRICE → DONE
+//
+// The oil questions ask the TYPE first and the viscosity second: the type is
+// what the tax registry classifies an oil by (one MXIK / package code per base
+// composition — see OIL_TYPE_FISCAL), so it is the coarser, more fundamental
+// answer and every later question is read in its light.
 //
 // Photos are processed in the BACKGROUND (BullMQ) while the seller answers the
 // questionnaire; the preview appears when both tracks meet (see DraftCoordinator).
@@ -54,6 +61,11 @@ import {
   normalizeViscosity,
   parseVolumeLitres,
 } from './motor-oil-catalog';
+import {
+  ANTIFREEZE_WEIGHTS,
+  formatWeight,
+  parseWeightKg,
+} from './antifreeze-catalog';
 import { CategoryAnchor } from '../catalog/categories/category-map';
 import { WIZARD_BRANDS } from './wizard-catalog';
 import { DEFAULT_APP_LANG, type AppLang } from '../common/app-lang.util';
@@ -73,8 +85,14 @@ export enum WizardStep {
    *  dynamic tree, so it is spliced into the flow by {@link flowSteps} rather
    *  than listed in FLOWS. The step repeats itself for each further level. */
   SUBCATEGORY = 'SUBCATEGORY',
-  /** The "Другое" menu: pick a NON-spare-part category (Моторные масла, …). Only
-   *  reachable from BRAND via the "Другое" button. */
+  /** "Что продаёте?" — the KIND question the "Другое" button opens: Моторное
+   *  масло or Антифриз. It is the step that CHOOSES the questionnaire, so it
+   *  precedes the kind being known and is not part of any kind's FLOWS entry. */
+  OTHER_KIND = 'OTHER_KIND',
+  /** The "Другое" oil menu: pick which oil taxonomy the listing belongs to
+   *  (Индустриальные / Мотоциклетные / …). Reached from OTHER_KIND's "Моторное
+   *  масло" branch only — antifreeze is filed under its own category anchor and
+   *  never sees this step. */
   OTHER_CATEGORY = 'OTHER_CATEGORY',
   /** "Как продаётся товар?" — Штука or Комплект / набор. CONDITIONAL, like
    *  SUBCATEGORY: it exists only for a category that carries BOTH Tasnif package
@@ -90,6 +108,14 @@ export enum WizardStep {
   OIL_VOLUME = 'OIL_VOLUME',
   /** Free-text volume, reached only from OIL_VOLUME's "Другое" button. */
   OIL_VOLUME_CUSTOM = 'OIL_VOLUME_CUSTOM',
+  // ── Antifreeze steps ──────────────────────────────────────────────────────
+  /** "Сколько килограммов?" — the packaged NET WEIGHT. Antifreeze is sold by the
+   *  kilogram, never by the piece, so this is the listing's quantity question
+   *  and its answer is stored in grams. */
+  ANTIFREEZE_WEIGHT = 'ANTIFREEZE_WEIGHT',
+  /** Free-text weight in kilograms (fractional allowed), reached only from
+   *  ANTIFREEZE_WEIGHT's "Другое" button. */
+  ANTIFREEZE_WEIGHT_CUSTOM = 'ANTIFREEZE_WEIGHT_CUSTOM',
   // ── Steps shared by every kind ────────────────────────────────────────────
   TITLE = 'TITLE',
   DESCRIPTION = 'DESCRIPTION',
@@ -121,14 +147,37 @@ const FLOWS: Record<ProductKind, WizardStep[]> = {
     WizardStep.PRICE,
   ],
   [ProductKind.MOTOR_OIL]: [
-    WizardStep.OIL_VISCOSITY,
+    // TYPE BEFORE VISCOSITY. The base composition is what the tax registry
+    // classifies an oil by — one MXIK and one package code per type (see
+    // OIL_TYPE_FISCAL) — so it is the coarser question and is asked first; the
+    // viscosity then narrows within the type the seller already named.
     WizardStep.OIL_TYPE,
+    WizardStep.OIL_VISCOSITY,
     WizardStep.OIL_VOLUME,
     WizardStep.TITLE,
     WizardStep.DESCRIPTION,
     WizardStep.PRICE,
   ],
+  [ProductKind.ANTIFREEZE]: [
+    // The quantity question, in KILOGRAMS. Antifreeze has no viscosity, no
+    // volume and no part number: one attribute, then the shared steps.
+    WizardStep.ANTIFREEZE_WEIGHT,
+    WizardStep.TITLE,
+    WizardStep.DESCRIPTION,
+    WizardStep.PRICE,
+  ],
 };
+
+/**
+ * The kinds the "Что продаёте?" step can start — i.e. everything reachable
+ * WITHOUT a car, which is every kind but SPARE_PART. Derived from ProductKind by
+ * exclusion rather than listed, so a new non-vehicle kind is offered there the
+ * moment it exists instead of being silently left out of the menu.
+ */
+export type OtherProductKind = Exclude<
+  ProductKind,
+  typeof ProductKind.SPARE_PART
+>;
 
 /**
  * MOTOR_OIL reached through the VEHICLE path (brand → model → category → "Моторные
@@ -143,8 +192,9 @@ const FLOWS: Record<ProductKind, WizardStep[]> = {
 const MOTOR_OIL_FOR_VEHICLE_FLOW: WizardStep[] = [
   WizardStep.MODEL,
   WizardStep.CATEGORY,
-  WizardStep.OIL_VISCOSITY,
+  // Same order as the "Другое" oil flow above — type first, then viscosity.
   WizardStep.OIL_TYPE,
+  WizardStep.OIL_VISCOSITY,
   WizardStep.OIL_VOLUME,
   WizardStep.TITLE,
   WizardStep.DESCRIPTION,
@@ -181,16 +231,17 @@ export { isUniversalFor };
  *     subcategories (TRANSMISSION / HEATING_AND_COOLING go straight to TITLE);
  *   • PART_NUMBER follows PART_NUMBER_TYPE only when a number was requested
  *     (type OEM/GM — a skipped number goes straight to PRICE);
- *   • OIL_VISCOSITY_CUSTOM / OIL_VOLUME_CUSTOM follow their button step only
- *     while the seller is on (or came through) the "Другое" branch.
+ *   • OIL_VISCOSITY_CUSTOM / OIL_VOLUME_CUSTOM / ANTIFREEZE_WEIGHT_CUSTOM
+ *     follow their button step only while the seller is on (or came through)
+ *     the "Другое" branch of that question.
  */
 function flowSteps(session: WizardSession): WizardStep[] {
   // The shared PREFIX every flow walks before its own questions begin. BRAND is
-  // the branch point; OTHER_CATEGORY is the menu the "Другое" button opens, and
-  // it belongs here — NOT inside a kind's FLOWS entry — because it is the step
-  // that CHOOSES the kind, so it precedes the kind being known. Putting it in
-  // MOTOR_OIL's flow made it unreachable from the session that is standing on
-  // it (kind is still SPARE_PART at that moment), which left `previousStep`
+  // the branch point; OTHER_KIND ("Что продаёте?") and the OTHER_CATEGORY menu
+  // belong here — NOT inside a kind's FLOWS entry — because OTHER_KIND is the
+  // step that CHOOSES the kind, so it precedes the kind being known. Putting it
+  // in a kind's flow made it unreachable from the session that is standing on it
+  // (kind is still SPARE_PART at that moment), which left `previousStep`
   // returning null and the step rendering with no "⬅️ Назад" button at all.
   //
   // The condition below is deliberately NOT a capability lookup: it asks "did
@@ -202,14 +253,30 @@ function flowSteps(session: WizardSession): WizardStep[] {
   // is excluded by the `brand === null` clause — otherwise an oil sold for a
   // Cobalt would grow a phantom "Другое" step it never visited.
   const steps: WizardStep[] = [WizardStep.BRAND];
-  if (
+  const viaOtherMenu =
+    session.step === WizardStep.OTHER_KIND ||
     session.step === WizardStep.OTHER_CATEGORY ||
-    (session.kind !== ProductKind.SPARE_PART && session.brand === null)
-  ) {
-    steps.push(WizardStep.OTHER_CATEGORY);
-    // The "Другое" child IS the listing's category, so the sale-form question
-    // (when that category offers a choice) follows it here — this branch's flow
-    // has no CATEGORY step of its own to hang it off.
+    (session.kind !== ProductKind.SPARE_PART && session.brand === null);
+  if (viaOtherMenu) {
+    steps.push(WizardStep.OTHER_KIND);
+    // The oil taxonomy menu follows the kind question for MOTOR_OIL ONLY.
+    // Antifreeze is filed under its own category anchor, so it has no taxonomy
+    // to pick and goes straight from "Что продаёте?" to its own question — which
+    // is exactly what makes "⬅️ Назад" from ANTIFREEZE_WEIGHT land back on the
+    // kind choice rather than on an oil menu it never saw.
+    //
+    // `session.step === OTHER_CATEGORY` is kept as its own clause because a
+    // session STANDING on that step has not yet committed to a kind through it.
+    if (
+      session.step === WizardStep.OTHER_CATEGORY ||
+      session.kind === ProductKind.MOTOR_OIL
+    ) {
+      steps.push(WizardStep.OTHER_CATEGORY);
+    }
+    // The "Другое" branch's chosen category IS the listing's category, so the
+    // sale-form question (when that category offers a choice) follows it here —
+    // this branch's flow has no CATEGORY step of its own to hang it off. It
+    // applies to antifreeze too, whose category is the `antifreeze` anchor.
     if (session.packageChoiceRequired) steps.push(WizardStep.PACKAGE_FORM);
   }
   for (const step of flowFor(session)) {
@@ -255,6 +322,9 @@ function flowSteps(session: WizardSession): WizardStep[] {
     }
     if (step === WizardStep.OIL_VOLUME && session.volumeIsCustom) {
       steps.push(WizardStep.OIL_VOLUME_CUSTOM);
+    }
+    if (step === WizardStep.ANTIFREEZE_WEIGHT && session.weightIsCustom) {
+      steps.push(WizardStep.ANTIFREEZE_WEIGHT_CUSTOM);
     }
   }
   return steps;
@@ -318,6 +388,25 @@ export interface WizardSession {
    */
   categoryOptions: CategoryOption[];
   /**
+   * WHOSE CHILDREN `categoryOptions` are — the node the current category level
+   * hangs under, or null for the ROOT level. Together with `categoryOptions` it
+   * is the complete description of the level being offered.
+   *
+   * It exists because a category step must be re-openable, and `categoryId`
+   * cannot answer that question: once the level is ANSWERED, `categoryId` moves
+   * to the node the seller PICKED, so walking back to the step and asking "which
+   * level was this?" would return the picked node's own children — the wrong
+   * list, or none at all when the pick was a leaf. That is precisely the bug
+   * where "⬅️ Назад" onto a subcategory step rendered a keyboard with no options
+   * on it, and where the next tap was then rejected as stale because the live
+   * re-validation pinned the wrong expected parent.
+   *
+   * So the level is remembered separately from the answer, and is deliberately
+   * NOT overwritten when a pick ENDS the category questions (an empty child
+   * list): the level the seller answered is the level Back must re-open.
+   */
+  categoryOptionsParentId: string | null;
+  /**
    * The seller's interface language, copied onto the session when the dialogue
    * starts (or is rebuilt from a draft). Carried HERE rather than looked up per
    * prompt because this module is pure and synchronous — it renders a keyboard
@@ -365,6 +454,16 @@ export interface WizardSession {
   viscosityIsCustom: boolean;
   /** Ditto for the volume step. */
   volumeIsCustom: boolean;
+  // ── ANTIFREEZE fields (null in every other flow) ──────────────────────────
+  /**
+   * Packaged NET WEIGHT in GRAMS — the antifreeze listing's quantity. Grams, so
+   * a fractional kilogram ("2.5 кг" → 2500) is stored exactly; the unit shown to
+   * humans is always кг, never шт (see KIND_CAPABILITIES[ANTIFREEZE].unit).
+   */
+  antifreezeWeightG: number | null;
+  /** The seller chose "Другое" at the weight step, so the free-text step is part
+   *  of their path (it must be re-visited when walking back). */
+  weightIsCustom: boolean;
   price: number | null;
 }
 
@@ -477,7 +576,15 @@ export interface CategoryPackageCodes {
 // whether a further question follows. A version-4 keyboard belongs to a
 // dialogue that has no such step, so its taps are routed to the "catalog
 // updated, start again" notice rather than into a flow whose shape it predates.
-export const CATALOG_VERSION = 5;
+//
+// Bumped to 6 for the "Что продаёте?" (OTHER_KIND) step and the ANTIFREEZE
+// questionnaire. Two independent reasons, either of which alone would require
+// it: the SESSION SHAPE changed (antifreezeWeightG / weightIsCustom /
+// categoryOptionsParentId), and the MOTOR_OIL flow was REORDERED so the oil type
+// is asked before the viscosity. A version-5 keyboard belongs to a dialogue
+// that would answer the wrong question under the new order, so its taps are
+// routed to the "catalog updated, start again" notice instead.
+export const CATALOG_VERSION = 6;
 
 /** Build a versioned callback payload, e.g. buildAction('b', 5) → "wiz:1:b:5". */
 export function buildAction(kind: string, arg: string | number): string {
@@ -510,7 +617,18 @@ export const WIZ_PART_NUMBER_TYPE_ACTION = new RegExp(
 );
 // "Другое" on the brand keyboard → leave the spare-parts flow.
 export const WIZ_OTHER_BRAND_ACTION = buildAction('ob', '');
-// A pick from the "Другое" menu — index into WIZARD_OTHER_CATEGORIES.
+// "Что продаёте?" — the KIND the "Другое" branch is listing. A closed two-value
+// payload (not an index), so nothing about it can shift when catalogs change.
+export const WIZ_OTHER_KIND_ACTION = new RegExp(
+  `^wiz:${V}:ok:(motor_oil|antifreeze)$`,
+);
+/** Wire values of the OTHER_KIND buttons → the ProductKind each starts. */
+export const OTHER_KIND_BY_WIRE: Readonly<Record<string, OtherProductKind>> = {
+  motor_oil: ProductKind.MOTOR_OIL,
+  antifreeze: ProductKind.ANTIFREEZE,
+};
+// A pick from the "Другое" oil-taxonomy menu — carries the category's ID,
+// resolved against the admin-managed options the session actually rendered.
 export const WIZ_OTHER_CATEGORY_ACTION = new RegExp(
   `^wiz:${V}:oc:([a-z0-9_-]{1,64})$`,
 );
@@ -523,6 +641,11 @@ export const WIZ_OIL_VISCOSITY_ACTION = new RegExp(
 export const WIZ_OIL_TYPE_ACTION = new RegExp(`^wiz:${V}:ot:(\\d{1,2})$`);
 export const WIZ_OIL_VOLUME_ACTION = new RegExp(
   `^wiz:${V}:ol:(\\d{1,2}|custom)$`,
+);
+// Antifreeze weight pick — an index into ANTIFREEZE_WEIGHTS, or the literal
+// "custom" for the "Другое" free-text (fractional kilograms) escape hatch.
+export const WIZ_ANTIFREEZE_WEIGHT_ACTION = new RegExp(
+  `^wiz:${V}:aw:(\\d{1,2}|custom)$`,
 );
 // "⬅️ Назад" — return to the previous wizard step. Versioned like every other
 // payload so a Back tap on a message from an outdated catalog is treated as
@@ -604,6 +727,7 @@ export class WizardSessionStore {
       vehicleCategoryId: null,
       categoryId: null,
       categoryOptions: [],
+      categoryOptionsParentId: null,
       categoryStepPending: false,
       packageForm: null,
       packageChoiceRequired: false,
@@ -616,6 +740,8 @@ export class WizardSessionStore {
       oilVolumeMl: null,
       viscosityIsCustom: false,
       volumeIsCustom: false,
+      antifreezeWeightG: null,
+      weightIsCustom: false,
       price: null,
     };
     this.sessions.set(tgUserId, session);
@@ -671,25 +797,40 @@ export function selectBrand(
   if (!brand) return STALE;
   // A real car brand keeps (or returns) the session on the spare-parts flow —
   // "returns" matters when the seller walked back from the "Другое" menu. The
-  // oil answers of the abandoned branch go with it, so a session that returns
-  // to the parts flow carries no orphan oil attributes into its draft.
+  // answers of the abandoned branch go with it, so a session that returns to the
+  // parts flow carries no orphan oil/antifreeze attributes into its draft.
   if (session.kind !== ProductKind.SPARE_PART) {
     session.kind = ProductKind.SPARE_PART;
-    session.oilViscosity = null;
-    session.oilType = null;
-    session.oilVolumeMl = null;
-    session.viscosityIsCustom = false;
-    session.volumeIsCustom = false;
+    clearKindAttributes(session);
   }
   session.brand = brand.name;
   return advance(session);
 }
 
 /**
+ * Drop EVERY kind-specific attribute the session may be carrying.
+ *
+ * Called by each transition that CHANGES the questionnaire. One helper rather
+ * than a list repeated per transition, because the failure mode is silent: an
+ * attribute a switched-away flow left behind is written to the draft, and — for
+ * `oilType` — would then pick the listing's MXIK. A new kind adds its fields
+ * here once and every switch point clears them.
+ */
+function clearKindAttributes(session: WizardSession): void {
+  session.oilViscosity = null;
+  session.oilType = null;
+  session.oilVolumeMl = null;
+  session.viscosityIsCustom = false;
+  session.volumeIsCustom = false;
+  session.antifreezeWeightG = null;
+  session.weightIsCustom = false;
+}
+
+/**
  * "Другое" at the BRAND step: this listing is not a spare part for a specific
  * car. The vehicle fields are cleared (a previous brand pick must not survive
- * into a non-vehicle listing) and the "Другое" menu is shown. The KIND is not
- * decided yet — {@link selectOtherCategory} does that.
+ * into a non-vehicle listing) and the "Что продаёте?" question is shown. The
+ * KIND is not decided yet — {@link selectOtherKind} does that.
  */
 export function selectOtherBrand(session: WizardSession): WizardResult {
   if (session.step !== WizardStep.BRAND) return STALE;
@@ -700,8 +841,74 @@ export function selectOtherBrand(session: WizardSession): WizardResult {
   // The category is about to be re-chosen from a different branch, so any sale
   // form answered under the old one goes with it.
   clearPackageChoice(session);
-  session.step = WizardStep.OTHER_CATEGORY;
+  session.step = WizardStep.OTHER_KIND;
   return OK;
+}
+
+/**
+ * "Что продаёте?" — the answer that CHOOSES the questionnaire for a listing sold
+ * without a car. This is the "Другое" branch's counterpart to picking a category
+ * on the vehicle path: it is where `kind` is set, and therefore where the
+ * previous kind's attributes are dropped.
+ *
+ * `anchor` is the category a kind is FILED UNDER when its questionnaire asks no
+ * category question — antifreeze, whose listings all belong to the existing
+ * `antifreeze` node. It is resolved from the LIVE tree by the caller (this
+ * module does no I/O) so the ids written are real and the sale-form question is
+ * raised from that node's own package codes. MOTOR_OIL passes none: it goes on
+ * to the OTHER_CATEGORY menu, which supplies its category.
+ */
+export function selectOtherKind(
+  session: WizardSession,
+  kind: OtherProductKind,
+  anchor: CategoryAnchorSelection | null = null,
+): WizardResult {
+  if (session.step !== WizardStep.OTHER_KIND) return STALE;
+
+  session.kind = kind;
+  // The new questionnaire owns its own attribute set; whatever the seller
+  // answered before walking back here belongs to a flow they left.
+  clearKindAttributes(session);
+  // This branch means "no specific vehicle": the listing is universal.
+  session.brand = null;
+  session.model = null;
+  session.category = null;
+  session.subcategory = null;
+  // A "Другое" listing never carries a part number, whichever kind it is.
+  session.partNumberType = 'UNKNOWN';
+  session.partNumber = null;
+  // The category questions do not apply on this branch, so nothing is pending
+  // and no level is being offered.
+  session.categoryOptions = [];
+  session.categoryOptionsParentId = null;
+  session.categoryStepPending = false;
+
+  if (anchor) {
+    // A kind with a FIXED category: the pair is settled here, and the sale-form
+    // question is raised (or not) from that node's own codes.
+    session.vehicleCategoryId = anchor.vehicleCategoryId;
+    session.categoryId = anchor.categoryId;
+    applyPackageChoice(session, anchor.fiscal);
+  } else {
+    // The category still has to be picked (the OTHER_CATEGORY menu follows), so
+    // any pair and sale form from an abandoned branch are dropped rather than
+    // carried into a category the seller has not chosen yet.
+    session.vehicleCategoryId = null;
+    session.categoryId = null;
+    clearPackageChoice(session);
+  }
+  return advance(session);
+}
+
+/**
+ * The category a kind whose questionnaire asks no category question is filed
+ * under, as read from the live tree: the node itself, the ROOT it hangs under
+ * (so the pair passes the server-side lineage check) and its package codes.
+ */
+export interface CategoryAnchorSelection {
+  vehicleCategoryId: string;
+  categoryId: string;
+  fiscal: CategoryPackageCodes | null;
 }
 
 /**
@@ -754,7 +961,16 @@ export function selectOtherCategory(
   // TAXONOMY (Industrial / Motorcycle / Agricultural …), stored as categoryId.
   // A category that declares its own kind wins, so a future non-oil branch is a
   // mapping entry rather than a change here.
-  session.kind = chosen.kind ?? ProductKind.MOTOR_OIL;
+  //
+  // The step is reached only from OTHER_KIND's "Моторное масло" branch, so the
+  // kind is normally already MOTOR_OIL; the assignment stands because a category
+  // may still override it, and because it keeps this transition correct on its
+  // own rather than dependent on how it was reached.
+  const kind = chosen.kind ?? ProductKind.MOTOR_OIL;
+  if (kind !== session.kind) {
+    session.kind = kind;
+    clearKindAttributes(session);
+  }
   // This branch means "no specific vehicle": the listing is universal, so any
   // vehicle a previous path collected must be cleared. This is the ONLY place
   // universality is chosen by the seller rather than derived.
@@ -829,19 +1045,20 @@ export function selectCategory(
     // flow collected that this one never asks must not survive into the draft.
     session.partNumberType = 'UNKNOWN';
     session.partNumber = null;
-    session.oilViscosity = null;
-    session.oilType = null;
-    session.oilVolumeMl = null;
-    session.viscosityIsCustom = false;
-    session.volumeIsCustom = false;
+    clearKindAttributes(session);
   }
   // A deeper pick belongs to the category it was made under, so re-answering
   // this step drops it: the seller may have walked back and chosen a DIFFERENT
   // category, whose child list the old value is not part of.
   session.subcategory = null;
 
-  // Hand the next level's options to the step that is about to render them.
+  // Hand the next level's options to the step that is about to render them, and
+  // record WHOSE children they are so the step can be re-opened intact by
+  // "⬅️ Назад". Only recorded when there IS a next level: a leaf pick ends the
+  // category questions, and the level Back must re-open is then still the ROOT
+  // level this pick was made at (parent = null), which is what it already holds.
   session.categoryOptions = children;
+  if (children.length > 0) session.categoryOptionsParentId = category.id;
   session.categoryStepPending = children.length > 0;
   // The sale form belongs to the FINAL category. A root with children is not
   // final — the answer comes from the leaf the seller is about to pick — so the
@@ -880,6 +1097,10 @@ export function selectSubcategory(
   session.subcategory = chosen.mainCategoryEnum ?? null;
 
   session.categoryOptions = children;
+  // Same rule as the root pick: the offered level is recorded only when there IS
+  // one. A leaf pick must LEAVE the previous value in place — it names the level
+  // the seller just answered, which is exactly the level "⬅️ Назад" re-opens.
+  if (children.length > 0) session.categoryOptionsParentId = chosen.id;
   session.categoryStepPending = children.length > 0;
   // Same rule as the root pick: only a LEAF settles the sale form.
   applyPackageChoice(session, children.length > 0 ? null : fiscal);
@@ -982,6 +1203,49 @@ export function inputOilVolume(
     return invalid(t(session.lang, 'invalid.volume'));
   }
   session.oilVolumeMl = ml;
+  return advance(session);
+}
+
+// ── Antifreeze transitions ──────────────────────────────────────────────────
+/**
+ * Packaged weight from a preset button, or 'custom' for the "Другое" escape
+ * hatch (which routes to the free-text step instead of answering the question).
+ *
+ * Deliberately the same shape as {@link selectOilVolume}: the two kinds ask the
+ * same QUESTION ("how much is in the package?") and differ only in the unit,
+ * which the kind — not this transition — declares.
+ */
+export function selectAntifreezeWeight(
+  session: WizardSession,
+  choice: number | 'custom',
+): WizardResult {
+  if (session.step !== WizardStep.ANTIFREEZE_WEIGHT) return STALE;
+  if (choice === 'custom') {
+    // Splice the free-text step into the flow, then advance ONTO it.
+    session.weightIsCustom = true;
+    session.antifreezeWeightG = null;
+    return advance(session);
+  }
+  const weight = ANTIFREEZE_WEIGHTS[choice];
+  if (!weight) return STALE;
+  // A preset answer removes the free-text detour (the seller may have taken it
+  // before walking back), so the path forward matches the answer given.
+  session.weightIsCustom = false;
+  session.antifreezeWeightG = weight.value;
+  return advance(session);
+}
+
+/** Free-text weight in KILOGRAMS — fractional values ("2.5") are the point. */
+export function inputAntifreezeWeight(
+  session: WizardSession,
+  raw: string,
+): WizardResult {
+  if (session.step !== WizardStep.ANTIFREEZE_WEIGHT_CUSTOM) return STALE;
+  const grams = parseWeightKg(raw);
+  if (grams === null) {
+    return invalid(t(session.lang, 'invalid.weight'));
+  }
+  session.antifreezeWeightG = grams;
   return advance(session);
 }
 
@@ -1115,16 +1379,50 @@ export function previousStep(session: WizardSession): WizardStep | null {
 }
 
 /**
- * Move one step back. Only the `step` pointer moves — already-entered fields are
- * PRESERVED (the requirement: going back must not lose data, and going forward
- * again keeps everything). A value is simply overwritten if the seller re-enters
- * it. Returns `stale` when there is no previous step (first step / processing),
- * so a stray Back tap is ignored rather than corrupting the session.
+ * The steps that OFFER A LIST loaded from the category tree. Returning to one of
+ * them is not just a pointer move: the list it renders from must be re-opened,
+ * because the pick that left the step overwrote it with the NEXT level's options
+ * (or emptied it at a leaf).
+ */
+const CATEGORY_LEVEL_STEPS: ReadonlySet<WizardStep> = new Set([
+  WizardStep.CATEGORY,
+  WizardStep.SUBCATEGORY,
+  WizardStep.OTHER_CATEGORY,
+]);
+
+/** Whether this step renders options loaded from the category tree. */
+export function isCategoryLevelStep(step: WizardStep): boolean {
+  return CATEGORY_LEVEL_STEPS.has(step);
+}
+
+/**
+ * Move one step back. Already-entered fields are PRESERVED (the requirement:
+ * going back must not lose data, and going forward again keeps everything) — a
+ * value is simply overwritten if the seller re-enters it. Returns `stale` when
+ * there is no previous step (first step / processing), so a stray Back tap is
+ * ignored rather than corrupting the session.
+ *
+ * The one thing that is NOT merely preserved is a CATEGORY LEVEL's state. A
+ * question the seller is standing on is by definition unanswered, so returning
+ * to one re-opens it:
+ *   • its stale option snapshot is dropped, because the pick that left the step
+ *     replaced it with the next level's list — rendering that would show the
+ *     wrong buttons, and at a leaf (empty list) would show NO buttons at all,
+ *     which is exactly the "кнопки пропадают" bug;
+ *   • `categoryStepPending` goes back to true, so nothing downstream reads the
+ *     step as already settled while it is being asked again.
+ * The caller re-loads the level from the live tree before rendering, using
+ * `categoryOptionsParentId` — which deliberately still names the level that was
+ * answered, not the node that answered it.
  */
 export function goBack(session: WizardSession): WizardResult {
   const target = previousStep(session);
   if (target === null) return STALE;
   session.step = target;
+  if (isCategoryLevelStep(target)) {
+    session.categoryOptions = [];
+    session.categoryStepPending = true;
+  }
   return OK;
 }
 
@@ -1181,7 +1479,24 @@ export function brandKeyboard(session: WizardSession): InlineKeyboard {
   ]);
 }
 
-/** The "Другое" menu: one button per non-spare-part category. */
+/**
+ * "Что продаёте?" — the two things the "Другое" branch can list, one per row.
+ *
+ * A CLOSED set built from {@link OTHER_KIND_BY_WIRE}, not from the category
+ * tree: it is the KIND question, and a kind is a code-level fact (its own
+ * questionnaire, its own columns, its own unit). Adding a kind adds an entry
+ * there and it appears here — no button is spelled out twice.
+ */
+export function otherKindKeyboard(session: WizardSession): InlineKeyboard {
+  const buttons = Object.entries(OTHER_KIND_BY_WIRE).map(([wire, kind]) =>
+    Markup.button.callback(
+      t(session.lang, OTHER_KIND_LABEL_KEYS[kind]),
+      buildAction('ok', wire),
+    ),
+  );
+  return withBack(session, grid(buttons, 1));
+}
+
 /**
  * The "Другое" menu, built from the ADMIN-MANAGED children of the `other`
  * category that the caller loaded into `categoryOptions` — never from a
@@ -1234,6 +1549,29 @@ export function oilVolumeKeyboard(session: WizardSession): InlineKeyboard {
       Markup.button.callback(
         t(session.lang, 'btn.other'),
         buildAction('ol', 'custom'),
+      ),
+    ],
+  ]);
+}
+
+// ── Antifreeze keyboard ─────────────────────────────────────────────────────
+/**
+ * Weight presets (two per row) plus the "Другое" free-text escape hatch. Labels
+ * read in KILOGRAMS because that is the kind's unit — a "шт" never appears on
+ * this keyboard, nor anywhere downstream of it.
+ */
+export function antifreezeWeightKeyboard(
+  session: WizardSession,
+): InlineKeyboard {
+  const buttons = ANTIFREEZE_WEIGHTS.map((w, i) =>
+    Markup.button.callback(w.label, buildAction('aw', i)),
+  );
+  return withBack(session, [
+    ...grid(buttons, 2),
+    [
+      Markup.button.callback(
+        t(session.lang, 'btn.other'),
+        buildAction('aw', 'custom'),
       ),
     ],
   ]);
@@ -1348,6 +1686,17 @@ export interface StepPrompt {
 const TITLE_PROMPT_KEYS: Record<ProductKind, BotStringKey> = {
   [ProductKind.SPARE_PART]: 'step.title.sparePart',
   [ProductKind.MOTOR_OIL]: 'step.title.motorOil',
+  [ProductKind.ANTIFREEZE]: 'step.title.antifreeze',
+};
+
+/**
+ * The "Что продаёте?" button label per kind. A table (not a branch) for the same
+ * reason TITLE_PROMPT_KEYS is one: a new kind names its string key here and
+ * `Record<OtherProductKind, …>` refuses to compile until it does.
+ */
+const OTHER_KIND_LABEL_KEYS: Record<OtherProductKind, BotStringKey> = {
+  [ProductKind.MOTOR_OIL]: 'btn.kind.motorOil',
+  [ProductKind.ANTIFREEZE]: 'btn.kind.antifreeze',
 };
 
 /** The message (and inline keyboard, if any) that asks for the current step. */
@@ -1374,6 +1723,11 @@ export function stepPrompt(session: WizardSession): StepPrompt {
       return {
         text: t(lang, 'step.subcategory'),
         keyboard: subcategoryKeyboard(session),
+      };
+    case WizardStep.OTHER_KIND:
+      return {
+        text: t(lang, 'step.otherKind'),
+        keyboard: otherKindKeyboard(session),
       };
     case WizardStep.OTHER_CATEGORY:
       return {
@@ -1408,6 +1762,16 @@ export function stepPrompt(session: WizardSession): StepPrompt {
     case WizardStep.OIL_VOLUME_CUSTOM:
       return {
         text: t(lang, 'step.oilVolumeCustom'),
+        keyboard: backOnlyKeyboard(session),
+      };
+    case WizardStep.ANTIFREEZE_WEIGHT:
+      return {
+        text: t(lang, 'step.antifreezeWeight'),
+        keyboard: antifreezeWeightKeyboard(session),
+      };
+    case WizardStep.ANTIFREEZE_WEIGHT_CUSTOM:
+      return {
+        text: t(lang, 'step.antifreezeWeightCustom'),
         keyboard: backOnlyKeyboard(session),
       };
     case WizardStep.TITLE:
@@ -1465,6 +1829,9 @@ export function previewLines(
     oilViscosity: string | null;
     oilType: OilType | null;
     oilVolumeMl: number | null;
+    /** Packaged net weight in GRAMS — ANTIFREEZE only. Optional so callers that
+     *  predate the kind keep compiling. */
+    antifreezeWeightG?: number | null;
     /** Whether this LISTING fits every vehicle. A universal listing shows no
      *  vehicle line; a vehicle-specific one does, whatever its kind. Optional so
      *  callers that predate it keep the capability-only behaviour. */
@@ -1510,6 +1877,18 @@ export function previewLines(
         }`,
         `🧴 *${t(lang, 'preview.volume')}:* ${
           listing.oilVolumeMl !== null ? formatVolume(listing.oilVolumeMl) : '—'
+        }`,
+      );
+      break;
+    case ProductKind.ANTIFREEZE:
+      // ONE attribute, and it is a WEIGHT: the caption says "2.5 кг", never
+      // "2.5 шт". The unit is not spelled out here — `formatWeight` carries it,
+      // and the kind declares it (KIND_CAPABILITIES[ANTIFREEZE].unit).
+      lines.push(
+        `⚖️ *${t(lang, 'preview.weight')}:* ${
+          listing.antifreezeWeightG != null
+            ? formatWeight(listing.antifreezeWeightG)
+            : '—'
         }`,
       );
       break;

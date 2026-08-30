@@ -159,13 +159,15 @@ enum PartMainCategory {
 // questionnaire per kind, and each kind owns its own attribute columns:
 //   SPARE_PART → vehicle fitment + GM/OEM part numbers (the original flow)
 //   MOTOR_OIL  → viscosity / oil type / volume; NO fitment, NO part numbers
-// Additive by design: a new "Другое" category (antifreeze, brake fluid, …)
+//   ANTIFREEZE → net weight in grams, sold by the KILOGRAM (never "шт")
+// Additive by design: a new "Другое" category (brake fluid, batteries, …)
 // becomes a new value here plus its own attribute columns, without touching
 // any existing kind. SPARE_PART is the default so every pre-existing row keeps
 // its current meaning.
 enum ProductKind {
   SPARE_PART
   MOTOR_OIL
+  ANTIFREEZE
 }
 
 // Base composition of a motor oil, as chosen by the seller (never inferred).
@@ -428,6 +430,12 @@ model Product {
   // Package volume in MILLILITRES (integer) — stored as a number, not "4 л", so
   // it sorts and filters correctly; the display label is derived at render time.
   oilVolumeMl     Int?                 @map("oil_volume_ml")
+  // ── ANTIFREEZE attributes (null for every other kind) ─────────────────────
+  // NET WEIGHT in GRAMS (integer), because antifreeze is sold BY WEIGHT, not by
+  // the piece: "2.5 кг" is stored as 2500. Grams — not a fractional kilogram —
+  // for exactly the reason oilVolumeMl is millilitres: an integer sorts, filters
+  // and compares exactly, and the "2.5 кг" label is derived at render time.
+  antifreezeWeightG Int?               @map("antifreeze_weight_g")
   // ── Dynamic category tree (the source of truth going forward) ─────────────
   // `vehicleCategoryId` is the ROOT (level 0) node, `categoryId` the precise node
   // the seller picked (level 1 main category, or level 2 subcategory when the
@@ -576,6 +584,9 @@ model ProductDraft {
   oilViscosity   String?              @map("oil_viscosity") @db.VarChar(20)
   oilType        OilType?             @map("oil_type")
   oilVolumeMl    Int?                 @map("oil_volume_ml")
+  // ANTIFREEZE attribute — mirrors the Product column (see there): NET WEIGHT in
+  // GRAMS, null for every other kind.
+  antifreezeWeightG Int?              @map("antifreeze_weight_g")
   priceUzs       Decimal?             @map("price_uzs") @db.Decimal(14, 2)
   createdAt      DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt      DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
@@ -1360,6 +1371,9 @@ model CatalogPart {
   oilViscosity       String?              @map("oil_viscosity") @db.VarChar(20)
   oilType            OilType?             @map("oil_type")
   oilVolumeMl        Int?                 @map("oil_volume_ml")
+  // ANTIFREEZE net weight in GRAMS, projected verbatim from the supply-side
+  // Product so the buyer card can render "2.5 кг" without joining back.
+  antifreezeWeightG  Int?                 @map("antifreeze_weight_g")
   // The listing's sale form, projected verbatim from the supply-side Product so
   // the Payme fiscal builder resolves `package_code` from this row's own
   // category WITHOUT joining back to the seller domain (the two contexts share

@@ -12,6 +12,7 @@ import {
   beginQuestionnaire,
   selectBrand,
   selectOtherBrand,
+  selectOtherKind,
   selectOtherCategory,
   selectOilViscosity,
   inputOilViscosity,
@@ -36,6 +37,7 @@ import {
   oilTypeKeyboard,
   oilVolumeKeyboard,
   otherCategoryKeyboard,
+  otherKindKeyboard,
 } from './product-wizard';
 import {
   OIL_TYPES,
@@ -45,6 +47,7 @@ import {
   parseVolumeLitres,
 } from './motor-oil-catalog';
 import { WIZARD_BRANDS } from './wizard-catalog';
+import { resolveOilFiscalCodes } from '../common/fiscal.util';
 
 /**
  * The "Другое" menu is now the ADMIN-MANAGED children of the `other` category,
@@ -74,12 +77,23 @@ function freshSession(): WizardSession {
   return s;
 }
 
-/** Take the "Другое" → "Моторные масла" branch; lands on OIL_VISCOSITY. */
-function sessionAtViscosity(): WizardSession {
+/**
+ * Take the "Другое" → "Что продаёте?" → "Моторное масло" → taxonomy branch.
+ * Lands on OIL_TYPE, the FIRST oil question (type before viscosity).
+ */
+function sessionAtOilType(): WizardSession {
   const s = freshSession();
   selectOtherBrand(s);
+  selectOtherKind(s, ProductKind.MOTOR_OIL);
   withOtherOptions(s);
   selectOtherCategory(s, MOTOR_OIL);
+  return s;
+}
+
+/** …and one question further on, standing at the viscosity question. */
+function sessionAtViscosity(): WizardSession {
+  const s = sessionAtOilType();
+  selectOilType(s, SYNTHETIC);
   return s;
 }
 
@@ -87,7 +101,6 @@ function sessionAtViscosity(): WizardSession {
 function sessionAtDone(): WizardSession {
   const s = sessionAtViscosity();
   selectOilViscosity(s, FIVE_W_30);
-  selectOilType(s, SYNTHETIC);
   selectOilVolume(s, FOUR_LITRES);
   inputTitle(s, 'Mobil 1 ESP 5W-30 4L');
   inputDescription(s, 'Оригинал, Бельгия');
@@ -96,21 +109,41 @@ function sessionAtDone(): WizardSession {
 }
 
 describe('reaching the motor-oil flow', () => {
-  it('"Другое" at the BRAND step opens the other-category menu', () => {
+  it('"Другое" at the BRAND step asks WHAT is being sold', () => {
     const s = freshSession();
     expect(selectOtherBrand(s).status).toBe('ok');
-    expect(s.step).toBe(WizardStep.OTHER_CATEGORY);
-    // The kind is NOT decided yet — the menu pick decides it.
+    expect(s.step).toBe(WizardStep.OTHER_KIND);
+    // The kind is NOT decided yet — the "Что продаёте?" answer decides it.
     expect(s.kind).toBe(ProductKind.SPARE_PART);
   });
 
-  it('"Моторные масла" sets the kind and starts the oil questionnaire', () => {
+  it('"Моторное масло" sets the kind and opens the oil taxonomy menu', () => {
     const s = freshSession();
     selectOtherBrand(s);
+    expect(selectOtherKind(s, ProductKind.MOTOR_OIL).status).toBe('ok');
+    expect(s.kind).toBe(ProductKind.MOTOR_OIL);
+    expect(s.step).toBe(WizardStep.OTHER_CATEGORY);
+  });
+
+  it('"Что продаёте?" offers exactly the non-vehicle kinds', () => {
+    const s = freshSession();
+    selectOtherBrand(s);
+    const labels = otherKindKeyboard(s)
+      .reply_markup.inline_keyboard.flat()
+      .map((b) => b.text);
+    expect(labels).toEqual(['🛢 Моторное масло', '🧊 Антифриз', '⬅️ Назад']);
+  });
+
+  it('the oil taxonomy pick starts the oil questionnaire at the TYPE', () => {
+    const s = freshSession();
+    selectOtherBrand(s);
+    selectOtherKind(s, ProductKind.MOTOR_OIL);
     withOtherOptions(s);
     expect(selectOtherCategory(s, MOTOR_OIL).status).toBe('ok');
     expect(s.kind).toBe(ProductKind.MOTOR_OIL);
-    expect(s.step).toBe(WizardStep.OIL_VISCOSITY);
+    // TYPE FIRST — the registry classifies an oil by base composition, so it is
+    // the coarser question and the viscosity narrows within it.
+    expect(s.step).toBe(WizardStep.OIL_TYPE);
     // "Другое" means NO specific vehicle, so the listing is universal and the
     // chosen child is stored as its category.
     expect(s.brand).toBeNull();
@@ -121,6 +154,7 @@ describe('reaching the motor-oil flow', () => {
   it('the other-category menu offers exactly the registered categories', () => {
     const s = freshSession();
     selectOtherBrand(s);
+    selectOtherKind(s, ProductKind.MOTOR_OIL);
     withOtherOptions(s);
     const labels = otherCategoryKeyboard(s)
       .reply_markup.inline_keyboard.flat()
@@ -135,10 +169,12 @@ describe('reaching the motor-oil flow', () => {
   it('rejects a forged category id that was never offered', () => {
     const s = freshSession();
     selectOtherBrand(s);
+    selectOtherKind(s, ProductKind.MOTOR_OIL);
     withOtherOptions(s);
     // Resolved against the rendered options, so an arbitrary id matches nothing.
     expect(selectOtherCategory(s, 'not-a-category').status).toBe('stale');
-    expect(s.kind).toBe(ProductKind.SPARE_PART);
+    expect(s.step).toBe(WizardStep.OTHER_CATEGORY);
+    expect(s.categoryId).toBeNull();
   });
 
   it('clears any vehicle already chosen before the seller switched to "Другое"', () => {
@@ -149,6 +185,8 @@ describe('reaching the motor-oil flow', () => {
     goBack(s); // → MODEL
     goBack(s); // → BRAND
     selectOtherBrand(s);
+    selectOtherKind(s, ProductKind.MOTOR_OIL);
+    withOtherOptions(s);
     selectOtherCategory(s, MOTOR_OIL);
     expect(s.brand).toBeNull();
     expect(s.model).toBeNull();
@@ -157,7 +195,7 @@ describe('reaching the motor-oil flow', () => {
 });
 
 describe('motor-oil happy path', () => {
-  it('walks viscosity → type → volume → title → description → price', () => {
+  it('walks type → viscosity → volume → title → description → price', () => {
     const s = sessionAtDone();
     expect(s).toMatchObject({
       step: WizardStep.QUESTIONNAIRE_DONE,
@@ -183,7 +221,6 @@ describe('motor-oil happy path', () => {
   it('the description step can be skipped, exactly as for spare parts', () => {
     const s = sessionAtViscosity();
     selectOilViscosity(s, FIVE_W_30);
-    selectOilType(s, SYNTHETIC);
     selectOilVolume(s, FOUR_LITRES);
     inputTitle(s, 'ZIC X9 5W-30');
     expect(skipDescription(s).status).toBe('ok');
@@ -203,6 +240,7 @@ describe('motor-oil happy path', () => {
 
   it('spare-part steps are never reachable in the oil flow', () => {
     const s = sessionAtViscosity();
+    expect(s.step).toBe(WizardStep.OIL_VISCOSITY);
     expect(selectModel(s, 0).status).toBe('stale');
     expect(selectCategory(s, 'brake-system').status).toBe('stale');
     expect(choosePartNumberType(s, 'OEM').status).toBe('stale');
@@ -217,7 +255,7 @@ describe('"Другое" free-text branches', () => {
     expect(s.step).toBe(WizardStep.OIL_VISCOSITY_CUSTOM);
     expect(inputOilViscosity(s, '0w16').status).toBe('ok');
     expect(s.oilViscosity).toBe('0W-16'); // uppercased, dash inserted
-    expect(s.step).toBe(WizardStep.OIL_TYPE);
+    expect(s.step).toBe(WizardStep.OIL_VOLUME);
   });
 
   it('rejects a viscosity that is not a SAE grade, keeping the seller on the step', () => {
@@ -232,7 +270,6 @@ describe('"Другое" free-text branches', () => {
   it('a custom volume is parsed from litres into millilitres', () => {
     const s = sessionAtViscosity();
     selectOilViscosity(s, FIVE_W_30);
-    selectOilType(s, SYNTHETIC);
     expect(selectOilVolume(s, 'custom').status).toBe('ok');
     expect(s.step).toBe(WizardStep.OIL_VOLUME_CUSTOM);
     expect(inputOilVolume(s, '3,5 л').status).toBe('ok');
@@ -243,7 +280,6 @@ describe('"Другое" free-text branches', () => {
   it('rejects a non-positive or absurd volume', () => {
     const s = sessionAtViscosity();
     selectOilViscosity(s, FIVE_W_30);
-    selectOilType(s, SYNTHETIC);
     selectOilVolume(s, 'custom');
     expect(inputOilVolume(s, '0').status).toBe('invalid');
     expect(inputOilVolume(s, '-4').status).toBe('invalid');
@@ -259,7 +295,7 @@ describe('"Другое" free-text branches', () => {
     expect(s.viscosityIsCustom).toBe(false);
     expect(s.oilViscosity).toBe('5W-30');
     // The free-text step is no longer on the path.
-    expect(s.step).toBe(WizardStep.OIL_TYPE);
+    expect(s.step).toBe(WizardStep.OIL_VOLUME);
     expect(previousStep(s)).toBe(WizardStep.OIL_VISCOSITY);
   });
 });
@@ -275,9 +311,10 @@ describe('motor-oil back navigation', () => {
       WizardStep.DESCRIPTION,
       WizardStep.TITLE,
       WizardStep.OIL_VOLUME,
-      WizardStep.OIL_TYPE,
       WizardStep.OIL_VISCOSITY,
+      WizardStep.OIL_TYPE,
       WizardStep.OTHER_CATEGORY,
+      WizardStep.OTHER_KIND,
       WizardStep.BRAND,
     ]);
   });
@@ -285,11 +322,11 @@ describe('motor-oil back navigation', () => {
   it('re-visits the free-text steps only when they were taken', () => {
     const custom = sessionAtViscosity();
     selectOilViscosity(custom, 'custom');
-    inputOilViscosity(custom, '0W-16'); // → OIL_TYPE
+    inputOilViscosity(custom, '0W-16'); // → OIL_VOLUME
     expect(previousStep(custom)).toBe(WizardStep.OIL_VISCOSITY_CUSTOM);
 
     const preset = sessionAtViscosity();
-    selectOilViscosity(preset, FIVE_W_30); // → OIL_TYPE
+    selectOilViscosity(preset, FIVE_W_30); // → OIL_VOLUME
     expect(previousStep(preset)).toBe(WizardStep.OIL_VISCOSITY);
   });
 
@@ -314,15 +351,7 @@ describe('motor-oil back navigation', () => {
 
 describe('motor-oil prompts (Russian, oil-specific)', () => {
   it('asks each oil question in Russian with its catalog options', () => {
-    const s = sessionAtViscosity();
-    expect(stepPrompt(s).text).toContain('вязкость');
-    expect(
-      oilViscosityKeyboard(s)
-        .reply_markup.inline_keyboard.flat()
-        .map((b) => b.text),
-    ).toEqual([...OIL_VISCOSITIES, 'Другое', '⬅️ Назад']);
-
-    selectOilViscosity(s, FIVE_W_30);
+    const s = sessionAtOilType();
     expect(stepPrompt(s).text).toContain('тип масла');
     expect(
       oilTypeKeyboard(s)
@@ -332,6 +361,14 @@ describe('motor-oil prompts (Russian, oil-specific)', () => {
     ).toEqual(['Синтетическое', 'Полусинтетическое', 'Минеральное']);
 
     selectOilType(s, SYNTHETIC);
+    expect(stepPrompt(s).text).toContain('вязкость');
+    expect(
+      oilViscosityKeyboard(s)
+        .reply_markup.inline_keyboard.flat()
+        .map((b) => b.text),
+    ).toEqual([...OIL_VISCOSITIES, 'Другое', '⬅️ Назад']);
+
+    selectOilViscosity(s, FIVE_W_30);
     expect(stepPrompt(s).text).toContain('объём');
     expect(
       oilVolumeKeyboard(s)
@@ -343,7 +380,6 @@ describe('motor-oil prompts (Russian, oil-specific)', () => {
   it('shows oil examples on the shared TITLE step', () => {
     const oil = sessionAtViscosity();
     selectOilViscosity(oil, FIVE_W_30);
-    selectOilType(oil, SYNTHETIC);
     selectOilVolume(oil, FOUR_LITRES);
     const text = stepPrompt(oil).text;
     expect(text).toContain('Mobil 1 ESP 5W-30 4L');
@@ -444,6 +480,44 @@ describe('motor oils are universal by kind', () => {
   });
 });
 
+/**
+ * The seller's OIL_TYPE answer is what selects the listing's MXIK / package
+ * code, so the wizard's choice and the fiscal table must line up exactly. This
+ * is the linkage the reordered flow could plausibly have broken — the type is
+ * now asked FIRST, so a wrong index here would misprice every oil.
+ */
+describe('the OIL_TYPE answer picks the listing\'s IKPU', () => {
+  it.each([
+    [OilType.SYNTHETIC, '02710005001000000', '1282037'],
+    [OilType.SEMI_SYNTHETIC, '02710005002000000', '1282031'],
+    [OilType.MINERAL, '02710005003000000', '1282581'],
+  ])('%s → %s / %s', (type, mxik, packageCode) => {
+    const s = sessionAtOilType();
+    const index = OIL_TYPES.findIndex((t) => t.value === type);
+    expect(selectOilType(s, index).status).toBe('ok');
+    expect(s.oilType).toBe(type);
+    expect(resolveOilFiscalCodes(s.oilType)).toEqual({ mxik, packageCode });
+  });
+
+  it('re-answering the type after "⬅️ Назад" moves the codes with it', () => {
+    // The regression this guards: a seller who walks back and changes the type
+    // keeps the previous type's IKPU.
+    const s = sessionAtOilType();
+    selectOilType(s, OIL_TYPES.findIndex((t) => t.value === OilType.SYNTHETIC));
+    selectOilViscosity(s, FIVE_W_30);
+
+    goBack(s); // OIL_VOLUME → OIL_VISCOSITY
+    goBack(s); // OIL_VISCOSITY → OIL_TYPE
+    expect(s.step).toBe(WizardStep.OIL_TYPE);
+    selectOilType(s, OIL_TYPES.findIndex((t) => t.value === OilType.MINERAL));
+
+    expect(s.oilType).toBe(OilType.MINERAL);
+    expect(resolveOilFiscalCodes(s.oilType)?.mxik).toBe('02710005003000000');
+    // …and the viscosity already answered is preserved, not reset.
+    expect(s.oilViscosity).toBe('5W-30');
+  });
+});
+
 describe('motor-oil catalog parsers', () => {
   it.each([
     ['5w30', '5W-30'],
@@ -510,6 +584,7 @@ describe('rendered keyboards — every step the seller can reach', () => {
     // way back to the brand list short of /start.
     const s = freshSession();
     selectOtherBrand(s);
+    selectOtherKind(s, ProductKind.MOTOR_OIL);
     withOtherOptions(s);
     expect(renderedButtons(s)).toEqual([
       ...OTHER_OPTIONS.map((c) => c.name),
@@ -518,7 +593,13 @@ describe('rendered keyboards — every step the seller can reach', () => {
   });
 
   it('every oil step renders its full option set plus Back', () => {
-    const s = sessionAtViscosity();
+    const s = sessionAtOilType();
+    expect(renderedButtons(s)).toEqual([
+      ...OIL_TYPES.map((t) => t.label),
+      '⬅️ Назад',
+    ]);
+
+    selectOilType(s, SYNTHETIC);
     expect(renderedButtons(s)).toEqual([
       ...OIL_VISCOSITIES,
       'Другое',
@@ -526,12 +607,6 @@ describe('rendered keyboards — every step the seller can reach', () => {
     ]);
 
     selectOilViscosity(s, FIVE_W_30);
-    expect(renderedButtons(s)).toEqual([
-      ...OIL_TYPES.map((t) => t.label),
-      '⬅️ Назад',
-    ]);
-
-    selectOilType(s, SYNTHETIC);
     expect(renderedButtons(s)).toEqual([
       ...OIL_VOLUMES.map((v) => v.label),
       'Другое',
@@ -559,7 +634,7 @@ describe('rendered keyboards — every step the seller can reach', () => {
     }
   });
 
-  it('Back from the "Другое" menu returns to the brand list', () => {
+  it('Back from "Что продаёте?" returns to the brand list', () => {
     const s = freshSession();
     selectOtherBrand(s);
     expect(goBack(s).status).toBe('ok');
@@ -577,9 +652,10 @@ describe('rendered keyboards — every step the seller can reach', () => {
       WizardStep.DESCRIPTION,
       WizardStep.TITLE,
       WizardStep.OIL_VOLUME,
-      WizardStep.OIL_TYPE,
       WizardStep.OIL_VISCOSITY,
+      WizardStep.OIL_TYPE,
       WizardStep.OTHER_CATEGORY,
+      WizardStep.OTHER_KIND,
       WizardStep.BRAND,
     ]);
   });
@@ -588,7 +664,6 @@ describe('rendered keyboards — every step the seller can reach', () => {
     const s = sessionAtViscosity();
     selectOilViscosity(s, 'custom');
     inputOilViscosity(s, '0W-16');
-    selectOilType(s, SYNTHETIC);
     selectOilVolume(s, 'custom');
     inputOilVolume(s, '3,5');
 
@@ -598,10 +673,11 @@ describe('rendered keyboards — every step the seller can reach', () => {
       WizardStep.TITLE,
       WizardStep.OIL_VOLUME_CUSTOM,
       WizardStep.OIL_VOLUME,
-      WizardStep.OIL_TYPE,
       WizardStep.OIL_VISCOSITY_CUSTOM,
       WizardStep.OIL_VISCOSITY,
+      WizardStep.OIL_TYPE,
       WizardStep.OTHER_CATEGORY,
+      WizardStep.OTHER_KIND,
       WizardStep.BRAND,
     ]);
   });
@@ -623,6 +699,7 @@ describe('rendered keyboards — every step the seller can reach', () => {
     const visited: WizardStep[] = [s.step];
     while (goBack(s).status === 'ok') visited.push(s.step);
     expect(visited).not.toContain(WizardStep.OTHER_CATEGORY);
+    expect(visited).not.toContain(WizardStep.OTHER_KIND);
     expect(visited[visited.length - 1]).toBe(WizardStep.BRAND);
   });
 });
@@ -631,6 +708,7 @@ describe('callback payloads stay within Telegram limits', () => {
   it('every rendered payload is unique per step and under 64 bytes', () => {
     const s = sessionAtViscosity();
     const steps = [
+      WizardStep.OTHER_KIND,
       WizardStep.OTHER_CATEGORY,
       WizardStep.OIL_VISCOSITY,
       WizardStep.OIL_TYPE,
@@ -710,7 +788,7 @@ describe('the chosen category determines the flow (no sticky MOTOR_OIL)', () => 
   it('THE BUG: oil → back → ordinary category returns to the parts flow', () => {
     const s = atCategory();
     selectCategory(s, 'motor-oil', []);
-    expect(s.step).toBe(WizardStep.OIL_VISCOSITY);
+    expect(s.step).toBe(WizardStep.OIL_TYPE);
 
     goBack(s);
     expect(s.step).toBe(WizardStep.CATEGORY);
@@ -724,8 +802,8 @@ describe('the chosen category determines the flow (no sticky MOTOR_OIL)', () => 
   it('abandoning the oil branch drops the oil answers it collected', () => {
     const s = atCategory();
     selectCategory(s, 'motor-oil', []);
-    selectOilViscosity(s, FIVE_W_30);
     selectOilType(s, SYNTHETIC);
+    selectOilViscosity(s, FIVE_W_30);
     expect(s.oilViscosity).toBe('5W-30');
 
     while (s.step !== WizardStep.CATEGORY && goBack(s).status === 'ok') {
@@ -744,6 +822,7 @@ describe('the chosen category determines the flow (no sticky MOTOR_OIL)', () => 
   it('returning to the BRAND step also clears the abandoned oil answers', () => {
     const s = sessionAtViscosity();
     selectOilViscosity(s, FIVE_W_30);
+    expect(s.oilType).toBe(OilType.SYNTHETIC);
     while (s.step !== WizardStep.BRAND && goBack(s).status === 'ok') {
       // walk back to the branch point
     }
@@ -757,15 +836,16 @@ describe('the chosen category determines the flow (no sticky MOTOR_OIL)', () => 
     const s = atCategory();
     selectCategory(s, 'motor-oil', []);
     expect(s.kind).toBe(ProductKind.MOTOR_OIL);
-    expect(s.step).toBe(WizardStep.OIL_VISCOSITY);
+    // Same order on the vehicle path: type first.
+    expect(s.step).toBe(WizardStep.OIL_TYPE);
     // Picked AFTER a car, so the vehicle is kept and the listing is specific.
     expect(s.brand).toBe('Chevrolet');
     expect(s.model).toBe('Cobalt');
   });
 
   it('"Другое" → any child still starts the oil questionnaire', () => {
-    const s = sessionAtViscosity();
+    const s = sessionAtOilType();
     expect(s.kind).toBe(ProductKind.MOTOR_OIL);
-    expect(s.step).toBe(WizardStep.OIL_VISCOSITY);
+    expect(s.step).toBe(WizardStep.OIL_TYPE);
   });
 });

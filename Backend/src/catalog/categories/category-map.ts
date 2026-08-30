@@ -50,6 +50,15 @@ export const CategoryAnchor = {
    * vehicle and is therefore universal.
    */
   OTHER: 'other',
+  /**
+   * The antifreeze category, reached from the "Другое" branch's "Что продаёте?"
+   * question. It is an EXISTING node of the buyer tree — the `Антифризы` leaf
+   * under `maintenance-and-fluids` seeded by subcategory-taxonomy.seed.ts — not
+   * a parallel taxonomy invented for the bot: an antifreeze listing therefore
+   * lands exactly where a buyer browsing antifreeze already looks, and its
+   * MXIK / package codes come from that node's own fiscal columns.
+   */
+  ANTIFREEZE: 'antifreeze',
 } as const;
 
 /**
@@ -109,6 +118,15 @@ export const VEHICLE_CATEGORY_TO_SLUG: Record<PartVehicleCategory, string> = {
   [PartVehicleCategory.HEATING_AND_COOLING]: 'heating-and-cooling',
   [PartVehicleCategory.TUNING_AND_ACCESSORIES]: 'tuning-and-accessories',
 };
+
+/**
+ * The ROOT (level-0) node {@link CategoryAnchor.ANTIFREEZE} hangs under, so the
+ * (vehicleCategoryId, categoryId) pair the wizard writes passes the server-side
+ * lineage check. Derived from the enum→slug table rather than spelled out, so it
+ * cannot drift from the tree the seed builds.
+ */
+export const ANTIFREEZE_ROOT_ID: string =
+  VEHICLE_CATEGORY_TO_SLUG[PartVehicleCategory.MAINTENANCE_AND_FLUIDS];
 
 /**
  * Reverse lookups: category id → the legacy enum it mirrors, or undefined for an

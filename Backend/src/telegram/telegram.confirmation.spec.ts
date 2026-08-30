@@ -791,6 +791,25 @@ describe('isDraftComplete (per-kind completeness)', () => {
     expect(isDraftComplete(oilDraft({ oilVolumeMl: null }))).toBe(false);
   });
 
+  it('accepts an antifreeze with only its weight, and rejects it without', () => {
+    // ANTIFREEZE requires exactly ONE attribute — no viscosity, no volume, no
+    // vehicle, no category question — so a draft carrying just the weight (plus
+    // the universal title/price) is complete.
+    const antifreeze = (over: Record<string, unknown> = {}) =>
+      draftRow({
+        kind: ProductKind.ANTIFREEZE,
+        brand: null,
+        model: null,
+        category: null,
+        categoryId: 'antifreeze',
+        vehicleCategoryId: 'maintenance-and-fluids',
+        antifreezeWeightG: 2_500,
+        ...over,
+      }) as never;
+    expect(isDraftComplete(antifreeze())).toBe(true);
+    expect(isDraftComplete(antifreeze({ antifreezeWeightG: null }))).toBe(false);
+  });
+
   it('requires title and price from every kind', () => {
     expect(isDraftComplete(draftRow({ title: null }) as never)).toBe(false);
     expect(isDraftComplete(draftRow({ priceUzs: null }) as never)).toBe(false);
@@ -824,6 +843,9 @@ describe('buildSessionFromDraft', () => {
       // a category step is re-rendered, so a resumed session never replays a
       // stale snapshot of a taxonomy the admin may have changed meanwhile.
       categoryOptions: [],
+      // Nor WHICH level was last offered — that is re-derived from the step the
+      // resumed dialogue is standing on.
+      categoryOptionsParentId: null,
       categoryStepPending: false,
       // No sale form was answered, so the question is not on this dialogue's
       // path either — the category's single package code applies.
@@ -840,6 +862,9 @@ describe('buildSessionFromDraft', () => {
       oilVolumeMl: null,
       viscosityIsCustom: false,
       volumeIsCustom: false,
+      // Nor any antifreeze attribute: draftRow() is a spare part.
+      antifreezeWeightG: undefined,
+      weightIsCustom: false,
       price: 450000,
     });
     // The session carries NO image state — the draft's rows own that.

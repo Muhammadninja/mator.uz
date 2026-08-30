@@ -305,6 +305,7 @@ export class CatalogProjectionService {
       oilViscosity: product.oilViscosity,
       oilType: product.oilType,
       oilVolumeMl: product.oilVolumeMl,
+      antifreezeWeightG: product.antifreezeWeightG,
       // The listing's sale form, projected verbatim like every attribute above.
       // It is what lets the Payme receipt builder pick between this row's
       // category's two package codes without reaching back into the supply

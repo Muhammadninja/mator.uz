@@ -58,6 +58,8 @@ export interface BotStrings {
   'preview.viscosity': string;
   'preview.oilType': string;
   'preview.volume': string;
+  /** Antifreeze net weight — always shown in kg, never as a piece count. */
+  'preview.weight': string;
   /** Vehicle line for a part that fits everything. */
   'preview.universalVehicle': string;
   'confirm.nothingPending': string;
@@ -70,6 +72,9 @@ export interface BotStrings {
   'btn.back': string;
   'btn.skip': string;
   'btn.other': string;
+  /** "Что продаёте?" options — the KINDS the "Другое" branch can list. */
+  'btn.kind.motorOil': string;
+  'btn.kind.antifreeze': string;
   'btn.continue': string;
   'btn.startOver': string;
   'btn.retry': string;
@@ -87,6 +92,7 @@ export interface BotStrings {
   'step.model': string;
   'step.category': string;
   'step.subcategory': string;
+  'step.otherKind': string;
   'step.otherCategory': string;
   'step.packageForm': string;
   'step.oilViscosity': string;
@@ -94,8 +100,11 @@ export interface BotStrings {
   'step.oilType': string;
   'step.oilVolume': string;
   'step.oilVolumeCustom': string;
+  'step.antifreezeWeight': string;
+  'step.antifreezeWeightCustom': string;
   'step.title.sparePart': string;
   'step.title.motorOil': string;
+  'step.title.antifreeze': string;
   'step.description': string;
   'step.partNumberType': string;
   /** `{type}` — OEM or GM, as the seller labelled it. */
@@ -106,6 +115,7 @@ export interface BotStrings {
   // ── Input validation ──────────────────────────────────────────────────────
   'invalid.viscosity': string;
   'invalid.volume': string;
+  'invalid.weight': string;
   'invalid.titleIsCommand': string;
   /** `{min}` — the minimum length. */
   'invalid.titleTooShort': string;

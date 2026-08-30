@@ -26,6 +26,7 @@ import {
   selectOilViscosity,
   selectOilVolume,
   selectOtherBrand,
+  selectOtherKind,
   selectOtherCategory,
 } from './product-wizard';
 import { OIL_TYPES, OIL_VISCOSITIES, OIL_VOLUMES } from './motor-oil-catalog';
@@ -65,10 +66,11 @@ function oilForCobalt(): WizardSession {
   return s;
 }
 
-/** Oil via "Другое": no vehicle at all. */
+/** Oil via "Другое" → "Что продаёте?" → "Моторное масло": no vehicle at all. */
 function oilViaOther(): WizardSession {
   const s = freshSession();
   selectOtherBrand(s);
+  selectOtherKind(s, ProductKind.MOTOR_OIL);
   s.categoryOptions = OTHER_OPTIONS;
   selectOtherCategory(s, 'motor-oil');
   return s;
@@ -76,8 +78,8 @@ function oilViaOther(): WizardSession {
 
 /** Answer the three oil questions from wherever the session stands. */
 function answerOilQuestions(s: WizardSession): WizardSession {
-  selectOilViscosity(s, FIVE_W_30);
   selectOilType(s, SYNTHETIC);
+  selectOilViscosity(s, FIVE_W_30);
   selectOilVolume(s, FOUR_LITRES);
   return s;
 }
@@ -89,7 +91,8 @@ describe('1. MOTOR_OIL + specific make/model → isUniversal = false', () => {
     // The vehicle is KEPT — this is what makes the listing specific.
     expect(s.brand).toBe('Chevrolet');
     expect(s.model).toBe('Cobalt');
-    expect(s.step).toBe(WizardStep.OIL_VISCOSITY);
+    // The oil questionnaire opens on its FIRST question: the type.
+    expect(s.step).toBe(WizardStep.OIL_TYPE);
   });
 
   it('is NOT universal, despite being a MOTOR_OIL', () => {

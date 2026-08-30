@@ -20,6 +20,7 @@ import {
   selectCategory,
   selectSubcategory,
   selectOtherBrand,
+  selectOtherKind,
   selectOtherCategory,
   selectPackageForm,
   inputTitle,
@@ -101,6 +102,7 @@ describe('when the sale-form question is asked', () => {
     const s = new WizardSessionStore().start(1);
     beginQuestionnaire(s);
     selectOtherBrand(s);
+    selectOtherKind(s, ProductKind.MOTOR_OIL);
     s.categoryOptions = [{ id: 'motorcycle-oil', name: 'Мотоциклетные масла' }];
     selectOtherCategory(s, 'motorcycle-oil', BOTH_CODES);
 
@@ -112,11 +114,12 @@ describe('when the sale-form question is asked', () => {
     const s = new WizardSessionStore().start(1);
     beginQuestionnaire(s);
     selectOtherBrand(s);
+    selectOtherKind(s, ProductKind.MOTOR_OIL);
     s.categoryOptions = [{ id: 'motorcycle-oil', name: 'Мотоциклетные масла' }];
     selectOtherCategory(s, 'motorcycle-oil', SINGLE_CODE);
 
     // Straight into the oil questionnaire, exactly as before this step existed.
-    expect(s.step).toBe(WizardStep.OIL_VISCOSITY);
+    expect(s.step).toBe(WizardStep.OIL_TYPE);
   });
 });
 

@@ -48,6 +48,7 @@ function part(over: Partial<PartWithRelations> = {}): PartWithRelations {
     oilViscosity: null,
     oilType: null,
     oilVolumeMl: null,
+    antifreezeWeightG: null,
     // The sale form: unset, i.e. the category's single package code applies.
     packageForm: null,
     // Columns the presenter does not read, but the row type requires: omitting
@@ -200,6 +201,52 @@ describe('presentPartItem — kind attributes', () => {
     const out = presentPartItem(part(), null);
     expect(out.kind).toBe('SPARE_PART');
     expect(out.motor_oil).toBeNull();
+    expect(out.antifreeze).toBeNull();
+  });
+
+  it('exposes an antifreeze’s WEIGHT, raw in grams and labelled in kg', () => {
+    const out = presentPartItem(
+      part({
+        kind: 'ANTIFREEZE',
+        title: 'Felix Carbox G12',
+        antifreezeWeightG: 2500,
+      } as never),
+      null,
+    );
+    expect(out.kind).toBe('ANTIFREEZE');
+    expect(out.antifreeze).toEqual({
+      weight_g: 2500,
+      weight_label: '2.5 кг',
+    });
+    // Exactly one kind block is populated — an antifreeze is not half an oil.
+    expect(out.motor_oil).toBeNull();
+  });
+
+  it('tells the client which UNIT each kind is quantified in', () => {
+    // The rule that keeps a client from printing "шт" next to a weight.
+    expect(presentPartItem(part(), null).unit).toBe('PCS');
+    expect(
+      presentPartItem(part({ kind: 'MOTOR_OIL' } as never), null).unit,
+    ).toBe('L');
+    expect(
+      presentPartItem(part({ kind: 'ANTIFREEZE' } as never), null).unit,
+    ).toBe('KG');
+  });
+
+  it('an antifreeze card carries no oil, part-number or compatibility concept', () => {
+    const out = presentPartItem(
+      part({
+        kind: 'ANTIFREEZE',
+        antifreezeWeightG: 5000,
+        isUniversal: true,
+      } as never),
+      { trimId: 't1', engineId: 'e1', year: 2020 },
+    );
+    expect(out.motor_oil).toBeNull();
+    // Never a misleading "UNKNOWN" number type for a kind that has none.
+    expect(out.part_number_type).toBeNull();
+    // Universal by construction, so "does it fit my car?" has no answer to give.
+    expect(out.compatibility).toBeNull();
   });
 
   it('keeps every spare-part field unchanged when the kind is added', () => {

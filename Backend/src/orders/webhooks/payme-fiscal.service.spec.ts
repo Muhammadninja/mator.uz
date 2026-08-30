@@ -733,4 +733,85 @@ describe('buildFiscalItem (pure mapping)', () => {
       expect.objectContaining({ price: 15_000_001, count: 1 }),
     ]);
   });
+
+  // Where a listing's codes come from is decided by its KIND. Antifreeze is the
+  // case that makes the rule visible: it lives one step away from motor oil in
+  // the wizard, and the three oil MXIKs describe motor oil ONLY.
+  describe('ANTIFREEZE keeps its own category\'s IKPU', () => {
+    const ANTIFREEZE_CATEGORY = {
+      mxik: '03820000000000000',
+      packageCodeSingle: '1234567',
+      packageCodeSet: null,
+    };
+
+    it('fiscalizes from the category, never from the oil table', () => {
+      const result = buildFiscalItem(
+        line({
+          kind: ProductKind.ANTIFREEZE,
+          category: ANTIFREEZE_CATEGORY,
+          oilType: null,
+        }) as never,
+      );
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.items[0].code).toBe(ANTIFREEZE_CATEGORY.mxik);
+      expect(result.items[0].package_code).toBe(
+        ANTIFREEZE_CATEGORY.packageCodeSingle,
+      );
+      // None of the three motor-oil codes may appear on an antifreeze line.
+      const oilCodes = Object.values(OIL_TYPE_FISCAL);
+      expect(oilCodes.map((c) => c.mxik)).not.toContain(result.items[0].code);
+      expect(oilCodes.map((c) => c.packageCode)).not.toContain(
+        result.items[0].package_code,
+      );
+    });
+
+    it('is NOT diverted onto an oil code by a stray oilType', () => {
+      // The defensive "a row carrying an oil type is an oil" clause applies to
+      // SPARE_PART only — a kind with its own fiscal taxonomy must never be
+      // pulled onto the oil table by a leftover column value.
+      const result = buildFiscalItem(
+        line({
+          kind: ProductKind.ANTIFREEZE,
+          category: ANTIFREEZE_CATEGORY,
+          oilType: OilType.SYNTHETIC,
+        }) as never,
+      );
+      expect(result.ok && result.items[0].code).toBe(ANTIFREEZE_CATEGORY.mxik);
+    });
+
+    it('reports a gap instead of inventing an IKPU when unconfigured', () => {
+      // No antifreeze MXIK is invented anywhere in this codebase: an operator
+      // enters the real one in the admin console, and until then the checkout
+      // refuses rather than fiscalizing under a borrowed code.
+      const result = buildFiscalItem(
+        line({
+          kind: ProductKind.ANTIFREEZE,
+          category: {
+            mxik: null,
+            packageCodeSingle: null,
+            packageCodeSet: null,
+          },
+        }) as never,
+      );
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.gaps).toEqual([
+        'item oi_1: category has no MXIK',
+        'item oi_1: category has no package code',
+      ]);
+    });
+
+    it('leaves a SPARE_PART carrying an oil type on the oil path (unchanged)', () => {
+      const result = buildFiscalItem(
+        line({
+          kind: ProductKind.SPARE_PART,
+          oilType: OilType.MINERAL,
+        }) as never,
+      );
+      expect(result.ok && result.items[0].code).toBe(
+        OIL_TYPE_FISCAL[OilType.MINERAL].mxik,
+      );
+    });
+  });
 });

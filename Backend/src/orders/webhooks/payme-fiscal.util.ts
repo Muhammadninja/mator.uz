@@ -5,6 +5,7 @@ import {
   resolveOilFiscalCodes,
   resolvePackageCode,
 } from '../../common/fiscal.util';
+import { fiscalizedByOilType } from '../../common/product-kind';
 import { splitEvenLines } from '../promo-allocation.util';
 
 /**
@@ -89,8 +90,10 @@ export interface FiscalLineSource {
   /** The sale form chosen for the listing; null ⇒ the single package code. */
   packageForm: PackageForm | null;
   /**
-   * The listing's kind. MOTOR_OIL fiscalizes from `oilType` instead of the
-   * category, because the registry classifies oil by base composition.
+   * The listing's kind. It decides WHERE the codes come from: a kind whose
+   * capability entry says `fiscalizedByOilType` (motor oil) reads `oilType`,
+   * because the registry classifies oil by base composition; every other kind —
+   * ANTIFREEZE included — reads its own category's columns.
    */
   kind: ProductKind;
   /** Base composition of a motor oil; null for every other kind. */
@@ -137,12 +140,20 @@ export function buildFiscalItem(line: FiscalLineSource): FiscalLineResult {
 
   // WHERE the codes come from is decided by the listing, not by the caller:
   // motor oil is classified by base composition (three MXIKs under one
-  // category), everything else by its category. Keyed on the kind, with a
-  // stray oilType treated the same way — a listing carrying an oil type is an
-  // oil however it was classified, and fiscalizing it off an unrelated
-  // category's code would be wrong. (`!= null`, so an absent field reads like a
-  // null one instead of sending every product down the oil path.)
-  const byOilType = line.kind === ProductKind.MOTOR_OIL || line.oilType != null;
+  // category), everything else by its category. The rule is read from the kind
+  // capability table, so it is stated once and shared with the wizard and the
+  // admin console rather than re-derived here as a `kind === MOTOR_OIL` check.
+  //
+  // The second clause is the long-standing defensive one: a SPARE_PART carrying
+  // an oil type is an oil however it was classified, and fiscalizing it off an
+  // unrelated category's code would be wrong. (`!= null`, so an absent field
+  // reads like a null one instead of sending every product down the oil path.)
+  // It is deliberately NOT extended to a kind that has its own fiscal taxonomy:
+  // ANTIFREEZE must keep its OWN category's IKPU, and a stray oilType on such a
+  // row must never divert it onto a motor-oil code.
+  const byOilType =
+    fiscalizedByOilType(line.kind) ||
+    (line.kind === ProductKind.SPARE_PART && line.oilType != null);
 
   let mxik: string | null;
   let packageCode: string | null;

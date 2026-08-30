@@ -60,6 +60,8 @@ export interface DraftFormPatch {
   oilViscosity?: string | null;
   oilType?: OilType | null;
   oilVolumeMl?: number | null;
+  // ANTIFREEZE attribute — the packaged net weight in GRAMS; null elsewhere.
+  antifreezeWeightG?: number | null;
   priceUzs?: Prisma.Decimal | number | null;
 }
 
@@ -99,6 +101,7 @@ export interface DraftFormFields {
   oilViscosity: string | null;
   oilType: OilType | null;
   oilVolumeMl: number | null;
+  antifreezeWeightG: number | null;
 }
 
 // Compile-time guarantee that every field a capability entry can REQUIRE is a
@@ -249,6 +252,7 @@ export class ProductDraftService {
           oilViscosity: source.oilViscosity,
           oilType: source.oilType,
           oilVolumeMl: source.oilVolumeMl,
+          antifreezeWeightG: source.antifreezeWeightG,
           priceUzs: source.priceUzs,
         },
       });
@@ -395,6 +399,7 @@ export class ProductDraftService {
         oilViscosity: patch.oilViscosity,
         oilType: patch.oilType,
         oilVolumeMl: patch.oilVolumeMl,
+        antifreezeWeightG: patch.antifreezeWeightG,
         priceUzs: patch.priceUzs ?? undefined,
       },
     });

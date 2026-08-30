@@ -17,10 +17,15 @@ export const PART_REGION_VALUES = [
 // Listing kinds accepted on the wire, lowercased to match the rest of this
 // contract (region/sort are lowercase too). Mapped to the ProductKind enum in
 // the service.
-export const PART_KIND_VALUES = ['spare_part', 'motor_oil'] as const;
+export const PART_KIND_VALUES = [
+  'spare_part',
+  'motor_oil',
+  'antifreeze',
+] as const;
 export const KIND_BY_WIRE: Record<string, ProductKind> = {
   spare_part: ProductKind.SPARE_PART,
   motor_oil: ProductKind.MOTOR_OIL,
+  antifreeze: ProductKind.ANTIFREEZE,
 };
 
 // Oil types accepted on the wire. Same lowercase convention.

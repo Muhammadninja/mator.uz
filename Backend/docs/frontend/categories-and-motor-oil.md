@@ -240,7 +240,8 @@ categoryId        = motor-oil
 ### Path B — "Другое" motor oil
 
 ```text
-Brand → "Другое" → <an OTHER child, e.g. Motorcycle Oil>
+Brand → "Другое" → "Что продаёте?" → Моторное масло
+      → <an OTHER child, e.g. Motorcycle Oil>
 ```
 
 Result:
@@ -253,10 +254,36 @@ vehicleCategoryId = other
 categoryId        = motorcycle-oil
 ```
 
-**`OTHER` is not a `ProductKind`.** `ProductKind` has exactly two values,
-`SPARE_PART` and `MOTOR_OIL`. `other` is a `PartCategory` row — a taxonomy root.
-Both paths above produce `kind = MOTOR_OIL`; they differ only in category and
-universality.
+### Path C — "Другое" antifreeze
+
+```text
+Brand → "Другое" → "Что продаёте?" → Антифриз → вес (кг)
+```
+
+Result:
+
+```text
+kind              = ANTIFREEZE
+isUniversal       = true           ← no vehicle is ever asked
+brand/model       = null / null    (no fit rows)
+vehicleCategoryId = maintenance-and-fluids
+categoryId        = antifreeze     ← the EXISTING buyer-tree leaf
+antifreezeWeightG = 2500           ← "2.5 кг", stored in grams
+```
+
+Antifreeze is quantified **by weight**, never by the piece: the seller picks or
+types a package weight in kilograms and it is stored as an integer number of
+grams. See `unit` in Part 4.
+
+**`OTHER` is not a `ProductKind`.** `ProductKind` has three values —
+`SPARE_PART`, `MOTOR_OIL` and `ANTIFREEZE`. `other` is a `PartCategory` row — a
+taxonomy root. Paths A and B both produce `kind = MOTOR_OIL`; they differ only
+in category and universality.
+
+**The "Что продаёте?" step is a KIND question, not a category one.** It is a
+closed, code-level list (one entry per non-vehicle `ProductKind`), so it is NOT
+admin-editable and does NOT appear in the category tree. The admin-managed
+OTHER children are still pure taxonomy, reached *after* "Моторное масло".
 
 ---
 
@@ -304,7 +331,7 @@ clients working against one filter.
 
 ### 3.3 Other filters, pagination, sorting, search
 
-- `kind=motor_oil` (repeatable, lowercase). Omitted → every kind.
+- `kind=motor_oil | spare_part | antifreeze` (repeatable, lowercase). Omitted → every kind.
 - `viscosity=5W-30` (repeatable, exact, case-insensitive), `oil_type=synthetic|semi_synthetic|mineral`, `volume_ml=4000` (repeatable, **millilitres**) or `volume_ml_min` / `volume_ml_max`. Any of these implies `kind=motor_oil`.
 - `q=` free-text over title.
 - `make=` / `model=` — canonical name (`Chevrolet`) or slug (`make_chevrolet`).
@@ -358,13 +385,17 @@ the same shape (`presentPartItem`).
 |---|---|---|
 | `id` | `string` | |
 | `title` | `string` | |
-| `kind` | `"SPARE_PART" \| "MOTOR_OIL"` | Drives which card to render |
-| `motor_oil` | object \| `null` | `null` for spare parts |
+| `kind` | `"SPARE_PART" \| "MOTOR_OIL" \| "ANTIFREEZE"` | Drives which card to render |
+| `unit` | `"PCS" \| "L" \| "KG"` | **The unit this listing is quantified in.** Render quantities with this — never a hardcoded "шт". `PCS` for spare parts, `L` for oils, `KG` for antifreeze |
+| `motor_oil` | object \| `null` | `null` unless `kind === "MOTOR_OIL"` |
 | `motor_oil.viscosity` | `string \| null` | e.g. `"5W-30"` |
 | `motor_oil.oil_type` | `"SYNTHETIC" \| "SEMI_SYNTHETIC" \| "MINERAL" \| null` | raw enum |
 | `motor_oil.oil_type_label` | `string \| null` | pre-localized, e.g. `"Синтетическое"` |
 | `motor_oil.volume_ml` | `number \| null` | millilitres |
 | `motor_oil.volume_label` | `string \| null` | e.g. `"4 л"` |
+| `antifreeze` | object \| `null` | `null` unless `kind === "ANTIFREEZE"` |
+| `antifreeze.weight_g` | `number \| null` | net weight in **grams** (exact; sortable) |
+| `antifreeze.weight_label` | `string \| null` | e.g. `"2.5 кг"` — render this |
 | `category` | `{ id, name }` | The `PartCategory` this part points at |
 | `main_category` | enum \| `null` | Legacy mirror; `null` for admin-created categories |
 | `vehicle_category` | enum \| `null` | Legacy mirror |
@@ -373,7 +404,7 @@ the same shape (`presentPartItem`).
 | `fits` | array | `{make_slug, make_name, model_slug, model_name}`; **empty for universal** |
 | `brand` | `{ id, name } \| null` | Part manufacturer |
 | `part_brand_name` | `string \| null` | |
-| `part_number_type` | `"GM" \| "OEM" \| "UNKNOWN" \| null` | **`null` for oils** — never render an OEM/GM row |
+| `part_number_type` | `"GM" \| "OEM" \| "UNKNOWN" \| null` | **`null` for oils and antifreeze** — never render an OEM/GM row |
 | `oem_numbers` / `gm_numbers` | `string[]` | Empty for oils |
 | `is_oem` / `is_gm` | `boolean` | |
 | `origin_region` | enum \| `null` | |
@@ -383,6 +414,14 @@ the same shape (`presentPartItem`).
 | `delivery_eta_days_min/max` | `number \| null` | |
 | `images` | `string[]` | |
 | `seller` | `{ id, name, rating_avg, certified, lowest_price }` | |
+
+> ⚠️ **Exactly one kind block is ever non-null.** `motor_oil` and `antifreeze`
+> are siblings; switch on `kind` and read the matching one. A kind added later
+> adds a sibling key rather than changing either of these.
+
+> ⚠️ **`antifreeze.weight_g` is the PACKAGE size, not an order quantity.** Cart
+> and order quantities stay integer counts of listings ("2 канистры"); the
+> weight describes what one listing contains.
 
 > ⚠️ **There is no `description` field** on the buyer part response. Don't design
 > a layout that requires one. (The seller does enter a description in the bot; it
