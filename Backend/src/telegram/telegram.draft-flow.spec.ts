@@ -247,6 +247,38 @@ describe('TelegramService — draft flow (photos-first)', () => {
       );
     });
 
+    // The bug: an ANTIFREEZE draft's ONLY required attribute is its weight, and
+    // this snapshot never passed it — so Prisma left the column NULL, the
+    // rendezvous stayed blocked on the form axis, and the seller watched every
+    // image reach READY while "⏳ Завершаем обработку фото…" never went away.
+    // This asserts the write path where the bug actually lived; the coordinator
+    // spec covers what the block looked like from the other side.
+    it('on QUESTIONNAIRE_DONE: persists antifreezeWeightG, the ANTIFREEZE kind\'s required field', async () => {
+      const drafts = {
+        updateForm: jest.fn().mockResolvedValue(undefined),
+        findWithImages: jest.fn().mockResolvedValue({
+          status: 'CREATING',
+          images: [{ status: 'PROCESSING' }],
+        }),
+      };
+      const svc = makeService({ drafts });
+      const ctx = makeCtx();
+      const session = svc.wizard.start(7);
+      session.draftId = 'draft_1';
+      session.kind = 'ANTIFREEZE';
+      session.step = WizardStep.PRICE;
+      session.title = 'Antifriz G12 5kg';
+      session.antifreezeWeightG = 5000; // answered at ANTIFREEZE_WEIGHT
+      inputPrice(session, '250 000'); // → QUESTIONNAIRE_DONE
+
+      await svc.handleFormAdvance(ctx, 7, session);
+
+      expect(drafts.updateForm).toHaveBeenCalledWith(
+        'draft_1',
+        expect.objectContaining({ antifreezeWeightG: 5000 }),
+      );
+    });
+
     it('on QUESTIONNAIRE_DONE with a failed image: does NOT show the holding message (the failure notice owns that)', async () => {
       const drafts = {
         updateForm: jest.fn().mockResolvedValue(undefined),

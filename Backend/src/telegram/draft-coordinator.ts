@@ -79,11 +79,25 @@ export class DraftCoordinator {
       const stillProcessing = images.some(
         (img) => img.status === DraftImageStatus.PROCESSING,
       );
-      if (stillProcessing) return; // batch not done yet; the last settle re-checks
 
       const failedCount = images.filter(
         (img) => img.status === DraftImageStatus.FAILED,
       ).length;
+
+      // The decision line. Logged with the ACTUAL counts and the form axis every
+      // time the rendezvous is evaluated, because "why is this seller still
+      // waiting?" is otherwise unanswerable from logs: `image.ready` proves the
+      // image pipeline finished, never that the flow was allowed to advance. The
+      // antifreeze bug looked exactly like a stuck image (total=2 ready=2) while
+      // the real blocker was formComplete=false on a fully answered questionnaire.
+      const formComplete = isDraftFormComplete(draft);
+      this.logDecision(draft, {
+        stillProcessing,
+        failedCount,
+        formComplete,
+      });
+
+      if (stillProcessing) return; // batch not done yet; the last settle re-checks
       if (failedCount > 0) {
         // Strict all-must-succeed: any failure blocks the preview. Draft (and its
         // form data) is kept; the seller is offered retry/replace/cancel.
@@ -95,7 +109,7 @@ export class DraftCoordinator {
       // SINGLE definition of completeness — never a local copy, which is how a
       // motor oil (no brand/model/category by design) once failed this gate
       // silently and stranded the seller on the "processing photos" message.
-      if (images.length === 0 || !isDraftFormComplete(draft)) return;
+      if (images.length === 0 || !formComplete) return;
 
       const won = await this.drafts.tryTransition(
         draftId,
@@ -112,6 +126,48 @@ export class DraftCoordinator {
     }
     this.logger.warn(
       `maybeAdvanceToPreview(${draftId}) exhausted retries under version contention`,
+    );
+  }
+
+  /**
+   * One structured line per rendezvous evaluation, naming the blocking axis.
+   *
+   * `reason` is the SINGLE thing keeping the seller waiting, in the same order the
+   * gates are applied, so the log answers "wait or advance, and why" outright
+   * instead of leaving it to be inferred from image events that only ever describe
+   * the image pipeline.
+   */
+  private logDecision(
+    draft: DraftWithImages,
+    axes: {
+      stillProcessing: boolean;
+      failedCount: number;
+      formComplete: boolean;
+    },
+  ): void {
+    const images = draft.images;
+    const counts = {
+      total: images.length,
+      ready: images.filter((i) => i.status === DraftImageStatus.READY).length,
+      processing: images.filter((i) => i.status === DraftImageStatus.PROCESSING)
+        .length,
+      failed: axes.failedCount,
+    };
+    const reason = axes.stillProcessing
+      ? 'images_processing'
+      : axes.failedCount > 0
+        ? 'images_failed'
+        : images.length === 0
+          ? 'no_images'
+          : !axes.formComplete
+            ? 'form_incomplete'
+            : 'advance';
+    this.logger.log(
+      `[DraftImageWait] draftId=${draft.id} kind=${draft.kind} ` +
+        `total=${counts.total} ready=${counts.ready} ` +
+        `processing=${counts.processing} failed=${counts.failed} ` +
+        `formComplete=${axes.formComplete} reason=${reason} ` +
+        `imageStatuses=${images.map((i) => `${i.id}:${i.status}`).join(',')}`,
     );
   }
 

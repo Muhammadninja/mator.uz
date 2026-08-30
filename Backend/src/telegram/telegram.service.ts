@@ -42,6 +42,7 @@ import {
   ProductDraftService,
   isDraftFormComplete,
   type DraftWithImages,
+  type QuestionnaireSnapshot,
 } from './product-draft.service';
 import { DraftCoordinator } from './draft-coordinator';
 import { DraftTelemetry, DraftMetric } from './draft-telemetry';
@@ -1221,8 +1222,11 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    // Persist the current field snapshot (idempotent; cheap).
-    await this.drafts.updateForm(session.draftId, {
+    // Persist the current field snapshot (idempotent; cheap). Typed as
+    // QuestionnaireSnapshot, NOT the looser DraftFormPatch: that type demands
+    // every field some kind requires, so a new kind cannot be added without its
+    // attribute being saved here.
+    const snapshot: QuestionnaireSnapshot = {
       formStep: session.step,
       kind: session.kind,
       brand: session.brand,
@@ -1239,8 +1243,17 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       oilViscosity: session.oilViscosity,
       oilType: session.oilType,
       oilVolumeMl: session.oilVolumeMl,
+      // ANTIFREEZE's ONLY required field. Omitting it here (while every other
+      // kind's attributes were listed) is what stranded antifreeze sellers on
+      // "⏳ Завершаем обработку фото…": the session held the weight, but
+      // `updateForm` never wrote it, so the column stayed NULL and
+      // isDraftFormComplete failed the rendezvous forever — no matter how many
+      // images went READY. Every field of DraftFormPatch is optional and Prisma
+      // reads `undefined` as "leave alone", so nothing caught the omission.
+      antifreezeWeightG: session.antifreezeWeightG,
       priceUzs: session.price ?? undefined,
-    });
+    };
+    await this.drafts.updateForm(session.draftId, snapshot);
 
     if (session.step !== WizardStep.QUESTIONNAIRE_DONE) {
       // More questions to go.

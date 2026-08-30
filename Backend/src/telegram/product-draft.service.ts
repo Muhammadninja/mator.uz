@@ -65,6 +65,38 @@ export interface DraftFormPatch {
   priceUzs?: Prisma.Decimal | number | null;
 }
 
+/**
+ * Compile-time guarantee that the patch can carry EVERY field some kind requires.
+ *
+ * The companion to `_RequiredFieldsAreReadable` below: that one proves the
+ * completeness CHECK can read each required field, this one proves the WRITE path
+ * can persist it. Without this, a kind could require a column the wizard is
+ * structurally unable to save — which is exactly the antifreeze bug: the session
+ * held `antifreezeWeightG`, `updateForm` supported it, but the questionnaire's
+ * snapshot never passed it, so the column stayed NULL and the rendezvous never
+ * fired. Types alone could not catch that (every field here is optional), so the
+ * call site is pinned by {@link QuestionnaireSnapshot} instead.
+ */
+type _RequiredFieldsArePatchable =
+  KindRequiredField extends keyof DraftFormPatch ? true : never;
+const _requiredFieldsArePatchable: _RequiredFieldsArePatchable = true;
+void _requiredFieldsArePatchable;
+
+/**
+ * The snapshot `handleFormAdvance` persists when a questionnaire step is answered.
+ *
+ * REQUIRES (not merely permits) every field any kind lists in its capability
+ * table, so omitting one — the antifreeze bug — is a compile error rather than a
+ * seller stuck forever on "⏳ Завершаем обработку фото…". A kind that does not use
+ * a given field passes `null`, which is explicit and costs nothing; `undefined` is
+ * not accepted, because that is precisely the value Prisma silently ignores.
+ */
+export type QuestionnaireSnapshot = DraftFormPatch & {
+  [K in KindRequiredField]: DraftFormPatch[K] extends infer V
+    ? Exclude<V, undefined>
+    : never;
+};
+
 /** One uploaded photo as accepted on the hot path (before any processing). */
 export interface DraftImageInput {
   sortOrder: number;

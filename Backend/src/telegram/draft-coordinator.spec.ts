@@ -39,6 +39,7 @@ function makeDraft(over: Partial<Record<string, unknown>> = {}) {
     oilViscosity: null,
     oilType: null,
     oilVolumeMl: null,
+    antifreezeWeightG: null,
     priceUzs: 250000,
     images: [] as Img[],
     ...over,
@@ -58,6 +59,22 @@ function makeOilDraft(over: Partial<Record<string, unknown>> = {}) {
     oilViscosity: '5W-30',
     oilType: OilType.SYNTHETIC,
     oilVolumeMl: 4000,
+    ...over,
+  });
+}
+
+/** A fully-answered ANTIFREEZE draft: no vehicle, no category, no oil fields —
+ *  its ONLY required attribute is the packaged net weight. */
+function makeAntifreezeDraft(over: Partial<Record<string, unknown>> = {}) {
+  return makeDraft({
+    kind: ProductKind.ANTIFREEZE,
+    title: 'Antifriz G12 5kg',
+    brand: null,
+    model: null,
+    category: null,
+    vehicleCategoryId: null,
+    categoryId: null,
+    antifreezeWeightG: 5000,
     ...over,
   });
 }
@@ -387,5 +404,166 @@ describe('DraftCoordinator rendezvous — per product kind', () => {
 
     expect(draft.status).toBe(DraftStatus.CREATING);
     expect(previewEmits(events)).toHaveLength(0);
+  });
+});
+
+// ── The waiting rule, per reported bug ──────────────────────────────────────
+// Regression for the SECOND instance of "the seller waits forever while every
+// image is READY". The first was MOTOR_OIL (a duplicated completeness rule); this
+// one is ANTIFREEZE, and the completeness rule was innocent — `handleFormAdvance`
+// simply never passed `antifreezeWeightG` to `updateForm`, so the kind's one
+// required column stayed NULL and the rendezvous was correctly-but-permanently
+// blocked on the FORM axis while the image logs looked perfect.
+//
+// These tests pin the property that actually matters to the seller: once the last
+// image reaches READY on a fully-answered draft, the flow STOPS waiting — exactly
+// once, regardless of arrival order, repeats, or a stale caller.
+describe('DraftCoordinator — stop waiting once images are READY', () => {
+  const READY = DraftImageStatus.READY;
+  const PROCESSING = DraftImageStatus.PROCESSING;
+  const FAILED = DraftImageStatus.FAILED;
+
+  function coordinatorFor(draft: ReturnType<typeof makeDraft>) {
+    const drafts = makeDraftsMock(draft);
+    const events = makeEvents();
+    const coord = new DraftCoordinator(
+      drafts as never,
+      events as never,
+      makeTelemetry() as never,
+    );
+    return { coord, drafts, events };
+  }
+
+  const previews = (events: ReturnType<typeof makeEvents>) =>
+    events.emit.mock.calls.filter(
+      (c: unknown[]) => c[0] === DraftEvent.READY_FOR_PREVIEW,
+    );
+
+  // Case 1 — a single image going READY ends the wait.
+  it('Case 1: one image → READY stops the waiting and advances', async () => {
+    const draft = makeAntifreezeDraft({
+      images: [{ id: 'i1', status: READY }],
+    });
+    const { coord, events } = coordinatorFor(draft);
+
+    await coord.onImageSettled('draft_1');
+
+    expect(draft.status).toBe(DraftStatus.READY_FOR_PREVIEW);
+    expect(previews(events)).toHaveLength(1);
+  });
+
+  // Case 2 — with two images the flow waits for the SECOND, then advances.
+  it('Case 2: two images → waits after #1, advances after #2', async () => {
+    const images: Img[] = [
+      { id: 'i1', status: PROCESSING },
+      { id: 'i2', status: PROCESSING },
+    ];
+    const draft = makeAntifreezeDraft({ images });
+    const { coord, events } = coordinatorFor(draft);
+
+    images[0].status = READY; // image #1 settles
+    await coord.onImageSettled('draft_1');
+    expect(draft.status).toBe(DraftStatus.CREATING);
+    expect(previews(events)).toHaveLength(0);
+
+    images[1].status = READY; // image #2 settles — batch boundary
+    await coord.onImageSettled('draft_1');
+    expect(draft.status).toBe(DraftStatus.READY_FOR_PREVIEW);
+    expect(previews(events)).toHaveLength(1);
+  });
+
+  // Case 3 — arrival order is irrelevant; only the batch boundary matters.
+  it('Case 3: settle order does not matter (#2 before #1)', async () => {
+    const images: Img[] = [
+      { id: 'i1', status: PROCESSING },
+      { id: 'i2', status: PROCESSING },
+    ];
+    const draft = makeAntifreezeDraft({ images });
+    const { coord, events } = coordinatorFor(draft);
+
+    images[1].status = READY; // the LATER image settles first
+    await coord.onImageSettled('draft_1');
+    expect(previews(events)).toHaveLength(0);
+
+    images[0].status = READY;
+    await coord.onImageSettled('draft_1');
+    expect(draft.status).toBe(DraftStatus.READY_FOR_PREVIEW);
+    expect(previews(events)).toHaveLength(1);
+  });
+
+  // Case 4 — a redelivered/duplicated settle must not advance the flow twice.
+  it('Case 4: a repeated image.ready settle emits the preview only once', async () => {
+    const draft = makeAntifreezeDraft({
+      images: [{ id: 'i1', status: READY }],
+    });
+    const { coord, events } = coordinatorFor(draft);
+
+    await coord.onImageSettled('draft_1');
+    await coord.onImageSettled('draft_1'); // duplicate delivery
+    await coord.onImageSettled('draft_1'); // and another
+
+    expect(previews(events)).toHaveLength(1);
+    expect(draft.status).toBe(DraftStatus.READY_FOR_PREVIEW);
+  });
+
+  // Case 5 — the caller's view is irrelevant: the coordinator re-reads the draft
+  // on every call, so a stale in-memory snapshot cannot keep the seller waiting.
+  it('Case 5: a stale caller snapshot does not block — state is re-read', async () => {
+    const images: Img[] = [{ id: 'i1', status: PROCESSING }];
+    const draft = makeAntifreezeDraft({ images });
+    const { coord, drafts, events } = coordinatorFor(draft);
+
+    // A caller holding this stale object would still see PROCESSING…
+    const staleSnapshot = { ...draft, images: [{ ...images[0] }] };
+    expect(staleSnapshot.images[0].status).toBe(PROCESSING);
+
+    images[0].status = READY; // …while the DB has since moved to READY.
+    await coord.onFormStep('draft_1');
+
+    expect(drafts.findWithImages).toHaveBeenCalledWith('draft_1');
+    expect(draft.status).toBe(DraftStatus.READY_FOR_PREVIEW);
+    expect(previews(events)).toHaveLength(1);
+  });
+
+  // Case 6 — a genuine failure is NOT success: no preview, draft stays CREATING,
+  // and the seller gets the existing retry/cancel offer instead.
+  it('Case 6: one FAILED image blocks the preview and reports the failure', async () => {
+    const draft = makeAntifreezeDraft({
+      images: [
+        { id: 'i1', status: READY },
+        { id: 'i2', status: FAILED },
+      ],
+    });
+    const { coord, events } = coordinatorFor(draft);
+
+    await coord.onImageSettled('draft_1');
+
+    expect(previews(events)).toHaveLength(0);
+    expect(draft.status).toBe(DraftStatus.CREATING);
+    const failures = events.emit.mock.calls.filter(
+      (c: unknown[]) => c[0] === DraftEvent.IMAGES_FAILED,
+    );
+    expect(failures).toHaveLength(1);
+    expect(failures[0][1]).toMatchObject({
+      draftId: 'draft_1',
+      failedCount: 1,
+    });
+  });
+
+  // The bug itself, stated as the coordinator sees it: a draft whose weight was
+  // never persisted must NOT advance (proving the gate is real), while the same
+  // draft with the weight saved advances immediately. Before the fix every
+  // antifreeze draft was permanently in the first state.
+  it('does not advance an ANTIFREEZE draft whose weight was never saved', async () => {
+    const draft = makeAntifreezeDraft({
+      antifreezeWeightG: null, // what the missing updateForm field produced
+      images: [{ id: 'i1', status: READY }],
+    });
+    const { coord, events } = coordinatorFor(draft);
+
+    await coord.onImageSettled('draft_1');
+
+    expect(draft.status).toBe(DraftStatus.CREATING);
+    expect(previews(events)).toHaveLength(0);
   });
 });
