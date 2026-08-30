@@ -1,4 +1,5 @@
 import {
+  OilType,
   PartMainCategory,
   PartVehicleCategory,
   ProductKind,
@@ -67,7 +68,69 @@ export const CategoryAnchor = {
    * package codes — never from the motor-oil codes, which are per oil type.
    */
   TRANSMISSION_OIL: 'transmission-oil',
+  /**
+   * The three motor-oil BASE COMPOSITIONS, as categories.
+   *
+   * The seller picks one of these instead of answering a separate "тип масла"
+   * question: the composition IS the category. Each carries the registry's MXIK
+   * for that composition, which is why they are anchors — behaviour (the fiscal
+   * code, and the fact that picking one starts the oil questionnaire) is keyed
+   * on these ids, never on their names, so an admin may rename them freely.
+   */
+  SYNTHETIC_MOTOR_OIL: 'synthetic-motor-oil',
+  SEMI_SYNTHETIC_MOTOR_OIL: 'semi-synthetic-motor-oil',
+  MINERAL_MOTOR_OIL: 'mineral-motor-oil',
 } as const;
+
+/**
+ * The FOUR categories offered under "Моторное масло", in display order.
+ *
+ * One list, read by both wizard paths (vehicle and "Другое") and by the tests
+ * that assert they agree — the two showing different options is exactly the bug
+ * this replaces.
+ */
+export const MOTOR_OIL_CATEGORY_IDS: readonly string[] = [
+  CategoryAnchor.SYNTHETIC_MOTOR_OIL,
+  CategoryAnchor.SEMI_SYNTHETIC_MOTOR_OIL,
+  CategoryAnchor.MINERAL_MOTOR_OIL,
+  CategoryAnchor.TRANSMISSION_OIL,
+];
+
+/**
+ * Category id → the base composition it denotes. DERIVED, never asked.
+ *
+ * `Product.oilType` remains the single input to the registry's oil codes
+ * (OIL_TYPE_FISCAL) and to the buyer catalog's type facet, so it keeps being
+ * populated — but from the category the seller chose rather than from a question
+ * of its own. That removes the two-sources-of-truth problem: there is one
+ * choice, and this table is the only thing that turns it into an attribute.
+ *
+ * `transmission-oil` is absent ON PURPOSE. It is not a base composition, there
+ * is no OilType for it, and inventing one would divert its receipt onto a
+ * motor-oil MXIK. It is fiscalized from its own category columns instead.
+ */
+export const OIL_TYPE_BY_CATEGORY: Readonly<Partial<Record<string, OilType>>> =
+  {
+    [CategoryAnchor.SYNTHETIC_MOTOR_OIL]: OilType.SYNTHETIC,
+    [CategoryAnchor.SEMI_SYNTHETIC_MOTOR_OIL]: OilType.SEMI_SYNTHETIC,
+    [CategoryAnchor.MINERAL_MOTOR_OIL]: OilType.MINERAL,
+  };
+
+/**
+ * The base composition a category denotes, or null when it denotes none
+ * (transmission oil, and every non-oil category).
+ *
+ * Own-property check only, so a category whose id happens to be 'constructor'
+ * or 'toString' cannot inherit a truthy value off Object.prototype.
+ */
+export function oilTypeForCategory(categoryId: string | null): OilType | null {
+  if (categoryId === null) return null;
+  if (!Object.prototype.hasOwnProperty.call(OIL_TYPE_BY_CATEGORY, categoryId)) {
+    return null;
+  }
+  const type: OilType | undefined = OIL_TYPE_BY_CATEGORY[categoryId];
+  return type ?? null;
+}
 
 /**
  * Category id → the questionnaire it starts. Only categories that CHANGE the
@@ -80,6 +143,13 @@ export const CategoryAnchor = {
  */
 export const CATEGORY_ID_TO_KIND: Readonly<Record<string, ProductKind>> = {
   [CategoryAnchor.MOTOR_OIL]: ProductKind.MOTOR_OIL,
+  // The three compositions and transmission oil all run the OIL questionnaire
+  // (viscosity → volume). They differ in the codes they carry, not in what the
+  // seller is asked, which is why they share a kind.
+  [CategoryAnchor.SYNTHETIC_MOTOR_OIL]: ProductKind.MOTOR_OIL,
+  [CategoryAnchor.SEMI_SYNTHETIC_MOTOR_OIL]: ProductKind.MOTOR_OIL,
+  [CategoryAnchor.MINERAL_MOTOR_OIL]: ProductKind.MOTOR_OIL,
+  [CategoryAnchor.TRANSMISSION_OIL]: ProductKind.MOTOR_OIL,
 };
 
 /**
@@ -103,7 +173,12 @@ export function isFiscalizedByOilType(category: {
 }): boolean {
   return (
     category.id === CategoryAnchor.MOTOR_OIL ||
-    category.parentId === CategoryAnchor.OTHER
+    category.parentId === CategoryAnchor.OTHER ||
+    // The three composition categories: their listings' codes come from the
+    // oilType this table derives, so empty fiscal columns are correct there.
+    // TRANSMISSION_OIL is deliberately excluded — it denotes no composition, so
+    // it must carry its OWN MXIK and is reported as a gap until it has one.
+    oilTypeForCategory(category.id) !== null
   );
 }
 

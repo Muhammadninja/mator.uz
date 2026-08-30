@@ -66,7 +66,10 @@ import {
   formatWeight,
   parseWeightKg,
 } from './antifreeze-catalog';
-import { CategoryAnchor } from '../catalog/categories/category-map';
+import {
+  CategoryAnchor,
+  oilTypeForCategory,
+} from '../catalog/categories/category-map';
 import { WIZARD_BRANDS } from './wizard-catalog';
 import { DEFAULT_APP_LANG, type AppLang } from '../common/app-lang.util';
 import { oilTypeLabel, packageFormLabel, t } from './i18n';
@@ -147,11 +150,11 @@ const FLOWS: Record<ProductKind, WizardStep[]> = {
     WizardStep.PRICE,
   ],
   [ProductKind.MOTOR_OIL]: [
-    // TYPE BEFORE VISCOSITY. The base composition is what the tax registry
-    // classifies an oil by — one MXIK and one package code per type (see
-    // OIL_TYPE_FISCAL) — so it is the coarser question and is asked first; the
-    // viscosity then narrows within the type the seller already named.
-    WizardStep.OIL_TYPE,
+    // NO OIL_TYPE STEP. The base composition IS the category the seller picked
+    // (Синтетическое / Полусинтетическое / Минеральное / Трансмиссионное), so
+    // asking it again would be a second source of truth for one fact.
+    // `Product.oilType` — which still selects the registry's MXIK — is DERIVED
+    // from that category by OIL_TYPE_BY_CATEGORY, never answered separately.
     WizardStep.OIL_VISCOSITY,
     WizardStep.OIL_VOLUME,
     WizardStep.TITLE,
@@ -192,44 +195,11 @@ export type OtherProductKind = Exclude<
 const MOTOR_OIL_FOR_VEHICLE_FLOW: WizardStep[] = [
   WizardStep.MODEL,
   WizardStep.CATEGORY,
-  // Same order as the "Другое" oil flow above — type first, then viscosity.
-  WizardStep.OIL_TYPE,
+  // No OIL_TYPE here either: the composition is the SUBCATEGORY the seller
+  // picked under "Моторные масла" (the step CATEGORY splices in), so the flow
+  // continues straight to the viscosity.
   WizardStep.OIL_VISCOSITY,
   WizardStep.OIL_VOLUME,
-  WizardStep.TITLE,
-  WizardStep.DESCRIPTION,
-  WizardStep.PRICE,
-];
-
-/**
- * TRANSMISSION OIL reached through the VEHICLE path.
- *
- * Picked on the oil-type screen, which the seller reaches via brand → model →
- * "Моторные масла". It is an ordinary category (kind SPARE_PART, its own MXIK),
- * so it asks NONE of the oil attribute questions — the screen it was chosen on
- * is the last of them. The vehicle steps and OIL_TYPE stay on the path so
- * "⬅️ Назад" walks back through the screens actually visited, and no part-number
- * question is asked: an oil is not sold by OEM number.
- */
-const TRANSMISSION_OIL_FOR_VEHICLE_FLOW: WizardStep[] = [
-  WizardStep.MODEL,
-  WizardStep.CATEGORY,
-  WizardStep.OIL_TYPE,
-  WizardStep.TITLE,
-  WizardStep.DESCRIPTION,
-  WizardStep.PRICE,
-];
-
-/**
- * TRANSMISSION OIL reached through the "Другое" menu.
- *
- * The same branch without the vehicle steps: "Другое" → "Моторное масло" →
- * OTHER_CATEGORY → the oil-type screen → "Трансмиссионное масло". The shared
- * prefix (OTHER_KIND / OTHER_CATEGORY) is supplied by {@link flowSteps}, so this
- * list starts where that prefix ends.
- */
-const TRANSMISSION_OIL_FLOW: WizardStep[] = [
-  WizardStep.OIL_TYPE,
   WizardStep.TITLE,
   WizardStep.DESCRIPTION,
   WizardStep.PRICE,
@@ -246,16 +216,6 @@ const TRANSMISSION_OIL_FLOW: WizardStep[] = [
 function flowFor(session: WizardSession): WizardStep[] {
   if (session.kind === ProductKind.MOTOR_OIL && session.brand !== null) {
     return MOTOR_OIL_FOR_VEHICLE_FLOW;
-  }
-  // Transmission oil is a SPARE_PART by kind but does NOT walk the spare-part
-  // questionnaire: it was chosen on the oil-type screen, so its path runs
-  // through the oil steps the seller actually saw, not through CATEGORY /
-  // PART_NUMBER. Keyed on the chosen CATEGORY (a stable anchor id) rather than
-  // on the kind, because the kind alone cannot tell it from a brake pad.
-  if (session.categoryId === CategoryAnchor.TRANSMISSION_OIL) {
-    return session.brand !== null
-      ? TRANSMISSION_OIL_FOR_VEHICLE_FLOW
-      : TRANSMISSION_OIL_FLOW;
   }
   return FLOWS[session.kind];
 }
@@ -300,13 +260,7 @@ function flowSteps(session: WizardSession): WizardStep[] {
   const viaOtherMenu =
     session.step === WizardStep.OTHER_KIND ||
     session.step === WizardStep.OTHER_CATEGORY ||
-    (session.kind !== ProductKind.SPARE_PART && session.brand === null) ||
-    // Transmission oil picked on the "Другое" path is the one SPARE_PART that
-    // DID come through this menu, so the kind test above cannot see it. Keyed on
-    // the category it was filed under, with no brand — exactly the state that
-    // branch produces — so "⬅️ Назад" walks back to the oil menu it came from.
-    (session.categoryId === CategoryAnchor.TRANSMISSION_OIL &&
-      session.brand === null);
+    (session.kind !== ProductKind.SPARE_PART && session.brand === null);
   if (viaOtherMenu) {
     steps.push(WizardStep.OTHER_KIND);
     // The oil taxonomy menu follows the kind question for MOTOR_OIL ONLY.
@@ -319,10 +273,7 @@ function flowSteps(session: WizardSession): WizardStep[] {
     // session STANDING on that step has not yet committed to a kind through it.
     if (
       session.step === WizardStep.OTHER_CATEGORY ||
-      session.kind === ProductKind.MOTOR_OIL ||
-      // Transmission oil reached the oil-type screen THROUGH this menu, so the
-      // menu stays on its path too.
-      session.categoryId === CategoryAnchor.TRANSMISSION_OIL
+      session.kind === ProductKind.MOTOR_OIL
     ) {
       steps.push(WizardStep.OTHER_CATEGORY);
     }
@@ -475,18 +426,7 @@ export interface WizardSession {
    * not demand a further, non-existent selection.
    */
   categoryStepPending: boolean;
-  /**
-   * The `transmission-oil` category, when it is available to offer on the
-   * OIL_TYPE screen — loaded live from the tree by the caller, like every other
-   * category option, so a rename or a deactivation is reflected with no
-   * redeploy. Null when the node is absent/inactive, and the screen then shows
-   * the three oil types alone rather than a button that resolves to nothing.
-   *
-   * Held on the session (not recomputed at render time) because `stepPrompt` is
-   * pure: the I/O that loads it belongs to TelegramService, exactly as it does
-   * for `categoryOptions`.
-   */
-  transmissionOption: CategoryOption | null;
+
   // ── Sale form (fiscal) ────────────────────────────────────────────────────
   /**
    * How the item is sold, once the seller has been asked. Null when the
@@ -704,10 +644,7 @@ export const WIZ_OIL_VISCOSITY_ACTION = new RegExp(
   `^wiz:${V}:ov:(\\d{1,2}|custom)$`,
 );
 export const WIZ_OIL_TYPE_ACTION = new RegExp(`^wiz:${V}:ot:(\\d{1,2})$`);
-// "Трансмиссионное масло" on the oil-type screen. A payload-free action: the
-// category it files under is resolved from the session's rendered option, not
-// carried on the wire, so a stale keyboard cannot name a foreign category.
-export const WIZ_TRANSMISSION_OIL_ACTION = buildAction('tx', '');
+
 export const WIZ_OIL_VOLUME_ACTION = new RegExp(
   `^wiz:${V}:ol:(\\d{1,2}|custom)$`,
 );
@@ -798,7 +735,6 @@ export class WizardSessionStore {
       categoryOptions: [],
       categoryOptionsParentId: null,
       categoryStepPending: false,
-      transmissionOption: null,
       packageForm: null,
       packageChoiceRequired: false,
       title: null,
@@ -886,6 +822,27 @@ export function selectBrand(
  * `oilType` — would then pick the listing's MXIK. A new kind adds its fields
  * here once and every switch point clears them.
  */
+/**
+ * Derive the oil attributes that follow from the CHOSEN CATEGORY.
+ *
+ * `oilType` is still what selects an oil's MXIK (OIL_TYPE_FISCAL) and what the
+ * buyer catalog facets on, so it must be populated — but the seller no longer
+ * answers it: the composition IS the category they picked. Called by every
+ * category transition, so a listing's type and its category cannot disagree,
+ * and walking back to pick a DIFFERENT composition re-derives it rather than
+ * leaving the previous answer behind.
+ *
+ * Null for transmission oil and for every non-oil category, which is correct:
+ * neither denotes a base composition, and a stray oilType on such a row would
+ * divert its receipt onto a motor-oil code.
+ */
+function applyCategoryOilType(
+  session: WizardSession,
+  categoryId: string,
+): void {
+  session.oilType = oilTypeForCategory(categoryId);
+}
+
 function clearKindAttributes(session: WizardSession): void {
   session.oilViscosity = null;
   session.oilType = null;
@@ -1048,10 +1005,18 @@ export function selectOtherCategory(
   session.model = null;
   session.category = null;
   session.subcategory = null;
-  // The chosen "Другое" child IS the listing's category. Its parent (`other`) is
-  // the root, so the pair stays coherent for the server-side lineage check.
-  session.vehicleCategoryId = CategoryAnchor.OTHER;
+  // The chosen child IS the listing's category. Its ROOT depends on which
+  // subtree it came from: an oil composition hangs under `motor-oil`, while an
+  // admin-managed "Другое" catalogue entry hangs under `other`. Stating it from
+  // the option itself keeps the pair coherent for the server-side lineage check
+  // — hardcoding `other` here would have mis-parented every oil category.
+  session.vehicleCategoryId =
+    session.kind === ProductKind.MOTOR_OIL
+      ? CategoryAnchor.MOTOR_OIL
+      : CategoryAnchor.OTHER;
   session.categoryId = chosen.id;
+  // The composition follows from the category, and is never asked separately.
+  applyCategoryOilType(session, chosen.id);
   session.categoryOptions = [];
   session.categoryStepPending = false;
   // This pick is FINAL (a "Другое" child has no deeper level in the wizard), so
@@ -1098,6 +1063,9 @@ export function selectCategory(
   // The selection starts AT the root: if it turns out to be a leaf, the root is
   // itself the answer, so the product still carries a concrete categoryId.
   session.categoryId = category.id;
+  // A root is never itself a composition (`motor-oil` denotes none), so this
+  // clears any type carried in from an abandoned branch rather than setting one.
+  applyCategoryOilType(session, category.id);
   session.category = category.vehicleCategoryEnum ?? null;
   // The CHOSEN category DETERMINES the questionnaire — it does not merely
   // upgrade it. A category that declares no kind is an ordinary spare part, so
@@ -1165,6 +1133,12 @@ export function selectSubcategory(
   // any mirror left by a previously chosen sibling, or the draft would carry a
   // legacy subcategory that contradicts its categoryId.
   session.subcategory = chosen.mainCategoryEnum ?? null;
+  // THIS is where a motor-oil composition is chosen on the vehicle path
+  // (Моторное масло → Синтетическое …), so the derived type is recorded here.
+  // Unconditional for the same reason `subcategory` is: re-answering with
+  // transmission oil, or with a non-oil sibling, must CLEAR a type a previous
+  // pick set rather than leave it contradicting the new category.
+  applyCategoryOilType(session, chosen.id);
 
   session.categoryOptions = children;
   // Same rule as the root pick: the offered level is recorded only when there IS
@@ -1242,46 +1216,6 @@ export function selectOilType(
   const type = OIL_TYPES[typeIndex];
   if (!type) return STALE;
   session.oilType = type.value;
-  return advance(session);
-}
-
-/**
- * "Трансмиссионное масло" on the oil-type screen.
- *
- * NOT an oil type: it files the listing under the `transmission-oil` CATEGORY
- * and leaves the motor-oil questionnaire entirely. The kind reverts to
- * SPARE_PART — the existing behaviour for any ordinary category — so the seller
- * is never asked for a viscosity or a volume, and `clearKindAttributes` drops
- * anything a half-finished oil flow left behind. Above all `oilType` is cleared:
- * that column selects a MOTOR-OIL MXIK, and transmission oil must be fiscalized
- * from its own category codes instead.
- *
- * `fiscal` is that category's own package codes, so the sale-form question is
- * raised (or not) exactly as it is for every other final category pick.
- */
-export function selectTransmissionOil(
-  session: WizardSession,
-  category: CategoryOption,
-  fiscal: CategoryPackageCodes | null = null,
-): WizardResult {
-  if (session.step !== WizardStep.OIL_TYPE) return STALE;
-  // Resolved against the option this session actually rendered, like every other
-  // category pick — a tap on a stale keyboard cannot file the listing anywhere.
-  if (!session.transmissionOption || session.transmissionOption.id !== category.id) {
-    return STALE;
-  }
-
-  session.kind = category.kind ?? ProductKind.SPARE_PART;
-  clearKindAttributes(session);
-  session.categoryId = category.id;
-  // The listing's lineage stays coherent: transmission oil hangs under the
-  // motor-oil root, which is the level the seller reached this screen from.
-  session.vehicleCategoryId = CategoryAnchor.MOTOR_OIL;
-  session.partNumberType = 'UNKNOWN';
-  session.partNumber = null;
-  // This pick is FINAL — there is no deeper level — so the sale form is settled
-  // here from the chosen category's own codes.
-  applyPackageChoice(session, fiscal);
   return advance(session);
 }
 
@@ -1640,13 +1574,10 @@ export function oilViscosityKeyboard(session: WizardSession): InlineKeyboard {
 /**
  * Oil type — a closed set, so one button per row and no free-text option.
  *
- * The list ends with an option that is NOT an oil type: "Трансмиссионное масло".
- * It sits here because this is the screen where the seller says WHAT KIND OF OIL
- * they are listing, and transmission oil is one of the answers — but it is a
- * CATEGORY, not a base composition, so it carries its own action ('tx') rather
- * than an OIL_TYPES index. Rendered only when the caller supplied the category
- * (it is admin-managed and may be renamed, deactivated or absent), which is what
- * keeps the button honest: no button, rather than a button that cannot resolve.
+ * NOT on any flow any more: the base composition is now the CATEGORY the seller
+ * picks (Синтетическое / Полусинтетическое / Минеральное). Kept because the step
+ * remains reachable by a resumed draft saved mid-question before the change, and
+ * because `stepPrompt` is exhaustive over WizardStep.
  */
 export function oilTypeKeyboard(session: WizardSession): InlineKeyboard {
   const buttons = OIL_TYPES.map((type, i) =>
@@ -1655,14 +1586,7 @@ export function oilTypeKeyboard(session: WizardSession): InlineKeyboard {
       buildAction('ot', i),
     ),
   );
-  const rows = grid(buttons, 1);
-  const transmission = session.transmissionOption;
-  if (transmission) {
-    rows.push([
-      Markup.button.callback(transmission.name, buildAction('tx', '')),
-    ]);
-  }
-  return withBack(session, rows);
+  return withBack(session, grid(buttons, 1));
 }
 
 /** Volume presets (two per row) plus the "Другое" free-text escape hatch. */

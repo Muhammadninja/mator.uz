@@ -119,7 +119,7 @@ describe('when the sale-form question is asked', () => {
     selectOtherCategory(s, 'motorcycle-oil', SINGLE_CODE);
 
     // Straight into the oil questionnaire, exactly as before this step existed.
-    expect(s.step).toBe(WizardStep.OIL_TYPE);
+    expect(s.step).toBe(WizardStep.OIL_VISCOSITY);
   });
 });
 

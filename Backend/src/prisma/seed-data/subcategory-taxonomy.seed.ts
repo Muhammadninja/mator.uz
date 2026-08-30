@@ -150,7 +150,19 @@ export const TAXONOMY: RootGroup[] = [
     // the very rows that migration deletes.
     //
     // Transmission oil stays: it is a product TYPE, not a grade.
-    subs: [{ name: 'Трансмиссионное масло', slug: 'transmission-oil' }],
+    // The FOUR options the seller sees after "Моторное масло". The first three
+    // are base COMPOSITIONS (each carrying the registry's MXIK for it, derived
+    // to Product.oilType via OIL_TYPE_BY_CATEGORY); the fourth is a product type
+    // that denotes no composition and carries its own codes.
+    subs: [
+      { name: 'Синтетическое моторное масло', slug: 'synthetic-motor-oil' },
+      {
+        name: 'Полусинтетическое моторное масло',
+        slug: 'semi-synthetic-motor-oil',
+      },
+      { name: 'Минеральное моторное масло', slug: 'mineral-motor-oil' },
+      { name: 'Трансмиссионное масло', slug: 'transmission-oil' },
+    ],
   },
   {
     friendlySlug: 'other',

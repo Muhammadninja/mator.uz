@@ -28,14 +28,28 @@ import {
   selectOtherBrand,
   selectOtherKind,
   selectOtherCategory,
+  selectSubcategory,
 } from './product-wizard';
 import { OIL_TYPES, OIL_VISCOSITIES, OIL_VOLUMES } from './motor-oil-catalog';
+import {
+  CategoryAnchor,
+  MOTOR_OIL_CATEGORY_IDS,
+} from '../catalog/categories/category-map';
 
 const CHEVROLET = 0;
 const COBALT = 0;
 const FIVE_W_30 = OIL_VISCOSITIES.indexOf('5W-30');
 const SYNTHETIC = OIL_TYPES.findIndex((t) => t.value === OilType.SYNTHETIC);
 const FOUR_LITRES = OIL_VOLUMES.findIndex((v) => v.value === 4_000);
+
+/** The four compositions offered under "Моторные масла". */
+const OIL_CATEGORY_OPTIONS = MOTOR_OIL_CATEGORY_IDS.map((id) => ({
+  id,
+  name: id,
+  vehicleCategoryEnum: null,
+  mainCategoryEnum: null,
+  kind: ProductKind.MOTOR_OIL,
+}));
 
 /** The CATEGORY step's options, as the bot loads them from the dynamic tree. */
 const CATEGORY_ROOTS = [
@@ -62,7 +76,10 @@ function oilForCobalt(): WizardSession {
   selectBrand(s, CHEVROLET);
   selectModel(s, COBALT);
   s.categoryOptions = CATEGORY_ROOTS;
-  selectCategory(s, 'motor-oil', []);
+  // `motor-oil` has children — the four compositions — so the pick opens that
+  // level, and choosing one is what starts the oil questionnaire.
+  selectCategory(s, 'motor-oil', OIL_CATEGORY_OPTIONS);
+  selectSubcategory(s, CategoryAnchor.SYNTHETIC_MOTOR_OIL, []);
   return s;
 }
 
@@ -71,14 +88,14 @@ function oilViaOther(): WizardSession {
   const s = freshSession();
   selectOtherBrand(s);
   selectOtherKind(s, ProductKind.MOTOR_OIL);
-  s.categoryOptions = OTHER_OPTIONS;
-  selectOtherCategory(s, 'motor-oil');
+  s.categoryOptions = OIL_CATEGORY_OPTIONS;
+  selectOtherCategory(s, CategoryAnchor.SYNTHETIC_MOTOR_OIL);
   return s;
 }
 
 /** Answer the three oil questions from wherever the session stands. */
 function answerOilQuestions(s: WizardSession): WizardSession {
-  selectOilType(s, SYNTHETIC);
+  // The type is no longer asked — it was DERIVED from the composition category.
   selectOilViscosity(s, FIVE_W_30);
   selectOilVolume(s, FOUR_LITRES);
   return s;
@@ -91,8 +108,10 @@ describe('1. MOTOR_OIL + specific make/model → isUniversal = false', () => {
     // The vehicle is KEPT — this is what makes the listing specific.
     expect(s.brand).toBe('Chevrolet');
     expect(s.model).toBe('Cobalt');
-    // The oil questionnaire opens on its FIRST question: the type.
-    expect(s.step).toBe(WizardStep.OIL_TYPE);
+    // The composition was the category pick, so the questionnaire opens on the
+    // viscosity — and the type came with it.
+    expect(s.step).toBe(WizardStep.OIL_VISCOSITY);
+    expect(s.oilType).toBe(OilType.SYNTHETIC);
   });
 
   it('is NOT universal, despite being a MOTOR_OIL', () => {

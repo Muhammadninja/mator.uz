@@ -127,6 +127,52 @@ describe('ensureCategoryOptions', () => {
     ]);
   });
 
+  // THE BUG: "Другое" → "Моторное масло" showed an EMPTY option list. This step
+  // loaded the children of the `other` root — an admin-managed catalogue that
+  // has nothing to do with the oil taxonomy — so the screen was blank whenever
+  // that subtree was absent, while the vehicle path opened a different subtree
+  // entirely. Both paths now read the children of `motor-oil`, so they show the
+  // same four compositions by construction rather than by two lists kept in step.
+  it('loads the motor-oil compositions on the "Другое" oil menu', async () => {
+    const svc: AnyService = makeService();
+    svc.categories.findChildren.mockResolvedValue([
+      { id: 'synthetic-motor-oil', name: 'Синтетическое моторное масло' },
+      { id: 'semi-synthetic-motor-oil', name: 'Полусинтетическое моторное масло' },
+      { id: 'mineral-motor-oil', name: 'Минеральное моторное масло' },
+      { id: 'transmission-oil', name: 'Трансмиссионное масло' },
+    ]);
+    const session = svc.wizard.start(1);
+    session.step = WizardStep.OTHER_CATEGORY;
+    session.kind = ProductKind.MOTOR_OIL;
+
+    await svc.ensureCategoryOptions(session);
+
+    expect(svc.categories.findChildren).toHaveBeenCalledWith('motor-oil');
+    expect(session.categoryOptions.map((o: { id: string }) => o.id)).toEqual([
+      'synthetic-motor-oil',
+      'semi-synthetic-motor-oil',
+      'mineral-motor-oil',
+      'transmission-oil',
+    ]);
+    expect(session.categoryOptions).not.toEqual([]);
+  });
+
+  it('keeps the "Другое" catalogue for a non-oil kind', async () => {
+    // Only MOTOR_OIL re-points at the oil taxonomy; anything else that reaches
+    // this step still browses the admin-managed `other` children.
+    const svc: AnyService = makeService();
+    svc.categories.findChildren.mockResolvedValue([
+      { id: 'fasteners-and-clips', name: 'Крепеж и клипсы' },
+    ]);
+    const session = svc.wizard.start(1);
+    session.step = WizardStep.OTHER_CATEGORY;
+    session.kind = ProductKind.SPARE_PART;
+
+    await svc.ensureCategoryOptions(session);
+
+    expect(svc.categories.findChildren).toHaveBeenCalledWith('other');
+  });
+
   it('does nothing on any other step', async () => {
     const svc: AnyService = makeService();
     const session = svc.wizard.start(1);

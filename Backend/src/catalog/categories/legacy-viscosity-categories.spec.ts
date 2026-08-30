@@ -7,13 +7,19 @@
 // wizard asked for a viscosity attribute while the seed kept creating viscosity
 // categories and the classifier kept filing parts into them.
 
-import { OilType } from '@prisma/client';
+import { OilType, ProductKind } from '@prisma/client';
 import {
   LEGACY_VISCOSITY_CATEGORIES,
   LEGACY_VISCOSITY_CATEGORY_IDS,
   isLegacyViscosityCategory,
 } from './legacy-viscosity-categories';
-import { CategoryAnchor } from './category-map';
+import {
+  CATEGORY_ID_TO_KIND,
+  CategoryAnchor,
+  MOTOR_OIL_CATEGORY_IDS,
+  isFiscalizedByOilType,
+  oilTypeForCategory,
+} from './category-map';
 import { TAXONOMY } from '../../prisma/seed-data/subcategory-taxonomy.seed';
 import { CATEGORY_NAMES } from '../../prisma/seed-data/category-names.seed';
 import {
@@ -21,7 +27,10 @@ import {
   classifySubcategory,
   classifyOilViscosity,
 } from '../../ai/subcategory-classifier';
-import { OIL_TYPE_FISCAL } from '../../common/fiscal.util';
+import {
+  OIL_TYPE_FISCAL,
+  resolveOilFiscalCodes,
+} from '../../common/fiscal.util';
 import { OIL_VISCOSITIES } from '../../telegram/motor-oil-catalog';
 
 /** The motor-oil group as the seed declares it. */
@@ -153,5 +162,97 @@ describe('IKPU is per oil TYPE and independent of viscosity', () => {
     expect(OIL_TYPE_FISCAL[OilType.SYNTHETIC].mxik).not.toBe(
       OIL_TYPE_FISCAL[OilType.MINERAL].mxik,
     );
+  });
+});
+
+// ── The composition categories ──────────────────────────────────────────────
+// The base composition (synthetic / semi-synthetic / mineral) is now a CATEGORY
+// rather than a wizard question, and `Product.oilType` — still the single input
+// to the registry's oil codes — is DERIVED from it. These guard the two halves
+// of that: the tree offers exactly four options, and the derivation maps each to
+// the right type without inventing one for transmission oil.
+describe('motor-oil compositions are categories', () => {
+  it('offers exactly four options under motor-oil', () => {
+    const slugs = (oilGroup?.subs ?? []).map((s) => s.slug);
+    expect(slugs).toEqual([
+      CategoryAnchor.SYNTHETIC_MOTOR_OIL,
+      CategoryAnchor.SEMI_SYNTHETIC_MOTOR_OIL,
+      CategoryAnchor.MINERAL_MOTOR_OIL,
+      CategoryAnchor.TRANSMISSION_OIL,
+    ]);
+    // The seed and the list both wizard paths read must agree, or the two
+    // screens drift apart again.
+    expect(slugs).toEqual([...MOTOR_OIL_CATEGORY_IDS]);
+  });
+
+  it('names all four in every language', () => {
+    for (const id of MOTOR_OIL_CATEGORY_IDS) {
+      const names = CATEGORY_NAMES[id];
+      expect(names?.ru).toEqual(expect.any(String));
+      expect(names?.uz).toEqual(expect.any(String));
+      expect(names?.en).toEqual(expect.any(String));
+    }
+  });
+
+  it('derives the oil type from the three composition categories', () => {
+    expect(oilTypeForCategory(CategoryAnchor.SYNTHETIC_MOTOR_OIL)).toBe(
+      OilType.SYNTHETIC,
+    );
+    expect(oilTypeForCategory(CategoryAnchor.SEMI_SYNTHETIC_MOTOR_OIL)).toBe(
+      OilType.SEMI_SYNTHETIC,
+    );
+    expect(oilTypeForCategory(CategoryAnchor.MINERAL_MOTOR_OIL)).toBe(
+      OilType.MINERAL,
+    );
+  });
+
+  it('derives NO type for transmission oil', () => {
+    // It denotes no base composition. Inventing one would fiscalize it under a
+    // motor-oil MXIK instead of its own category codes.
+    expect(oilTypeForCategory(CategoryAnchor.TRANSMISSION_OIL)).toBeNull();
+    expect(oilTypeForCategory(CategoryAnchor.MOTOR_OIL)).toBeNull();
+    expect(oilTypeForCategory(null)).toBeNull();
+    expect(oilTypeForCategory('brake-system')).toBeNull();
+  });
+
+  it('each composition category resolves to its own registry code', () => {
+    const codes = MOTOR_OIL_CATEGORY_IDS.map((id) =>
+      resolveOilFiscalCodes(oilTypeForCategory(id)),
+    );
+    expect(codes).toEqual([
+      { mxik: '02710005001000000', packageCode: '1282037' },
+      { mxik: '02710005002000000', packageCode: '1282031' },
+      { mxik: '02710005003000000', packageCode: '1282581' },
+      // Transmission oil takes none of the motor-oil codes.
+      null,
+    ]);
+  });
+
+  it('all four start the oil questionnaire', () => {
+    for (const id of MOTOR_OIL_CATEGORY_IDS) {
+      expect(CATEGORY_ID_TO_KIND[id]).toBe(ProductKind.MOTOR_OIL);
+    }
+  });
+
+  it('treats the three compositions — but NOT transmission oil — as oil-type fiscalized', () => {
+    // A composition category legitimately has no MXIK columns of its own (the
+    // codes come from the derived type), so the admin console must not report
+    // it as unconfigured. Transmission oil DOES need its own codes, so it must
+    // still be reported until an admin enters them.
+    for (const id of [
+      CategoryAnchor.SYNTHETIC_MOTOR_OIL,
+      CategoryAnchor.SEMI_SYNTHETIC_MOTOR_OIL,
+      CategoryAnchor.MINERAL_MOTOR_OIL,
+    ]) {
+      expect(
+        isFiscalizedByOilType({ id, parentId: CategoryAnchor.MOTOR_OIL }),
+      ).toBe(true);
+    }
+    expect(
+      isFiscalizedByOilType({
+        id: CategoryAnchor.TRANSMISSION_OIL,
+        parentId: CategoryAnchor.MOTOR_OIL,
+      }),
+    ).toBe(false);
   });
 });

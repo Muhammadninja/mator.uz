@@ -149,7 +149,9 @@ describe('reaching the antifreeze flow', () => {
     selectOtherKind(s, ProductKind.MOTOR_OIL);
     s.categoryOptions = [{ id: 'motorcycle-oil', name: 'Мотоциклетные масла' }];
     selectOtherCategory(s, 'motorcycle-oil');
-    expect(s.step).toBe(WizardStep.OIL_TYPE);
+    // The oil questionnaire starts at the viscosity: the composition, where one
+    // applies, is the category itself rather than a step.
+    expect(s.step).toBe(WizardStep.OIL_VISCOSITY);
     expect(selectAntifreezeWeight(s, 0).status).toBe('stale');
   });
 });

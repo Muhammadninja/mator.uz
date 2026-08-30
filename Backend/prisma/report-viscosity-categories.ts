@@ -13,6 +13,7 @@ import {
   LEGACY_VISCOSITY_CATEGORIES,
   LEGACY_VISCOSITY_CATEGORY_IDS,
 } from '../src/catalog/categories/legacy-viscosity-categories';
+import { MOTOR_OIL_CATEGORY_IDS } from '../src/catalog/categories/category-map';
 
 const prisma = new PrismaClient();
 
@@ -86,7 +87,11 @@ async function main(): Promise<void> {
     '\n── Must survive (not touched by the migration) ──────────────',
   );
   const keep = await prisma.partCategory.findMany({
-    where: { id: { in: ['motor-oil', 'transmission-oil', 'antifreeze'] } },
+    where: {
+      id: {
+        in: ['motor-oil', 'antifreeze', ...MOTOR_OIL_CATEGORY_IDS],
+      },
+    },
     orderBy: { id: 'asc' },
   });
   for (const c of keep) {
@@ -98,8 +103,13 @@ async function main(): Promise<void> {
         `isActive=${c.isActive} CatalogPart=${parts}`,
     );
   }
-  if (!keep.some((c) => c.id === 'transmission-oil')) {
-    console.log('⚠ transmission-oil is MISSING from this database.');
+  for (const expected of MOTOR_OIL_CATEGORY_IDS) {
+    if (!keep.some((c) => c.id === expected)) {
+      console.log(
+        `⚠ ${expected} is MISSING — run the 20260831000000 migration, or the ` +
+          `wizard will offer fewer than four options.`,
+      );
+    }
   }
 
   console.log('\n── Current children of motor-oil ───────────────────────────');

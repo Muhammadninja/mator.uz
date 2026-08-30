@@ -332,6 +332,21 @@ export const CATEGORY_NAMES: Readonly<Record<string, CategoryNames>> = {
   // The per-viscosity entries ('motor-oil-5w30' …) were removed with the
   // categories themselves: a SAE grade is Product.oilViscosity, not a node in
   // the tree. Transmission oil is a product TYPE and keeps its names.
+  'synthetic-motor-oil': {
+    ru: 'Синтетическое моторное масло',
+    uz: 'Sintetik motor moyi',
+    en: 'Synthetic Motor Oil',
+  },
+  'semi-synthetic-motor-oil': {
+    ru: 'Полусинтетическое моторное масло',
+    uz: 'Yarim sintetik motor moyi',
+    en: 'Semi-Synthetic Motor Oil',
+  },
+  'mineral-motor-oil': {
+    ru: 'Минеральное моторное масло',
+    uz: 'Mineral motor moyi',
+    en: 'Mineral Motor Oil',
+  },
   'transmission-oil': {
     ru: 'Трансмиссионное масло',
     uz: 'Transmissiya moyi',
