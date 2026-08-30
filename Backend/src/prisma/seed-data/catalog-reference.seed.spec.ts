@@ -18,15 +18,35 @@ import {
   isCategoryFiscallyConfigured,
 } from '../../common/fiscal.util';
 import { isFiscalizedByOilType } from '../../catalog/categories/category-map';
+import { TAXONOMY } from './subcategory-taxonomy.seed';
 
-/** Every category id the seed creates. */
+/**
+ * Every category id the seed creates.
+ *
+ * TAXONOMY is part of it: the subcategory seeder creates the level-2 leaves a
+ * seller actually lands on ('antifreeze', 'front-brake-pads', …), and those are
+ * exactly the nodes fiscal codes attach to. Leaving it out made this guard
+ * describe only part of the tree, so a code attached to a real leaf looked like
+ * a code attached to nothing.
+ */
 const SEEDED_IDS = new Set<string>([
   ...SEED_ROOT_CATEGORIES.map((c) => c.id),
   ...SEED_CATEGORIES.map((c) => c.id),
   ...SEED_OTHER_CATEGORIES.map((c) => c.id),
+  ...TAXONOMY.flatMap((g) => g.subs.map((sub) => sub.slug)),
 ]);
 
-/** Ids that are a PARENT of something — a seller never lands on one of these. */
+/**
+ * Ids that are a PARENT of something — a seller never lands on one of these.
+ *
+ * Scoped to the level-0/level-1 tree ON PURPOSE. Widening it with TAXONOMY's
+ * parents surfaces a PRE-EXISTING gap unrelated to this table's correctness:
+ * `transmission` and `heating-and-cooling` were configured as childless roots,
+ * and the later subcategory seeder gave both of them children — so their codes
+ * are no longer reachable by any listing. Fixing that means deciding WHICH leaf
+ * inherits each code, which is an operator call, not a test's. Left as-is so
+ * this guard keeps checking what it was written to check.
+ */
 const PARENT_IDS = new Set<string>([
   ...SEED_CATEGORIES.map((c) => c.parentId),
   ...SEED_OTHER_CATEGORIES.map(() => 'other'),
@@ -143,5 +163,24 @@ describe('CATEGORY_FISCAL_DATA', () => {
       packageCodeSingle: '1499205',
       packageCodeSet: null,
     });
+  });
+
+  it('configures the ANTIFREEZE leaf on the ordinary category path', () => {
+    // Pinned literally: these are the operator-supplied codes, and the whole
+    // point of putting them here is that an antifreeze listing resolves to THEM
+    // rather than to one of the three motor-oil MXIKs.
+    expect(fiscalDataFor('antifreeze')).toEqual({
+      mxik: '03820001001000000',
+      packageCodeSingle: '1513835',
+      // Sold in one form, so the bot never asks "Штука / Комплект".
+      packageCodeSet: null,
+    });
+    // And it is NOT oil-fiscalized, which is what makes those codes reachable.
+    expect(
+      isFiscalizedByOilType({
+        id: 'antifreeze',
+        parentId: 'maintenance-and-fluids',
+      }),
+    ).toBe(false);
   });
 });

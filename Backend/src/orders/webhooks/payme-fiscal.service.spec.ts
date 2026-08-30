@@ -17,6 +17,7 @@ import {
 } from './payme-fiscal.service';
 import { buildFiscalItem, receiptTotalTiyin } from './payme-fiscal.util';
 import { OIL_TYPE_FISCAL, OIL_TYPE_REQUIRED } from '../../common/fiscal.util';
+import { CATEGORY_FISCAL_DATA } from '../../prisma/seed-data/catalog-reference.seed';
 import {
   createPrismaMock,
   fakeConfig,
@@ -737,12 +738,21 @@ describe('buildFiscalItem (pure mapping)', () => {
   // Where a listing's codes come from is decided by its KIND. Antifreeze is the
   // case that makes the rule visible: it lives one step away from motor oil in
   // the wizard, and the three oil MXIKs describe motor oil ONLY.
-  describe('ANTIFREEZE keeps its own category\'s IKPU', () => {
+  describe("ANTIFREEZE keeps its own category's IKPU", () => {
+    // The REAL operator-supplied codes of the `antifreeze` category, taken from
+    // the seed's own table so this test and the configuration cannot drift.
     const ANTIFREEZE_CATEGORY = {
-      mxik: '03820000000000000',
-      packageCodeSingle: '1234567',
+      mxik: CATEGORY_FISCAL_DATA.antifreeze.mxik,
+      packageCodeSingle: CATEGORY_FISCAL_DATA.antifreeze.packageCodeSingle,
       packageCodeSet: null,
     };
+
+    it("resolves to the antifreeze category's own configured codes", () => {
+      // Pinned literally here, derived from the seed above — so a change to
+      // either side fails rather than silently re-fiscalizing every antifreeze.
+      expect(ANTIFREEZE_CATEGORY.mxik).toBe('03820001001000000');
+      expect(ANTIFREEZE_CATEGORY.packageCodeSingle).toBe('1513835');
+    });
 
     it('fiscalizes from the category, never from the oil table', () => {
       const result = buildFiscalItem(

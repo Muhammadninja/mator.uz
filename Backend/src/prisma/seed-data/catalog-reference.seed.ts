@@ -196,6 +196,11 @@ export const SEED_OTHER_CATEGORIES: SeedOtherCategory[] = [
  * single node cannot hold three MXIKs — so the oil codes live in
  * OIL_TYPE_FISCAL (common/fiscal.util.ts) and are resolved per listing.
  *
+ * ANTIFREEZE is NOT one of those: it is classified as an ordinary category (one
+ * MXIK for the whole leaf, not one per attribute), so its codes live here with
+ * every other category's — which is what keeps an antifreeze listing off the
+ * motor-oil codes.
+ *
  * The oil categories therefore stay EMPTY here and are still fiscally complete:
  * `isFiscalizedByOilType` (catalog/categories/category-map.ts) is what tells the
  * admin console not to report them as unconfigured. Note the exception —
@@ -227,6 +232,11 @@ export const CATEGORY_FISCAL_DATA: Readonly<
   },
   // Sold in one form only — no question is asked and the single code applies.
   filters: { mxik: '08421002001000000', packageCodeSingle: '1499205' },
+  // The `antifreeze` leaf under maintenance-and-fluids. Operator-supplied, like
+  // every other entry here. It is an ORDINARY category on the fiscal path — the
+  // ANTIFREEZE questionnaire asks no oil type, so `isFiscalizedByOilType` is
+  // false for it and these are the codes its listings actually use.
+  antifreeze: { mxik: '03820001001000000', packageCodeSingle: '1513835' },
   wipers: { mxik: '08512900001000000', packageCodeSingle: '1866417' },
   batteries: { mxik: '08507001009000000', packageCodeSingle: '1431941' },
   // "Spark Plug" → the ignition leaf; "Starter" → the electrical-parts leaf.
