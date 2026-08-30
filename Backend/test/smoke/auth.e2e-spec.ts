@@ -16,6 +16,15 @@ import { hashPassword } from '../../src/auth/password.util';
 import { RedisKeys } from '../../src/redis/redis.keys';
 import { createPrismaMock, fakeConfig, fakeQueue, fakeRedis, buildAppUser, PrismaMock } from '../utils/harness';
 
+/**
+ * LegalService double for the phone-auth tests. The consent RULES are covered by
+ * LegalService's own spec; what these tests assert is that PhoneAuthService
+ * calls it at all (and refuses to create an account when it cannot).
+ */
+function legalStub() {
+  return { acceptWithinTransaction: jest.fn().mockResolvedValue(undefined) } as any;
+}
+
 /** Real token service (ephemeral RS256 keypair) for end-to-end token integration. */
 function realTokens(prisma: PrismaMock, redis: any = fakeRedis()) {
   const keys = new JwtKeyService(fakeConfig());
@@ -90,7 +99,7 @@ describe('Auth smoke', () => {
           tokenType: 'Bearer',
         }),
       };
-      const svc = new PhoneAuthService(prisma, otp as any, tokens as any);
+      const svc = new PhoneAuthService(prisma, otp as any, tokens as any, legalStub());
       prisma.appUser.findUnique.mockResolvedValue(null);
       prisma.appUser.create.mockResolvedValue(
         buildAppUser({ phoneE164: '+998901112233', phoneVerified: true }),
@@ -100,6 +109,9 @@ describe('Auth smoke', () => {
         request_id: 'otp_1',
         phone_e164: '+998901112233',
         otp_code: '123456',
+        // Registration now requires legal consent; the versions are claims the
+        // backend verifies (LegalService is stubbed here — see its own spec).
+        legal: { terms_version: 1, privacy_version: 1, personal_data_consent_version: 1 },
       } as any);
 
       expect(otp.verify).toHaveBeenCalled();
@@ -109,6 +121,56 @@ describe('Auth smoke', () => {
       // garage and never exposes requires_myid_verification.
       expect(res).not.toHaveProperty('requires_myid_verification');
       expect(res.next_screen).toBe('GarageListScreen');
+    });
+
+    it('verifyOtp REFUSES to register a new account without legal consent', async () => {
+      const otp = { verify: jest.fn().mockResolvedValue(undefined) };
+      const legal = legalStub();
+      const svc = new PhoneAuthService(prisma, otp as any, {} as any, legal);
+      prisma.appUser.findUnique.mockResolvedValue(null);
+
+      await expect(
+        svc.verifyOtp({
+          request_id: 'otp_1',
+          phone_e164: '+998901112233',
+          otp_code: '123456',
+        } as any),
+      ).rejects.toMatchObject({
+        response: { code: 'LEGAL_ACCEPTANCE_REQUIRED' },
+      });
+
+      // The account must NOT exist: consent is a precondition of registration,
+      // not a follow-up step.
+      expect(prisma.appUser.create).not.toHaveBeenCalled();
+      expect(legal.acceptWithinTransaction).not.toHaveBeenCalled();
+    });
+
+    it('verifyOtp signs an EXISTING user in without a legal block', async () => {
+      const otp = { verify: jest.fn().mockResolvedValue(undefined) };
+      const tokens = {
+        issueSession: jest.fn().mockResolvedValue({
+          accessToken: 'a.b.c',
+          accessTokenExpiresAt: new Date(),
+          refreshToken: 'rt_x',
+          refreshTokenExpiresAt: new Date(),
+          tokenType: 'Bearer',
+        }),
+      };
+      const svc = new PhoneAuthService(prisma, otp as any, tokens as any, legalStub());
+      prisma.appUser.findUnique.mockResolvedValue(
+        buildAppUser({ phoneE164: '+998901112233', phoneVerified: true }),
+      );
+
+      // No `legal` block. Publishing a new document version must never lock an
+      // existing user out of their account; they re-accept via /v1/legal/accept.
+      const res = await svc.verifyOtp({
+        request_id: 'otp_1',
+        phone_e164: '+998901112233',
+        otp_code: '123456',
+      } as any);
+
+      expect(res.tokens.access_token).toBe('a.b.c');
+      expect(prisma.appUser.create).not.toHaveBeenCalled();
     });
   });
 

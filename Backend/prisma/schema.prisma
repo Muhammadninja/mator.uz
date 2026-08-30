@@ -61,6 +61,16 @@ enum MyIdStatus {
   VERIFIED
 }
 
+/// The legal documents a user must consent to. One enum member per DOCUMENT —
+/// deliberately not merged into a single "terms" record, because each is a
+/// separately versioned instrument that can be re-issued (and must be
+/// re-accepted) on its own schedule.
+enum LegalDocumentType {
+  TERMS_OF_USE
+  PRIVACY_POLICY
+  PERSONAL_DATA_CONSENT
+}
+
 enum OtpChannel {
   SMS
   TELEGRAM
@@ -703,6 +713,7 @@ model AppUser {
   addresses              Address[]
   myIdSessions           MyIdSession[]
   myIdVerifications      MyIdVerification[]
+  legalAcceptances       LegalAcceptance[]
 
   @@index([deletedAt])
   @@map("app_users")
@@ -2218,4 +2229,82 @@ model SourcingTicket {
   @@index([status])
   @@index([userId])
   @@map("sourcing_tickets")
+}
+
+// ── Legal documents & consent ────────────────────────────────────────────────
+//
+// Two models with strictly separate jobs (do not conflate them):
+//   • LegalDocument   — the TEXT of one version of one document, per locale.
+//   • LegalAcceptance — the PROOF that one user accepted one version, once.
+//
+// Versions are immutable and never deleted: an acceptance is evidence, and
+// evidence that points at rewritten text proves nothing. Publishing a new
+// version therefore INSERTS a row and flips `isActive`; it never UPDATEs the
+// text of a version anyone may already have accepted.
+
+/// One version of one legal document, in one locale. `version` is shared across
+/// locales — TERMS_OF_USE v2 is the same instrument in `ru` and `uz`, so a user
+/// who accepted it in either language has accepted v2.
+///
+/// "Currently required" = the active row for (type, locale). Prisma cannot
+/// express the partial unique index that would enforce one-active-per-pair
+/// (`WHERE is_active`), so the migration adds it by hand and LegalService
+/// publishes through it; see the migration for the full rationale.
+model LegalDocument {
+  id            String            @id @default(uuid()) @db.Uuid
+  type          LegalDocumentType
+  version       Int
+  /// Interface language code as it appears on the wire: 'ru' | 'uz' | 'en'
+  /// (see common/app-lang.util). Stored as the lowercase code rather than the
+  /// `Language` enum so a new locale is a data row, not a schema migration.
+  locale        String            @db.VarChar(8)
+  title         String            @db.VarChar(300)
+  content       String            @db.Text
+  contentFormat String            @default("markdown") @map("content_format") @db.VarChar(20)
+  isActive      Boolean           @default(false) @map("is_active")
+  effectiveAt   DateTime          @map("effective_at") @db.Timestamptz(3)
+  createdAt     DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  acceptances LegalAcceptance[]
+
+  @@unique([type, version, locale])
+  @@index([type, locale, isActive])
+  @@map("legal_documents")
+}
+
+/// Evidence that a user accepted a specific version of a specific document at a
+/// specific time. Append-only by design.
+///
+/// There is deliberately NO @@unique([userId, documentId]): a user accepts v1,
+/// then later v2, and both rows must survive — the consent history IS the audit
+/// trail. Re-accepting the SAME version is deduplicated in the service layer
+/// (retry-safe) rather than by a constraint, so a genuine re-consent event
+/// could still be recorded if the business ever needs it.
+///
+/// `documentVersion` duplicates `document.version` on purpose: the acceptance
+/// must remain readable as "accepted v1" from the row alone, without a join.
+model LegalAcceptance {
+  id              String   @id @default(uuid()) @db.Uuid
+  userId          String   @map("user_id") @db.Uuid
+  documentId      String   @map("document_id") @db.Uuid
+  documentVersion Int      @map("document_version")
+  acceptedAt      DateTime @default(now()) @map("accepted_at") @db.Timestamptz(3)
+  /// Request provenance, captured server-side (never trusted from the client) —
+  /// it is what makes the row evidence rather than a claim. Nullable because a
+  /// proxy may withhold the address and a client may send no User-Agent.
+  ipAddress       String?  @map("ip_address") @db.VarChar(45)
+  userAgent       String?  @map("user_agent") @db.VarChar(500)
+  /// The language the user was actually shown the document in.
+  locale          String?  @db.VarChar(8)
+
+  user     AppUser       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Restrict, not Cascade: a document version that someone has accepted must not
+  // be deletable — that would destroy the evidence the row exists to hold.
+  document LegalDocument @relation(fields: [documentId], references: [id], onDelete: Restrict)
+
+  @@index([userId])
+  @@index([documentId])
+  @@index([userId, documentVersion])
+  @@map("legal_acceptances")
 }

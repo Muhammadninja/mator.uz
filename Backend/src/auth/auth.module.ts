@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { AuthService } from './auth.service';
@@ -16,6 +16,7 @@ import { PhoneAuthService } from './phone/phone-auth.service';
 import { MyIdService } from './myid/myid.service';
 import { MailModule } from '../mail/mail.module';
 import { SmsModule } from '../sms/sms.module';
+import { LegalModule } from '../legal/legal.module';
 
 @Module({
   imports: [
@@ -23,6 +24,10 @@ import { SmsModule } from '../sms/sms.module';
     JwtModule.register({}),
     MailModule,
     SmsModule,
+    // forwardRef: LegalModule imports this module for the JWT guard, while
+    // PhoneAuthService needs LegalService to record registration consent inside
+    // the account-creation transaction.
+    forwardRef(() => LegalModule),
   ],
   providers: [
     AuthService,

@@ -30,7 +30,10 @@ function build(devOtpCode?: string) {
   const otp = makeOtpMock(devOtpCode);
   const prisma = makePrismaMock();
   const tokens = {} as never;
-  const service = new PhoneAuthService(prisma as never, otp as never, tokens);
+  // LegalService is unused on the request/resend paths under test here (it is
+  // only reached when verifyOtp creates a NEW account).
+  const legal = {} as never;
+  const service = new PhoneAuthService(prisma as never, otp as never, tokens, legal);
   return { service, otp, prisma };
 }
 

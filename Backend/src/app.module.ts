@@ -31,6 +31,7 @@ import { AccountModule } from './account/account.module';
 import { ShippingModule } from './shipping/shipping.module';
 import { ReferenceModule } from './reference/reference.module';
 import { AddressesModule } from './addresses/addresses.module';
+import { LegalModule } from './legal/legal.module';
 import { DealersModule } from './dealers/dealers.module';
 import { MobileConfigModule } from './mobile-config/mobile-config.module';
 import { SalesModule } from './sales/sales.module';
@@ -86,6 +87,7 @@ import { isBlueprintEnabled } from './blueprint/blueprint-auth';
     ShippingModule,
     ReferenceModule,
     AddressesModule,
+    LegalModule,
     DealersModule,
     // Admin-managed automatic discounts (/v1/admin/sales, /v1/sales). Exports
     // DiscountService for products/cart/orders to inject; entirely separate

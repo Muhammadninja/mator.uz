@@ -5,12 +5,15 @@ import {
   Body,
   UseGuards,
   Request,
+  Headers,
   HttpCode,
   HttpStatus,
   BadRequestException,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiHeader, ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
+import type { Request as ExpressRequest } from 'express';
 import { Throttle } from '@nestjs/throttler';
+import { resolveRequestLang } from '../common/app-lang.util';
 import { AuthService } from './auth.service';
 import { PhoneAuthService } from './phone/phone-auth.service';
 import { TokenService, ACCESS_TTL_SECONDS } from './tokens/token.service';
@@ -70,8 +73,33 @@ export class AuthController {
   @Post('phone/verify-otp')
   @Throttle({ default: { limit: 10, ttl: 60 * 1000 } })
   @HttpCode(HttpStatus.OK)
-  verifyOtp(@Body() dto: VerifyOtpDto) {
-    return this.phoneAuth.verifyOtp(dto);
+  @ApiOperation({
+    summary: 'Verify the OTP — signs in an existing user, or registers a new one.',
+    description:
+      'A phone number with no account yet is REGISTERED here, and registration ' +
+      'requires the `legal` block naming the accepted document versions ' +
+      '(fetch them from GET /v1/legal/documents). The versions are verified ' +
+      'against the ones actually in force; a stale one is rejected with ' +
+      'LEGAL_ACCEPTANCE_REQUIRED, and the account is not created. An EXISTING ' +
+      'user signs in without it and re-accepts via POST /v1/legal/accept.',
+  })
+  @ApiHeader({
+    name: 'Accept-Language',
+    required: false,
+    description: 'Recorded on the consent rows as the language the documents were shown in.',
+  })
+  verifyOtp(
+    @Request() req: ExpressRequest,
+    @Body() dto: VerifyOtpDto,
+    @Headers('accept-language') acceptLanguage?: string,
+  ) {
+    // Consent provenance is captured server-side (see LegalService); `req.ip` is
+    // the real client address because main.ts sets `trust proxy`.
+    return this.phoneAuth.verifyOtp(dto, {
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent'),
+      locale: resolveRequestLang(acceptLanguage),
+    });
   }
 
   @Post('phone/resend-otp')

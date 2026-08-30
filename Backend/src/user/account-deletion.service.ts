@@ -30,12 +30,18 @@ import { TokenService } from '../auth/tokens/token.service';
  * Retained (financial/legal):
  *   • orders + order_items + payments + order_status_history — amounts, statuses,
  *     line snapshots and timings, i.e. the money trail.
+ *   • legal_acceptances — proof that this person consented to a specific version
+ *     of each legal document. It is the lawful basis for having processed their
+ *     data at all; deleting it would discard the defence, not just the data.
  *
  * Anonymized or detached on those retained rows:
  *   • orders.contact_phone_e164   → NULL (buyer's phone)
  *   • orders.delivery_address_id  → NULL (detached before the address row is
  *                                  deleted; the FK is SetNull, so this is
  *                                  explicit rather than incidental)
+ *   • legal_acceptances.ip_address / .user_agent → NULL (network and device
+ *                                  identifiers; the consent fact itself, its
+ *                                  version and timestamp are retained)
  *   • order_status_history.actor_name → NULL for CUSTOMER entries, i.e. the ones
  *                                  the buyer caused (the snapshotted display
  *                                  name). OPERATOR/ADMIN entries are untouched —
@@ -105,6 +111,20 @@ export class AccountDeletionService {
       await tx.orderStatusHistory.updateMany({
         where: { actorId: userId, actorType: OrderActorType.CUSTOMER },
         data: { actorName: null },
+      });
+
+      // Consent records are KEPT, with their request provenance stripped. The
+      // acceptance itself is the evidence that processing this person's data was
+      // lawful — destroying it on request would destroy the very record that
+      // justifies the retained orders, so it survives like the money trail does.
+      // The IP address and User-Agent are a different matter: they are network
+      // and device identifiers with no retention basis once the account is gone,
+      // so they are cleared while `user_id`, `document_id`, `document_version`
+      // and `accepted_at` — the parts that make the row proof — stay intact.
+      // Same shape as the order/actor-name anonymization above.
+      await tx.legalAcceptance.updateMany({
+        where: { userId },
+        data: { ipAddress: null, userAgent: null },
       });
 
       // ── 2. Delete every other personal-data relation ──────────────────────

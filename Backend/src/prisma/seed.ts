@@ -19,6 +19,11 @@ import {
   seedLaunchCatalog,
   launchDatasetIsEmpty,
 } from './seed-launch-catalog';
+import {
+  LEGAL_DOCUMENT_SEED,
+  LEGAL_V1_EFFECTIVE_AT,
+  isPlaceholderLegalContent,
+} from './seed-data/legal-documents.seed';
 
 const prisma = new PrismaClient();
 
@@ -355,6 +360,116 @@ async function verify() {
   });
 }
 
+
+/**
+ * Legal documents — v1 of each required instrument, in ru and uz.
+ *
+ * Idempotent, and CAREFUL about what it overwrites:
+ *   • document absent            → created, active.
+ *   • present, still placeholder → title/content updated in place, so the real
+ *                                  legal text can be dropped into the seed file
+ *                                  and published with `npm run seed`, no code
+ *                                  change and no version bump.
+ *   • present, real text         → LEFT ALONE. Once approved wording is
+ *                                  published (and possibly accepted by users),
+ *                                  a re-run must never silently rewrite it —
+ *                                  that would invalidate every acceptance
+ *                                  pointing at it. Changing published text is a
+ *                                  NEW version, which is a deliberate act.
+ *
+ * The one-active-version-per-(type, locale) invariant is enforced by a partial
+ * unique index (see the add_legal_documents migration). This seed publishes v1
+ * ACTIVE only while no other version of that (type, locale) is active: once v2
+ * has been published, re-running the seed must not resurrect v1 alongside it —
+ * that would violate the index (crashing the seed) and, without it, would make
+ * "which version is required?" ambiguous.
+ */
+async function seedLegalDocuments() {
+  let created = 0;
+  let refreshed = 0;
+  let preserved = 0;
+  let superseded = 0;
+
+  for (const doc of LEGAL_DOCUMENT_SEED) {
+    const existing = await prisma.legalDocument.findUnique({
+      where: {
+        type_version_locale: {
+          type: doc.type,
+          version: doc.version,
+          locale: doc.locale,
+        },
+      },
+    });
+
+    // Is a DIFFERENT version of this document already in force? If so this seed
+    // row has been superseded and must stay inactive — activating it would put
+    // two active versions on one (type, locale) and trip the partial unique
+    // index. This is what makes `npm run seed` safe to re-run after a version
+    // bump instead of a landmine.
+    const supersededBy = await prisma.legalDocument.findFirst({
+      where: {
+        type: doc.type,
+        locale: doc.locale,
+        isActive: true,
+        version: { not: doc.version },
+      },
+      select: { version: true },
+    });
+    const isActive = supersededBy === null;
+    if (supersededBy) superseded++;
+
+    if (!existing) {
+      await prisma.legalDocument.create({
+        data: {
+          type: doc.type,
+          version: doc.version,
+          locale: doc.locale,
+          title: doc.title,
+          content: doc.content,
+          contentFormat: 'markdown',
+          isActive,
+          effectiveAt: LEGAL_V1_EFFECTIVE_AT,
+        },
+      });
+      created++;
+      continue;
+    }
+
+    if (isPlaceholderLegalContent(existing.content)) {
+      await prisma.legalDocument.update({
+        where: { id: existing.id },
+        data: { title: doc.title, content: doc.content, isActive },
+      });
+      refreshed++;
+    } else {
+      preserved++;
+    }
+  }
+
+  console.log(
+    `[seed] legal documents: ${created} created, ${refreshed} placeholder(s) refreshed, ` +
+      `${preserved} approved document(s) left untouched` +
+      (superseded > 0
+        ? `, ${superseded} left INACTIVE (a newer version is already published).`
+        : '.'),
+  );
+
+  const stillPlaceholder = await prisma.legalDocument.count({
+    where: { isActive: true, content: { contains: '[PLACEHOLDER' } },
+  });
+  if (stillPlaceholder > 0) {
+    // Loud, and it SHOULD be: users are being asked to consent to text nobody
+    // has approved. Not an error — the structure is correct and the text is a
+    // drop-in replacement — but this must not ship to production unnoticed.
+    console.warn(
+      `[seed] WARNING: ${stillPlaceholder} active legal document(s) still contain PLACEHOLDER text.\n` +
+        '       Users would be consenting to wording no legal owner has approved.\n' +
+        '       Replace title/content in src/prisma/seed-data/legal-documents.seed.ts and re-run\n' +
+        '       `npm run seed` — no backend code change is required.',
+    );
+  }
+}
+
 async function main() {
   await seedAdmin();
   await seedVehicleCatalog();
@@ -362,6 +477,7 @@ async function main() {
   await seedDealers();
   await seedSmsOperators();
   await seedFitmentNodes();
+  await seedLegalDocuments();
 
   // The launch commercial catalogue (brands / dealers / products / sales). Runs
   // last: it references the categories and dealers seeded above.
@@ -377,6 +493,7 @@ async function main() {
     sms_operators: await prisma.smsOperator.count(),
     sms_operator_prefixes: await prisma.smsOperatorPrefix.count(),
     vehicle_nodes: await prisma.vehicleNode.count(),
+    legal_documents: await prisma.legalDocument.count(),
   };
   console.log('[seed] reference-data row counts:');
   console.table(counts);

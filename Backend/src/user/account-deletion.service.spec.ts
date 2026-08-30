@@ -98,6 +98,20 @@ describe('AccountDeletionService', () => {
     });
   });
 
+  it('RETAINS legal consent but strips its network/device provenance', async () => {
+    const { service, prisma } = build();
+
+    await service.deleteAccount(USER_ID);
+
+    // The consent record is the lawful basis for having processed this person's
+    // data — it must survive deletion exactly as the order trail does.
+    expect(prisma.legalAcceptance.deleteMany).not.toHaveBeenCalled();
+    expect(prisma.legalAcceptance.updateMany).toHaveBeenCalledWith({
+      where: { userId: USER_ID },
+      data: { ipAddress: null, userAgent: null },
+    });
+  });
+
   it('revokes all sessions through the existing TokenService entry point', async () => {
     const { service, tokens } = build();
 
