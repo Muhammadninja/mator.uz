@@ -17,6 +17,7 @@ import {
 } from '@prisma/client';
 import { PartsService } from './parts.service';
 import { ListPartsQueryDto } from './dto/list-parts.query.dto';
+import { normalizeOem } from '../../common/normalize-oem.util';
 
 /**
  * Prisma stub that records the arguments of every catalogPart call. `findMany`
@@ -259,13 +260,31 @@ describe('PartsService — search and sort survive ProductKind', () => {
     ]);
   });
 
-  it('free-text search still matches on title only, for every kind', async () => {
+  it('free-text search matches on title, for every kind', async () => {
+    // A Cyrillic query normalizes to the empty article number, so the search is
+    // title-only: the OR-group carries the title predicate and nothing else.
+    expect(normalizeOem('фильтр')).toBe('');
     const { and } = await whereFor({ q: 'фильтр' });
     expect(
-      hasCond(and, { title: { contains: 'фильтр', mode: 'insensitive' } }),
+      hasCond(and, {
+        OR: [{ title: { contains: 'фильтр', mode: 'insensitive' } }],
+      }),
     ).toBe(true);
     // No kind predicate is added by a text search — it searches everything.
     expect(JSON.stringify(and)).not.toContain('kind');
+  });
+
+  it('an article-shaped query ALSO matches the OEM/GM number arrays', async () => {
+    const { and } = await whereFor({ q: 'sp-1362' });
+    expect(
+      hasCond(and, {
+        OR: [
+          { title: { contains: 'sp-1362', mode: 'insensitive' } },
+          { oemNumbers: { has: 'SP1362' } },
+          { gmNumbers: { has: 'SP1362' } },
+        ],
+      }),
+    ).toBe(true);
   });
 
   it('pagination is unaffected', async () => {
