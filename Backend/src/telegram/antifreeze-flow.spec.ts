@@ -345,6 +345,7 @@ describe('antifreeze preview', () => {
     oilViscosity: null,
     oilType: null,
     oilVolumeMl: null,
+    antifreezeWeightG: null,
   };
 
   it('shows the weight in kg and no oil, vehicle or part-number line', () => {

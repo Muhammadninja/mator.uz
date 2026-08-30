@@ -2539,6 +2539,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         oilViscosity: listing.oilViscosity,
         oilType: listing.oilType,
         oilVolumeMl: listing.oilVolumeMl,
+        antifreezeWeightG: listing.antifreezeWeightG,
         // The listing's own universality, so an oil sold for a specific car
         // shows that car in the preview while a "Другое" oil shows none.
         isUniversal: metadata.isUniversal,

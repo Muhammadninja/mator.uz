@@ -40,6 +40,9 @@ interface AnyService {
     listing: unknown,
     processedUrls: string[],
   ) => Promise<void>;
+  /** The preview caption + keyboard builder — the last hop before the seller
+   *  reads the confirmation message. */
+  buildPreview: (listing: unknown) => { caption: string };
   answerStaleCallback: (ctx: unknown) => Promise<void>;
   onSellerApproved: (event: {
     sellerId: number;
@@ -93,6 +96,7 @@ function draft(
     oilViscosity: null,
     oilType: null,
     oilVolumeMl: null,
+    antifreezeWeightG: null,
     processedUrls: publicIds.map((_, i) => `https://cdn/img${i}.webp`),
     publicIds,
     price: new Decimal(450000),
@@ -119,6 +123,29 @@ function oilPending(tgUserId: number) {
     metadata: {
       ...metadata,
       title: 'Mobil 1 ESP 5W-30 4L',
+      brand: null,
+      models: [],
+      vehicles: [],
+      gm_number: null,
+      isUniversal: true,
+    },
+  });
+}
+
+/**
+ * A pending ANTIFREEZE confirmation, shaped as `buildPendingFromDraft` derives
+ * one: no vehicle, no part number, no oil attribute — just the packaged weight
+ * in GRAMS, which is the kind's single attribute.
+ */
+function antifreezePending(tgUserId: number, weightG: number | null = 10_000) {
+  return draft(tgUserId, ['mator/products/antifreeze'], {
+    kind: ProductKind.ANTIFREEZE,
+    vehicleCategory: null,
+    antifreezeWeightG: weightG,
+    title: 'Antifriz G12 10kg',
+    metadata: {
+      ...metadata,
+      title: 'Antifriz G12 10kg',
       brand: null,
       models: [],
       vehicles: [],
@@ -1287,5 +1314,71 @@ describe('TelegramService — seller approval notification', () => {
     await expect(
       svc.onSellerApproved({ sellerId: 7, tgId: BigInt(1) }),
     ).resolves.toBeUndefined();
+  });
+});
+
+// ── The confirmation CAPTION, built from a PendingProduct ────────────────────
+// Regression: `buildPreview` is the last hop before the seller reads the
+// message, and it forwarded the oil attributes to `previewLines` while silently
+// dropping `antifreezeWeightG`. The weight was on the draft, on the pending
+// record, and correctly rendered by `previewLines` — so every layer tested in
+// isolation looked right, and the caption still said "Вес: —" for a weight the
+// seller had just typed. Nothing covered this seam; these tests do.
+//
+// They assert on the CAPTION `buildPreview` returns (not on `previewLines`),
+// because the caption is what the bug was about.
+describe('buildPreview — the confirmation caption', () => {
+  /** The caption a seller would actually read for this pending listing. */
+  function captionFor(pending: ReturnType<typeof draft>): string {
+    const svc = makeService(makePrisma(), makeCloudinary());
+    return svc.buildPreview(pending).caption;
+  }
+
+  it('shows a 10 кг antifreeze weight', () => {
+    expect(captionFor(antifreezePending(1, 10_000))).toContain('10 кг');
+  });
+
+  it('shows a fractional 2.5 кг weight', () => {
+    expect(captionFor(antifreezePending(1, 2_500))).toContain('2.5 кг');
+  });
+
+  it('shows a sub-kilogram weight in grams, not kilograms', () => {
+    const caption = captionFor(antifreezePending(1, 500));
+    expect(caption).toContain('500 г');
+    // Guards the unit confusion the formatter exists to prevent: 500 g must
+    // never read as "500 кг" (nor as "0.5 кг", which formatWeight does not emit).
+    expect(caption).not.toContain('500 кг');
+  });
+
+  it('renders the em-dash fallback when no weight was recorded', () => {
+    const caption = captionFor(antifreezePending(1, null));
+    expect(caption).toContain('Вес');
+    expect(caption).toContain('—');
+    expect(caption).not.toContain('null');
+  });
+
+  it('labels the weight line rather than showing a bare number', () => {
+    const caption = captionFor(antifreezePending(1, 10_000));
+    expect(caption).toMatch(/Вес.*10 кг/);
+    // An antifreeze is sold by WEIGHT: no oil line may appear on its caption,
+    // and above all no oil TYPE — that column selects an oil's MXIK.
+    expect(caption).not.toContain('Вязкость');
+    expect(caption).not.toContain('Объём');
+    expect(caption).not.toContain('Синтетическое');
+  });
+
+  it('leaves the MOTOR_OIL caption unchanged (viscosity / type / volume, no weight)', () => {
+    const caption = captionFor(oilPending(1));
+    expect(caption).toContain('5W-30');
+    expect(caption).toContain('Синтетическое');
+    expect(caption).toContain('4 л');
+    expect(caption).not.toContain('Вес');
+  });
+
+  it('leaves the SPARE_PART caption unchanged (no weight line)', () => {
+    const caption = captionFor(draft(1));
+    expect(caption).toContain('96234567');
+    expect(caption).not.toContain('Вес');
+    expect(caption).not.toContain('Вязкость');
   });
 });

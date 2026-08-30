@@ -1829,9 +1829,18 @@ export function previewLines(
     oilViscosity: string | null;
     oilType: OilType | null;
     oilVolumeMl: number | null;
-    /** Packaged net weight in GRAMS — ANTIFREEZE only. Optional so callers that
-     *  predate the kind keep compiling. */
-    antifreezeWeightG?: number | null;
+    /**
+     * Packaged net weight in GRAMS — ANTIFREEZE only.
+     *
+     * REQUIRED, not optional. It was optional (so callers predating the kind
+     * kept compiling) and that is exactly how the confirmation caption came to
+     * read "Вес: —" for a weight the seller had entered and the DB had stored:
+     * `buildPreview` simply never passed the field, and an optional property
+     * made that omission invisible to the compiler. Every other attribute here
+     * is required for the same reason — a kind's attribute reaching the renderer
+     * must not be something a call site can silently forget.
+     */
+    antifreezeWeightG: number | null;
     /** Whether this LISTING fits every vehicle. A universal listing shows no
      *  vehicle line; a vehicle-specific one does, whatever its kind. Optional so
      *  callers that predate it keep the capability-only behaviour. */

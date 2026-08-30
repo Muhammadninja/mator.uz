@@ -404,6 +404,7 @@ describe('preview lines per kind', () => {
     oilViscosity: '5W-30',
     oilType: OilType.SYNTHETIC,
     oilVolumeMl: 4_000,
+    antifreezeWeightG: null,
   };
 
   it('an oil shows viscosity / type / volume and no spare-part lines', () => {
