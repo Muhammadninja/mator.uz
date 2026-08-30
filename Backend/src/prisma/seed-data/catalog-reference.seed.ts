@@ -237,6 +237,16 @@ export const CATEGORY_FISCAL_DATA: Readonly<
   // ANTIFREEZE questionnaire asks no oil type, so `isFiscalizedByOilType` is
   // false for it and these are the codes its listings actually use.
   antifreeze: { mxik: '03820001001000000', packageCodeSingle: '1513835' },
+  // The `transmission-oil` leaf under motor-oil — the one option on the oil
+  // screen that is NOT a base composition. Its three siblings (synthetic /
+  // semi-synthetic / mineral) are fiscalized from the oilType they derive, and
+  // deliberately carry no codes here; transmission oil derives no oilType, so
+  // it is on the ORDINARY category path and needs its own. Operator-supplied,
+  // like every other entry.
+  'transmission-oil': {
+    mxik: '02710005005000000',
+    packageCodeSingle: '1282593',
+  },
   wipers: { mxik: '08512900001000000', packageCodeSingle: '1866417' },
   batteries: { mxik: '08507001009000000', packageCodeSingle: '1431941' },
   // "Spark Plug" → the ignition leaf; "Starter" → the electrical-parts leaf.

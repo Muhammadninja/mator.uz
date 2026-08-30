@@ -136,6 +136,39 @@ describe('CATEGORY_FISCAL_DATA', () => {
     }
   });
 
+  it('configures transmission oil, the one oil sibling on the CATEGORY path', () => {
+    // The four options under "Моторное масло" split two ways. The three base
+    // compositions resolve their codes from the oilType they derive and so hold
+    // none of their own; transmission oil derives no oilType, which is exactly
+    // why it must carry its own MXIK — otherwise its listings would either be
+    // unsellable or borrow a motor-oil code.
+    expect(fiscalDataFor('transmission-oil')).toEqual({
+      mxik: '02710005005000000',
+      packageCodeSingle: '1282593',
+      // Sold in one form: no "Штука / Комплект" question is asked, so the set
+      // code is explicitly null (the shape the DB column takes).
+      packageCodeSet: null,
+    });
+  });
+
+  it('stores NO codes on the three composition categories', () => {
+    // Their listings are fiscalized from the derived oilType (OIL_TYPE_FISCAL),
+    // so codes here would be unreachable — and a code on the WRONG side of this
+    // split is how an oil would come to be sold under another oil's MXIK.
+    for (const id of [
+      'synthetic-motor-oil',
+      'semi-synthetic-motor-oil',
+      'mineral-motor-oil',
+    ]) {
+      expect(fiscalDataFor(id)).toEqual({});
+      expect(isFiscalizedByOilType({ id, parentId: 'motor-oil' })).toBe(true);
+    }
+    // …and transmission oil is on the other side of it.
+    expect(
+      isFiscalizedByOilType({ id: 'transmission-oil', parentId: 'motor-oil' }),
+    ).toBe(false);
+  });
+
   it('leaves the SPARE-PART oil leaf on the category path', () => {
     // 'oil-and-fluids' hangs under maintenance-and-fluids and runs the ordinary
     // spare-part questionnaire — no oil type is ever collected — so it needs
