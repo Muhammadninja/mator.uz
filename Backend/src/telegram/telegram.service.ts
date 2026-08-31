@@ -604,7 +604,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         from.username ?? from.first_name,
       );
       await this.setLang(from.id, lang);
-      await this.removeInlineKeyboard(ctx);
+      await this.consumeCallbackMessage(ctx);
       await ctx.reply(t(lang, 'lang.changed'));
 
       const session = this.wizard.get(from.id);
@@ -916,8 +916,8 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     // ── Confirmation buttons on the preview message ─────────────────────────
     this.bot.action(CONFIRM_ADD, async (ctx) => {
       await ctx.answerCbQuery();
-      // Remove the keyboard first so a second tap can't re-trigger the action.
-      await this.removeInlineKeyboard(ctx);
+      // Retire the preview first so a second tap can't re-trigger the action.
+      await this.consumeCallbackMessage(ctx);
       const from = ctx.from;
       if (from) {
         await this.commitPending(ctx, from.id);
@@ -930,8 +930,8 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
     this.bot.action(CONFIRM_CANCEL, async (ctx) => {
       await ctx.answerCbQuery();
-      // Remove the keyboard first so a second tap can't re-trigger the action.
-      await this.removeInlineKeyboard(ctx);
+      // Retire the preview first so a second tap can't re-trigger the action.
+      await this.consumeCallbackMessage(ctx);
       const from = ctx.from;
       // Resolved BEFORE the dialogue is cleared, so the session's language is
       // still available and the cancel notice does not cost a DB read.
@@ -950,7 +950,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     // processing re-runs.
     this.bot.action(CONFIRM_BACK, async (ctx) => {
       await ctx.answerCbQuery();
-      await this.removeInlineKeyboard(ctx);
+      await this.consumeCallbackMessage(ctx);
       const from = ctx.from;
       if (from) await this.reopenDraftForEdit(ctx, from.id);
     });
@@ -960,7 +960,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     // so the fresh photos go through the queue like any other upload.
     this.bot.action(CONFIRM_CHANGE_PHOTOS, async (ctx) => {
       await ctx.answerCbQuery();
-      await this.removeInlineKeyboard(ctx);
+      await this.consumeCallbackMessage(ctx);
       const from = ctx.from;
       if (from) await this.replaceDraftPhotos(ctx, from.id);
     });
@@ -968,13 +968,13 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     // ── /start resume prompt ────────────────────────────────────────────────
     this.bot.action(DRAFT_RESUME, async (ctx) => {
       await ctx.answerCbQuery();
-      await this.removeInlineKeyboard(ctx);
+      await this.consumeCallbackMessage(ctx);
       const from = ctx.from;
       if (from) await this.resumeDraft(ctx, from.id);
     });
     this.bot.action(DRAFT_RESTART, async (ctx) => {
       await ctx.answerCbQuery();
-      await this.removeInlineKeyboard(ctx);
+      await this.consumeCallbackMessage(ctx);
       const from = ctx.from;
       if (!from) return;
       const seller = await this.sellers.findByTgId(BigInt(from.id));
@@ -999,13 +999,13 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     // ── Image-failure recovery ──────────────────────────────────────────────
     this.bot.action(DRAFT_RETRY_IMAGES, async (ctx) => {
       await ctx.answerCbQuery();
-      await this.removeInlineKeyboard(ctx);
+      await this.consumeCallbackMessage(ctx);
       const from = ctx.from;
       if (from) await this.retryFailedImages(ctx, from.id);
     });
     this.bot.action(DRAFT_CANCEL, async (ctx) => {
       await ctx.answerCbQuery();
-      await this.removeInlineKeyboard(ctx);
+      await this.consumeCallbackMessage(ctx);
       const from = ctx.from;
       if (!from) return;
       const lang = await this.resolveLang(from.id);
@@ -2129,7 +2129,11 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     const result = await transition(session);
     if (result.status !== 'ok') return; // stale button — ignore silently
 
-    await this.removeInlineKeyboard(ctx);
+    // The choice stuck, so the question it answered is spent: retire the whole
+    // screen rather than leaving an answered keyboard behind. Strictly AFTER
+    // the transition — a rejected tap above returns with the seller's current
+    // screen still intact.
+    await this.consumeCallbackMessage(ctx);
     // Persist the answered field to the draft and, when the questionnaire finishes,
     // hand off to the coordinator (rendezvous).
     await this.handleFormAdvance(ctx, from.id, session);
@@ -2350,6 +2354,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
    * without deleting the message. Best-effort: if the edit fails — e.g. the
    * keyboard was already removed by an earlier tap, or the message is too old —
    * the error is logged and swallowed so the action still proceeds.
+   *
+   * Used on the paths where the seller must KEEP the screen in front of them:
+   * a stale tap, a rejected category. The message stays as a record of what was
+   * asked; only its now-dead buttons go.
    */
   private async removeInlineKeyboard(ctx: Context): Promise<void> {
     try {
@@ -2359,6 +2367,40 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         `Could not remove inline keyboard: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+  }
+
+  /**
+   * Retire the message whose button was just tapped, after the choice it
+   * carried has been ACCEPTED.
+   *
+   * Every wizard screen is a question that is answered exactly once and then
+   * replaced by the next one, so leaving the answered screens behind turns the
+   * chat into a pile of dead keyboards the seller can still tap. Deleting the
+   * message keeps only the live question on screen.
+   *
+   * Purely cosmetic, and deliberately unable to fail the action: Telegram
+   * refuses a delete for reasons entirely outside this flow (the message is
+   * older than 48 h, the seller deleted it first, the bot lacks the right in
+   * this chat). Any such refusal falls back to merely stripping the keyboard,
+   * which at least makes the stale screen unclickable, and never propagates.
+   *
+   * Call this ONLY after the transition succeeded — an early delete on a tap
+   * that turns out to be stale would take the seller's current screen with it.
+   */
+  private async consumeCallbackMessage(ctx: Context): Promise<void> {
+    try {
+      await ctx.deleteMessage();
+      return;
+    } catch (err) {
+      this.logger.debug(
+        `Could not delete callback message (falling back to keyboard removal): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+    // Delete refused — degrade to the older behaviour rather than leaving a
+    // live keyboard behind.
+    await this.removeInlineKeyboard(ctx);
   }
 
   /**

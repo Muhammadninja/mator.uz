@@ -68,6 +68,8 @@ export class TelegramOfferService {
       const choice = ctx.match[1];
       s.condition = choice === 'SKIP' ? undefined : (choice as SourcingOfferCondition);
       s.step = 'PHOTO';
+      // Answered question — retire its screen before the next one is sent.
+      await this.consumeCallbackMessage(ctx);
       await ctx.reply(
         'Добавьте фото детали (по желанию) — можно несколько. ' +
           'Когда будете готовы, нажмите «Отправить предложение». Фото не обязательно.',
@@ -84,6 +86,7 @@ export class TelegramOfferService {
       await ctx.answerCbQuery('Отменено').catch(() => undefined);
       const from = ctx.from;
       if (from) this.clearSession(from.id);
+      await this.consumeCallbackMessage(ctx);
       await ctx.reply('Предложение отменено.');
     });
   }
@@ -213,12 +216,14 @@ export class TelegramOfferService {
         sellerUsername: from.username ?? null,
       });
       this.clearSession(from.id);
+      await this.consumeCallbackMessage(ctx);
       await ctx.reply(
         '✅ Предложение отправлено покупателю. Спасибо! Мы уведомим вас, если он согласится.',
       );
     } catch (err) {
       if (err instanceof NotFoundException) {
         this.clearSession(from.id);
+        await this.consumeCallbackMessage(ctx);
         await ctx.reply('Заявка уже закрыта — предложение не отправлено.');
         return;
       }
@@ -299,5 +304,32 @@ export class TelegramOfferService {
 
   private formatPrice(price: number): string {
     return price.toLocaleString('ru-RU').replace(/ /g, ' ');
+  }
+
+  /**
+   * Retire the message whose button was just tapped, once the choice it carried
+   * has been accepted, so answered screens don't pile up in the chat.
+   *
+   * Best-effort and never fatal: Telegram refuses deletes for reasons outside
+   * this flow (message older than 48 h, already gone, no rights in the chat).
+   * A refusal degrades to stripping the keyboard, so the spent screen is at
+   * least unclickable, and is never allowed to fail the offer itself.
+   */
+  private async consumeCallbackMessage(ctx: Context): Promise<void> {
+    try {
+      await ctx.deleteMessage();
+      return;
+    } catch (err) {
+      this.logger.debug(
+        `Could not delete callback message (falling back to keyboard removal): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+    try {
+      await ctx.editMessageReplyMarkup(undefined);
+    } catch {
+      // Nothing more to do — the stale screen simply stays as it is.
+    }
   }
 }

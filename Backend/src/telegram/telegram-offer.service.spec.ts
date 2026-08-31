@@ -135,3 +135,118 @@ describe('TelegramOfferService', () => {
     expect(c.reply.mock.calls[0][0]).toContain('закрыта');
   });
 });
+
+// The offer flow's inline screens are answered once, so each is retired on tap
+// — the same rule the product wizard follows. Cleanup is cosmetic: a Telegram
+// refusal must never cost the seller their offer.
+describe('TelegramOfferService — callback screen cleanup', () => {
+  /** A callback ctx recording what the tap did to its own message. */
+  function cbCtx(deleteBehaviour: 'ok' | 'throws' = 'ok') {
+    const rec = { deleted: false, keyboardStripped: false };
+    return {
+      rec,
+      ctx: {
+        from: { id: 42, first_name: 'Ali', username: 'ali_dealer' },
+        match: ['sof:cond:NEW', 'NEW'],
+        answerCbQuery: jest.fn().mockResolvedValue(true),
+        reply: jest.fn().mockResolvedValue(undefined),
+        deleteMessage: jest.fn(async () => {
+          if (deleteBehaviour === 'throws') {
+            throw new Error("400: Bad Request: message can't be deleted");
+          }
+          rec.deleted = true;
+          return true;
+        }),
+        editMessageReplyMarkup: jest.fn(async () => {
+          rec.keyboardStripped = true;
+          return {};
+        }),
+      } as any,
+    };
+  }
+
+  /** Register the flow's actions against a fake bot and dispatch by data. */
+  function wire(service: TelegramOfferService) {
+    const handlers: { match: RegExp | string; fn: (c: any) => Promise<void> }[] =
+      [];
+    service.registerActions({
+      action: (match: RegExp | string, fn: (c: any) => Promise<void>) =>
+        handlers.push({ match, fn }),
+    } as never);
+    return (data: string, c: any) => {
+      const e = handlers.find(({ match }) =>
+        match instanceof RegExp ? match.test(data) : match === data,
+      );
+      if (!e) throw new Error(`no handler for "${data}"`);
+      c.match = e.match instanceof RegExp ? e.match.exec(data) : [data];
+      return e.fn(c);
+    };
+  }
+
+  it('deletes the condition screen and moves on to photos', async () => {
+    const { service } = build();
+    const tap = wire(service);
+    await service.startFromDeepLink(ctx(), 'offer_ticket-1');
+    await service.handleText(ctx('250000')); // PRICE → CONDITION
+
+    const { ctx: c, rec } = cbCtx();
+    await tap('sof:cond:NEW', c);
+
+    expect(rec.deleted).toBe(true);
+    expect(c.reply.mock.calls[0][0]).toContain('фото');
+  });
+
+  it('deletes the submit screen once the offer is recorded', async () => {
+    const { service, offers } = build();
+    const tap = wire(service);
+    await service.startFromDeepLink(ctx(), 'offer_ticket-1');
+    await service.handleText(ctx('250000'));
+
+    const { ctx: c, rec } = cbCtx();
+    await tap('sof:submit', c);
+
+    expect(offers.createOffer).toHaveBeenCalledTimes(1);
+    expect(rec.deleted).toBe(true);
+  });
+
+  it('does NOT delete when submit is rejected for a missing price', async () => {
+    const { service, offers } = build();
+    const tap = wire(service);
+    await service.startFromDeepLink(ctx(), 'offer_ticket-1'); // no price yet
+
+    const { ctx: c, rec } = cbCtx();
+    await tap('sof:submit', c);
+
+    // Validation bounce: the seller keeps the screen they must act on.
+    expect(offers.createOffer).not.toHaveBeenCalled();
+    expect(rec.deleted).toBe(false);
+    expect(c.reply.mock.calls[0][0]).toContain('цену');
+  });
+
+  it('records the offer even when Telegram refuses the delete', async () => {
+    const { service, offers } = build();
+    const tap = wire(service);
+    await service.startFromDeepLink(ctx(), 'offer_ticket-1');
+    await service.handleText(ctx('250000'));
+
+    const { ctx: c, rec } = cbCtx('throws');
+    await tap('sof:submit', c);
+
+    expect(offers.createOffer).toHaveBeenCalledTimes(1);
+    expect(rec.deleted).toBe(false);
+    expect(rec.keyboardStripped).toBe(true);
+  });
+
+  it('deletes the screen on cancel and clears the session', async () => {
+    const { service } = build();
+    const tap = wire(service);
+    await service.startFromDeepLink(ctx(), 'offer_ticket-1');
+
+    const { ctx: c, rec } = cbCtx();
+    await tap('sof:cancel', c);
+
+    expect(rec.deleted).toBe(true);
+    // Session gone: further text is no longer consumed by the offer flow.
+    expect(await service.handleText(ctx('250000'))).toBe(false);
+  });
+});
