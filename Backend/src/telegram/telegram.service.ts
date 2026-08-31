@@ -83,6 +83,7 @@ import {
   selectOtherBrand,
   selectOtherKind,
   selectOtherCategory,
+  otherCategoryParentId,
   selectModel,
   selectCategory,
   selectSubcategory,
@@ -736,9 +737,14 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     // admin deactivated or moved after the keyboard was sent is rejected.
     this.bot.action(WIZ_OTHER_CATEGORY_ACTION, async (ctx) => {
       const categoryId = ctx.match[1];
+      const session = ctx.from ? this.wizard.get(ctx.from.id) : undefined;
+      // The parent to re-validate against is the level this menu was RENDERED
+      // from — `otherCategoryParentId`, the same helper `ensureCategoryOptions`
+      // builds the keyboard with. Hardcoding `other` here rejected every button
+      // on the MOTOR_OIL menu, whose options are children of `motor-oil`.
       const category = await this.selectableCategory(
         categoryId,
-        CategoryAnchor.OTHER,
+        session ? otherCategoryParentId(session) : CategoryAnchor.OTHER,
       );
       if (!category) {
         await this.rejectStaleCategoryTap(ctx);
@@ -2168,12 +2174,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       //
       // Any other kind that ever reaches this step keeps the `other` catalogue.
       case WizardStep.OTHER_CATEGORY:
-        await this.openCategoryLevel(
-          session,
-          session.kind === ProductKind.MOTOR_OIL
-            ? CategoryAnchor.MOTOR_OIL
-            : CategoryAnchor.OTHER,
-        );
+        await this.openCategoryLevel(session, otherCategoryParentId(session));
         return;
       // A deeper level: whose children to show is remembered on the session,
       // because `categoryId` has by then moved to the node that was PICKED and

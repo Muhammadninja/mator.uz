@@ -928,6 +928,26 @@ export function selectOtherKind(
 }
 
 /**
+ * WHOSE CHILDREN the "Другое" menu (OTHER_CATEGORY) is showing.
+ *
+ * The SINGLE answer used by both sides of that step: the caller loads this
+ * level's children into `categoryOptions` to build the keyboard, and re-validates
+ * a tap against this same parent. Having the two derive the anchor separately is
+ * what broke "Другое → Моторное масло": the menu was rendered from `motor-oil`'s
+ * children while every tap was checked against `other`, so each correctly-listed
+ * oil category came back as "no longer available".
+ *
+ * MOTOR_OIL opens the children of `motor-oil` — the SAME four categories the
+ * vehicle path offers, which is what makes the two paths agree by construction.
+ * Any other kind reaching this step keeps the admin-managed `other` catalogue.
+ */
+export function otherCategoryParentId(session: WizardSession): string {
+  return session.kind === ProductKind.MOTOR_OIL
+    ? CategoryAnchor.MOTOR_OIL
+    : CategoryAnchor.OTHER;
+}
+
+/**
  * The category a kind whose questionnaire asks no category question is filed
  * under, as read from the live tree: the node itself, the ROOT it hangs under
  * (so the pair passes the server-side lineage check) and its package codes.
