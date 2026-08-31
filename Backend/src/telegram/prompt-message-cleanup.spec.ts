@@ -8,11 +8,14 @@
 // That recording — and the pairing of question and answer as ONE spent
 // exchange — is what these tests pin.
 //
-// Three properties are load-bearing and each is asserted separately:
-//   1. an ACCEPTED answer retires both the prompt and the seller's message;
-//   2. a REJECTED one retires NEITHER, so the seller keeps what they typed and
-//      the question they still owe an answer to;
-//   3. every delete is cosmetic — a refusal from Telegram never costs the
+// Four properties are load-bearing and each is asserted separately:
+//   1. an ACCEPTED answer retires the PROMPT — and only the prompt;
+//   2. the seller's own messages are NEVER deleted, at any step, accepted or
+//      not: they are the record of what the seller told the bot, and a chat
+//      that eats them leaves the seller unable to see what they have said;
+//   3. a REJECTED answer additionally keeps the QUESTION, so the seller can
+//      still read what was being asked;
+//   4. every delete is cosmetic — a refusal from Telegram never costs the
 //      seller their listing.
 
 import { TelegramService } from './telegram.service';
@@ -33,6 +36,8 @@ type ChatRecord = {
   deleted: string[];
   /** Call order, so "deleted before the next question went out" can be caught. */
   order: string[];
+  /** Message ids the SELLER's own messages used — none may ever be deleted. */
+  userMessageIds: number[];
 };
 
 const CHAT_ID = 500;
@@ -56,9 +61,16 @@ function makeBotService(deleteBehaviour: 'ok' | 'throws' = 'ok'): {
   livePromptId: () => number | undefined;
   /** The validation complaint currently on screen, if any. */
   liveNoticeId: () => number | undefined;
+  /** Id of the most recent message the SELLER sent. */
+  lastUserMessageId: () => number;
 } {
   const svc = Object.create(TelegramService.prototype) as AnyService;
-  const rec: ChatRecord = { sent: [], deleted: [], order: [] };
+  const rec: ChatRecord = {
+    sent: [],
+    deleted: [],
+    order: [],
+    userMessageIds: [],
+  };
 
   // Handlers registered by registerHandlers, keyed by the filter they took.
   const textHandlers: ((ctx: any) => Promise<void>)[] = [];
@@ -156,6 +168,7 @@ function makeBotService(deleteBehaviour: 'ok' | 'throws' = 'ok'): {
 
   async function sendText(text: string): Promise<void> {
     const messageId = ++nextMessageId;
+    rec.userMessageIds.push(messageId);
     await textHandlers[0](
       makeCtx({
         message_id: messageId,
@@ -171,6 +184,7 @@ function makeBotService(deleteBehaviour: 'ok' | 'throws' = 'ok'): {
     mediaGroupId?: string,
   ): Promise<number> {
     const messageId = ++nextMessageId;
+    rec.userMessageIds.push(messageId);
     const msg: Record<string, unknown> = {
       message_id: messageId,
       photo: [{ file_id: fileId }],
@@ -189,6 +203,7 @@ function makeBotService(deleteBehaviour: 'ok' | 'throws' = 'ok'): {
     sendPhoto,
     livePromptId: () => svc.livePrompt.get(USER_ID)?.messageId,
     liveNoticeId: () => svc.liveNotice.get(USER_ID)?.messageId,
+    lastUserMessageId: () => rec.userMessageIds[rec.userMessageIds.length - 1],
   };
 }
 
@@ -264,38 +279,44 @@ const TEXT_STEPS: {
   },
 ];
 
-describe('an accepted text answer retires both halves of the exchange', () => {
+describe('an accepted text answer retires the question, and only the question', () => {
   it.each(TEXT_STEPS)(
-    '$name: the question and the seller’s reply both go',
+    '$name: the prompt goes, the seller’s reply stays',
     async ({ step, valid, read }) => {
-      const { svc, rec, sendText } = makeBotService();
+      const { svc, rec, sendText, lastUserMessageId } = makeBotService();
       const session = await seatOnStep(svc, step);
 
       await sendText(valid);
 
       // The answer stuck…
       expect(read(session)).toBeTruthy();
-      // …and both messages that made up the exchange are gone: the seller's
-      // input (the id sendText just used) and the prompt above it (900).
+      // …the question it answered is gone…
       expect(rec.deleted).toContain(`${CHAT_ID}:900`);
-      expect(rec.deleted.length).toBe(2);
+      // …and the seller's own message is still there. This is the whole point:
+      // exactly ONE delete went out, and it was the bot's own message.
+      expect(rec.deleted).not.toContain(`${CHAT_ID}:${lastUserMessageId()}`);
+      expect(rec.deleted).toEqual([`${CHAT_ID}:900`]);
     },
   );
 
-  it('deletes the seller’s message BEFORE the prompt above it', async () => {
-    // Otherwise the chat momentarily shows an answer with no question over it.
-    const { svc, rec, sendText } = makeBotService();
-    await seatOnStep(svc, WizardStep.TITLE);
+  it.each(TEXT_STEPS)(
+    '$name: the seller’s message survives even when several are sent',
+    async ({ step, valid }) => {
+      // Walking a step twice must not retroactively eat the first answer.
+      const { svc, rec, sendText } = makeBotService();
+      await seatOnStep(svc, step);
+      await sendText(valid);
+      const firstAnswer = rec.userMessageIds[0];
 
-    await sendText('Mobil 1 ESP 5W-30');
+      await seatOnStep(svc, step);
+      await sendText(valid);
 
-    const promptDelete = rec.order.indexOf('delete:900');
-    const userDelete = rec.order.findIndex(
-      (o) => o.startsWith('delete:') && o !== 'delete:900',
-    );
-    expect(userDelete).toBeGreaterThanOrEqual(0);
-    expect(userDelete).toBeLessThan(promptDelete);
-  });
+      expect(rec.deleted).not.toContain(`${CHAT_ID}:${firstAnswer}`);
+      for (const id of rec.userMessageIds) {
+        expect(rec.deleted).not.toContain(`${CHAT_ID}:${id}`);
+      }
+    },
+  );
 
   it('retires the old question BEFORE sending the next one', async () => {
     // The invariant the whole feature rests on: never two live screens at once.
@@ -362,57 +383,59 @@ describe('a rejected text answer keeps the seller’s context', () => {
 });
 
 describe('text sent at a step that does not take text', () => {
-  it('retires the stray message and re-shows the real question', async () => {
-    const { svc, rec, sendText } = makeBotService();
+  it('keeps the stray message and re-shows the real question', async () => {
+    const { svc, rec, sendText, lastUserMessageId } = makeBotService();
     // BRAND is answered with a button, never by typing.
     await seatOnStep(svc, WizardStep.BRAND);
 
     await sendText('Chevrolet');
 
-    // The stray text is gone and a question is back on screen.
-    expect(rec.deleted.length).toBeGreaterThan(0);
+    // A question is back on screen…
     expect(rec.sent).toHaveLength(1);
+    // …and the seller's stray message stays. Even text the wizard could do
+    // nothing with is the seller's to keep.
+    expect(rec.deleted).not.toContain(`${CHAT_ID}:${lastUserMessageId()}`);
   });
 });
 
-describe('photo cleanup', () => {
-  it('retires the seller’s photos once the upload is accepted', async () => {
+describe('the seller’s photos are never deleted', () => {
+  it('keeps the photo but still retires the "send me photos" prompt', async () => {
     const { svc, rec, sendPhoto } = makeBotService();
     const session = await seatOnStep(svc, WizardStep.PHOTOS_FIRST);
-    // Stand in for the accepted upload: handlePhotos' effect is a created
-    // draft, which is what makes the photos spent.
-    svc.handlePhotos = jest.fn(async (ctx: any, tgUserId: number) => {
-      await svc.consumePhotoMessages(tgUserId);
+    // Stand in for the accepted upload: the real handlePhotos creates the draft
+    // and then retires the question it answered — and nothing else.
+    svc.handlePhotos = jest.fn(async (_ctx: any, tgUserId: number) => {
       await svc.consumePromptMessage(tgUserId);
     });
 
     const photoId = await sendPhoto('file_1');
 
-    expect(rec.deleted).toContain(`${CHAT_ID}:${photoId}`);
-    // The "send me photos" question goes with them.
+    // The bot's question is gone…
     expect(rec.deleted).toContain(`${CHAT_ID}:900`);
+    // …and the seller's photo is still in the chat.
+    expect(rec.deleted).not.toContain(`${CHAT_ID}:${photoId}`);
     expect(session.step).toBe(WizardStep.PHOTOS_FIRST);
   });
 
-  it('retires EVERY photo of an album, not just the last', async () => {
+  it('keeps EVERY photo of an album', async () => {
     const { svc, rec, sendPhoto } = makeBotService();
     await seatOnStep(svc, WizardStep.PHOTOS_FIRST);
-    // Albums are buffered and flushed as one batch; the ids are collected as
-    // the updates arrive, which is the behaviour under test here.
+    svc.handlePhotos = jest.fn(async (_ctx: any, tgUserId: number) => {
+      await svc.consumePromptMessage(tgUserId);
+    });
+
     const ids = [
       await sendPhoto('file_1', 'album_1'),
       await sendPhoto('file_2', 'album_1'),
       await sendPhoto('file_3', 'album_1'),
     ];
 
-    await svc.consumePhotoMessages(USER_ID);
-
-    for (const id of ids) expect(rec.deleted).toContain(`${CHAT_ID}:${id}`);
+    for (const id of ids) expect(rec.deleted).not.toContain(`${CHAT_ID}:${id}`);
   });
 
-  it('does NOT delete photos the wizard refused', async () => {
-    // Photos sent at a question step answered nothing — they are still the
-    // seller's only record of what they sent.
+  it('keeps photos the wizard refused', async () => {
+    // Photos sent at a question step answered nothing — and are still the
+    // seller's record of what they sent.
     const { svc, rec, sendPhoto } = makeBotService();
     await seatOnStep(svc, WizardStep.TITLE);
 
@@ -421,20 +444,22 @@ describe('photo cleanup', () => {
     expect(rec.deleted).not.toContain(`${CHAT_ID}:${photoId}`);
   });
 
-  it('does not carry a refused upload’s photos into the next one', async () => {
+  it('never deletes a photo across a whole upload sequence', async () => {
+    // The regression guard: refused photos, then accepted ones, and not one of
+    // the seller's messages goes.
     const { svc, rec, sendPhoto } = makeBotService();
     await seatOnStep(svc, WizardStep.TITLE);
-    const refused = await sendPhoto('file_old'); // rejected: wrong step
+    await sendPhoto('file_old'); // refused: wrong step
 
-    // A later, accepted upload must retire ITS photos and only its photos.
     await seatOnStep(svc, WizardStep.PHOTOS_FIRST);
-    svc.handlePhotos = jest.fn(async (ctx: any, tgUserId: number) => {
-      await svc.consumePhotoMessages(tgUserId);
+    svc.handlePhotos = jest.fn(async (_ctx: any, tgUserId: number) => {
+      await svc.consumePromptMessage(tgUserId);
     });
-    const accepted = await sendPhoto('file_new');
+    await sendPhoto('file_new');
 
-    expect(rec.deleted).toContain(`${CHAT_ID}:${accepted}`);
-    expect(rec.deleted).not.toContain(`${CHAT_ID}:${refused}`);
+    for (const id of rec.userMessageIds) {
+      expect(rec.deleted).not.toContain(`${CHAT_ID}:${id}`);
+    }
   });
 });
 
@@ -445,11 +470,16 @@ describe('every delete is cosmetic', () => {
 
     await sendText('Mobil 1 ESP 5W-30');
 
-    // The refusals were swallowed…
+    // The refusal was swallowed…
     expect(rec.deleted).toHaveLength(0);
-    // …and neither the state transition nor the next question was lost.
+    // …neither the state transition nor the next question was lost…
     expect(session.title).toBe('Mobil 1 ESP 5W-30');
     expect(svc.handleFormAdvance).toHaveBeenCalledTimes(1);
+    // …and a failing bot-message delete never reaches for the seller's message
+    // as a fallback.
+    expect(rec.order.filter((o) => o.startsWith('delete:'))).toEqual([
+      'delete:900',
+    ]);
   });
 
   it('survives a step with nothing tracked to delete', async () => {
@@ -554,5 +584,41 @@ describe('button screens outside the questionnaire are transient too', () => {
         failedCount: 1,
       }),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe('the boundary itself: no seller message is ever deleted', () => {
+  // A single sweep over the whole questionnaire — valid answers, invalid ones,
+  // stray text, photos — asserting the one rule that must hold everywhere. If a
+  // future change reintroduces a delete of the seller's own message anywhere on
+  // these paths, this fails even if every step-specific test still passes.
+  it('survives a full mixed run with every seller message intact', async () => {
+    const { svc, rec, sendText, sendPhoto } = makeBotService();
+
+    await seatOnStep(svc, WizardStep.PHOTOS_FIRST);
+    svc.handlePhotos = jest.fn(async (_ctx: any, tgUserId: number) => {
+      await svc.consumePromptMessage(tgUserId);
+    });
+    await sendPhoto('file_1', 'album_1');
+    await sendPhoto('file_2', 'album_1');
+
+    await seatOnStep(svc, WizardStep.TITLE);
+    await sendText('x'); // rejected — too short
+    await sendText('Mobil 1 ESP 5W-30'); // accepted
+
+    await seatOnStep(svc, WizardStep.PRICE);
+    await sendText('abc'); // rejected
+    await sendText('85000'); // accepted
+
+    await seatOnStep(svc, WizardStep.BRAND);
+    await sendText('Chevrolet'); // stray: a button step
+
+    // Something WAS cleaned up — this is not passing because nothing happened.
+    expect(rec.deleted.length).toBeGreaterThan(0);
+    // And not one of the deletes was a seller message.
+    expect(rec.userMessageIds.length).toBe(7);
+    for (const id of rec.userMessageIds) {
+      expect(rec.deleted).not.toContain(`${CHAT_ID}:${id}`);
+    }
   });
 });

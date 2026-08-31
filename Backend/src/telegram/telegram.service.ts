@@ -477,13 +477,6 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   // every retry — the seller must still be able to read what was asked.
   private readonly liveNotice = new Map<number, LivePrompt>();
 
-  // The seller's own photo messages for the upload currently being assembled,
-  // per user. Collected as the updates ARRIVE (a photo message id is only ever
-  // on its own update) and drained once the upload is accepted, because an album
-  // is answered as ONE batch: its photos are only spent when the whole flush has
-  // produced a draft, not one update at a time.
-  private readonly pendingPhotoMessages = new Map<number, LivePrompt[]>();
-
   // Last time (ms epoch) each user was sent the "catalog updated, restart"
   // notice. Rapid repeat taps on stale buttons share one notice within
   // STALE_NOTICE_DEDUP_MS instead of piling up identical messages.
@@ -581,7 +574,6 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     this.langCache.clear();
     this.livePrompt?.clear();
     this.liveNotice?.clear();
-    this.pendingPhotoMessages?.clear();
     for (const session of this.pending.values()) clearTimeout(session.expiry);
     this.pending.clear();
     this.bot?.stop('SIGTERM');
@@ -983,10 +975,9 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         return;
       }
       if (result.status === 'ok') {
-        // Accepted and applied: the question and the answer are both spent.
-        // Order matters — the seller's message goes first so the chat never
-        // shows an answer with no question above it.
-        await this.consumeUserMessage(ctx);
+        // Accepted and applied, so the QUESTION is spent. The seller's own
+        // message is not ours to remove: it is their record of what they told
+        // the bot, and the answers stay readable above the next question.
         await this.consumePromptMessage(from.id);
         // Any complaint from an earlier attempt at THIS step is now answered.
         await this.consumeValidationNotice(from.id);
@@ -995,9 +986,8 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         await this.handleFormAdvance(ctx, from.id, session);
         return;
       }
-      // 'stale' → the text answered no question (a button/photo step). Retire it
-      // and re-show what IS expected.
-      await this.consumeUserMessage(ctx);
+      // 'stale' → the text answered no question (a button/photo step). The
+      // stray message stays; only the question is re-shown.
       await this.sendStepPrompt(ctx, session);
     });
 
@@ -1014,12 +1004,6 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       // An active offer session claims incoming photos (each appended to the
       // quote), before the wizard's album buffer sees them.
       if (await this.offerFlow.handlePhoto(ctx, bestPhoto.file_id)) return;
-
-      // Remember THIS photo message so the whole upload can be retired once it
-      // is accepted. Recorded before the album/single split because the id lives
-      // on this update and nowhere else — a buffered album's flush runs later,
-      // with only file ids in hand.
-      this.rememberPhotoMessage(from.id, msg.chat.id, msg.message_id);
 
       const groupId = 'media_group_id' in msg ? msg.media_group_id : undefined;
 
@@ -1052,7 +1036,6 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         // started a new wizard between preview and this tap — clear it too so a
         // fresh /start is always required to begin the next listing).
         this.wizard.delete(from.id);
-        this.forgetPhotoMessages(from.id);
       }
     });
 
@@ -1072,7 +1055,6 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         await this.consumePromptMessage(from.id);
         await this.cancelPendingDraft(from.id);
         this.wizard.delete(from.id);
-        this.forgetPhotoMessages(from.id);
       }
       // The cancellation notice is the seller's RESULT — it stays.
       await ctx.reply(t(lang, 'draft.addCancelled'));
@@ -1297,10 +1279,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         `Failed to create draft for ${tgUserId}: ${err instanceof Error ? err.message : String(err)}`,
         err instanceof Error ? err.stack : undefined,
       );
-      // Roll the FSM back so the seller can retry the upload. The photos were
-      // NOT accepted, so they stay — the seller re-sends from what is still in
-      // the chat rather than from nothing.
-      this.forgetPhotoMessages(tgUserId);
+      // Roll the FSM back so the seller can retry the upload.
       session.step = WizardStep.PHOTOS_FIRST;
       await this.sendLivePrompt(ctx, tgUserId, t(lang, 'photos.notAccepted'));
       return;
@@ -1339,9 +1318,9 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    // The upload is accepted and recorded on the draft, so the seller's photo
-    // messages and the "send me photos" question are both spent.
-    await this.consumePhotoMessages(tgUserId);
+    // The upload is accepted and recorded on the draft, so the "send me photos"
+    // question is spent. The seller's photos themselves stay — they are theirs,
+    // and the chat should still show what they sent.
     await this.consumePromptMessage(tgUserId);
 
     // A transient receipt, replaced a moment later by the first question — it
@@ -2610,14 +2589,29 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   }
 
   // ── Transient-message cleanup ──────────────────────────────────────────────
-  // Helpers, one per KIND of spent message, all sharing the same contract:
-  // deleting is cosmetic, so a refusal from Telegram is logged and swallowed —
-  // never allowed to fail the step it is tidying up after. Telegram refuses for
-  // reasons wholly outside this flow (the message is older than 48 h, the seller
-  // deleted it first, the bot lacks the right in this chat), and none of those
-  // are a reason to strand a seller mid-listing.
+  // THE BOUNDARY THIS SECTION EXISTS TO HOLD: the bot tidies up ONLY its own
+  // messages. Nothing here deletes anything the seller sent.
   //
-  // The two registries are read through `?.` for the same reason. They are pure
+  // What the bot writes is disposable UI — a question is asked once, answered
+  // once, and replaced. What the SELLER writes is theirs: the title, the price,
+  // the photos are the record of what they told the bot, and a chat that eats
+  // them leaves the seller unable to see what they have already said. An
+  // earlier revision deleted them to keep the chat to a single screen; that
+  // traded the seller's history for tidiness, which is not a trade this bot
+  // gets to make.
+  //
+  // So there is deliberately NO helper here that takes a seller's message, and
+  // none should be added: every function below is reached either by a tracked
+  // bot message id or by a callback ctx, both of which can only ever name
+  // something the bot itself sent.
+  //
+  // Shared contract: deleting is cosmetic, so a refusal from Telegram is logged
+  // and swallowed — never allowed to fail the step it is tidying up after.
+  // Telegram refuses for reasons wholly outside this flow (the message is older
+  // than 48 h, the seller deleted it first, the bot lacks the right in this
+  // chat), and none of those is a reason to strand a seller mid-listing.
+  //
+  // The registries are read through `?.` for the same reason. They are pure
   // bookkeeping for a cosmetic feature, and this service is routinely stood up
   // WITHOUT its field initializers — the bot specs construct it via
   // Object.create/Object.assign to drive the registered handlers directly. A
@@ -2628,6 +2622,9 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   /**
    * Delete a message by id, with no ctx. The primitive the other helpers and the
    * ctx-free event listeners share.
+   *
+   * Every caller passes an id the bot recorded when IT sent the message, which
+   * is what keeps the boundary above intact.
    */
   private async deleteMessageById(
     chatId: number,
@@ -2642,21 +2639,6 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         }`,
       );
     }
-  }
-
-  /**
-   * Retire the seller's OWN message — the text or photo that just answered a
-   * prompt.
-   *
-   * Call this ONLY once the answer has been accepted and applied. On a REJECTED
-   * input the message must stay: it is the seller's record of what they typed,
-   * and the error message they are about to read ("не похоже на цену") only
-   * makes sense next to it.
-   */
-  private async consumeUserMessage(ctx: Context): Promise<void> {
-    const msg = ctx.message;
-    if (!msg) return; // nothing to consume — not an error
-    await this.deleteMessageById(msg.chat.id, msg.message_id);
   }
 
   /**
@@ -2758,46 +2740,6 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     await this.deleteMessageById(notice.chatId, notice.messageId);
   }
 
-  /** Record one arriving photo message as part of the upload being assembled. */
-  private rememberPhotoMessage(
-    tgUserId: number,
-    chatId: number,
-    messageId: number,
-  ): void {
-    const bucket = this.pendingPhotoMessages?.get(tgUserId);
-    if (bucket) bucket.push({ chatId, messageId });
-    else this.pendingPhotoMessages?.set(tgUserId, [{ chatId, messageId }]);
-  }
-
-  /**
-   * Retire the seller's photo messages for the upload that was just ACCEPTED,
-   * and clear the bucket.
-   *
-   * Deleting the photos is what keeps a ten-photo album from burying the
-   * questionnaire — the seller has already seen them, and the preview shows the
-   * processed versions back before anything is committed. Like every other
-   * cleanup here it is best-effort per message: one refusal does not stop the
-   * rest, and none of them can fail the upload.
-   */
-  private async consumePhotoMessages(tgUserId: number): Promise<void> {
-    const bucket = this.pendingPhotoMessages?.get(tgUserId);
-    if (!bucket) return;
-    this.pendingPhotoMessages.delete(tgUserId);
-    for (const { chatId, messageId } of bucket) {
-      await this.deleteMessageById(chatId, messageId);
-    }
-  }
-
-  /**
-   * Drop the collected photo messages WITHOUT deleting them — for an upload that
-   * was NOT accepted (wrong step, draft creation failed). Those photos are still
-   * the seller's only record of what they sent, and the next upload must not
-   * inherit them.
-   */
-  private forgetPhotoMessages(tgUserId: number): void {
-    this.pendingPhotoMessages?.delete(tgUserId);
-  }
-
   /**
    * Photo hand-off (single photo or a flushed album). Photos are only ever expected
    * at the PHOTOS_FIRST step — the ONE entry into the image pipeline. Anything else
@@ -2810,15 +2752,11 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   ): Promise<void> {
     const session = this.wizard.get(tgUserId);
     if (!session) {
-      // Not in a listing at all: the photos answered nothing, so they stay.
-      this.forgetPhotoMessages(tgUserId);
       await ctx.reply(t(await this.langOf(tgUserId), 'start.hint'));
       return;
     }
     if (session.step !== WizardStep.PHOTOS_FIRST) {
-      // Photos sent outside the upload step — re-show the current question. The
-      // photos were not accepted, so they are not the wizard's to delete.
-      this.forgetPhotoMessages(tgUserId);
+      // Photos sent outside the upload step — re-show the current question.
       await this.sendStepPrompt(ctx, session);
       return;
     }
