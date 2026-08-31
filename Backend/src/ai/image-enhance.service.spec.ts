@@ -1,4 +1,4 @@
-// Tests for the ImageEnhanceService (FLUX.2 Max): submit the base64 image with
+// Tests for the ImageEnhanceService (FLUX.2 Pro): submit the base64 image with
 // the preservation prompt, width=height=1000, and output_format=png; poll the
 // returned polling_url until Ready; then download the signed result URL and
 // return that PNG buffer (a 1000×1000 product photo on a white background).
@@ -46,10 +46,10 @@ describe('ImageEnhanceService.removeBackground', () => {
     // Returned byte-for-byte, no post-processing.
     expect(out.equals(png)).toBe(true);
 
-    // Submit: FLUX.2 Max endpoint, base64 body, 1000×1000, png output, x-key auth.
+    // Submit: FLUX.2 Pro endpoint, base64 body, 1000×1000, png output, x-key auth.
     expect(mockedAxios.post).toHaveBeenCalledTimes(1);
     const [url, body, cfg] = mockedAxios.post.mock.calls[0];
-    expect(url).toBe('https://api.bfl.ai/v1/flux-2-max');
+    expect(url).toBe('https://api.bfl.ai/v1/flux-2-pro');
     const payload = body as {
       prompt: string;
       input_image: string;
@@ -101,7 +101,7 @@ describe('ImageEnhanceService.removeBackground', () => {
 
     const svc = new ImageEnhanceService();
     await expect(svc.removeBackground(Buffer.from('x'))).rejects.toThrow(
-      /FLUX\.2 Max edit failed — HTTP 402: Payment required/,
+      /FLUX\.2 Pro edit failed — HTTP 402: Payment required/,
     );
   });
 
@@ -111,7 +111,7 @@ describe('ImageEnhanceService.removeBackground', () => {
 
     const svc = new ImageEnhanceService();
     await expect(svc.removeBackground(Buffer.from('x'))).rejects.toThrow(
-      /FLUX\.2 Max edit failed — job did not succeed \(status=Content Moderated\)/,
+      /FLUX\.2 Pro edit failed — job did not succeed \(status=Content Moderated\)/,
     );
     // No download attempted on failure.
     expect(mockedAxios.get).toHaveBeenCalledTimes(1);

@@ -1,12 +1,12 @@
 import { Injectable } from '@nestjs/common';
 import axios from 'axios';
 
-// Black Forest Labs FLUX.2 Max — the highest-quality model in the FLUX.2 family.
+// Black Forest Labs FLUX.2 Pro — the production model in the FLUX.2 family.
 // The API is asynchronous: POST the edit request, receive a polling_url, then GET
 // that url until the job is Ready (or errors), and finally download the produced
 // image from the signed result URL. Endpoint and parameter names below are taken
 // from the official BFL API schema (Flux2Inputs) — not assumed.
-const FLUX_ENDPOINT = 'https://api.bfl.ai/v1/flux-2-max';
+const FLUX_ENDPOINT = 'https://api.bfl.ai/v1/flux-2-pro';
 
 // Target canvas. FLUX.2 accepts explicit width/height (nullable ints, min 64) to
 // fix the output resolution; there is no aspect_ratio field, so this is how the
@@ -153,11 +153,11 @@ interface PollResponse {
 
 /**
  * ImageEnhanceService — the single, minimal image step for seller uploads,
- * backed by Black Forest Labs FLUX.2 Max.
+ * backed by Black Forest Labs FLUX.2 Pro.
  *
  * Pipeline (nothing else — no local resize, compositing, or post-processing):
  *   1. receive the uploaded image buffer,
- *   2. submit it to FLUX.2 Max (base64) with the preservation prompt,
+ *   2. submit it to FLUX.2 Pro (base64) with the preservation prompt,
  *      output_format=png, and width=height=1000, asking for the part centered
  *      on a pure white background,
  *   3. poll until the job is Ready, download the produced 1000×1000 PNG,
@@ -177,7 +177,7 @@ export class ImageEnhanceService {
 
   /**
    * Produce a 1000×1000 professional product photo of the part on a pure white
-   * background via FLUX.2 Max, returning the PNG it produces with no further
+   * background via FLUX.2 Pro, returning the PNG it produces with no further
    * processing. Throws on failure (there is no meaningful fallback — without the
    * processed image there is nothing to upload).
    *
@@ -192,7 +192,7 @@ export class ImageEnhanceService {
       return await this.download(imageUrl);
     } catch (error) {
       throw new Error(
-        `ImageEnhanceService: FLUX.2 Max edit failed — ${this.errorDetail(error)}`,
+        `ImageEnhanceService: FLUX.2 Pro edit failed — ${this.errorDetail(error)}`,
       );
     }
   }
