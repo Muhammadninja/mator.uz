@@ -291,3 +291,165 @@ describe('wizard prompts follow the session language', () => {
     expect(stepPrompt(session).text).toBe(t('ru', 'step.category'));
   });
 });
+
+// ── Command discoverability ─────────────────────────────────────────────────
+// A seller who picked the wrong language cannot read their way back to the
+// picker: every route to it is written in a language they do not understand.
+// The "/" menu is what makes /language reachable regardless, so it is published
+// at startup — and the picker itself behaves like any other wizard screen.
+
+describe('the "/" command menu', () => {
+  /** A service whose only job is to record setMyCommands calls. */
+  function makeMenuService(behaviour: 'ok' | 'throws' = 'ok') {
+    const calls: { commands: unknown; extra?: unknown }[] = [];
+    const warnings: string[] = [];
+    const svc = makeService({
+      logger: {
+        log() {},
+        warn: (m: string) => warnings.push(m),
+        error() {},
+        debug() {},
+      },
+      bot: {
+        telegram: {
+          setMyCommands: jest.fn(async (commands: unknown, extra?: unknown) => {
+            if (behaviour === 'throws') throw new Error('429: Too Many Requests');
+            calls.push({ commands, extra });
+            return true;
+          }),
+        },
+      },
+    });
+    return { svc, calls, warnings };
+  }
+
+  it('publishes /start, /language and /help', async () => {
+    const { svc, calls } = makeMenuService();
+
+    await svc.publishCommandMenu();
+
+    const names = (calls[0].commands as { command: string }[]).map(
+      (c) => c.command,
+    );
+    expect(names).toEqual(['start', 'language', 'help']);
+  });
+
+  it('publishes a list per language plus an unscoped default', async () => {
+    // Telegram resolves the menu against the CLIENT's language, not the one
+    // chosen in this bot — so an unmatched client needs the default list.
+    const { svc, calls } = makeMenuService();
+
+    await svc.publishCommandMenu();
+
+    expect(calls).toHaveLength(4); // default + ru + uz + en
+    expect(calls[0].extra).toBeUndefined();
+    expect(calls.slice(1).map((c) => (c.extra as any).language_code)).toEqual([
+      'ru',
+      'uz',
+      'en',
+    ]);
+  });
+
+  it('localizes the descriptions', async () => {
+    const { svc, calls } = makeMenuService();
+
+    await svc.publishCommandMenu();
+
+    const uz = calls.find((c) => (c.extra as any)?.language_code === 'uz')!;
+    const descriptions = (uz.commands as { description: string }[]).map(
+      (c) => c.description,
+    );
+    expect(descriptions).toEqual([
+      t('uz', 'command.start'),
+      t('uz', 'command.language'),
+      t('uz', 'command.help'),
+    ]);
+  });
+
+  it('survives a Telegram failure — the bot still runs without its menu', async () => {
+    const { svc, warnings } = makeMenuService('throws');
+
+    await expect(svc.publishCommandMenu()).resolves.toBeUndefined();
+    expect(warnings.join(' ')).toContain('command menu');
+  });
+});
+
+describe('the language picker is a transient screen', () => {
+  /** A ctx that hands back message ids, like the real Telegram does. */
+  function makeTrackingCtx(userId = 42) {
+    const deleted: number[] = [];
+    let nextId = 700;
+    const svc = makeService({
+      livePrompt: new Map<number, { chatId: number; messageId: number }>(),
+      bot: {
+        telegram: {
+          deleteMessage: jest.fn(async (_chat: number, id: number) => {
+            deleted.push(id);
+            return true;
+          }),
+        },
+      },
+    });
+    const ctx = {
+      from: { id: userId },
+      reply: jest.fn(async () => ({
+        message_id: ++nextId,
+        chat: { id: userId },
+      })),
+    } as never;
+    return { svc, ctx, deleted, userId };
+  }
+
+  it('retires the previous picker instead of stacking a second one', async () => {
+    // /language is available in every state, so a seller can tap it twice.
+    const { svc, ctx, deleted } = makeTrackingCtx();
+
+    await svc.promptLanguage(ctx, 'ru');
+    const first = svc.livePrompt.get(42).messageId;
+    await svc.promptLanguage(ctx, 'ru');
+
+    expect(deleted).toEqual([first]);
+    expect(svc.livePrompt.get(42).messageId).not.toBe(first);
+  });
+
+  it('tracks the picker so the choice can retire it', async () => {
+    const { svc, ctx } = makeTrackingCtx();
+
+    await svc.promptLanguage(ctx, 'ru');
+
+    // The LANG_ACTION handler retires it via consumeCallbackMessage, which
+    // clears this entry — the picker never outlives the choice.
+    expect(svc.livePrompt.get(42)).toBeDefined();
+    svc.forgetLivePrompt(42);
+    expect(svc.livePrompt.get(42)).toBeUndefined();
+  });
+
+  it('the resume prompt is transient — /start twice leaves ONE', async () => {
+    // Two live "Начать заново" buttons is the worst version of this bug: the
+    // stale one still cancels a draft the seller has since resumed.
+    const { svc, ctx, deleted } = makeTrackingCtx();
+    svc.drafts.findResumable.mockResolvedValue({ id: 'draft_1' });
+
+    await svc.startProductCreation(ctx, 42, 1, 'ru');
+    const first = svc.livePrompt.get(42).messageId;
+    await svc.startProductCreation(ctx, 42, 1, 'ru');
+
+    expect(deleted).toEqual([first]);
+    expect(svc.livePrompt.get(42).messageId).not.toBe(first);
+  });
+
+  it('still shows the picker when the update carries no user', async () => {
+    const { svc } = makeTrackingCtx();
+    const replies: string[] = [];
+    const ctx = {
+      reply: jest.fn(async (text: string) => {
+        replies.push(text);
+        return {};
+      }),
+    } as never;
+
+    await svc.promptLanguage(ctx, 'ru');
+
+    expect(replies).toEqual([t('ru', 'lang.prompt')]);
+  });
+});

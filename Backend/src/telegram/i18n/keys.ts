@@ -28,6 +28,14 @@ export interface BotStrings {
   'seller.approved': string;
   'help.message': string;
 
+  // ── Telegram command menu (setMyCommands) ─────────────────────────────────
+  // The one-line descriptions Telegram shows beside each command when the
+  // seller types "/". Short by necessity: Telegram truncates at 256 chars and
+  // renders them in a cramped popup, so these are labels, not sentences.
+  'command.start': string;
+  'command.language': string;
+  'command.help': string;
+
   // ── Photos & drafts ───────────────────────────────────────────────────────
   'images.processing': string;
   'photos.notAccepted': string;

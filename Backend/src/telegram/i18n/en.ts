@@ -9,19 +9,24 @@ export const EN: BotStrings = {
   'lang.prompt': '🌐 Выберите язык / Tilingizni tanlang / Choose your language',
   'lang.changed': '✅ Interface language: English.',
 
-  'start.hint': '👋 To add a product, press /start',
+  'start.hint':
+    '👋 To add a product, press /start\n' +
+    'To change the language — /language',
   'start.rejected': '⛔ Your application was rejected by an administrator.',
   'start.pending':
     '⏳ Your registration request has been received and is awaiting approval.\n' +
     'As soon as your account is activated you will be able to add products.',
-  'start.notRegistered': '👋 Please register first: send /start',
+  'start.notRegistered':
+    '👋 Please register first: send /start\n' +
+    'To change the language — /language',
   'start.awaitingApproval':
     '⏳ Your application has not been approved yet. Please wait.',
   'start.accountRejected': '⛔ Your account was rejected by an administrator.',
   'seller.approved':
     '✅ Your application has been approved!\n\n' +
     'You can now publish products on Mator.\n\n' +
-    'Press /start to open the menu and begin adding products.',
+    'Press /start to open the menu and begin adding products.\n' +
+    'To change the language — /language',
   'help.message':
     '📦 How to add a product\n\n' +
     'Press /start — the bot walks you through the steps:\n\n' +
@@ -43,6 +48,10 @@ export const EN: BotStrings = {
     '🔎 Adding an OEM or GM number makes your part far easier for buyers to find in search.\n\n' +
     '🌐 Change language: /language',
 
+  'command.start': 'Add a product',
+  'command.language': 'Change language',
+  'command.help': 'How to add a product',
+
   'images.processing': '📸 Photos are being processed, please wait.',
   'photos.notAccepted': '⚠️ Could not accept the photo. Please try again.',
   'photos.received':
@@ -61,15 +70,20 @@ export const EN: BotStrings = {
     'You have an unfinished listing.\nContinue it or start over?',
   'draft.resumed': '▶️ Continuing. Fill in the remaining fields.',
   'draft.expired':
-    '⌛ That unfinished listing is no longer available. Press /start to begin again.',
+    '⌛ That unfinished listing is no longer available. Press /start to begin again.\n' +
+    'To change the language — /language',
   'draft.addCancelled':
-    '❌ Adding the product was cancelled.\nPress /start to begin again.',
+    '❌ Adding the product was cancelled.\nPress /start to begin again.\n' +
+    'To change the language — /language',
   'draft.createCancelled':
-    '❌ Creating the product was cancelled.\nPress /start to begin again.',
+    '❌ Creating the product was cancelled.\nPress /start to begin again.\n' +
+    'To change the language — /language',
   'edit.noProduct':
-    '⌛ There is no product to edit (it may have expired). Press /start to begin again.',
+    '⌛ There is no product to edit (it may have expired). Press /start to begin again.\n' +
+    'To change the language — /language',
   'edit.notEditable':
-    '⌛ This listing can no longer be changed. Press /start to begin again.',
+    '⌛ This listing can no longer be changed. Press /start to begin again.\n' +
+    'To change the language — /language',
 
   'preview.header': '📋 *Check the product before adding it.*',
   'preview.title': 'Title',
@@ -83,11 +97,14 @@ export const EN: BotStrings = {
   'preview.weight': 'Weight',
   'preview.universalVehicle': 'All vehicles (universal part)',
   'confirm.nothingPending':
-    '⌛ There is no product to confirm (it may have expired). Press /start to begin again.',
+    '⌛ There is no product to confirm (it may have expired). Press /start to begin again.\n' +
+    'To change the language — /language',
   'confirm.alreadyProcessed':
-    '⌛ This listing has already been processed. Press /start to add the next product.',
+    '⌛ This listing has already been processed. Press /start to add the next product.\n' +
+    'To change the language — /language',
   'confirm.success':
-    '✅ Product added successfully.\nPress /start to add the next product.',
+    '✅ Product added successfully.\nPress /start to add the next product.\n' +
+    'To change the language — /language',
   'confirm.failed':
     '⚠️ Something went wrong while adding the product.\n`{error}`',
 
@@ -169,7 +186,8 @@ export const EN: BotStrings = {
 
   'stale.catalog':
     'The catalog has been updated.\n' +
-    'To carry on creating the listing, please press /start.',
+    'To carry on creating the listing, please press /start.\n' +
+    'To change the language — /language',
   'stale.category':
     'That category is no longer available — the catalog has been updated.\n' +
     'Please choose a category from the updated list.',

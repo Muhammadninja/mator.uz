@@ -16,6 +16,7 @@ import {
   SellerStatus,
 } from '@prisma/client';
 import {
+  APP_LANGS,
   DEFAULT_APP_LANG,
   localizedCategoryName,
   toAppLang,
@@ -222,6 +223,20 @@ export const SELLER_APPROVED_MESSAGE = t('ru', 'seller.approved');
 const CATEGORY_LABELS = new Map(
   WIZARD_CATEGORIES.map((c) => [c.value, c.label]),
 );
+
+/**
+ * A transient bot message that is on screen right now and will be retired when
+ * the seller answers it.
+ *
+ * The chat id is stored alongside the message id because the message must be
+ * deletable WITHOUT a ctx: a prompt is frequently retired by an update that is
+ * about a different message (the seller's own text) or by no update at all (the
+ * image worker's preview, which arrives ctx-free from another thread).
+ */
+interface LivePrompt {
+  chatId: number;
+  messageId: number;
+}
 
 /**
  * A fully-processed listing awaiting the seller's confirmation — the in-memory
@@ -440,6 +455,35 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   // draft is the durable record — see PendingProduct).
   private readonly pending = new Map<number, PendingProduct>();
 
+  // The ONE transient bot message currently on screen for each seller — the
+  // question they are being asked, or the status line that replaced it.
+  //
+  // A wizard prompt has the same lifetime as a wizard screen with buttons: it
+  // is asked once, answered once, and then spent. Button screens already retire
+  // themselves through `consumeCallbackMessage`, which can reach the message via
+  // the callback's own ctx. A TEXT prompt has no such handle — the update that
+  // answers it is the SELLER's message, not the bot's — so the id is remembered
+  // here at send time instead. Exactly one entry per user: a new prompt retires
+  // the previous one, which is what keeps the chat at a single live screen.
+  //
+  // Deliberately in-memory and unreplicated, like every other dialogue-position
+  // map on this service: losing it costs a leftover message, never a listing.
+  private readonly livePrompt = new Map<number, LivePrompt>();
+
+  // The validation complaint currently on screen, per user ("это не похоже на
+  // цену"). Tracked APART from `livePrompt` because the two have different
+  // lifetimes: a complaint is replaced by the next complaint and cleared when
+  // the step is finally answered, while the QUESTION it complains about outlives
+  // every retry — the seller must still be able to read what was asked.
+  private readonly liveNotice = new Map<number, LivePrompt>();
+
+  // The seller's own photo messages for the upload currently being assembled,
+  // per user. Collected as the updates ARRIVE (a photo message id is only ever
+  // on its own update) and drained once the upload is accepted, because an album
+  // is answered as ONE batch: its photos are only spent when the whole flush has
+  // produced a draft, not one update at a time.
+  private readonly pendingPhotoMessages = new Map<number, LivePrompt[]>();
+
   // Last time (ms epoch) each user was sent the "catalog updated, restart"
   // notice. Rapid repeat taps on stale buttons share one notice within
   // STALE_NOTICE_DEDUP_MS instead of piling up identical messages.
@@ -506,6 +550,12 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    // Publish the "/" menu once per process, on the SAME instance that polls.
+    // Guarding it behind the polling check is deliberate: setMyCommands is
+    // bot-global (not per-connection), so every extra instance calling it would
+    // race to overwrite the same list with an identical payload for no gain.
+    void this.publishCommandMenu();
+
     // launch() only resolves once polling stops (i.e. on shutdown) — log
     // start-up separately. A launch failure (e.g. a transient network error
     // reaching api.telegram.org) must not crash the whole backend as an
@@ -529,9 +579,53 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     this.wizard.clear();
     this.staleNoticeSentAt.clear();
     this.langCache.clear();
+    this.livePrompt?.clear();
+    this.liveNotice?.clear();
+    this.pendingPhotoMessages?.clear();
     for (const session of this.pending.values()) clearTimeout(session.expiry);
     this.pending.clear();
     this.bot?.stop('SIGTERM');
+  }
+
+  /**
+   * Publish the bot's command list so typing "/" offers the commands instead of
+   * requiring the seller to know they exist.
+   *
+   * Only the commands a SELLER should discover are listed. /language earns its
+   * place because a seller who picked the wrong language has no other way back:
+   * every other route to the picker is written in a language they cannot read.
+   *
+   * One call per supported language plus a default: Telegram resolves the menu
+   * against the CLIENT's language setting, which is independent of the language
+   * the seller chose in this bot, so the default list is what an unmatched
+   * client (say, a Turkish phone) actually sees.
+   *
+   * Best-effort — a bot whose menu failed to publish still works exactly as
+   * before, so a failure here is logged, never thrown.
+   */
+  private async publishCommandMenu(): Promise<void> {
+    const menuFor = (lang: AppLang) => [
+      { command: 'start', description: t(lang, 'command.start') },
+      { command: 'language', description: t(lang, 'command.language') },
+      { command: 'help', description: t(lang, 'command.help') },
+    ];
+
+    try {
+      // The fallback list, in the platform default language.
+      await this.bot.telegram.setMyCommands(menuFor(DEFAULT_APP_LANG));
+      for (const lang of APP_LANGS) {
+        await this.bot.telegram.setMyCommands(menuFor(lang), {
+          language_code: lang,
+        });
+      }
+      this.logger.log('Bot command menu published (/start, /language, /help)');
+    } catch (err) {
+      this.logger.warn(
+        `Could not publish bot command menu: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
 
   private registerHandlers() {
@@ -604,8 +698,11 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         from.username ?? from.first_name,
       );
       await this.setLang(from.id, lang);
+      // The picker is answered — retire it, then confirm. The confirmation is
+      // itself transient: mid-listing the re-prompted question replaces it a
+      // moment later, so the chat is back to one live screen.
       await this.consumeCallbackMessage(ctx);
-      await ctx.reply(t(lang, 'lang.changed'));
+      await this.sendLivePrompt(ctx, from.id, t(lang, 'lang.changed'));
 
       const session = this.wizard.get(from.id);
       if (session) {
@@ -872,16 +969,35 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       }
 
       if (result.status === 'invalid') {
-        await ctx.reply(result.message);
+        // REJECTED, so nothing about this exchange is spent. The seller keeps
+        // what they typed — the complaint only reads sensibly next to it — and
+        // keeps the QUESTION, which they still owe an answer to. Losing the
+        // question here is the failure mode this branch exists to avoid: it
+        // would leave a seller staring at "не похоже на цену" with nothing left
+        // on screen telling them what was being asked.
+        //
+        // Only the previous COMPLAINT is retired, so three bad prices leave one
+        // complaint rather than three. It is tracked separately from the live
+        // prompt for exactly that reason: the two have different lifetimes.
+        await this.replaceValidationNotice(ctx, from.id, result.message);
         return;
       }
       if (result.status === 'ok') {
+        // Accepted and applied: the question and the answer are both spent.
+        // Order matters — the seller's message goes first so the chat never
+        // shows an answer with no question above it.
+        await this.consumeUserMessage(ctx);
+        await this.consumePromptMessage(from.id);
+        // Any complaint from an earlier attempt at THIS step is now answered.
+        await this.consumeValidationNotice(from.id);
         // Persist the answered field to the draft and, when the questionnaire is
         // finished, hand off to the coordinator (rendezvous).
         await this.handleFormAdvance(ctx, from.id, session);
         return;
       }
-      // 'stale' → re-prompt the current step.
+      // 'stale' → the text answered no question (a button/photo step). Retire it
+      // and re-show what IS expected.
+      await this.consumeUserMessage(ctx);
       await this.sendStepPrompt(ctx, session);
     });
 
@@ -898,6 +1014,12 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       // An active offer session claims incoming photos (each appended to the
       // quote), before the wizard's album buffer sees them.
       if (await this.offerFlow.handlePhoto(ctx, bestPhoto.file_id)) return;
+
+      // Remember THIS photo message so the whole upload can be retired once it
+      // is accepted. Recorded before the album/single split because the id lives
+      // on this update and nowhere else — a buffered album's flush runs later,
+      // with only file ids in hand.
+      this.rememberPhotoMessage(from.id, msg.chat.id, msg.message_id);
 
       const groupId = 'media_group_id' in msg ? msg.media_group_id : undefined;
 
@@ -920,11 +1042,17 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       await this.consumeCallbackMessage(ctx);
       const from = ctx.from;
       if (from) {
+        // Terminal: no transient screen survives the end of a listing. The
+        // preview itself has just gone via consumeCallbackMessage; this clears
+        // any status line that outlived it (a holding "finishing the photos", a
+        // photo receipt) so the success notice below is left alone in the chat.
+        await this.consumePromptMessage(from.id);
         await this.commitPending(ctx, from.id);
         // Terminal action: leave NO wizard state behind (the seller may have
         // started a new wizard between preview and this tap — clear it too so a
         // fresh /start is always required to begin the next listing).
         this.wizard.delete(from.id);
+        this.forgetPhotoMessages(from.id);
       }
     });
 
@@ -938,10 +1066,15 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       const lang = from ? await this.resolveLang(from.id) : DEFAULT_APP_LANG;
       if (from) {
         // Terminal: delete the preview's assets, mark the backing draft CANCELLED,
-        // and clear the dialogue so the flow ends fully.
+        // and clear the dialogue so the flow ends fully. Any transient screen
+        // still up goes with it — a cancelled listing leaves no half-answered
+        // question behind.
+        await this.consumePromptMessage(from.id);
         await this.cancelPendingDraft(from.id);
         this.wizard.delete(from.id);
+        this.forgetPhotoMessages(from.id);
       }
+      // The cancellation notice is the seller's RESULT — it stays.
       await ctx.reply(t(lang, 'draft.addCancelled'));
     });
 
@@ -1092,7 +1225,12 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
     const resumable = await this.drafts.findResumable(sellerId);
     if (resumable) {
-      await ctx.reply(
+      // A question with buttons, so it is transient like any wizard screen: a
+      // seller who sends /start twice gets ONE resume prompt, not a stack of
+      // them each holding a live "Начать заново".
+      await this.sendLivePrompt(
+        ctx,
+        tgUserId,
         t(lang, 'draft.resumePrompt'),
         Markup.inlineKeyboard([
           [
@@ -1159,9 +1297,12 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         `Failed to create draft for ${tgUserId}: ${err instanceof Error ? err.message : String(err)}`,
         err instanceof Error ? err.stack : undefined,
       );
-      // Roll the FSM back so the seller can retry the upload.
+      // Roll the FSM back so the seller can retry the upload. The photos were
+      // NOT accepted, so they stay — the seller re-sends from what is still in
+      // the chat rather than from nothing.
+      this.forgetPhotoMessages(tgUserId);
       session.step = WizardStep.PHOTOS_FIRST;
-      await ctx.reply(t(lang, 'photos.notAccepted'));
+      await this.sendLivePrompt(ctx, tgUserId, t(lang, 'photos.notAccepted'));
       return;
     }
 
@@ -1198,7 +1339,18 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    await ctx.reply(t(lang, 'photos.received', { count: images.length }));
+    // The upload is accepted and recorded on the draft, so the seller's photo
+    // messages and the "send me photos" question are both spent.
+    await this.consumePhotoMessages(tgUserId);
+    await this.consumePromptMessage(tgUserId);
+
+    // A transient receipt, replaced a moment later by the first question — it
+    // goes through the same funnel so it cannot outlive the step it belongs to.
+    await this.sendLivePrompt(
+      ctx,
+      tgUserId,
+      t(lang, 'photos.received', { count: images.length }),
+    );
     // Start the questionnaire immediately (images process in parallel).
     await this.sendStepPrompt(ctx, session);
   }
@@ -1283,7 +1435,14 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       // failed yet, to avoid contradicting the failure notice.
       const anyFailed = draft.images.some((img) => img.status === 'FAILED');
       if (!anyFailed) {
-        await ctx.reply(t(session.lang, 'photos.finishing'));
+        // A holding line, not a result: the preview replaces it as soon as the
+        // last image lands (see sendPreviewToChat), so it is tracked like any
+        // other transient screen.
+        await this.sendLivePrompt(
+          ctx,
+          tgUserId,
+          t(session.lang, 'photos.finishing'),
+        );
       }
     }
   }
@@ -1347,7 +1506,11 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     try {
       const tgUserId = Number(event.tgId);
       const lang = await this.resolveLang(tgUserId);
-      await this.bot.telegram.sendMessage(
+      // This screen is the ANSWER to the holding line the seller is looking at
+      // ("завершаем обработку фото") — retire it, or the chat would contradict
+      // itself with a wait notice sitting above a failure notice.
+      await this.consumePromptMessage(tgUserId);
+      const sent = await this.bot.telegram.sendMessage(
         tgUserId,
         t(lang, 'draft.imagesFailed', { count: event.failedCount }),
         Markup.inlineKeyboard([
@@ -1355,6 +1518,9 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
           [Markup.button.callback(t(lang, 'btn.cancel'), DRAFT_CANCEL)],
         ]),
       );
+      // Tracked like a wizard screen: its own buttons retire it on tap, and a
+      // second failure notice replaces the first rather than stacking.
+      this.trackLivePrompt(tgUserId, sent);
     } catch (err) {
       this.logger.error(
         `Failed to notify image failure for draft ${event.draftId}: ${err instanceof Error ? err.message : String(err)}`,
@@ -1599,10 +1765,11 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     if (session.step === WizardStep.QUESTIONNAIRE_DONE) {
       // Form already complete — either images are still going or just finished.
       await this.draftCoordinator.onFormStep(draft.id);
-      await ctx.reply(t(lang, 'photos.finishing'));
+      await this.sendLivePrompt(ctx, tgUserId, t(lang, 'photos.finishing'));
       return;
     }
-    await ctx.reply(t(lang, 'draft.resumed'));
+    // Transient: the re-opened question replaces it on the next line.
+    await this.sendLivePrompt(ctx, tgUserId, t(lang, 'draft.resumed'));
     await this.sendStepPrompt(ctx, session);
   }
 
@@ -1667,7 +1834,9 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         );
       }
     }
-    await ctx.reply(t(lang, 'photos.retrying'));
+    // A holding line: the retried images end in a preview (or a fresh failure
+    // notice), either of which replaces it.
+    await this.sendLivePrompt(ctx, tgUserId, t(lang, 'photos.retrying'));
   }
 
   /**
@@ -1912,7 +2081,8 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     // image rows and enqueues them like any first upload.
     const session = buildSessionFromDraft(clone, WizardStep.PHOTOS_FIRST, lang);
     this.wizard.restore(tgUserId, session);
-    await ctx.reply(t(lang, 'photos.sendNew'));
+    // Transient: the photo step's own prompt replaces it on the next line.
+    await this.sendLivePrompt(ctx, tgUserId, t(lang, 'photos.sendNew'));
     await this.sendStepPrompt(ctx, session);
   }
 
@@ -2048,9 +2218,26 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     if (session) session.lang = lang;
   }
 
-  /** Show the language picker. Its header is trilingual by design. */
+  /**
+   * Show the language picker. Its header is trilingual by design.
+   *
+   * Tracked like a wizard screen: /language is reachable at any moment, so
+   * without this a seller who taps it twice — or opens it mid-listing — would
+   * leave a stack of pickers behind. The choice retires the live one through
+   * `consumeCallbackMessage`, exactly like any other answered keyboard.
+   */
   private async promptLanguage(ctx: Context, lang: AppLang): Promise<void> {
-    await ctx.reply(t(lang, 'lang.prompt'), languageKeyboard());
+    const tgUserId = ctx.from?.id;
+    if (tgUserId === undefined) {
+      await ctx.reply(t(lang, 'lang.prompt'), languageKeyboard());
+      return;
+    }
+    await this.sendLivePrompt(
+      ctx,
+      tgUserId,
+      t(lang, 'lang.prompt'),
+      languageKeyboard(),
+    );
   }
 
   /**
@@ -2139,14 +2326,28 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     await this.handleFormAdvance(ctx, from.id, session);
   }
 
-  /** Send the prompt (text + inline keyboard) asking for the session's current step. */
+  /**
+   * Send the prompt (text + inline keyboard) asking for the session's current
+   * step, retiring whatever transient screen it replaces.
+   *
+   * EVERY wizard question is sent from here, so tracking the prompt at this one
+   * point is what makes the chat hold a single live screen for the whole
+   * questionnaire — button steps and typed steps alike.
+   */
   private async sendStepPrompt(
     ctx: Context,
     session: WizardSession,
   ): Promise<void> {
     await this.ensureCategoryOptions(session);
     const prompt = stepPrompt(session);
-    await ctx.reply(prompt.text, prompt.keyboard);
+    const tgUserId = ctx.from?.id;
+    if (tgUserId === undefined) {
+      // No user on the update (shouldn't happen for a wizard step) — send the
+      // prompt anyway rather than dropping the seller's question on the floor.
+      await ctx.reply(prompt.text, prompt.keyboard);
+      return;
+    }
+    await this.sendLivePrompt(ctx, tgUserId, prompt.text, prompt.keyboard);
   }
 
   /**
@@ -2390,6 +2591,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   private async consumeCallbackMessage(ctx: Context): Promise<void> {
     try {
       await ctx.deleteMessage();
+      // A button screen IS the seller's live transient message, so retiring it
+      // through its own ctx settles the tracked one too — forget it rather than
+      // letting the next prompt try to delete it a second time.
+      this.forgetLivePrompt(ctx.from?.id);
       return;
     } catch (err) {
       this.logger.debug(
@@ -2401,6 +2606,196 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     // Delete refused — degrade to the older behaviour rather than leaving a
     // live keyboard behind.
     await this.removeInlineKeyboard(ctx);
+    this.forgetLivePrompt(ctx.from?.id);
+  }
+
+  // ── Transient-message cleanup ──────────────────────────────────────────────
+  // Helpers, one per KIND of spent message, all sharing the same contract:
+  // deleting is cosmetic, so a refusal from Telegram is logged and swallowed —
+  // never allowed to fail the step it is tidying up after. Telegram refuses for
+  // reasons wholly outside this flow (the message is older than 48 h, the seller
+  // deleted it first, the bot lacks the right in this chat), and none of those
+  // are a reason to strand a seller mid-listing.
+  //
+  // The two registries are read through `?.` for the same reason. They are pure
+  // bookkeeping for a cosmetic feature, and this service is routinely stood up
+  // WITHOUT its field initializers — the bot specs construct it via
+  // Object.create/Object.assign to drive the registered handlers directly. A
+  // missing registry must therefore degrade to "nothing tracked, delete
+  // nothing", exactly like a delete Telegram refuses; throwing here would fail
+  // the listing step over tidying.
+
+  /**
+   * Delete a message by id, with no ctx. The primitive the other helpers and the
+   * ctx-free event listeners share.
+   */
+  private async deleteMessageById(
+    chatId: number,
+    messageId: number,
+  ): Promise<void> {
+    try {
+      await this.bot.telegram.deleteMessage(chatId, messageId);
+    } catch (err) {
+      this.logger.debug(
+        `Could not delete message ${messageId} in chat ${chatId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  /**
+   * Retire the seller's OWN message — the text or photo that just answered a
+   * prompt.
+   *
+   * Call this ONLY once the answer has been accepted and applied. On a REJECTED
+   * input the message must stay: it is the seller's record of what they typed,
+   * and the error message they are about to read ("не похоже на цену") only
+   * makes sense next to it.
+   */
+  private async consumeUserMessage(ctx: Context): Promise<void> {
+    const msg = ctx.message;
+    if (!msg) return; // nothing to consume — not an error
+    await this.deleteMessageById(msg.chat.id, msg.message_id);
+  }
+
+  /**
+   * Retire the transient bot message currently on screen for this seller, if any,
+   * and forget it.
+   *
+   * This is the text-step counterpart of `consumeCallbackMessage`: a question
+   * answered by TYPING cannot be reached through the answering update's ctx, so
+   * it is reached through the id recorded when it was sent.
+   *
+   * Safe to call when nothing is tracked (no session, a prompt already retired,
+   * a restart since it was sent) — it simply does nothing.
+   */
+  private async consumePromptMessage(tgUserId: number): Promise<void> {
+    const prompt = this.livePrompt?.get(tgUserId);
+    if (!prompt) return;
+    this.livePrompt.delete(tgUserId);
+    await this.deleteMessageById(prompt.chatId, prompt.messageId);
+  }
+
+  /**
+   * Send a transient bot message, replacing whatever transient message the seller
+   * currently has on screen. THE funnel every wizard prompt and status line goes
+   * through — which is what makes "one live screen" a property of the mechanism
+   * rather than a discipline every call site has to remember.
+   *
+   * The outgoing message is retired BEFORE the new one is sent so the chat never
+   * shows both at once.
+   */
+  private async sendLivePrompt(
+    ctx: Context,
+    tgUserId: number,
+    text: string,
+    extra?: Parameters<Context['reply']>[1],
+  ): Promise<void> {
+    await this.consumePromptMessage(tgUserId);
+    const sent = await ctx.reply(text, extra);
+    this.trackLivePrompt(tgUserId, sent);
+  }
+
+  /** Remember a just-sent message as the seller's live transient screen. */
+  private trackLivePrompt(tgUserId: number, sent: unknown): void {
+    // Telegraf returns the sent Message; a test double may return nothing, and a
+    // missing id is not worth failing a send over — it only costs the cleanup.
+    const msg = sent as { message_id?: number; chat?: { id?: number } } | null;
+    if (!msg?.message_id || typeof msg.chat?.id !== 'number') return;
+    this.livePrompt?.set(tgUserId, {
+      chatId: msg.chat.id,
+      messageId: msg.message_id,
+    });
+  }
+
+  /**
+   * Drop the tracked prompt WITHOUT deleting it — for when the message has
+   * already gone (a callback screen deleted through its own ctx), or must stay
+   * (a terminal result the seller keeps).
+   */
+  private forgetLivePrompt(tgUserId: number | undefined): void {
+    if (tgUserId !== undefined) this.livePrompt?.delete(tgUserId);
+  }
+
+  /**
+   * Show a validation complaint, replacing the previous one, and LEAVE the
+   * question standing.
+   *
+   * The counterpart of `sendLivePrompt` for the rejected path: same "one screen"
+   * result, opposite treatment of the prompt.
+   */
+  private async replaceValidationNotice(
+    ctx: Context,
+    tgUserId: number,
+    text: string,
+  ): Promise<void> {
+    const previous = this.liveNotice?.get(tgUserId);
+    if (previous) {
+      this.liveNotice.delete(tgUserId);
+      await this.deleteMessageById(previous.chatId, previous.messageId);
+    }
+    const sent = (await ctx.reply(text)) as {
+      message_id?: number;
+      chat?: { id?: number };
+    } | null;
+    if (sent?.message_id && typeof sent.chat?.id === 'number') {
+      this.liveNotice?.set(tgUserId, {
+        chatId: sent.chat.id,
+        messageId: sent.message_id,
+      });
+    }
+  }
+
+  /**
+   * Retire the validation complaint, if one is up — the step it belonged to has
+   * been answered, so the seller no longer needs to be told what was wrong.
+   */
+  private async consumeValidationNotice(tgUserId: number): Promise<void> {
+    const notice = this.liveNotice?.get(tgUserId);
+    if (!notice) return;
+    this.liveNotice.delete(tgUserId);
+    await this.deleteMessageById(notice.chatId, notice.messageId);
+  }
+
+  /** Record one arriving photo message as part of the upload being assembled. */
+  private rememberPhotoMessage(
+    tgUserId: number,
+    chatId: number,
+    messageId: number,
+  ): void {
+    const bucket = this.pendingPhotoMessages?.get(tgUserId);
+    if (bucket) bucket.push({ chatId, messageId });
+    else this.pendingPhotoMessages?.set(tgUserId, [{ chatId, messageId }]);
+  }
+
+  /**
+   * Retire the seller's photo messages for the upload that was just ACCEPTED,
+   * and clear the bucket.
+   *
+   * Deleting the photos is what keeps a ten-photo album from burying the
+   * questionnaire — the seller has already seen them, and the preview shows the
+   * processed versions back before anything is committed. Like every other
+   * cleanup here it is best-effort per message: one refusal does not stop the
+   * rest, and none of them can fail the upload.
+   */
+  private async consumePhotoMessages(tgUserId: number): Promise<void> {
+    const bucket = this.pendingPhotoMessages?.get(tgUserId);
+    if (!bucket) return;
+    this.pendingPhotoMessages.delete(tgUserId);
+    for (const { chatId, messageId } of bucket) {
+      await this.deleteMessageById(chatId, messageId);
+    }
+  }
+
+  /**
+   * Drop the collected photo messages WITHOUT deleting them — for an upload that
+   * was NOT accepted (wrong step, draft creation failed). Those photos are still
+   * the seller's only record of what they sent, and the next upload must not
+   * inherit them.
+   */
+  private forgetPhotoMessages(tgUserId: number): void {
+    this.pendingPhotoMessages?.delete(tgUserId);
   }
 
   /**
@@ -2415,11 +2810,15 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   ): Promise<void> {
     const session = this.wizard.get(tgUserId);
     if (!session) {
+      // Not in a listing at all: the photos answered nothing, so they stay.
+      this.forgetPhotoMessages(tgUserId);
       await ctx.reply(t(await this.langOf(tgUserId), 'start.hint'));
       return;
     }
     if (session.step !== WizardStep.PHOTOS_FIRST) {
-      // Photos sent outside the upload step — re-show the current question.
+      // Photos sent outside the upload step — re-show the current question. The
+      // photos were not accepted, so they are not the wizard's to delete.
+      this.forgetPhotoMessages(tgUserId);
       await this.sendStepPrompt(ctx, session);
       return;
     }
@@ -2497,6 +2896,11 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       lang,
       await this.categoryLabel(listing, lang),
     );
+    // The preview is what the seller was waiting for, so whatever transient
+    // screen is still up — the "finishing the photos" holding line, or the last
+    // question — is spent. In a seller DM the chat id IS the user id, which is
+    // what lets this ctx-free path reach the tracked prompt at all.
+    await this.consumePromptMessage(chatId);
     try {
       if (processedUrls.length === 1) {
         await this.bot.telegram.sendPhoto(chatId, processedUrls[0], {

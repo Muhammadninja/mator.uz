@@ -1290,7 +1290,10 @@ describe('TelegramService — seller approval notification', () => {
     expect(sent[0].text).toBe(
       '✅ Ваша заявка успешно одобрена!\n\n' +
         'Теперь вы можете публиковать товары в Mator.\n\n' +
-        'Нажмите /start, чтобы открыть меню и начать добавление товаров.',
+        'Нажмите /start, чтобы открыть меню и начать добавление товаров.\n' +
+        // Every message that names a command names /language too: a seller who
+        // picked the wrong language cannot read their way back to the picker.
+        'Сменить язык — /language',
     );
   });
 

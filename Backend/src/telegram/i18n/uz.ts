@@ -13,20 +13,24 @@ export const UZ: BotStrings = {
   'lang.prompt': '🌐 Выберите язык / Tilingizni tanlang / Choose your language',
   'lang.changed': '✅ Interfeys tili: O‘zbekcha.',
 
-  'start.hint': '👋 Mahsulot qo‘shish uchun /start ni bosing',
+  'start.hint':
+    '👋 Mahsulot qo‘shish uchun /start ni bosing\n' +
+    'Tilni o‘zgartirish — /language',
   'start.rejected': '⛔ Arizangiz administrator tomonidan rad etildi.',
   'start.pending':
     '⏳ Ro‘yxatdan o‘tish arizangiz qabul qilindi va administrator tasdig‘ini kutmoqda.\n' +
     'Hisobingiz faollashtirilishi bilan mahsulot qo‘sha olasiz.',
   'start.notRegistered':
-    '👋 Avval ro‘yxatdan o‘ting: /start buyrug‘ini yuboring',
+    '👋 Avval ro‘yxatdan o‘ting: /start buyrug‘ini yuboring\n' +
+    'Tilni o‘zgartirish — /language',
   'start.awaitingApproval':
     '⏳ Arizangiz hali tasdiqlanmagan. Iltimos, kuting.',
   'start.accountRejected': '⛔ Hisobingiz administrator tomonidan rad etilgan.',
   'seller.approved':
     '✅ Arizangiz muvaffaqiyatli tasdiqlandi!\n\n' +
     'Endi Mator’da mahsulot joylashtirishingiz mumkin.\n\n' +
-    'Menyuni ochish va mahsulot qo‘shishni boshlash uchun /start ni bosing.',
+    'Menyuni ochish va mahsulot qo‘shishni boshlash uchun /start ni bosing.\n' +
+    'Tilni o‘zgartirish — /language',
   'help.message':
     '📦 Mahsulot qanday qo‘shiladi\n\n' +
     '/start ni bosing — bot sizni bosqichma-bosqich olib boradi:\n\n' +
@@ -48,6 +52,10 @@ export const UZ: BotStrings = {
     '🔎 OEM yoki GM raqamini ko‘rsatsangiz, xaridorlar detalingizni qidiruvdan ancha oson topadi.\n\n' +
     '🌐 Tilni o‘zgartirish: /language',
 
+  'command.start': 'Mahsulot qo‘shish',
+  'command.language': 'Tilni o‘zgartirish',
+  'command.help': 'Mahsulot qanday qo‘shiladi',
+
   'images.processing': '📸 Surat qayta ishlanmoqda, iltimos kutib turing.',
   'photos.notAccepted':
     '⚠️ Suratni qabul qilib bo‘lmadi. Yana bir bor urinib ko‘ring.',
@@ -67,15 +75,20 @@ export const UZ: BotStrings = {
     'Sizda tugallanmagan e’lon bor.\nDavom ettiramizmi yoki boshidan boshlaymizmi?',
   'draft.resumed': '▶️ Davom etamiz. Qolgan maydonlarni to‘ldiring.',
   'draft.expired':
-    '⌛ Tugallanmagan e’lon endi mavjud emas. Boshidan boshlash uchun /start ni bosing.',
+    '⌛ Tugallanmagan e’lon endi mavjud emas. Boshidan boshlash uchun /start ni bosing.\n' +
+    'Tilni o‘zgartirish — /language',
   'draft.addCancelled':
-    '❌ Mahsulot qo‘shish bekor qilindi.\nBoshidan boshlash uchun /start ni bosing.',
+    '❌ Mahsulot qo‘shish bekor qilindi.\nBoshidan boshlash uchun /start ni bosing.\n' +
+    'Tilni o‘zgartirish — /language',
   'draft.createCancelled':
-    '❌ Mahsulot yaratish bekor qilindi.\nBoshidan boshlash uchun /start ni bosing.',
+    '❌ Mahsulot yaratish bekor qilindi.\nBoshidan boshlash uchun /start ni bosing.\n' +
+    'Tilni o‘zgartirish — /language',
   'edit.noProduct':
-    '⌛ Tahrirlash uchun mahsulot yo‘q (vaqt tugagan bo‘lishi mumkin). Boshidan boshlash uchun /start ni bosing.',
+    '⌛ Tahrirlash uchun mahsulot yo‘q (vaqt tugagan bo‘lishi mumkin). Boshidan boshlash uchun /start ni bosing.\n' +
+    'Tilni o‘zgartirish — /language',
   'edit.notEditable':
-    '⌛ Bu e’lonni endi o‘zgartirib bo‘lmaydi. Boshidan boshlash uchun /start ni bosing.',
+    '⌛ Bu e’lonni endi o‘zgartirib bo‘lmaydi. Boshidan boshlash uchun /start ni bosing.\n' +
+    'Tilni o‘zgartirish — /language',
 
   'preview.header': '📋 *Qo‘shishdan oldin mahsulotni tekshiring.*',
   'preview.title': 'Nomi',
@@ -89,11 +102,14 @@ export const UZ: BotStrings = {
   'preview.weight': 'Og‘irligi',
   'preview.universalVehicle': 'Barcha avtomobillar (universal detal)',
   'confirm.nothingPending':
-    '⌛ Tasdiqlash uchun mahsulot yo‘q (vaqt tugagan bo‘lishi mumkin). Boshidan boshlash uchun /start ni bosing.',
+    '⌛ Tasdiqlash uchun mahsulot yo‘q (vaqt tugagan bo‘lishi mumkin). Boshidan boshlash uchun /start ni bosing.\n' +
+    'Tilni o‘zgartirish — /language',
   'confirm.alreadyProcessed':
-    '⌛ Bu e’lon allaqachon qayta ishlangan. Keyingi mahsulotni qo‘shish uchun /start ni bosing.',
+    '⌛ Bu e’lon allaqachon qayta ishlangan. Keyingi mahsulotni qo‘shish uchun /start ni bosing.\n' +
+    'Tilni o‘zgartirish — /language',
   'confirm.success':
-    '✅ Mahsulot muvaffaqiyatli qo‘shildi.\nKeyingi mahsulotni qo‘shish uchun /start ni bosing.',
+    '✅ Mahsulot muvaffaqiyatli qo‘shildi.\nKeyingi mahsulotni qo‘shish uchun /start ni bosing.\n' +
+    'Tilni o‘zgartirish — /language',
   'confirm.failed': '⚠️ Mahsulot qo‘shishda xatolik yuz berdi.\n`{error}`',
 
   'btn.back': '⬅️ Orqaga',
@@ -176,7 +192,8 @@ export const UZ: BotStrings = {
 
   'stale.catalog':
     'Katalog yangilandi.\n' +
-    'E’lon yaratishni davom ettirish uchun /start ni bosing.',
+    'E’lon yaratishni davom ettirish uchun /start ni bosing.\n' +
+    'Tilni o‘zgartirish — /language',
   'stale.category':
     'Bu turkum endi mavjud emas — katalog yangilandi.\n' +
     'Iltimos, yangilangan ro‘yxatdan turkum tanlang.',
