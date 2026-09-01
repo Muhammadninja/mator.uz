@@ -20,10 +20,10 @@ import {
   launchDatasetIsEmpty,
 } from './seed-launch-catalog';
 import {
-  LEGAL_DOCUMENT_SEED,
   LEGAL_V1_EFFECTIVE_AT,
-  isPlaceholderLegalContent,
+  legalDocumentSeed,
 } from './seed-data/legal-documents.seed';
+import { decideLegalSeedAction } from './seed-data/legal-seed-decision';
 
 const prisma = new PrismaClient();
 
@@ -362,20 +362,26 @@ async function verify() {
 
 
 /**
- * Legal documents — v1 of each required instrument, in ru and uz.
+ * Legal documents — every version present in `docs/legal`, in ru, uz and en.
+ *
+ * The TEXT comes from `Backend/docs/legal/*.md` (see legal-documents.loader).
+ * This function owns only publication state: which version exists in the
+ * database, and which one is in force.
  *
  * Idempotent, and CAREFUL about what it overwrites:
  *   • document absent            → created, active.
- *   • present, still placeholder → title/content updated in place, so the real
- *                                  legal text can be dropped into the seed file
+ *   • present, still placeholder → title/content updated in place, so approved
+ *                                  legal text can be dropped into the markdown
  *                                  and published with `npm run seed`, no code
  *                                  change and no version bump.
- *   • present, real text         → LEFT ALONE. Once approved wording is
- *                                  published (and possibly accepted by users),
- *                                  a re-run must never silently rewrite it —
- *                                  that would invalidate every acceptance
- *                                  pointing at it. Changing published text is a
- *                                  NEW version, which is a deliberate act.
+ *   • present, real text, same   → no-op.
+ *   • present, real text, CHANGED→ LEFT ALONE, and reported loudly. Once
+ *                                  approved wording is published (and possibly
+ *                                  accepted by users), a re-run must never
+ *                                  silently rewrite it — that would invalidate
+ *                                  every acceptance pointing at it. Changing
+ *                                  published text means adding a NEW version
+ *                                  file, which is a deliberate act.
  *
  * The one-active-version-per-(type, locale) invariant is enforced by a partial
  * unique index (see the add_legal_documents migration). This seed publishes v1
@@ -389,8 +395,12 @@ async function seedLegalDocuments() {
   let refreshed = 0;
   let preserved = 0;
   let superseded = 0;
+  // Files whose text no longer matches the approved row already in the database.
+  const diverged: string[] = [];
 
-  for (const doc of LEGAL_DOCUMENT_SEED) {
+  // Read at CALL time, not at import: a malformed source file must fail the
+  // seed with the loader's diagnostic, not break every importer of this module.
+  for (const doc of legalDocumentSeed()) {
     const existing = await prisma.legalDocument.findUnique({
       where: {
         type_version_locale: {
@@ -406,7 +416,7 @@ async function seedLegalDocuments() {
     // two active versions on one (type, locale) and trip the partial unique
     // index. This is what makes `npm run seed` safe to re-run after a version
     // bump instead of a landmine.
-    const supersededBy = await prisma.legalDocument.findFirst({
+    const supersededByRow = await prisma.legalDocument.findFirst({
       where: {
         type: doc.type,
         locale: doc.locale,
@@ -415,34 +425,55 @@ async function seedLegalDocuments() {
       },
       select: { version: true },
     });
-    const isActive = supersededBy === null;
-    if (supersededBy) superseded++;
+    if (supersededByRow) superseded++;
 
-    if (!existing) {
-      await prisma.legalDocument.create({
-        data: {
-          type: doc.type,
-          version: doc.version,
-          locale: doc.locale,
-          title: doc.title,
-          content: doc.content,
-          contentFormat: 'markdown',
-          isActive,
-          effectiveAt: LEGAL_V1_EFFECTIVE_AT,
-        },
-      });
-      created++;
-      continue;
-    }
+    // The overwrite rules live in decideLegalSeedAction so they can be tested
+    // without a database — see legal-seed-decision.spec.ts.
+    const action = decideLegalSeedAction(
+      doc,
+      existing,
+      supersededByRow?.version ?? null,
+    );
 
-    if (isPlaceholderLegalContent(existing.content)) {
-      await prisma.legalDocument.update({
-        where: { id: existing.id },
-        data: { title: doc.title, content: doc.content, isActive },
-      });
-      refreshed++;
-    } else {
-      preserved++;
+    switch (action.kind) {
+      case 'create':
+        await prisma.legalDocument.create({
+          data: {
+            type: doc.type,
+            version: doc.version,
+            locale: doc.locale,
+            title: doc.title,
+            content: doc.content,
+            contentFormat: 'markdown',
+            isActive: action.isActive,
+            effectiveAt: LEGAL_V1_EFFECTIVE_AT,
+          },
+        });
+        created++;
+        break;
+
+      case 'refresh':
+        await prisma.legalDocument.update({
+          where: { id: existing!.id },
+          data: {
+            title: doc.title,
+            content: doc.content,
+            isActive: action.isActive,
+          },
+        });
+        refreshed++;
+        break;
+
+      case 'preserve':
+        preserved++;
+        break;
+
+      case 'diverged':
+        // Approved text was edited at the source after publication. Nothing is
+        // written: the database holds what users accepted. Reported below.
+        preserved++;
+        diverged.push(`${doc.type} v${doc.version} (${doc.locale})`);
+        break;
     }
   }
 
@@ -454,6 +485,20 @@ async function seedLegalDocuments() {
         : '.'),
   );
 
+  if (diverged.length > 0) {
+    // The source files were edited after the text was published. Nothing was
+    // overwritten — publishing changed wording is a version bump, not an edit.
+    console.warn(
+      `[seed] WARNING: ${diverged.length} published document(s) differ from their ` +
+        'source file and were NOT updated:\n' +
+        diverged.map((d) => `         • ${d}`).join('\n') +
+        '\n       The database holds the text users actually accepted, so it wins.\n' +
+        '       To publish new wording, add a new version file\n' +
+        '       (e.g. docs/legal/privacy-policy.v2.ru.md) and re-run `npm run seed`.\n' +
+        '       To discard the edit, revert the source file to the published text.',
+    );
+  }
+
   const stillPlaceholder = await prisma.legalDocument.count({
     where: { isActive: true, content: { contains: '[PLACEHOLDER' } },
   });
@@ -464,8 +509,8 @@ async function seedLegalDocuments() {
     console.warn(
       `[seed] WARNING: ${stillPlaceholder} active legal document(s) still contain PLACEHOLDER text.\n` +
         '       Users would be consenting to wording no legal owner has approved.\n' +
-        '       Replace title/content in src/prisma/seed-data/legal-documents.seed.ts and re-run\n' +
-        '       `npm run seed` — no backend code change is required.',
+        '       Replace the text in Backend/docs/legal/<document>.v<version>.<locale>.md\n' +
+        '       and re-run `npm run seed` — no backend code change is required.',
     );
   }
 }
