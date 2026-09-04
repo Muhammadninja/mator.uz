@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   HttpStatus,
@@ -125,13 +126,16 @@ export class AdminDealersController {
         logo: {
           type: 'string',
           format: 'binary',
-          description: 'Image file (JPEG/PNG/WebP, ≤ 5 MB). Aliases: `file`, `image`.',
+          description:
+            'Image file (JPEG/PNG/WebP, ≤ 5 MB). Aliases: `file`, `image`.',
         },
       },
       required: ['logo'],
     },
   })
-  @ApiOkResponse({ description: 'Uploaded. Returns the stored image URL as `logoUrl`.' })
+  @ApiOkResponse({
+    description: 'Uploaded. Returns the stored image URL as `logoUrl`.',
+  })
   uploadLogo(
     @UploadedFiles()
     files?: Array<{
@@ -151,7 +155,8 @@ export class AdminDealersController {
   @Get()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'List dealers (admin/operator) — paginated, filterable, searchable',
+    summary:
+      'List dealers (admin/operator) — paginated, filterable, searchable',
     description:
       'Newest dealers first by default. `search` matches store name, city, email and ' +
       '(from four digits up) phone. `sort` accepts joinedAt, name, gmvUzs, orders or ' +
@@ -249,5 +254,68 @@ export class AdminDealersController {
   @ApiNotFoundResponse({ description: 'No such dealer.' })
   reactivate(@Param('id') id: string, @Req() req: AuthenticatedAdminRequest) {
     return this.dealers.reactivate(id, this.auditContext(req));
+  }
+
+  /**
+   * Issue the dealer's 1C integration credential.
+   *
+   * Narrower than the rest of this controller: a key grants the ability to
+   * rewrite a dealer's stock and prices, so issuing one is not routine operator
+   * work. The method-level @Roles TIGHTENS the class-level list rather than
+   * replacing it — Nest guards are additive, and AdminRoleGuard reads the
+   * closest decorator via getAllAndOverride.
+   */
+  @Post(':id/api-key')
+  @Roles(AdminRole.SUPER_ADMIN, AdminRole.MANAGER)
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({
+    summary: 'Issue a 1C integration API key for the dealer (admin/manager)',
+    description:
+      'Generates the dealer credential for POST /v1/integrations/dealers/sync-inventory. ' +
+      'The plaintext key is returned ONCE in this response and never again — only its ' +
+      'SHA-256 digest is stored, so it cannot be recovered, only replaced. Calling this ' +
+      'on a dealer that already has a key ROTATES it: the previous key stops working ' +
+      'immediately. Recorded as DEALER_API_KEY_ISSUED (suffix and timestamps only).',
+  })
+  @ApiCreatedResponse({
+    description: 'The newly issued key — shown once.',
+    schema: {
+      example: {
+        success: true,
+        data: {
+          dealerId: 'd1',
+          apiKey: 'mtr_live_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
+          apiKeyLast4: '8f2c',
+          issuedAt: '2026-09-04T20:30:00.000Z',
+        },
+        message:
+          'Store this key now — it is shown once and cannot be retrieved again.',
+      },
+    },
+  })
+  @ApiNotFoundResponse({ description: 'No such dealer.' })
+  issueApiKey(@Param('id') id: string, @Req() req: AuthenticatedAdminRequest) {
+    return this.dealers.issueApiKey(id, this.auditContext(req));
+  }
+
+  /** Revoke the dealer's integration credential. Same narrowed role list. */
+  @Delete(':id/api-key')
+  @Roles(AdminRole.SUPER_ADMIN, AdminRole.MANAGER)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Revoke the dealer’s 1C integration API key (admin/manager)',
+    description:
+      'Clears the stored digest, so the dealer’s next sync attempt is rejected with 401. ' +
+      'Idempotent — revoking a dealer that has no key succeeds and changes nothing. ' +
+      'Recorded as DEALER_API_KEY_REVOKED.',
+  })
+  @ApiOkResponse({
+    schema: {
+      example: { success: true, data: { dealerId: 'd1', revoked: true } },
+    },
+  })
+  @ApiNotFoundResponse({ description: 'No such dealer.' })
+  revokeApiKey(@Param('id') id: string, @Req() req: AuthenticatedAdminRequest) {
+    return this.dealers.revokeApiKey(id, this.auditContext(req));
   }
 }

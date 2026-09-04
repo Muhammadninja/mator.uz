@@ -33,6 +33,7 @@ import { ReferenceModule } from './reference/reference.module';
 import { AddressesModule } from './addresses/addresses.module';
 import { LegalModule } from './legal/legal.module';
 import { DealersModule } from './dealers/dealers.module';
+import { IntegrationsModule } from './integrations/integrations.module';
 import { MobileConfigModule } from './mobile-config/mobile-config.module';
 import { SalesModule } from './sales/sales.module';
 import { OpsModule } from './ops/ops.module';
@@ -89,6 +90,10 @@ import { isBlueprintEnabled } from './blueprint/blueprint-auth';
     AddressesModule,
     LegalModule,
     DealersModule,
+    // Dealer/supplier 1C stock upload (POST /v1/integrations/dealers/sync-inventory).
+    // Authenticated by X-API-KEY, not by any user or admin token; writes only the
+    // inventory columns of catalog rows that already exist.
+    IntegrationsModule,
     // Admin-managed automatic discounts (/v1/admin/sales, /v1/sales). Exports
     // DiscountService for products/cart/orders to inject; entirely separate
     // from the promo-code system, which is untouched.

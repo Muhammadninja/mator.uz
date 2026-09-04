@@ -19,6 +19,7 @@ import {
   CloudinaryFolder,
   MAX_AVATAR_BYTES,
 } from '../../common/image.constants';
+import { generateDealerApiKey } from '../../integrations/api-key.util';
 import { AdminAuditContext } from '../auth/admin-auth.service';
 import { AdminAuditService } from '../auth/admin-audit.service';
 import {
@@ -433,6 +434,111 @@ export class AdminDealersService {
     });
 
     return this.getOne(id);
+  }
+
+  /**
+   * Issue (or re-issue) the dealer's 1C integration key.
+   *
+   * Returns the plaintext key ONCE, in this response and nowhere else: only its
+   * SHA-256 digest is stored, so neither this API, the audit trail nor the
+   * database can ever reveal it again. A lost key is replaced, not recovered.
+   *
+   * Re-issuing overwrites the previous digest in the same transaction that
+   * writes the audit entry, which is what makes rotation atomic — there is no
+   * instant in which both the old and the new key are valid, and none in which
+   * neither is.
+   */
+  async issueApiKey(id: string, ctx: AdminAuditContext) {
+    const { rawKey, hash, last4 } = generateDealerApiKey();
+    const issuedAt = new Date();
+
+    await this.prisma.$transaction(async (tx) => {
+      const dealer = await this.requireDealer(tx, id);
+      const previous = await tx.catalogSeller.findUnique({
+        where: { id },
+        select: { apiKeyLast4: true, apiKeyIssuedAt: true },
+      });
+
+      await tx.catalogSeller.update({
+        where: { id },
+        data: {
+          apiKeyHash: hash,
+          apiKeyLast4: last4,
+          apiKeyIssuedAt: issuedAt,
+          // A rotation starts a fresh liveness history: the old key's last use
+          // says nothing about whether the new one has ever been tried.
+          apiKeyLastUsedAt: null,
+        },
+      });
+
+      await this.recordDealerAudit(tx, {
+        action: AdminAuditAction.DEALER_API_KEY_ISSUED,
+        // Only the suffix and timestamps — never the key or its digest.
+        previousValues: {
+          apiKeyLast4: previous?.apiKeyLast4 ?? null,
+          apiKeyIssuedAt: previous?.apiKeyIssuedAt?.toISOString() ?? null,
+        },
+        newValues: {
+          apiKeyLast4: last4,
+          apiKeyIssuedAt: issuedAt.toISOString(),
+        },
+        dealer,
+        ctx,
+      });
+    });
+
+    return {
+      success: true,
+      data: {
+        dealerId: id,
+        // Shown once. The caller must hand it to the dealer now; it cannot be
+        // retrieved later, only replaced.
+        apiKey: rawKey,
+        apiKeyLast4: last4,
+        issuedAt: issuedAt.toISOString(),
+      },
+      message:
+        'Store this key now — it is shown once and cannot be retrieved again.',
+    };
+  }
+
+  /**
+   * Revoke the dealer's integration key. The next sync attempt gets a 401 —
+   * immediately, since the guard resolves the caller by the digest this clears.
+   * Idempotent: revoking a dealer that has no key is a no-op, not an error, so a
+   * repeated call from a console cannot fail confusingly.
+   */
+  async revokeApiKey(id: string, ctx: AdminAuditContext) {
+    await this.prisma.$transaction(async (tx) => {
+      const dealer = await this.requireDealer(tx, id);
+      const previous = await tx.catalogSeller.findUnique({
+        where: { id },
+        select: { apiKeyHash: true, apiKeyLast4: true },
+      });
+
+      // Nothing to revoke — return without writing a misleading audit entry.
+      if (!previous?.apiKeyHash) return;
+
+      await tx.catalogSeller.update({
+        where: { id },
+        data: {
+          apiKeyHash: null,
+          apiKeyLast4: null,
+          apiKeyIssuedAt: null,
+          apiKeyLastUsedAt: null,
+        },
+      });
+
+      await this.recordDealerAudit(tx, {
+        action: AdminAuditAction.DEALER_API_KEY_REVOKED,
+        previousValues: { apiKeyLast4: previous.apiKeyLast4 },
+        newValues: { apiKeyLast4: null },
+        dealer,
+        ctx,
+      });
+    });
+
+    return { success: true, data: { dealerId: id, revoked: true } };
   }
 
   /** PENDING → ACTIVE. Any other current status is a 400. */

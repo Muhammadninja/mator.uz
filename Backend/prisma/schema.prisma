@@ -1311,6 +1311,30 @@ model CatalogSeller {
   // payable at once, with no product write.
   tin              String?       @db.VarChar(14)
   vatPercent       Decimal?      @map("vat_percent") @db.Decimal(5, 2)
+  // ── 1C integration credential (POST /v1/integrations/dealers/sync-inventory) ──
+  // SHA-256 hash of the dealer's X-API-KEY, hex-encoded — never the key itself.
+  // The endpoint is machine-to-machine, so the credential is a bearer secret in
+  // a header: anyone holding it can rewrite this dealer's stock and prices.
+  // Storing only the digest means a database leak does not hand out working
+  // keys, exactly like AppAdmin.passwordHash. Unique so one key resolves to at
+  // most one dealer, and so the guard can look the caller up by hash in a single
+  // indexed read instead of scanning every dealer row.
+  //
+  // NULL means "no integration configured" — the overwhelming majority of rows,
+  // including every projected seller_<id> one. A null must never match: the
+  // guard rejects an absent/blank header before it ever queries.
+  apiKeyHash       String?       @unique @map("api_key_hash") @db.VarChar(64)
+  // Last 4 characters of the plaintext key, for operator display ("…8f2c") and
+  // support ("which key is 1C using?"). 4 characters of a 43-character random
+  // key are not enough to shorten a brute-force search meaningfully, and this
+  // is what lets an operator identify a key without the system ever being able
+  // to reveal it.
+  apiKeyLast4      String?       @map("api_key_last4") @db.VarChar(4)
+  // When the key was issued, and when it was last accepted by the guard. The
+  // second is the operational signal that answers "is this dealer's 1C actually
+  // syncing?" without reading logs. Written on every successful sync.
+  apiKeyIssuedAt   DateTime?     @map("api_key_issued_at") @db.Timestamptz(3)
+  apiKeyLastUsedAt DateTime?     @map("api_key_last_used_at") @db.Timestamptz(3)
   // When the dealer joined. Existing rows have no creation timestamp, so the
   // migration backfills them to now(); new rows default to insert time.
   joinedAt         DateTime      @default(now()) @map("joined_at") @db.Timestamptz(3)
@@ -1810,6 +1834,12 @@ enum AdminAuditAction {
   // A dealer/storefront created from the admin console (POST /v1/admin/dealers).
   // The target is the new dealer; newValues carries the initial row.
   DEALER_CREATED
+  // 1C integration credential lifecycle. Neither entry ever carries the key or
+  // its digest — only the display suffix and the timestamps, so the audit trail
+  // records WHO issued or revoked a key and WHEN without becoming a place the
+  // secret can be read back out of.
+  DEALER_API_KEY_ISSUED
+  DEALER_API_KEY_REVOKED
 }
 
 // What kind of thing an audit entry is about, for entries whose target is not
