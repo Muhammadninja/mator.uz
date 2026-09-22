@@ -201,4 +201,25 @@ export const UZ: BotStrings = {
   'oilType.SYNTHETIC': 'Sintetik',
   'oilType.SEMI_SYNTHETIC': 'Yarim sintetik',
   'oilType.MINERAL': 'Mineral',
+
+  'dv.notFound':
+    "❌ Driver's Village pozitsiyasi {code} kodi bilan topilmadi. Rasm izohidagi 1C kodini tekshiring.",
+  'dv.photosReceived':
+    '📸 {code} pozitsiyasi uchun rasmlar qabul qilindi ({count}). Ishlov berilmoqda — oldindan ko‘rishni yuboramiz.',
+  'dv.previewHeader': "🖼 *Driver's Village pozitsiyasi uchun yangi rasmlar*",
+  'dv.previewCode': '1C kodi',
+  'dv.previewPhotos': 'Rasmlar: {count} (hozir mahsulotda: {current})',
+  'dv.previewNote':
+    'Tasdiqlangandan so‘ng mahsulotning joriy rasmlari shu rasmlar bilan almashtiriladi. Nomi, narxi va boshqa ma’lumotlar o‘zgarmaydi.',
+  'btn.dvConfirm': '✅ Tasdiqlash',
+  'btn.dvCancel': '❌ Bekor qilish',
+  'dv.photosUpdated':
+    '✅ {code} pozitsiyasining rasmlari yangilandi ({count}).',
+  'dv.cancelled':
+    'Rasmlarni yangilash bekor qilindi. Mahsulot rasmlari o‘zgarmadi.',
+  'dv.positionGone': '⚠️ Pozitsiya endi topilmadi — rasmlar saqlanmadi.',
+  'dv.imagesFailed':
+    '⚠️ Rasmlarga ishlov berib bo‘lmadi ({count}). Rasmlarni izohda 1C kodi bilan qayta yuboring.',
+  'dv.updateFailed':
+    '⚠️ Rasmlarni saqlab bo‘lmadi. Rasmlarni izohda 1C kodi bilan qayta yuboring.',
 };

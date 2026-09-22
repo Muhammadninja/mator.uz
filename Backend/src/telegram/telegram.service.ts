@@ -42,9 +42,16 @@ import { persistVehicleLinks } from './vehicle-links';
 import {
   ProductDraftService,
   isDraftFormComplete,
+  isPhotoUpdateDraft,
   type DraftWithImages,
   type QuestionnaireSnapshot,
 } from './product-draft.service';
+import {
+  DriversVillagePhotoService,
+  code1cFromCaption,
+  escapeMarkdown,
+  type DvPosition,
+} from './drivers-village-photo.service';
 import { DraftCoordinator } from './draft-coordinator';
 import { DraftTelemetry, DraftMetric } from './draft-telemetry';
 import {
@@ -192,6 +199,15 @@ const CONFIRM_BACK = 'product:back';
 // "🖼 Изменить фото" on the preview: return to the PHOTOS step and force a fresh
 // upload (deletes the old assets → the pipeline re-runs on the new photos).
 const CONFIRM_CHANGE_PHOTOS = 'product:change_photos';
+
+// Confirm / cancel on a Driver's Village PHOTO-UPDATE preview. The draft id rides
+// in the payload (≤ 40 bytes, inside Telegram's 64-byte limit), so a tap always
+// names the exact preview it was sent with — independent of the ordinary
+// listing's single `pending` slot, which these never touch.
+const DV_PHOTO_CONFIRM_PREFIX = 'dvph:ok:';
+const DV_PHOTO_CANCEL_PREFIX = 'dvph:no:';
+const DV_PHOTO_CONFIRM = /^dvph:ok:(.+)$/;
+const DV_PHOTO_CANCEL = /^dvph:no:(.+)$/;
 
 // ── PARALLEL flow inline-button payloads ────────────────────────────────────
 // /start resume prompt: continue the existing draft, or discard it and start over.
@@ -505,6 +521,9 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     private readonly categories: PartCategoryService,
     // The "У меня есть" → DM offer-capture flow (isolated session state).
     private readonly offerFlow: TelegramOfferService,
+    // Driver's Village photo updates (album + caption = code_1c): position
+    // lookup and gallery replacement. Only reached for a code-shaped caption.
+    private readonly dvPhotos: DriversVillagePhotoService,
   ) {
     this.draftTtlMs = resolveDraftTtlMs(
       this.config.get<string>('DRAFT_TTL_HOURS'),
@@ -523,7 +542,12 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         const ctx = this.groupCtx.get(String(group.tgUserId));
         this.groupCtx.delete(String(group.tgUserId));
         if (ctx)
-          void this.handleWizardPhotos(ctx, group.tgUserId, group.fileIds);
+          void this.routePhotos(
+            ctx,
+            group.tgUserId,
+            group.fileIds,
+            group.caption,
+          );
       },
     );
 
@@ -1006,17 +1030,24 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       if (await this.offerFlow.handlePhoto(ctx, bestPhoto.file_id)) return;
 
       const groupId = 'media_group_id' in msg ? msg.media_group_id : undefined;
+      // Only one photo of an album carries the caption; the buffer keeps the
+      // first non-empty one. It is read ONLY to recognize a Driver's Village
+      // code_1c — the ordinary wizard still ignores captions.
+      const caption =
+        'caption' in msg && typeof msg.caption === 'string'
+          ? msg.caption
+          : null;
 
       if (groupId) {
         // Buffer ALL albums (even out-of-step ones) so the flush validates the
         // wizard state exactly once per album instead of once per photo.
         this.groupCtx.set(String(from.id), ctx);
-        this.mediaBuffer.add(groupId, bestPhoto.file_id, null, from.id);
+        this.mediaBuffer.add(groupId, bestPhoto.file_id, caption, from.id);
         return;
       }
 
       // Single photo — hand over immediately.
-      await this.handleWizardPhotos(ctx, from.id, [bestPhoto.file_id]);
+      await this.routePhotos(ctx, from.id, [bestPhoto.file_id], caption);
     });
 
     // ── Confirmation buttons on the preview message ─────────────────────────
@@ -1078,6 +1109,23 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       await this.consumeCallbackMessage(ctx);
       const from = ctx.from;
       if (from) await this.replaceDraftPhotos(ctx, from.id);
+    });
+
+    // ── Driver's Village photo-update preview ───────────────────────────────
+    // Same cleanup rule as the ordinary preview buttons: the preview (a bot
+    // message) is retired first so a second tap cannot re-trigger the action;
+    // the user's own photos and caption are never touched.
+    this.bot.action(DV_PHOTO_CONFIRM, async (ctx) => {
+      await ctx.answerCbQuery();
+      await this.consumeDvPreviewMessage(ctx);
+      const from = ctx.from;
+      if (from) await this.commitDvPhotos(ctx, from.id, ctx.match[1]);
+    });
+    this.bot.action(DV_PHOTO_CANCEL, async (ctx) => {
+      await ctx.answerCbQuery();
+      await this.consumeDvPreviewMessage(ctx);
+      const from = ctx.from;
+      if (from) await this.cancelDvPhotos(ctx, from.id, ctx.match[1]);
     });
 
     // ── /start resume prompt ────────────────────────────────────────────────
@@ -1482,6 +1530,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
    */
   @OnEvent(DraftEvent.IMAGES_FAILED)
   async onDraftImagesFailed(event: DraftImagesFailedEvent): Promise<void> {
+    if (event.targetStockId !== undefined) {
+      await this.onDvPhotosFailed(event);
+      return;
+    }
     try {
       const tgUserId = Number(event.tgId);
       const lang = await this.resolveLang(tgUserId);
@@ -1533,6 +1585,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   ): Promise<void> {
     const draft = await this.drafts.findWithImages(draftId);
     if (!draft || draft.status !== 'READY_FOR_PREVIEW') return;
+    if (isPhotoUpdateDraft(draft)) {
+      await this.deliverDvPhotoPreview(draft, chatId);
+      return;
+    }
 
     const processedUrls = draft.images
       .filter((img) => img.status === 'READY' && img.processedUrl)
@@ -2763,6 +2819,373 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     await this.handlePhotos(ctx, tgUserId, session, fileIds);
   }
 
+  // ── Driver's Village photo updates (photos + caption = code_1c) ─────────────
+  // Any Telegram user who knows a position's code_1c may replace its photos. The
+  // photos travel the SAME pipeline as a new listing — draft → BullMQ worker
+  // (FLUX + Cloudinary) → coordinator rendezvous → preview media — and on
+  // confirm only the product gallery of that existing position changes. No
+  // Product or Stock is ever created here, and the ordinary listing's wizard
+  // session and single `pending` slot are never touched.
+
+  /**
+   * Route incoming photos (one photo, or a flushed album). A caption that is a
+   * Driver's Village code_1c starts a photo update of that position; no caption
+   * or any other caption goes to the ordinary listing wizard exactly as before.
+   */
+  private async routePhotos(
+    ctx: Context,
+    tgUserId: number,
+    fileIds: string[],
+    caption: string | null,
+  ): Promise<void> {
+    const code1c = code1cFromCaption(caption);
+    if (code1c) {
+      await this.handleDvPhotos(ctx, tgUserId, fileIds, code1c);
+      return;
+    }
+    await this.handleWizardPhotos(ctx, tgUserId, fileIds);
+  }
+
+  /**
+   * Start a photo update: resolve the position by its Stock source fields, then
+   * create a PHOTO-UPDATE draft and queue its images exactly like
+   * {@link handlePhotos} does. An unknown code is answered and NOTHING is
+   * written — no draft, no job, no upload.
+   */
+  private async handleDvPhotos(
+    ctx: Context,
+    tgUserId: number,
+    fileIds: string[],
+    code1c: string,
+  ): Promise<void> {
+    const lang = await this.langOf(tgUserId);
+    const images = fileIds.slice(0, MAX_IMAGES_PER_LISTING);
+    if (images.length === 0) return;
+
+    const position = await this.dvPhotos.resolvePosition(code1c);
+    if (!position) {
+      await ctx.reply(t(lang, 'dv.notFound', { code: code1c }));
+      return;
+    }
+
+    let draft: DraftWithImages;
+    try {
+      draft = await this.dvPhotos.createPhotoDraft({
+        position,
+        tgUserId,
+        fileIds: images,
+        expiresAt: new Date(Date.now() + this.draftTtlMs),
+      });
+    } catch (err) {
+      this.logger.error(
+        `Failed to create photo-update draft for ${code1c} (tg ${tgUserId}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      await ctx.reply(t(lang, 'photos.notAccepted'));
+      return;
+    }
+    this.telemetry.event('draft.created', {
+      draftId: draft.id,
+      sellerId: position.sellerId,
+    });
+
+    // The same guarded, idempotent enqueue as a new listing's photos.
+    for (const img of draft.images) {
+      try {
+        const jobId = await this.enqueueImageJob(draft.id, img.id);
+        if (jobId === null) continue;
+        this.telemetry.event('image.queued', {
+          draftId: draft.id,
+          imageId: img.id,
+          sellerId: position.sellerId,
+          jobId,
+        });
+      } catch (err) {
+        this.logger.error(
+          `Failed to enqueue image ${img.id}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
+    const receipt = t(lang, 'dv.photosReceived', {
+      code: code1c,
+      count: images.length,
+    });
+    if (this.dvMayUseLivePrompt(tgUserId)) {
+      // A transient receipt the preview retires, like "photos.received".
+      await this.sendLivePrompt(ctx, tgUserId, receipt);
+    } else {
+      // Mid-questionnaire: never retire the listing question on screen.
+      await ctx.reply(receipt);
+    }
+  }
+
+  /**
+   * Whether a Driver's Village message may take the user's single tracked
+   * transient slot. Not while an ordinary listing is mid-questionnaire: that
+   * slot then holds the question the seller still has to answer.
+   */
+  private dvMayUseLivePrompt(tgUserId: number): boolean {
+    const session = this.wizard.get(tgUserId);
+    return !session || session.step === WizardStep.PHOTOS_FIRST;
+  }
+
+  /** A draft's processed image URLs in album order. */
+  private processedUrlsOf(draft: DraftWithImages): string[] {
+    return draft.images
+      .filter((img) => img.status === 'READY' && img.processedUrl)
+      .sort((a, b) => a.sortOrder - b.sortOrder)
+      .map((img) => img.processedUrl as string);
+  }
+
+  /**
+   * Send the photo-update preview (called from {@link deliverDraftPreview}, so
+   * under the same per-draft lock and send-once claim as a listing preview). The
+   * media go out through {@link sendPreviewMedia}, identical to a listing
+   * preview; the caption names the position and the buttons are Confirm/Cancel.
+   */
+  private async deliverDvPhotoPreview(
+    draft: DraftWithImages,
+    chatId: number,
+  ): Promise<void> {
+    const processedUrls = this.processedUrlsOf(draft);
+    if (processedUrls.length === 0) {
+      this.logger.error(
+        `Photo-update draft ${draft.id} reached preview with no images — skipping.`,
+      );
+      return;
+    }
+    const claimed = await this.drafts.claimPreviewSend(draft.id);
+    if (!claimed) return;
+
+    const lang = await this.langOf(chatId);
+    const position = await this.dvPhotos.describeTarget(
+      draft.targetStockId as number,
+    );
+    if (!position) {
+      // The position vanished between upload and preview: nothing to update.
+      await this.discardDvDraft(
+        draft,
+        DraftStatus.READY_FOR_PREVIEW,
+        draft.version + 1,
+      );
+      await this.bot.telegram.sendMessage(chatId, t(lang, 'dv.positionGone'));
+      return;
+    }
+
+    const caption = [
+      `${t(lang, 'dv.previewHeader')}\n`,
+      `🔢 *${t(lang, 'dv.previewCode')}:* ${escapeMarkdown(position.code1c)}`,
+      `🔩 *${t(lang, 'preview.title')}:* ${escapeMarkdown(position.title)}`,
+      `🖼 ${t(lang, 'dv.previewPhotos', { count: processedUrls.length, current: position.imageCount })}`,
+      '',
+      t(lang, 'dv.previewNote'),
+    ].join('\n');
+    const buttons = Markup.inlineKeyboard([
+      [
+        Markup.button.callback(
+          t(lang, 'btn.dvConfirm'),
+          `${DV_PHOTO_CONFIRM_PREFIX}${draft.id}`,
+        ),
+        Markup.button.callback(
+          t(lang, 'btn.dvCancel'),
+          `${DV_PHOTO_CANCEL_PREFIX}${draft.id}`,
+        ),
+      ],
+    ]);
+    if (this.dvMayUseLivePrompt(chatId)) {
+      await this.consumePromptMessage(chatId);
+    }
+    await this.sendPreviewMedia(chatId, processedUrls, caption, buttons);
+  }
+
+  /**
+   * The photo-update draft a tap refers to, only if it belongs to the tapping
+   * user — a preview is confirmable only by the person it was sent to.
+   */
+  private async loadOwnDvDraft(
+    draftId: string,
+    tgUserId: number,
+  ): Promise<DraftWithImages | null> {
+    const draft = await this.drafts.findWithImages(draftId);
+    if (!draft || !isPhotoUpdateDraft(draft)) return null;
+    return draft.tgId === BigInt(tgUserId) ? draft : null;
+  }
+
+  /**
+   * Confirm: replace ONLY the position's product gallery with the processed
+   * photos (first = primary, Product.imageUrl = first), re-project the stock,
+   * and publish the draft. Claimed READY_FOR_PREVIEW → COMMITTING first, so a
+   * double tap or a racing cancel cannot both act.
+   */
+  private async commitDvPhotos(
+    ctx: Context,
+    tgUserId: number,
+    draftId: string,
+  ): Promise<void> {
+    const lang = await this.langOf(tgUserId);
+    const draft = await this.loadOwnDvDraft(draftId, tgUserId);
+    const urls = draft ? this.processedUrlsOf(draft) : [];
+    if (!draft || urls.length === 0) {
+      await ctx.reply(t(lang, 'confirm.nothingPending'));
+      return;
+    }
+    const claimed =
+      draft.status === DraftStatus.READY_FOR_PREVIEW &&
+      (await this.drafts.tryTransition(
+        draft.id,
+        DraftStatus.READY_FOR_PREVIEW,
+        DraftStatus.COMMITTING,
+        draft.version,
+      ));
+    if (!claimed) {
+      await ctx.reply(t(lang, 'confirm.alreadyProcessed'));
+      return;
+    }
+
+    let position: DvPosition | null;
+    try {
+      position = await this.dvPhotos.replaceGallery(
+        draft.targetStockId as number,
+        urls,
+      );
+    } catch (err) {
+      this.logger.error(
+        `Photo-update commit failed for draft ${draft.id}: ${err instanceof Error ? err.message : String(err)}`,
+        err instanceof Error ? err.stack : undefined,
+      );
+      // The draft stays COMMITTING; the TTL sweep reclaims its assets. The
+      // sender may be any Telegram user, so the database error is logged only,
+      // never echoed into the chat.
+      await ctx.reply(t(lang, 'dv.updateFailed'));
+      return;
+    }
+    if (!position) {
+      // No longer a Driver's Village position: nothing was written.
+      await this.discardDvDraft(
+        draft,
+        DraftStatus.COMMITTING,
+        draft.version + 1,
+      );
+      await ctx.reply(t(lang, 'dv.positionGone'));
+      return;
+    }
+    // Both swallow and log their own failures: the gallery is already saved.
+    await this.projectToCatalog(position.stockId);
+    // COMMITTING → PUBLISHED and the originals deleted — the processed images
+    // are the product's now (exactly as for a published listing).
+    await this.finalizePublishedDraft(draft.id, draft.sellerId);
+    await ctx.reply(
+      t(lang, 'dv.photosUpdated', {
+        code: position.code1c,
+        count: urls.length,
+      }),
+    );
+  }
+
+  /**
+   * Cancel: the draft becomes CANCELLED and only ITS temporary uploads are
+   * deleted. The product, its current photos and the stock are not touched.
+   */
+  private async cancelDvPhotos(
+    ctx: Context,
+    tgUserId: number,
+    draftId: string,
+  ): Promise<void> {
+    const lang = await this.langOf(tgUserId);
+    const draft = await this.loadOwnDvDraft(draftId, tgUserId);
+    if (draft && draft.status === DraftStatus.READY_FOR_PREVIEW) {
+      await this.discardDvDraft(
+        draft,
+        DraftStatus.READY_FOR_PREVIEW,
+        draft.version,
+      );
+    }
+    await ctx.reply(t(lang, 'dv.cancelled'));
+  }
+
+  /**
+   * Make a photo-update draft terminal (CANCELLED) and, only if this call won
+   * the transition, delete the draft's own temporary assets and jobs. Winning
+   * first is what stops a racing confirm from publishing URLs whose assets were
+   * just deleted. collectPublicIds never returns an asset a product claims.
+   * Returns whether this call won (true even if the asset cleanup then failed —
+   * the TTL sweep retries that).
+   */
+  private async discardDvDraft(
+    draft: DraftWithImages,
+    from: DraftStatus,
+    version: number,
+  ): Promise<boolean> {
+    let won = false;
+    try {
+      won = await this.drafts.tryTransition(
+        draft.id,
+        from,
+        DraftStatus.CANCELLED,
+        version,
+      );
+      if (won) await this.discardDraftAssets(draft);
+    } catch (err) {
+      this.logger.error(
+        `Failed to discard photo-update draft ${draft.id}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    return won;
+  }
+
+  /**
+   * Retire a tapped photo-update preview (delete it, or strip its buttons when
+   * Telegram refuses the delete). Unlike {@link consumeCallbackMessage} this
+   * never forgets the tracked live prompt: a photo-update preview is never that
+   * prompt, and mid-questionnaire the tracked prompt is the listing question,
+   * which must still be retired when the seller answers it.
+   */
+  private async consumeDvPreviewMessage(ctx: Context): Promise<void> {
+    try {
+      await ctx.deleteMessage();
+    } catch (err) {
+      this.logger.debug(
+        `Could not delete photo-update preview (removing its buttons instead): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      await this.removeInlineKeyboard(ctx);
+    }
+  }
+
+  /**
+   * Images of a photo-update draft failed after retries. There is no form to
+   * keep, so the draft is dropped and the user is asked to send the photos
+   * again (the ordinary retry/cancel buttons act on listing drafts only).
+   */
+  private async onDvPhotosFailed(event: DraftImagesFailedEvent): Promise<void> {
+    const tgUserId = Number(event.tgId);
+    try {
+      const lang = await this.resolveLang(tgUserId);
+      const draft = await this.drafts.findWithImages(event.draftId);
+      if (!draft || draft.status !== DraftStatus.CREATING) return;
+      // Two workers settling the last images together can both emit the event;
+      // only the handler that wins the drop tells the user, so they hear once.
+      const won = await this.discardDvDraft(
+        draft,
+        DraftStatus.CREATING,
+        draft.version,
+      );
+      if (!won) return;
+      if (this.dvMayUseLivePrompt(tgUserId)) {
+        await this.consumePromptMessage(tgUserId);
+      }
+      await this.bot.telegram.sendMessage(
+        tgUserId,
+        t(lang, 'dv.imagesFailed', { count: event.failedCount }),
+      );
+    } catch (err) {
+      this.logger.error(
+        `Failed to handle image failure for photo-update draft ${event.draftId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
   // ── Pending confirmation session ────────────────────────────────────────────
   /**
    * Store the single pending confirmation for a user, discarding any existing one
@@ -2839,6 +3262,21 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     // question — is spent. In a seller DM the chat id IS the user id, which is
     // what lets this ctx-free path reach the tracked prompt at all.
     await this.consumePromptMessage(chatId);
+    await this.sendPreviewMedia(chatId, processedUrls, caption, buttons);
+  }
+
+  /**
+   * The preview's MEDIA rendering, shared by the listing preview and the Driver's
+   * Village photo-update preview so both look identical: one photo → the photo
+   * with the caption and buttons; an album → the photos, then the caption with
+   * the buttons; any media failure → the caption as text (buttons kept).
+   */
+  private async sendPreviewMedia(
+    chatId: number,
+    processedUrls: string[],
+    caption: string,
+    buttons: ReturnType<typeof Markup.inlineKeyboard>,
+  ): Promise<void> {
     try {
       if (processedUrls.length === 1) {
         await this.bot.telegram.sendPhoto(chatId, processedUrls[0], {

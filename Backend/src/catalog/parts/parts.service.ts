@@ -391,7 +391,7 @@ export class PartsService {
     // "make_chevrolet" and "Chevrolet" work. Universal parts (no fit rows) are
     // included since they fit every make/model.
     if (q.make) and.push(this.makeWhere(q.make));
-    if (q.model) and.push(this.modelWhere(q.model));
+    if (q.model) and.push(this.modelWhere(q.model, q.make));
 
     // Garage vehicle: only compatible parts. A part fits when it is universal, OR
     // its make/model fit rows match the vehicle, OR its trim/engine compatibility
@@ -519,26 +519,53 @@ export class PartsService {
             },
           },
         },
+        // Make-wide parts ("every model of this make") match their make.
+        { makeFits: { some: this.makeFitMatch(value) } },
       ],
     };
   }
 
-  /** Match universal parts OR parts whose fit rows reference the model. */
-  private modelWhere(model: string): Prisma.CatalogPartWhereInput {
+  /**
+   * Match universal parts OR parts whose fit rows reference the model, OR
+   * make-wide parts of that model's make. The make is known from a model SLUG
+   * (model_<make>_<model>) or from an explicit `make` filter; a bare model
+   * name with no make gives no make to match, so make-wide parts are not
+   * claimed for it.
+   */
+  private modelWhere(
+    model: string,
+    make?: string,
+  ): Prisma.CatalogPartWhereInput {
     const value = model.trim();
-    return {
-      OR: [
-        { isUniversal: true },
-        {
-          fits: {
-            some: {
-              OR: [
-                { modelSlug: value },
-                { modelName: { equals: value, mode: 'insensitive' } },
-              ],
-            },
+    const or: Prisma.CatalogPartWhereInput[] = [
+      { isUniversal: true },
+      {
+        fits: {
+          some: {
+            OR: [
+              { modelSlug: value },
+              { modelName: { equals: value, mode: 'insensitive' } },
+            ],
           },
         },
+      },
+    ];
+    const slugMake = /^model_([a-z0-9-]+)_/.exec(value)?.[1];
+    if (slugMake) {
+      or.push({ makeFits: { some: { makeSlug: `make_${slugMake}` } } });
+    }
+    if (make?.trim()) {
+      or.push({ makeFits: { some: this.makeFitMatch(make.trim()) } });
+    }
+    return { OR: or };
+  }
+
+  /** A make-wide fit row matching a make given as slug or canonical name. */
+  private makeFitMatch(value: string): Prisma.CatalogPartMakeFitWhereInput {
+    return {
+      OR: [
+        { makeSlug: value },
+        { makeName: { equals: value, mode: 'insensitive' } },
       ],
     };
   }
@@ -568,6 +595,17 @@ export class PartsService {
           makeName: { equals: vehicle.makeName, mode: 'insensitive' },
         });
       or.push({ fits: { some: { AND: [{ OR: fitConds }] } } });
+    }
+    // A make-wide part fits every model of its make, so the garage vehicle's
+    // make alone is enough to match it.
+    if (vehicle.makeName) {
+      or.push({
+        makeFits: {
+          some: {
+            makeName: { equals: vehicle.makeName, mode: 'insensitive' },
+          },
+        },
+      });
     }
 
     if (vehicle.trimId || vehicle.engineId) {

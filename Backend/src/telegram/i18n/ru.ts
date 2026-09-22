@@ -196,4 +196,23 @@ export const RU: BotStrings = {
   'oilType.SYNTHETIC': 'Синтетическое',
   'oilType.SEMI_SYNTHETIC': 'Полусинтетическое',
   'oilType.MINERAL': 'Минеральное',
+
+  'dv.notFound':
+    "❌ Позиция Driver's Village с кодом {code} не найдена. Проверьте код 1С в подписи к фото.",
+  'dv.photosReceived':
+    '📸 Фото получены ({count}) для позиции {code}. Обрабатываем — пришлём предпросмотр.',
+  'dv.previewHeader': "🖼 *Новые фото для позиции Driver's Village*",
+  'dv.previewCode': 'Код 1С',
+  'dv.previewPhotos': 'Фото: {count} (сейчас у товара: {current})',
+  'dv.previewNote':
+    'После подтверждения текущие фото товара будут заменены этими. Название, цена и остальные данные не меняются.',
+  'btn.dvConfirm': '✅ Подтвердить',
+  'btn.dvCancel': '❌ Отменить',
+  'dv.photosUpdated': '✅ Фото позиции {code} обновлены ({count}).',
+  'dv.cancelled': 'Обновление фото отменено. Фото товара не изменены.',
+  'dv.positionGone': '⚠️ Позиция больше не найдена — фото не сохранены.',
+  'dv.imagesFailed':
+    '⚠️ Не удалось обработать фото ({count}). Отправьте фото ещё раз с кодом 1С в подписи.',
+  'dv.updateFailed':
+    '⚠️ Не удалось сохранить фото. Отправьте фото ещё раз с кодом 1С в подписи.',
 };

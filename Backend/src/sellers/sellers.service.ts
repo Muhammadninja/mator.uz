@@ -1,5 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { BotLanguage, SellerStatus } from '@prisma/client';
+import { BotLanguage, SellerStatus, SellerType } from '@prisma/client';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { PrismaService } from '../prisma/prisma.service';
 import { SellerEvent, type SellerApprovedEvent } from './seller-events';
@@ -40,7 +40,15 @@ export class SellersService {
     return this.prisma.seller.upsert({
       where: { tgId },
       update: {},
-      create: { tgId, storeName, phone, status: SellerStatus.PENDING },
+      // Stated explicitly (it is also the column default): anyone onboarding
+      // through the bot is a TELEGRAM seller, with a tg_id and a phone.
+      create: {
+        sellerType: SellerType.TELEGRAM,
+        tgId,
+        storeName,
+        phone,
+        status: SellerStatus.PENDING,
+      },
     });
   }
 
@@ -67,9 +75,13 @@ export class SellersService {
       data: { status },
     });
 
+    // The approval message goes to the seller's Telegram chat. A BUSINESS
+    // seller has no Telegram account (tgId is NULL), so there is no one to
+    // message — the status change itself is unaffected.
     if (
       status === SellerStatus.ACTIVE &&
-      seller.status !== SellerStatus.ACTIVE
+      seller.status !== SellerStatus.ACTIVE &&
+      updated.tgId !== null
     ) {
       const payload: SellerApprovedEvent = {
         sellerId: updated.id,

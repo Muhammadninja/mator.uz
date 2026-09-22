@@ -26,4 +26,7 @@ export interface DraftImagesFailedEvent {
   draftId: string;
   tgId: bigint;
   failedCount: number;
+  /** Present only for a PHOTO-UPDATE draft (the Stock it targets). Absent for
+   *  every ordinary listing draft, whose payload is unchanged. */
+  targetStockId?: number;
 }

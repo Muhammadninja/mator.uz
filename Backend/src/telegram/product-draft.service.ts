@@ -164,6 +164,18 @@ void _requiredFieldsAreReadable;
  * Title and price are required by every kind, so they are checked here rather
  * than repeated in every capability entry.
  */
+/**
+ * A PHOTO-UPDATE draft replaces the gallery of an existing Stock's product (a
+ * Driver's Village position found by its code_1c). It has no questionnaire, so
+ * its "form" is complete by definition and the rendezvous waits on the image
+ * axis alone. Every ordinary listing draft has `targetStockId` NULL.
+ */
+export function isPhotoUpdateDraft(draft: {
+  targetStockId?: number | null;
+}): boolean {
+  return typeof draft.targetStockId === 'number';
+}
+
 export function isDraftFormComplete(draft: DraftFormFields): boolean {
   if (draft.title === null || draft.priceUzs === null) return false;
   return capabilitiesOf(draft.kind).requiredFields.every(
@@ -188,6 +200,8 @@ export class ProductDraftService {
     formStep: string;
     expiresAt: Date;
     images: DraftImageInput[];
+    /** Set only for a PHOTO-UPDATE draft (see isPhotoUpdateDraft). */
+    targetStockId?: number;
   }): Promise<DraftWithImages> {
     const draftId = prefixedId(IdPrefix.DRAFT);
     return this.prisma.productDraft.create({
@@ -198,6 +212,9 @@ export class ProductDraftService {
         status: DraftStatus.CREATING,
         formStep: params.formStep,
         expiresAt: params.expiresAt,
+        ...(params.targetStockId !== undefined
+          ? { targetStockId: params.targetStockId }
+          : {}),
         images: {
           create: params.images.map((img) => ({
             id: prefixedId(IdPrefix.DRAFT_IMAGE),

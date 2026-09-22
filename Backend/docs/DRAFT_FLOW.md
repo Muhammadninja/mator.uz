@@ -207,6 +207,18 @@ would race the worker and the coordinator. Cloning makes the old draft terminal
 (nothing can advance it, the sweep ignores it) while the new one starts clean —
 and the seller retypes nothing.
 
+### Photo-update drafts (Driver's Village)
+
+A draft with `targetStockId` set is a **photo-update draft**: photos captioned
+with a Driver's Village `code_1c` (see `docs/DRIVERS_VILLAGE_IMPORT.md` §7). It
+uses the same image rows, worker, rendezvous and preview media, but has no
+questionnaire (the coordinator treats its form axis as complete), shows
+✅ Confirm / ❌ Cancel (`dvph:ok|no:<draftId>`), and on confirm replaces the
+gallery of that existing stock's product instead of creating one. It never uses
+the per-user `pending` slot, the resume prompt or the retry buttons; an image
+failure drops the draft and asks the user to resend. The TTL sweep covers it
+like any other draft.
+
 ---
 
 ## 6. Resume (/start on an in-progress draft)

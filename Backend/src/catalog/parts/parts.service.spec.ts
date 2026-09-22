@@ -417,3 +417,40 @@ describe('PartsService — spare-part queries do not silently change', () => {
     expect(JSON.stringify(makeCond.OR)).toContain('isUniversal');
   });
 });
+
+describe('PartsService — make-wide fitment (imported "all models of a make")', () => {
+  const makeFitsIn = (cond: unknown) => JSON.stringify(cond).includes('makeFits');
+
+  it('a make filter also matches make-wide parts of that make', async () => {
+    const { and } = await whereFor({ make: 'make_skoda' });
+    const makeCond = and.find((c) => 'OR' in c) as { OR: unknown[] };
+    expect(makeCond.OR).toContainEqual({
+      makeFits: { some: { OR: [{ makeSlug: 'make_skoda' }, { makeName: { equals: 'make_skoda', mode: 'insensitive' } }] } },
+    });
+  });
+
+  it('a model SLUG matches make-wide parts of the make encoded in the slug', async () => {
+    const { and } = await whereFor({ model: 'model_chevrolet_cobalt' });
+    const modelCond = and.find((c) => 'OR' in c) as { OR: unknown[] };
+    expect(modelCond.OR).toContainEqual({ makeFits: { some: { makeSlug: 'make_chevrolet' } } });
+  });
+
+  it('a bare model NAME claims make-wide parts only together with an explicit make', async () => {
+    const alone = await whereFor({ model: 'Cobalt' });
+    expect(makeFitsIn(alone.and)).toBe(false);
+
+    const withMake = await whereFor({ model: 'Cobalt', make: 'Chevrolet' });
+    const modelCond = withMake.and.find((c) => JSON.stringify(c).includes('"modelName"')) as { OR: unknown[] };
+    expect(makeFitsIn(modelCond)).toBe(true);
+  });
+
+  it('a garage vehicle matches make-wide parts of its make', async () => {
+    const { svc, prisma } = makeService();
+    prisma.vehicle.findUnique.mockResolvedValue({
+      trimId: null, engineId: null, year: 2020, make: { name: 'Skoda' }, model: { name: 'Kodiaq' },
+    });
+    await svc.list({ vehicle_id: 'v1' });
+    const where = JSON.stringify((prisma.calls.findMany as { where: unknown }).where);
+    expect(where).toContain('{"makeFits":{"some":{"makeName":{"equals":"Skoda","mode":"insensitive"}}}}');
+  });
+});
