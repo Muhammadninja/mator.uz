@@ -11,3 +11,4 @@ keys/
 .DS_Store
 .mcp.json
 logs/
+imports/
