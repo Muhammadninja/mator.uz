@@ -82,9 +82,33 @@ function part(over: Partial<PartWithRelations> = {}): PartWithRelations {
     } as never,
     compatibilities: [],
     fits: [],
+    makeFits: [],
     ...over,
   };
 }
+
+describe('presentPartItem — make_fits[]', () => {
+  it('is empty for a part without make-wide fitment', () => {
+    expect(presentPartItem(part(), null).make_fits).toEqual([]);
+  });
+
+  it('lists make-wide fitment sorted by make slug, separate from fits[]', () => {
+    const out = presentPartItem(
+      part({
+        makeFits: [
+          { partId: 'part-1', makeSlug: 'make_skoda', makeName: 'Skoda' },
+          { partId: 'part-1', makeSlug: 'make_lada', makeName: 'Lada' },
+        ],
+      }),
+      null,
+    );
+    expect(out.make_fits).toEqual([
+      { make_slug: 'make_lada', make_name: 'Lada' },
+      { make_slug: 'make_skoda', make_name: 'Skoda' },
+    ]);
+    expect(out.fits).toEqual([]);
+  });
+});
 
 describe('presentPartItem — fits[]', () => {
   it('maps each fit row to the snake_case contract shape', () => {

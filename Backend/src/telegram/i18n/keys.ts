@@ -143,6 +143,29 @@ export interface BotStrings {
   'oilType.SYNTHETIC': string;
   'oilType.SEMI_SYNTHETIC': string;
   'oilType.MINERAL': string;
+
+  // ── Driver's Village photo update (photos + caption = code_1c) ────────────
+  /** No Driver's Village position has this code_1c. Nothing was written. */
+  'dv.notFound': string;
+  /** Photos accepted for a position; processing started. */
+  'dv.photosReceived': string;
+  /** Preview caption lines (legacy Markdown). */
+  'dv.previewHeader': string;
+  'dv.previewCode': string;
+  'dv.previewPhotos': string;
+  'dv.previewNote': string;
+  'btn.dvConfirm': string;
+  'btn.dvCancel': string;
+  /** Confirmed: the position's gallery now shows the new photos. */
+  'dv.photosUpdated': string;
+  /** Cancelled: the position's photos are unchanged. */
+  'dv.cancelled': string;
+  /** The position disappeared before the preview/confirm. Nothing was saved. */
+  'dv.positionGone': string;
+  /** Some photos could not be processed; the update was dropped. */
+  'dv.imagesFailed': string;
+  /** Saving the new gallery failed. Plain text: never carries the raw error. */
+  'dv.updateFailed': string;
 }
 
 /** A string key, for callers that pass one around. */

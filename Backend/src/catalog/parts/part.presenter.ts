@@ -26,6 +26,7 @@ export const PART_INCLUDE = {
   seller: true,
   compatibilities: true,
   fits: true,
+  makeFits: true,
 } satisfies Prisma.CatalogPartInclude;
 
 export type PartWithRelations = Prisma.CatalogPartGetPayload<{
@@ -275,6 +276,13 @@ export function presentPartItem(
         model_slug: f.modelSlug,
         model_name: f.modelName,
       })),
+    // Make-wide fitment: the part fits EVERY model of these makes (e.g. an
+    // imported dealer position whose source names a make but no model).
+    // Additive — clients that do not read it are unaffected; `fits` above keeps
+    // its one-model-per-entry shape. Empty for most parts.
+    make_fits: [...(part.makeFits ?? [])]
+      .sort((a, b) => a.makeSlug.localeCompare(b.makeSlug))
+      .map((f) => ({ make_slug: f.makeSlug, make_name: f.makeName })),
     images: part.images,
     // Curated PRODUCT rating (admin-maintained; distinct from `seller.rating_avg`
     // below, which rates the DEALER). `Number(...)` unwraps the Prisma Decimal —

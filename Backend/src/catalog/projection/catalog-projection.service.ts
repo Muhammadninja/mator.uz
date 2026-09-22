@@ -39,6 +39,20 @@ export class CatalogProjectionService {
   // same source row always maps to the same buyer id (this is what makes the
   // projection idempotent). No ids are hardcoded.
   static catalogSellerId = (sellerId: number) => `seller_${sellerId}`;
+
+  /**
+   * The CatalogSeller a supply-side seller's listings project into. A seller an
+   * operator explicitly linked to an existing curated dealer
+   * (`Seller.catalogSellerId`, e.g. 'drivers-village') projects into THAT
+   * dealer; every other seller keeps its synthetic `seller_<id>` storefront.
+   * Never inferred from names — the link is an explicit column or nothing.
+   */
+  static catalogSellerIdFor = (seller: {
+    id: number;
+    catalogSellerId?: string | null;
+  }): string =>
+    seller.catalogSellerId ??
+    CatalogProjectionService.catalogSellerId(seller.id);
   static partBrandId = (brandId: number) => `brand_${brandId}`;
   static catalogPartId = (stockId: number) => `part_stock_${stockId}`;
 
@@ -85,6 +99,7 @@ export class CatalogProjectionService {
       include: {
         images: { orderBy: { sortOrder: 'asc' as const } },
         partModels: { include: { model: { include: { brand: true } } } },
+        partMakes: { include: { brand: true } },
       },
     },
   } satisfies Prisma.StockInclude;
@@ -109,6 +124,23 @@ export class CatalogProjectionService {
     if (!stock) {
       this.logger.warn(`projectStock(${stockId}): stock not found — skipped`);
       return null;
+    }
+
+    // A seller linked to a curated dealer projects into that dealer's EXISTING
+    // row, which this service never creates (it is admin-managed presentation).
+    // Fail loudly with the actual cause rather than letting the part upsert die
+    // on an opaque foreign-key error.
+    if (stock.seller.catalogSellerId) {
+      const dealer = await this.prisma.catalogSeller.findUnique({
+        where: { id: stock.seller.catalogSellerId },
+        select: { id: true },
+      });
+      if (!dealer) {
+        throw new Error(
+          `projectStock(${stockId}): seller #${stock.sellerId} is linked to ` +
+            `catalog seller "${stock.seller.catalogSellerId}", which does not exist`,
+        );
+      }
     }
 
     const ops = this.buildProjectionOps(stock);
@@ -201,6 +233,10 @@ export class CatalogProjectionService {
     for (const pm of product.partModels) {
       brandsForProduct.set(pm.model.brand.id, pm.model.brand.name);
     }
+    // Make-wide links name a vehicle brand just as specific-model links do.
+    for (const pmk of product.partMakes ?? []) {
+      brandsForProduct.set(pmk.brand.id, pmk.brand.name);
+    }
 
     // Parent brands (optional FK — only if the product has vehicle links).
     for (const [bId, bName] of brandsForProduct) {
@@ -214,23 +250,29 @@ export class CatalogProjectionService {
       );
     }
 
-    // Parent seller (required FK).
-    const sellerId = CatalogProjectionService.catalogSellerId(stock.sellerId);
-    const sellerName =
-      stock.seller.storeName ??
-      stock.seller.marketName ??
-      `Seller ${stock.sellerId}`;
-    ops.push(
-      this.prisma.catalogSeller.upsert({
-        where: { id: sellerId },
-        update: { name: sellerName, internalSellerId: stock.sellerId },
-        create: {
-          id: sellerId,
-          name: sellerName,
-          internalSellerId: stock.sellerId,
-        },
-      }),
-    );
+    // Parent seller (required FK). A seller linked to a curated dealer projects
+    // into that dealer's existing row, which is admin-owned presentation (name,
+    // logo, storefront flags) and therefore NOT upserted here — projectStock
+    // verifies it exists. Every other seller keeps its synthetic seller_<id>
+    // row, upserted exactly as before.
+    const sellerId = CatalogProjectionService.catalogSellerIdFor(stock.seller);
+    if (!stock.seller.catalogSellerId) {
+      const sellerName =
+        stock.seller.storeName ??
+        stock.seller.marketName ??
+        `Seller ${stock.sellerId}`;
+      ops.push(
+        this.prisma.catalogSeller.upsert({
+          where: { id: sellerId },
+          update: { name: sellerName, internalSellerId: stock.sellerId },
+          create: {
+            id: sellerId,
+            name: sellerName,
+            internalSellerId: stock.sellerId,
+          },
+        }),
+      );
+    }
 
     // Pick a brandId for the listing: exactly one linked vehicle brand → use it;
     // otherwise null (a multi-brand or brandless listing has no single part
@@ -249,12 +291,23 @@ export class CatalogProjectionService {
     // to BOTH searches (its true type is unknown). Synthetic idempotency keys
     // (tg_…, produced when a listing carried no number) are never real numbers,
     // so they are excluded from both arrays.
-    const { gmNumbers, oemNumbers } =
-      CatalogProjectionService.numberSearchArrays(
-        product.gmNumber,
-        product.oemNumber,
-        product.partNumberType,
-      );
+    const legacyNumbers = CatalogProjectionService.numberSearchArrays(
+      product.gmNumber,
+      product.oemNumber,
+      product.partNumberType,
+    );
+    // Plus the multi-valued LABELED numbers an import stores (already in the
+    // normalizeOem canonical form). Each list keeps its own label — a GM number
+    // is never copied into the OEM array or vice versa — and duplicates are
+    // collapsed so a number is listed once.
+    const gmNumbers = uniqueStrings([
+      ...legacyNumbers.gmNumbers,
+      ...(product.gmNumbers ?? []),
+    ]);
+    const oemNumbers = uniqueStrings([
+      ...legacyNumbers.oemNumbers,
+      ...(product.oemNumbers ?? []),
+    ]);
 
     // Point the part at its PartCategory, in priority order:
     //
@@ -287,6 +340,12 @@ export class CatalogProjectionService {
       // currency: schema default "UZS"
       condition: PartCondition.NEW, // supply side has no condition — schema default
       inStock: stock.quantity > 0,
+      // The on-hand count, ONLY for a position imported from an external stock
+      // system — the one case where Stock.quantity is a real warehouse count.
+      // Telegram listings carry the schema default quantity (1), which is not a
+      // count, so their stockQty is left to its existing owners exactly as
+      // before.
+      ...(stock.sourceSystem ? { stockQty: stock.quantity } : {}),
       // deliveryEtaDaysMin/Max: no source → left null (both optional)
       images,
       // Classified attributes projected verbatim from the supply-side Product
@@ -340,6 +399,20 @@ export class CatalogProjectionService {
       ops.push(
         this.prisma.catalogPartFit.createMany({
           data: fitRows,
+          skipDuplicates: true,
+        }),
+      );
+    }
+
+    // Make-wide fitment ("every model of this make"), reconciled the same way:
+    // replace-then-insert, so a re-projection drops a make the listing no
+    // longer claims. Products without part_makes rows project none.
+    ops.push(this.prisma.catalogPartMakeFit.deleteMany({ where: { partId } }));
+    const makeFitRows = this.buildMakeFitRows(partId, product.partMakes ?? []);
+    if (makeFitRows.length > 0) {
+      ops.push(
+        this.prisma.catalogPartMakeFit.createMany({
+          data: makeFitRows,
           skipDuplicates: true,
         }),
       );
@@ -407,4 +480,32 @@ export class CatalogProjectionService {
     }
     return [...byModelSlug.values()];
   }
+
+  /**
+   * Deduplicated make-wide fit rows from a product's part_makes links, using the
+   * same make slug convention as {@link buildFitRows} (make_<slug>), so a buyer
+   * make filter matches both tables with one value.
+   */
+  private buildMakeFitRows(
+    partId: string,
+    partMakes: Array<{ brand: { name: string } }>,
+  ): { partId: string; makeSlug: string; makeName: string }[] {
+    const bySlug = new Map<
+      string,
+      { partId: string; makeSlug: string; makeName: string }
+    >();
+    for (const pmk of partMakes) {
+      const makeName = pmk.brand.name;
+      const makeSlug = `make_${CatalogProjectionService.slugify(makeName)}`;
+      if (!bySlug.has(makeSlug)) {
+        bySlug.set(makeSlug, { partId, makeSlug, makeName });
+      }
+    }
+    return [...bySlug.values()];
+  }
+}
+
+/** Order-preserving de-duplication of non-blank strings. */
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.filter((v) => v.trim() !== ''))];
 }

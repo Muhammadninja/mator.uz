@@ -431,3 +431,96 @@ describe('CatalogProjectionService.numberSearchArrays', () => {
     });
   });
 });
+
+describe('CatalogProjectionService — imported dealer positions (Driver\'s Village)', () => {
+  let prisma: PrismaMock;
+  let svc: CatalogProjectionService;
+
+  beforeEach(() => {
+    prisma = createPrismaMock();
+    svc = new CatalogProjectionService(prisma as any);
+  });
+
+  /** A Stock imported from 1C for the seller linked to 'drivers-village'. */
+  const imported = (over: Partial<any> = {}) =>
+    buildStock({
+      quantity: 8,
+      sourceSystem: 'DRIVERS_VILLAGE_1C',
+      sourceCode: '00-00001431',
+      unit: 'PCS',
+      seller: { id: 7, storeName: 'DV Telegram', marketName: null, catalogSellerId: 'drivers-village' },
+      ...over,
+      product: {
+        ...buildStock().product,
+        gmNumber: null,
+        partNumberType: 'OEM',
+        gmNumbers: [],
+        oemNumbers: ['96611630', 'S4511006'],
+        partMakes: [],
+        ...(over.product ?? {}),
+      },
+    });
+
+  it('projects a linked seller into the curated dealer and never upserts/renames that dealer', () => {
+    svc.buildProjectionOps(imported());
+    expect(upsertArg(prisma, 'catalogPart').create.sellerId).toBe('drivers-village');
+    expect(prisma.catalogSeller.upsert).not.toHaveBeenCalled();
+    expect(CatalogProjectionService.catalogSellerIdFor({ id: 7, catalogSellerId: null })).toBe('seller_7');
+  });
+
+  it('refuses to project into a linked dealer that does not exist', async () => {
+    prisma.stock.findUnique.mockResolvedValue(imported());
+    prisma.catalogSeller.findUnique.mockResolvedValue(null);
+    await expect(svc.projectStock(500)).rejects.toThrow(/catalog seller "drivers-village", which does not exist/);
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('projects when the linked dealer exists', async () => {
+    prisma.stock.findUnique.mockResolvedValue(imported());
+    prisma.catalogSeller.findUnique.mockResolvedValue({ id: 'drivers-village' });
+    await expect(svc.projectStock(500)).resolves.toBe('part_stock_500');
+  });
+
+  it('projects the labeled number arrays without cross-copying, merged with the legacy number', () => {
+    svc.buildProjectionOps(imported());
+    expect(upsertArg(prisma, 'catalogPart').create).toMatchObject({ oemNumbers: ['96611630', 'S4511006'], gmNumbers: [] });
+
+    prisma.catalogPart.upsert.mockClear();
+    svc.buildProjectionOps(buildStock({ product: { ...buildStock().product, partNumberType: 'GM', gmNumbers: ['96535062', '11111111'], oemNumbers: [] } }));
+    // Legacy GM-labeled number + the array, the duplicate collapsed.
+    expect(upsertArg(prisma, 'catalogPart').create).toMatchObject({ gmNumbers: ['96535062', '11111111'], oemNumbers: [] });
+  });
+
+  it('writes the exact on-hand count only for imported stock', () => {
+    svc.buildProjectionOps(imported({ quantity: 1743 }));
+    expect(upsertArg(prisma, 'catalogPart').create).toMatchObject({ inStock: true, stockQty: 1743 });
+
+    prisma.catalogPart.upsert.mockClear();
+    svc.buildProjectionOps(imported({ quantity: 0 }));
+    expect(upsertArg(prisma, 'catalogPart').create).toMatchObject({ inStock: false, stockQty: 0 });
+
+    // A Telegram listing's default quantity is not a count: stockQty untouched.
+    prisma.catalogPart.upsert.mockClear();
+    svc.buildProjectionOps(buildStock());
+    expect(upsertArg(prisma, 'catalogPart').create).not.toHaveProperty('stockQty');
+  });
+
+  it('projects make-wide fitment into catalog_part_make_fits, reconciled every time', () => {
+    svc.buildProjectionOps(
+      imported({ product: { isUniversal: false, partModels: [], partMakes: [{ brand: { id: 9, name: 'Skoda' } }, { brand: { id: 9, name: 'Skoda' } }] } }),
+    );
+    expect(prisma.catalogPartMakeFit.deleteMany).toHaveBeenCalledWith({ where: { partId: 'part_stock_500' } });
+    expect(prisma.catalogPartMakeFit.createMany.mock.calls.at(-1)?.[0].data).toEqual([
+      { partId: 'part_stock_500', makeSlug: 'make_skoda', makeName: 'Skoda' },
+    ]);
+    expect(prisma.catalogPartFit.createMany).not.toHaveBeenCalled();
+    // The make-wide brand also fills the single-brand slot.
+    expect(upsertArg(prisma, 'catalogPart').create.brandId).toBe('brand_9');
+  });
+
+  it('clears make-wide rows for a product without part_makes', () => {
+    svc.buildProjectionOps(buildStock());
+    expect(prisma.catalogPartMakeFit.deleteMany).toHaveBeenCalledWith({ where: { partId: 'part_stock_500' } });
+    expect(prisma.catalogPartMakeFit.createMany).not.toHaveBeenCalled();
+  });
+});

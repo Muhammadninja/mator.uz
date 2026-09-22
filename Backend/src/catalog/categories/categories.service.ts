@@ -127,6 +127,14 @@ export class CategoriesService {
 
     const or: Prisma.CatalogPartWhereInput[] = [{ isUniversal: true }];
     if (fitConds.length > 0) or.push({ fits: { some: { OR: fitConds } } });
+    // Make-wide parts ("every model of this make") fit the vehicle by make.
+    if (v.make?.name) {
+      or.push({
+        makeFits: {
+          some: { makeName: { equals: v.make.name, mode: 'insensitive' } },
+        },
+      });
+    }
     return { OR: or };
   }
 }

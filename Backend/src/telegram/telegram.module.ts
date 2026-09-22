@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TelegramService } from './telegram.service';
 import { TelegramOfferService } from './telegram-offer.service';
+import { DriversVillagePhotoService } from './drivers-village-photo.service';
 import { SellersModule } from '../sellers/sellers.module';
 import { CatalogModule } from '../catalog/catalog.module';
 import { PartCategoryModule } from '../catalog/categories/part-category.module';
@@ -23,6 +24,12 @@ import { SourcingModule } from '../sourcing/sourcing.module';
     PartCategoryModule,
     SourcingModule,
   ],
-  providers: [TelegramService, TelegramOfferService],
+  // DriversVillagePhotoService: Driver's Village photo updates (album + caption
+  // = code_1c) — position lookup and gallery replacement for TelegramService.
+  providers: [
+    TelegramService,
+    TelegramOfferService,
+    DriversVillagePhotoService,
+  ],
 })
 export class TelegramModule {}

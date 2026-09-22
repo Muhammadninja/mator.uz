@@ -1108,13 +1108,24 @@ describe('TelegramService — draft flow (photos-first)', () => {
       expect(offenders).toEqual([]);
     });
 
-    it('the only productImage writes are the confirm path’s deleteMany + createMany', () => {
+    it('the only productImage writes are the two confirm paths’ deleteMany + createMany', () => {
+      const WRITE = /productImage\s*\.\s*(create|createMany|delete|deleteMany|update|updateMany|upsert)\b/g;
       const writers = sourceFiles(srcDir).filter((f) =>
-        /productImage\s*\.\s*(create|createMany|delete|deleteMany|update|updateMany|upsert)\b/.test(
-          readFileSync(f, 'utf8'),
-        ),
+        new RegExp(WRITE.source).test(readFileSync(f, 'utf8')),
       );
-      expect(writers.map((f) => basename(f))).toEqual(['telegram.service.ts']);
+      // The listing confirm path, and the Driver's Village photo-update confirm
+      // path (album + caption = code_1c) — nothing else writes product photos.
+      expect(writers.map((f) => basename(f)).sort()).toEqual([
+        'drivers-village-photo.service.ts',
+        'telegram.service.ts',
+      ]);
+      // …and both only ever REPLACE a gallery (deleteMany + createMany).
+      for (const f of writers) {
+        const ops = new Set(
+          [...readFileSync(f, 'utf8').matchAll(WRITE)].map((m) => m[1]),
+        );
+        expect([...ops].sort()).toEqual(['createMany', 'deleteMany']);
+      }
     });
   });
 });

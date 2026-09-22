@@ -9,6 +9,7 @@ import {
 import {
   ProductDraftService,
   isDraftFormComplete,
+  isPhotoUpdateDraft,
   type DraftWithImages,
 } from './product-draft.service';
 import { DraftTelemetry, DraftMetric } from './draft-telemetry';
@@ -90,7 +91,11 @@ export class DraftCoordinator {
       // image pipeline finished, never that the flow was allowed to advance. The
       // antifreeze bug looked exactly like a stuck image (total=2 ready=2) while
       // the real blocker was formComplete=false on a fully answered questionnaire.
-      const formComplete = isDraftFormComplete(draft);
+      // A photo-update draft (new photos for an existing Driver's Village
+      // position) has no questionnaire: its form axis is complete by definition,
+      // so it waits on the images alone.
+      const formComplete =
+        isPhotoUpdateDraft(draft) || isDraftFormComplete(draft);
       this.logDecision(draft, {
         stillProcessing,
         failedCount,
@@ -192,6 +197,11 @@ export class DraftCoordinator {
       draftId: draft.id,
       tgId: draft.tgId,
       failedCount,
+      // Only a photo-update draft carries its target, so the listener can pick
+      // the right recovery; an ordinary draft's payload is exactly as before.
+      ...(isPhotoUpdateDraft(draft)
+        ? { targetStockId: draft.targetStockId as number }
+        : {}),
     };
     this.logger.warn(
       `Draft ${draft.id}: ${failedCount} image(s) failed after retries`,

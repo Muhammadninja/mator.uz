@@ -195,4 +195,24 @@ export const EN: BotStrings = {
   'oilType.SYNTHETIC': 'Synthetic',
   'oilType.SEMI_SYNTHETIC': 'Semi-synthetic',
   'oilType.MINERAL': 'Mineral',
+
+  'dv.notFound':
+    "❌ No Driver's Village position has the code {code}. Check the 1C code in the photo caption.",
+  'dv.photosReceived':
+    '📸 Photos received ({count}) for position {code}. Processing — a preview will follow.',
+  'dv.previewHeader': "🖼 *New photos for a Driver's Village position*",
+  'dv.previewCode': '1C code',
+  'dv.previewPhotos': 'Photos: {count} (the product has {current} now)',
+  'dv.previewNote':
+    "On confirm, the product's current photos are replaced with these. Title, price and all other data stay unchanged.",
+  'btn.dvConfirm': '✅ Confirm',
+  'btn.dvCancel': '❌ Cancel',
+  'dv.photosUpdated': '✅ Photos of position {code} updated ({count}).',
+  'dv.cancelled': "Photo update cancelled. The product's photos are unchanged.",
+  'dv.positionGone':
+    '⚠️ The position no longer exists — the photos were not saved.',
+  'dv.imagesFailed':
+    '⚠️ Could not process the photos ({count}). Send them again with the 1C code in the caption.',
+  'dv.updateFailed':
+    '⚠️ Could not save the photos. Send them again with the 1C code in the caption.',
 };

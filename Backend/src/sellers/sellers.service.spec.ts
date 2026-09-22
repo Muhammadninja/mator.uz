@@ -132,3 +132,34 @@ describe('SellersService.updateStatus — approval event', () => {
     expect(result).toMatchObject({ id: 7, status: SellerStatus.ACTIVE });
   });
 });
+
+describe('SellersService — TELEGRAM vs BUSINESS sellers', () => {
+  it('onboarding through the bot always creates a TELEGRAM seller with its tgId and phone', async () => {
+    const { svc, prisma } = makeService(null);
+
+    await svc.upsertFromBot(BigInt(555), 'Avtomir', '+998901234567');
+
+    expect(prisma.seller.upsert).toHaveBeenCalledWith({
+      where: { tgId: BigInt(555) },
+      update: {},
+      create: {
+        sellerType: 'TELEGRAM',
+        tgId: BigInt(555),
+        storeName: 'Avtomir',
+        phone: '+998901234567',
+        status: SellerStatus.PENDING,
+      },
+    });
+  });
+
+  it('approving a BUSINESS seller (no Telegram account) changes the status but sends no Telegram notice', async () => {
+    const business = { id: 9, sellerType: 'BUSINESS', tgId: null, phone: null, status: SellerStatus.PENDING };
+    const { svc, prisma, events } = makeService(business);
+
+    const result = await svc.updateStatus(9, SellerStatus.ACTIVE);
+
+    expect(prisma.seller.update).toHaveBeenCalledWith({ where: { id: 9 }, data: { status: SellerStatus.ACTIVE } });
+    expect(result).toMatchObject({ id: 9, status: SellerStatus.ACTIVE });
+    expect(events.emit).not.toHaveBeenCalled();
+  });
+});
