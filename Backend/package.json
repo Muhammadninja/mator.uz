@@ -23,6 +23,7 @@
     "grafana:check": "npm run grafana:build && npm run grafana:test",
     "backfill:catalog": "ts-node --compiler-options '{\"module\":\"commonjs\"}' prisma/backfill-catalog.ts",
     "import:drivers-village": "ts-node --compiler-options '{\"module\":\"commonjs\"}' scripts/import-drivers-village.ts",
+    "backfill:root-buckets": "ts-node --compiler-options '{\"module\":\"commonjs\"}' prisma/backfill-root-buckets.ts",
     "seed": "ts-node --compiler-options '{\"module\":\"commonjs\"}' src/prisma/seed.ts",
     "seed:categories": "ts-node --compiler-options '{\"module\":\"commonjs\"}' prisma/seed-categories.ts",
     "seed:oem": "ts-node --compiler-options '{\"module\":\"commonjs\"}' prisma/seed-oem.ts",

@@ -233,3 +233,45 @@ export const VEHICLE_CATEGORY_BY_SLUG: ReadonlyMap<
     enumValue as PartVehicleCategory,
   ]),
 );
+
+/**
+ * ROOT PartCategory id → the buyer-grid bucket its whole subtree belongs to.
+ *
+ * WHY THIS EXISTS. A part carries two independent classifications: the category
+ * the seller CHOSE (`Product.categoryId`, anywhere in the tree) and the bucket
+ * the bot's keyword classifier guessed (`Product.mainCategory`). Only the second
+ * feeds the home grid — both `GET /v1/categories` counts and the
+ * `?category=<bucket>` listing roll up by `mainCategory`. A listing filed on a
+ * real subcategory but left unclassified therefore has `mainCategory = null` and
+ * is invisible to its own bucket, reachable only by drilling the exact
+ * subcategory id.
+ *
+ * That is what hid the motor oils: sellers filed them under
+ * 'synthetic-motor-oil' / 'semi-synthetic-motor-oil' (children of the
+ * 'motor-oil' root), the classifier assigned no mainCategory, and the
+ * "Масла и жидкости" tile kept showing only the 4 legacy rows that happened to
+ * carry the enum.
+ *
+ * The projection consults this map ONLY when the classifier produced nothing —
+ * a bot-assigned mainCategory always wins, so this can never overwrite a real
+ * classification.
+ *
+ * DELIBERATELY PARTIAL. A root earns an entry only when EVERY part beneath it
+ * belongs to one bucket. The unmapped roots are genuinely ambiguous and are
+ * listed below rather than guessed:
+ *
+ *   maintenance-and-fluids   spans FILTERS, OIL_AND_FLUIDS and WIPERS
+ *   electrical-and-lighting  spans ELECTRICAL_PARTS, LIGHTING and BATTERIES
+ *   transmission             no bucket exists for it
+ *   heating-and-cooling      no bucket exists for it
+ *   tuning-and-accessories   arguably EXTERIOR, but holds interior parts too
+ *
+ * Adding a root here RE-BUCKETS every unclassified part beneath it on the next
+ * projection, which moves the home-grid counts. Add one only after checking
+ * what it would absorb.
+ */
+export const ROOT_TO_MAIN_CATEGORY: Readonly<Record<string, PartMainCategory>> =
+  {
+    // Every descendant is a motor/transmission oil → Oil & Fluids.
+    'motor-oil': PartMainCategory.OIL_AND_FLUIDS,
+  };

@@ -1,7 +1,15 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Prisma, PartCondition, PartNumberType } from '@prisma/client';
+import {
+  Prisma,
+  PartCondition,
+  PartMainCategory,
+  PartNumberType,
+} from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
-import { MAIN_CATEGORY_TO_SLUG } from '../categories/category-map';
+import {
+  MAIN_CATEGORY_TO_SLUG,
+  ROOT_TO_MAIN_CATEGORY,
+} from '../categories/category-map';
 import { localizedNamesFor } from '../../prisma/seed-data/category-names.seed';
 
 /** Prefix of the synthetic Product.gmNumber key used when a listing has no real
@@ -104,6 +112,75 @@ export class CatalogProjectionService {
     },
   } satisfies Prisma.StockInclude;
 
+  // ── Category-root resolution ──────────────────────────────────────────────
+  // `buildProjectionOps` is a PURE builder (no I/O) so the live path and the
+  // backfill share one mapping, which means the tree walk cannot happen inside
+  // it. Instead the async callers resolve `categoryId → rootId` up front and
+  // hand the result in.
+  //
+  // The whole PartCategory tree is ~60 rows and changes only when an admin
+  // edits it, so it is cached in-process behind the same 300s TTL the reference
+  // API uses for its Redis copy. Worst case after an admin adds a category: one
+  // listing projected in the next 5 minutes derives no bucket, which the next
+  // projection corrects.
+  private static readonly ROOT_CACHE_TTL_MS = 300_000;
+  private rootByCategoryId: ReadonlyMap<string, string> | null = null;
+  private rootCacheLoadedAt = 0;
+
+  /**
+   * `categoryId → the id of its ROOT ancestor` for every category in the tree.
+   * A root maps to itself. Cycles (which the schema permits but the admin UI
+   * does not create) terminate at the tree depth rather than spinning.
+   */
+  private async categoryRoots(): Promise<ReadonlyMap<string, string>> {
+    const now = Date.now();
+    if (
+      this.rootByCategoryId &&
+      now - this.rootCacheLoadedAt < CatalogProjectionService.ROOT_CACHE_TTL_MS
+    ) {
+      return this.rootByCategoryId;
+    }
+
+    const rows = await this.prisma.partCategory.findMany({
+      select: { id: true, parentId: true },
+    });
+    const parentOf = new Map(rows.map((r) => [r.id, r.parentId]));
+    const roots = new Map<string, string>();
+
+    for (const { id } of rows) {
+      let cursor = id;
+      // Bounded by the row count, so a malformed cycle cannot hang the walk.
+      for (let hops = 0; hops <= rows.length; hops += 1) {
+        const parent = parentOf.get(cursor);
+        if (!parent || parent === cursor) break;
+        cursor = parent;
+      }
+      roots.set(id, cursor);
+    }
+
+    this.rootByCategoryId = roots;
+    this.rootCacheLoadedAt = now;
+    return roots;
+  }
+
+  /**
+   * The bucket a part belongs to: the classifier's answer when it produced one,
+   * otherwise the bucket owned by its category's ROOT (see
+   * ROOT_TO_MAIN_CATEGORY). Null when neither applies, exactly as before.
+   *
+   * A bot-assigned `mainCategory` ALWAYS wins — this only fills a gap, so it can
+   * never overwrite a real classification.
+   */
+  static deriveMainCategory(
+    productMainCategory: PartMainCategory | null,
+    categoryId: string,
+    rootByCategoryId: ReadonlyMap<string, string>,
+  ): PartMainCategory | null {
+    if (productMainCategory) return productMainCategory;
+    const root = rootByCategoryId.get(categoryId);
+    return root ? (ROOT_TO_MAIN_CATEGORY[root] ?? null) : null;
+  }
+
   /**
    * Project a single Stock row into the buyer catalog: ensure the fallback
    * category, the parent CatalogSeller, any parent PartBrand, then upsert the
@@ -143,7 +220,7 @@ export class CatalogProjectionService {
       }
     }
 
-    const ops = this.buildProjectionOps(stock);
+    const ops = this.buildProjectionOps(stock, await this.categoryRoots());
     await this.prisma.$transaction(ops);
     return CatalogProjectionService.catalogPartId(stock.id);
   }
@@ -202,6 +279,11 @@ export class CatalogProjectionService {
     stock: Prisma.StockGetPayload<{
       include: typeof CatalogProjectionService.stockInclude;
     }>,
+    /** `categoryId → root id`, resolved by the async caller (see
+     *  `categoryRoots`). Omitted in tests that don't exercise bucket
+     *  derivation — an empty map simply leaves `mainCategory` as the
+     *  classifier set it, i.e. the pre-existing behaviour. */
+    rootByCategoryId: ReadonlyMap<string, string> = new Map(),
   ): Prisma.PrismaPromise<unknown>[] {
     const ops: Prisma.PrismaPromise<unknown>[] = [];
     const product = stock.product;
@@ -350,7 +432,16 @@ export class CatalogProjectionService {
       images,
       // Classified attributes projected verbatim from the supply-side Product
       // (set by the Telegram classifier) — enables indexed buyer-side filtering.
-      mainCategory: product.mainCategory,
+      // Bucket for the home grid. Projected verbatim when the classifier
+      // assigned one; otherwise derived from the category's ROOT, so a listing
+      // filed on a real subcategory (e.g. 'synthetic-motor-oil') still rolls up
+      // to its bucket instead of vanishing from the tile. See
+      // ROOT_TO_MAIN_CATEGORY.
+      mainCategory: CatalogProjectionService.deriveMainCategory(
+        product.mainCategory,
+        categoryId,
+        rootByCategoryId,
+      ),
       vehicleCategory: product.vehicleCategory,
       partBrandName: product.partBrand,
       originRegion: product.originRegion,

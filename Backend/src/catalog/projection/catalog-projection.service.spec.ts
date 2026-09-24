@@ -391,6 +391,116 @@ describe('CatalogProjectionService — mapping', () => {
       expect(await svc.updateProjection(500)).toBe('part_stock_500');
     });
   });
+
+  // The motor-oil regression: sellers file oils on a CHILD of the 'motor-oil'
+  // root and the keyword classifier assigns no mainCategory, so the part used
+  // to project with mainCategory = null — invisible to the home grid's
+  // "Масла и жидкости" tile, which both counts and lists by mainCategory.
+  describe('bucket derived from the category ROOT', () => {
+    /** The oil branch of the real tree, plus an unmapped root for contrast. */
+    const TREE = [
+      { id: 'motor-oil', parentId: null },
+      { id: 'synthetic-motor-oil', parentId: 'motor-oil' },
+      { id: 'semi-synthetic-motor-oil', parentId: 'motor-oil' },
+      { id: 'transmission', parentId: null },
+      { id: 'clutch-kits', parentId: 'transmission' },
+    ];
+
+    beforeEach(() => {
+      prisma.partCategory.findMany.mockResolvedValue(TREE);
+    });
+
+    const projectWith = async (product: Record<string, unknown>) => {
+      const base = buildStock() as any;
+      prisma.stock.findUnique.mockResolvedValue({
+        ...base,
+        product: { ...base.product, ...product },
+      });
+      await svc.projectStock(500);
+      return upsertArg(prisma, 'catalogPart').create;
+    };
+
+    it('derives OIL_AND_FLUIDS for an unclassified part under the oil root', async () => {
+      const part = await projectWith({
+        mainCategory: null,
+        categoryId: 'synthetic-motor-oil',
+      });
+      // categoryId is untouched — the subcategory drill keeps working — while
+      // the bucket now rolls the part into the oil tile.
+      expect(part.categoryId).toBe('synthetic-motor-oil');
+      expect(part.mainCategory).toBe('OIL_AND_FLUIDS');
+    });
+
+    it('derives the bucket for the ROOT category itself', async () => {
+      const part = await projectWith({
+        mainCategory: null,
+        categoryId: 'motor-oil',
+      });
+      expect(part.mainCategory).toBe('OIL_AND_FLUIDS');
+    });
+
+    it('never overwrites a mainCategory the classifier assigned', async () => {
+      // A bot-assigned bucket is a real classification and always wins, even
+      // when the category root disagrees with it.
+      const part = await projectWith({
+        mainCategory: 'ENGINE',
+        categoryId: 'synthetic-motor-oil',
+      });
+      expect(part.mainCategory).toBe('ENGINE');
+    });
+
+    it('leaves mainCategory null under a root with no unambiguous bucket', async () => {
+      // 'transmission' is deliberately absent from ROOT_TO_MAIN_CATEGORY — no
+      // buyer-grid bucket corresponds to it, so guessing would be wrong.
+      const part = await projectWith({
+        mainCategory: null,
+        categoryId: 'clutch-kits',
+      });
+      expect(part.mainCategory).toBeNull();
+    });
+
+    it('reads the tree once and serves later projections from cache', async () => {
+      prisma.stock.findUnique.mockResolvedValue(buildStock());
+      await svc.projectStock(500);
+      await svc.projectStock(500);
+      expect(prisma.partCategory.findMany).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('deriveMainCategory', () => {
+    const roots = new Map([
+      ['synthetic-motor-oil', 'motor-oil'],
+      ['clutch-kits', 'transmission'],
+    ]);
+
+    it('returns the classifier value untouched when there is one', () => {
+      expect(
+        CatalogProjectionService.deriveMainCategory(
+          'BRAKES' as any,
+          'synthetic-motor-oil',
+          roots,
+        ),
+      ).toBe('BRAKES');
+    });
+
+    it('maps an oil subcategory to OIL_AND_FLUIDS', () => {
+      expect(
+        CatalogProjectionService.deriveMainCategory(
+          null,
+          'synthetic-motor-oil',
+          roots,
+        ),
+      ).toBe('OIL_AND_FLUIDS');
+    });
+
+    it('returns null for a category missing from the tree map', () => {
+      // A category added after the 300s cache was filled: no bucket this run,
+      // corrected on the next projection.
+      expect(
+        CatalogProjectionService.deriveMainCategory(null, 'brand-new', roots),
+      ).toBeNull();
+    });
+  });
 });
 
 describe('CatalogProjectionService.numberSearchArrays', () => {
