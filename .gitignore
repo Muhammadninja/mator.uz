@@ -2,6 +2,7 @@ node_modules
 keys/
 *.pem
 .claude-flow/
+.expo/
 .swarm/
 .DS_Store
 .mcp.json
