@@ -20,7 +20,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { NodeCategory, Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../prisma/prisma.service';
 import { BindPartDto } from './dto/bind-part.dto';
@@ -30,6 +30,7 @@ import { UnbindPartDto } from './dto/unbind-part.dto';
 import {
   NODE_ALLOWED_CATEGORIES,
   completionStatus,
+  isCategoryAllowedOnNode,
   type CompletionStatus,
 } from './fitment-node.config';
 
@@ -94,7 +95,7 @@ export class FitmentStudioService {
 
     return nodes.map((n) => {
       const list = byNode.get(n.id) ?? [];
-      const hasOem = list.some((b) => (b.part as PartLite).oemNumbers.length > 0);
+      const hasOem = list.some((b) => b.part.oemNumbers.length > 0);
       const status: CompletionStatus = completionStatus(list.length, hasOem);
       return {
         id: n.id,
@@ -103,7 +104,7 @@ export class FitmentStudioService {
         position: { x: n.positionX, y: n.positionY, z: n.positionZ },
         totalMappedParts: list.length,
         completionStatus: status,
-        parts: list.map((b) => this.mapPart(b.part as PartLite, b.status)),
+        parts: list.map((b) => this.mapPart(b.part, b.status)),
       };
     });
   }
@@ -181,11 +182,13 @@ export class FitmentStudioService {
     if (!part) throw new NotFoundException(`Part ${dto.productId} not found`);
     await this.assertVehicle(dto.vehicleModelId);
 
-    // Category guard: block KNOWN mismatches (e.g. "oils" → FRONT_BRAKES). If the
-    // part's category can't be resolved to a slug, we allow (can't validate).
-    const slug = (part as { category?: { slug?: string | null } }).category?.slug;
-    const allowed = NODE_ALLOWED_CATEGORIES[node.category as NodeCategory];
-    if (slug && !allowed.includes(slug)) {
+    // Category guard: block KNOWN mismatches (e.g. a motor oil → FRONT_BRAKES).
+    // Shared with the part-first surface so both refuse and accept the same
+    // things; a category no node claims is allowed (we cannot validate it).
+    const slug = (part as { category?: { slug?: string | null } }).category
+      ?.slug;
+    if (!isCategoryAllowedOnNode(node.category, slug)) {
+      const allowed = NODE_ALLOWED_CATEGORIES[node.category];
       throw new BadRequestException(
         `Category "${slug}" cannot be bound to node ${node.category}. Allowed: ${allowed.join(', ')}.`,
       );
@@ -233,7 +236,11 @@ export class FitmentStudioService {
       select: { partId: true, status: true },
     });
     if (source.length === 0) {
-      return { copied: 0, sourceCount: 0, targets: dto.targetVehicleModelIds.length };
+      return {
+        copied: 0,
+        sourceCount: 0,
+        targets: dto.targetVehicleModelIds.length,
+      };
     }
 
     const results = await this.prisma.$transaction(
@@ -264,9 +271,7 @@ export class FitmentStudioService {
       where: { vehicleModelId, nodeId },
       select: { part: { select: { oemNumbers: true } } },
     });
-    const hasOem = list.some(
-      (b) => (b.part as { oemNumbers: string[] }).oemNumbers.length > 0,
-    );
+    const hasOem = list.some((b) => b.part.oemNumbers.length > 0);
     return {
       id: nodeId,
       totalMappedParts: list.length,
@@ -279,7 +284,8 @@ export class FitmentStudioService {
       where: { id: vehicleModelId },
       select: { id: true },
     });
-    if (!exists) throw new NotFoundException(`Vehicle model ${vehicleModelId} not found`);
+    if (!exists)
+      throw new NotFoundException(`Vehicle model ${vehicleModelId} not found`);
   }
 
   private mapPart(p: PartLite, status?: string) {

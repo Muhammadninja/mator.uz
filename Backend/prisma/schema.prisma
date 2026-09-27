@@ -1527,6 +1527,12 @@ model CatalogPart {
   // rating/review tiebreakers until a population job (or admin toggle) fills them.
   isBestseller       Boolean              @default(false) @map("is_bestseller")
   salesCount         Int                  @default(0) @map("sales_count")
+  // Manual rank in the Fitment Studio's digitization queue (`filter=top300`):
+  // 1 = digitize first. NULL = not queued, which is most of the catalogue — the
+  // queue is a curated few hundred, not the whole table. Explicit (not derived
+  // from salesCount) so an operator can promote a part that has never sold yet;
+  // prisma/backfill-fitment-priority.ts seeds the first pass from sales.
+  fitmentPriority    Int?                 @map("fitment_priority")
   createdAt          DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt          DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
   brand              PartBrand?           @relation(fields: [brandId], references: [id], onDelete: SetNull)
@@ -1550,6 +1556,8 @@ model CatalogPart {
   @@index([stockQty])
   // Hot path: filter by macro-category, order bestsellers first.
   @@index([mainCategory, isBestseller, salesCount])
+  // Fitment Studio queue: the prioritized slice, in its stable display order.
+  @@index([fitmentPriority])
   @@map("catalog_parts")
 }
 

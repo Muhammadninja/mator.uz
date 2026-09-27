@@ -52,7 +52,10 @@ function makePrisma(over: Record<string, Record<string, jest.Mock>> = {}) {
     $transaction: jest.fn((ops: Promise<unknown>[]) => Promise.all(ops)),
   };
   for (const [model, methods] of Object.entries(over)) {
-    Object.assign((prisma as Record<string, unknown>)[model] as object, methods);
+    Object.assign(
+      (prisma as Record<string, unknown>)[model] as object,
+      methods,
+    );
   }
   return prisma;
 }
@@ -61,7 +64,9 @@ function svcWith(prisma: ReturnType<typeof makePrisma>) {
   return new FitmentStudioService(prisma as never);
 }
 
-const NODE = (over: Partial<{ id: string; category: string; name: string }> = {}) => ({
+const NODE = (
+  over: Partial<{ id: string; category: string; name: string }> = {},
+) => ({
   id: 'node_brakes_front',
   category: 'FRONT_BRAKES',
   name: 'Передние тормоза',
@@ -74,7 +79,9 @@ const NODE = (over: Partial<{ id: string; category: string; name: string }> = {}
 describe('FitmentStudioService.getNodes — grouping + completionStatus', () => {
   it('EMPTY when a node has no bindings', async () => {
     const prisma = makePrisma({
-      vehicleNode: { findMany: jest.fn().mockResolvedValue([NODE({ id: 'n1' })]) },
+      vehicleNode: {
+        findMany: jest.fn().mockResolvedValue([NODE({ id: 'n1' })]),
+      },
       fitmentBinding: { findMany: jest.fn().mockResolvedValue([]) },
     });
     const [node] = await svcWith(prisma).getNodes('cobalt');
@@ -85,11 +92,21 @@ describe('FitmentStudioService.getNodes — grouping + completionStatus', () => 
 
   it('PARTIAL when 1-3 parts and none carry an OEM', async () => {
     const prisma = makePrisma({
-      vehicleNode: { findMany: jest.fn().mockResolvedValue([NODE({ id: 'n1' })]) },
+      vehicleNode: {
+        findMany: jest.fn().mockResolvedValue([NODE({ id: 'n1' })]),
+      },
       fitmentBinding: {
         findMany: jest.fn().mockResolvedValue([
-          { nodeId: 'n1', status: 'EXACT_MATCH', part: PART({ oemNumbers: [] }) },
-          { nodeId: 'n1', status: 'MAYBE', part: PART({ id: 'part_2', oemNumbers: [] }) },
+          {
+            nodeId: 'n1',
+            status: 'EXACT_MATCH',
+            part: PART({ oemNumbers: [] }),
+          },
+          {
+            nodeId: 'n1',
+            status: 'MAYBE',
+            part: PART({ id: 'part_2', oemNumbers: [] }),
+          },
         ]),
       },
     });
@@ -97,15 +114,24 @@ describe('FitmentStudioService.getNodes — grouping + completionStatus', () => 
     expect(node.totalMappedParts).toBe(2);
     expect(node.completionStatus).toBe('PARTIAL');
     // status is echoed on each mapped part
-    expect(node.parts[0]).toMatchObject({ status: 'EXACT_MATCH', tag: 'AFTER' });
+    expect(node.parts[0]).toMatchObject({
+      status: 'EXACT_MATCH',
+      tag: 'AFTER',
+    });
   });
 
   it('COMPLETE via the OEM rule even with a single bound part', async () => {
     const prisma = makePrisma({
-      vehicleNode: { findMany: jest.fn().mockResolvedValue([NODE({ id: 'n1' })]) },
+      vehicleNode: {
+        findMany: jest.fn().mockResolvedValue([NODE({ id: 'n1' })]),
+      },
       fitmentBinding: {
         findMany: jest.fn().mockResolvedValue([
-          { nodeId: 'n1', status: 'EXACT_MATCH', part: PART({ oemNumbers: ['96484900'] }) },
+          {
+            nodeId: 'n1',
+            status: 'EXACT_MATCH',
+            part: PART({ oemNumbers: ['96484900'] }),
+          },
         ]),
       },
     });
@@ -123,7 +149,12 @@ describe('FitmentStudioService.getNodes — grouping + completionStatus', () => 
     }));
     const prisma = makePrisma({
       vehicleNode: {
-        findMany: jest.fn().mockResolvedValue([NODE({ id: 'n1' }), NODE({ id: 'n2', category: 'ENGINE' })]),
+        findMany: jest
+          .fn()
+          .mockResolvedValue([
+            NODE({ id: 'n1' }),
+            NODE({ id: 'n2', category: 'ENGINE' }),
+          ]),
       },
       fitmentBinding: { findMany: jest.fn().mockResolvedValue(four) },
     });
@@ -141,16 +172,27 @@ describe('FitmentStudioService.getNodes — grouping + completionStatus', () => 
 describe('FitmentStudioService.bind — category guard + upsert + OEM echo', () => {
   it('rejects a mismatched category slug with BadRequestException', async () => {
     const prisma = makePrisma({
-      vehicleNode: { findUnique: jest.fn().mockResolvedValue(NODE({ category: 'FRONT_BRAKES' })) },
+      vehicleNode: {
+        findUnique: jest
+          .fn()
+          .mockResolvedValue(NODE({ category: 'FRONT_BRAKES' })),
+      },
       catalogPart: {
         findUnique: jest.fn().mockResolvedValue({
           ...PART(),
-          category: { slug: 'oils' }, // not allowed on FRONT_BRAKES
+          // A REAL taxonomy slug (see subcategory-taxonomy.seed.ts). The old
+          // fixture said 'oils', which exists in no database and now reads as
+          // an ungoverned category the guard deliberately lets through.
+          category: { slug: 'synthetic-motor-oil' }, // ENGINE only
         }),
       },
     });
     await expect(
-      svcWith(prisma).bind({ productId: 'part_stock_6', vehicleModelId: 'cobalt', nodeId: 'node_brakes_front' }),
+      svcWith(prisma).bind({
+        productId: 'part_stock_6',
+        vehicleModelId: 'cobalt',
+        nodeId: 'node_brakes_front',
+      }),
     ).rejects.toBeInstanceOf(BadRequestException);
     expect(prisma.fitmentBinding.upsert).not.toHaveBeenCalled();
   });
@@ -158,11 +200,15 @@ describe('FitmentStudioService.bind — category guard + upsert + OEM echo', () 
   it('upserts on the composite key and echoes the part OEM numbers', async () => {
     const upsert = jest.fn().mockResolvedValue({});
     const prisma = makePrisma({
-      vehicleNode: { findUnique: jest.fn().mockResolvedValue(NODE({ category: 'FRONT_BRAKES' })) },
+      vehicleNode: {
+        findUnique: jest
+          .fn()
+          .mockResolvedValue(NODE({ category: 'FRONT_BRAKES' })),
+      },
       catalogPart: {
         findUnique: jest.fn().mockResolvedValue({
           ...PART({ oemNumbers: ['96484900', '96484901'] }),
-          category: { slug: 'brakes' }, // allowed on FRONT_BRAKES
+          category: { slug: 'front-brake-pads' }, // allowed on FRONT_BRAKES
         }),
       },
       fitmentBinding: { upsert, findMany: jest.fn().mockResolvedValue([]) },
@@ -181,23 +227,39 @@ describe('FitmentStudioService.bind — category guard + upsert + OEM echo', () 
             nodeId: 'node_brakes_front',
           },
         },
-        create: expect.objectContaining({ partId: 'part_stock_6', status: 'EXACT_MATCH' }),
+        create: expect.objectContaining({
+          partId: 'part_stock_6',
+          status: 'EXACT_MATCH',
+        }) as unknown,
       }),
     );
     expect(res.oemNumbers).toEqual(['96484900', '96484901']);
-    expect(res.node).toMatchObject({ id: 'node_brakes_front', completionStatus: 'EMPTY' });
+    expect(res.node).toMatchObject({
+      id: 'node_brakes_front',
+      completionStatus: 'EMPTY',
+    });
   });
 
   it('allows binding when the part category cannot be resolved to a slug', async () => {
     const upsert = jest.fn().mockResolvedValue({});
     const prisma = makePrisma({
-      vehicleNode: { findUnique: jest.fn().mockResolvedValue(NODE({ category: 'FRONT_BRAKES' })) },
+      vehicleNode: {
+        findUnique: jest
+          .fn()
+          .mockResolvedValue(NODE({ category: 'FRONT_BRAKES' })),
+      },
       catalogPart: {
-        findUnique: jest.fn().mockResolvedValue({ ...PART(), category: { slug: null } }),
+        findUnique: jest
+          .fn()
+          .mockResolvedValue({ ...PART(), category: { slug: null } }),
       },
       fitmentBinding: { upsert, findMany: jest.fn().mockResolvedValue([]) },
     });
-    await svcWith(prisma).bind({ productId: 'part_stock_6', vehicleModelId: 'cobalt', nodeId: 'node_brakes_front' });
+    await svcWith(prisma).bind({
+      productId: 'part_stock_6',
+      vehicleModelId: 'cobalt',
+      nodeId: 'node_brakes_front',
+    });
     expect(upsert).toHaveBeenCalled();
   });
 });
@@ -214,9 +276,17 @@ describe('FitmentStudioService.unbind — idempotent deleteMany', () => {
       nodeId: 'node_brakes_front',
     });
     expect(deleteMany).toHaveBeenCalledWith({
-      where: { partId: 'part_stock_6', vehicleModelId: 'cobalt', nodeId: 'node_brakes_front' },
+      where: {
+        partId: 'part_stock_6',
+        vehicleModelId: 'cobalt',
+        nodeId: 'node_brakes_front',
+      },
     });
-    expect(res.node).toMatchObject({ id: 'node_brakes_front', totalMappedParts: 0, completionStatus: 'EMPTY' });
+    expect(res.node).toMatchObject({
+      id: 'node_brakes_front',
+      totalMappedParts: 0,
+      completionStatus: 'EMPTY',
+    });
   });
 });
 

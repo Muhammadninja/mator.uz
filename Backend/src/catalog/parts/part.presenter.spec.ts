@@ -64,6 +64,7 @@ function part(over: Partial<PartWithRelations> = {}): PartWithRelations {
     reviewCount: 0,
     isBestseller: false,
     salesCount: 0,
+    fitmentPriority: null,
     createdAt: new Date(),
     updatedAt: new Date(),
     brand: null,
