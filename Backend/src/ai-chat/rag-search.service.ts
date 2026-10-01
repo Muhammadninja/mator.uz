@@ -6,6 +6,7 @@ import { SupportedLang } from '../common/i18n.util';
 import { formatUzs } from '../catalog/parts/part.presenter';
 import { ActiveSale, DiscountService } from '../sales/discount.service';
 import { expandToken } from './part-synonyms.util';
+import { BUYER_VISIBLE_PART } from '../catalog/buyer-visibility';
 
 /** A matched in-stock part returned to the chat client. */
 export interface StockItem {
@@ -97,7 +98,8 @@ export class RagSearchService {
     ]);
 
     const candidates = await this.prisma.catalogPart.findMany({
-      where: { inStock: true, OR: or },
+      // Never quote a suspended dealer's part (catalog/buyer-visibility.ts).
+      where: { inStock: true, OR: or, ...BUYER_VISIBLE_PART },
       include: { category: true, brand: true },
       take: CANDIDATE_LIMIT,
     });

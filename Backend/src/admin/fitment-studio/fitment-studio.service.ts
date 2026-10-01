@@ -229,8 +229,43 @@ export class FitmentStudioService {
     return { node: await this.nodeStatus(dto.vehicleModelId, dto.nodeId) };
   }
 
-  /** Copy every binding of one node from a source model onto target models. */
+  /**
+   * Copy every binding of one node from a source model onto target models.
+   *
+   * Validated BEFORE anything is written, so a bad request is a 4xx the
+   * operator can act on — never a foreign-key failure surfacing as a 500:
+   *   • the node and the source model must exist (404, like bind/getNodes);
+   *   • a model cannot be its own target (400);
+   *   • every target model id must exist (400, naming the unknown ids).
+   * Duplicate targets are collapsed by the DTO.
+   */
   async propagateNode(dto: PropagateFitmentDto) {
+    const targets = dto.targetVehicleModelIds;
+    if (targets.includes(dto.sourceVehicleModelId)) {
+      throw new BadRequestException(
+        `Vehicle model ${dto.sourceVehicleModelId} cannot be its own propagation target`,
+      );
+    }
+    const node = await this.prisma.vehicleNode.findUnique({
+      where: { id: dto.nodeId },
+      select: { id: true },
+    });
+    if (!node) throw new NotFoundException(`Node ${dto.nodeId} not found`);
+    await this.assertVehicle(dto.sourceVehicleModelId);
+
+    const known = await this.prisma.vehicleModelRef.findMany({
+      where: { id: { in: targets } },
+      select: { id: true },
+    });
+    if (known.length !== targets.length) {
+      const found = new Set(known.map((m) => m.id));
+      throw new BadRequestException(
+        `Unknown vehicle model id(s): ${targets
+          .filter((id) => !found.has(id))
+          .join(', ')}`,
+      );
+    }
+
     const source = await this.prisma.fitmentBinding.findMany({
       where: { vehicleModelId: dto.sourceVehicleModelId, nodeId: dto.nodeId },
       select: { partId: true, status: true },

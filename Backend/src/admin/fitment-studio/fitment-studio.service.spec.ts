@@ -4,8 +4,12 @@
 // the OEM→COMPLETE rule), the category guard, bind upsert + OEM echo, unbind's
 // idempotent deleteMany, and listVehicles make/model/engine='' mapping.
 
-import { BadRequestException } from '@nestjs/common';
+import 'reflect-metadata';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { plainToInstance } from 'class-transformer';
+import { validateSync } from 'class-validator';
 import { FitmentStudioService } from './fitment-studio.service';
+import { PropagateFitmentDto } from './dto/propagate-fitment.dto';
 
 type PartRow = {
   id: string;
@@ -305,5 +309,127 @@ describe('FitmentStudioService.listVehicles — make/model/engine mapping', () =
       { id: 'cobalt', make: 'Chevrolet', model: 'Cobalt', engine: '' },
       { id: 'lacetti', make: 'Chevrolet', model: 'Lacetti', engine: '' },
     ]);
+  });
+});
+
+describe('FitmentStudioService.propagateNode — validated before any write', () => {
+  const dto = (over: Record<string, unknown> = {}) =>
+    ({
+      sourceVehicleModelId: 'gentra',
+      targetVehicleModelIds: ['cobalt', 'nexia-3'],
+      nodeId: 'node_brakes_front',
+      ...over,
+    }) as never;
+
+  function propagatePrisma(
+    over: Record<string, Record<string, jest.Mock>> = {},
+  ) {
+    return makePrisma({
+      vehicleNode: {
+        findUnique: jest.fn().mockResolvedValue({ id: 'node_brakes_front' }),
+      },
+      vehicleModelRef: {
+        findUnique: jest.fn().mockResolvedValue({ id: 'gentra' }),
+        findMany: jest
+          .fn()
+          .mockResolvedValue([{ id: 'cobalt' }, { id: 'nexia-3' }]),
+      },
+      fitmentBinding: {
+        findMany: jest
+          .fn()
+          .mockResolvedValue([{ partId: 'part_1', status: 'EXACT_MATCH' }]),
+        createMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
+      ...over,
+    });
+  }
+
+  it('copies the node onto every valid target', async () => {
+    const prisma = propagatePrisma();
+    const res = await svcWith(prisma).propagateNode(dto());
+    expect(prisma.fitmentBinding.createMany).toHaveBeenCalledTimes(2);
+    expect(res).toMatchObject({ sourceCount: 1, targets: 2 });
+  });
+
+  it('an unknown target model → 400 naming it, nothing written (not an FK 500)', async () => {
+    const prisma = propagatePrisma({
+      vehicleModelRef: {
+        findUnique: jest.fn().mockResolvedValue({ id: 'gentra' }),
+        findMany: jest.fn().mockResolvedValue([{ id: 'cobalt' }]),
+      },
+    });
+    await expect(svcWith(prisma).propagateNode(dto())).rejects.toThrow(
+      /nexia-3/,
+    );
+    await expect(svcWith(prisma).propagateNode(dto())).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+    expect(prisma.fitmentBinding.createMany).not.toHaveBeenCalled();
+  });
+
+  it('a model as its own target → 400, nothing read or written', async () => {
+    const prisma = propagatePrisma();
+    await expect(
+      svcWith(prisma).propagateNode(
+        dto({ targetVehicleModelIds: ['cobalt', 'gentra'] }),
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(prisma.fitmentBinding.createMany).not.toHaveBeenCalled();
+  });
+
+  it('an unknown node → 404', async () => {
+    const prisma = propagatePrisma({
+      vehicleNode: { findUnique: jest.fn().mockResolvedValue(null) },
+    });
+    await expect(svcWith(prisma).propagateNode(dto())).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+    expect(prisma.fitmentBinding.createMany).not.toHaveBeenCalled();
+  });
+
+  it('an unknown source model → 404', async () => {
+    const prisma = propagatePrisma({
+      vehicleModelRef: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        findMany: jest.fn().mockResolvedValue([]),
+      },
+    });
+    await expect(svcWith(prisma).propagateNode(dto())).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+  });
+});
+
+describe('PropagateFitmentDto', () => {
+  const parse = (raw: Record<string, unknown>) => {
+    const dto = plainToInstance(PropagateFitmentDto, raw);
+    return { dto, errors: validateSync(dto).map((e) => e.property) };
+  };
+
+  it('dedupes targets', () => {
+    const { dto, errors } = parse({
+      sourceVehicleModelId: 'gentra',
+      targetVehicleModelIds: ['cobalt', 'cobalt', ' spark '],
+      nodeId: 'n1',
+    });
+    expect(errors).toEqual([]);
+    expect(dto.targetVehicleModelIds).toEqual(['cobalt', 'spark']);
+  });
+
+  it('rejects blank target ids and an empty target list', () => {
+    expect(
+      parse({
+        sourceVehicleModelId: 'g',
+        targetVehicleModelIds: [''],
+        nodeId: 'n',
+      }).errors,
+    ).toContain('targetVehicleModelIds');
+    expect(
+      parse({
+        sourceVehicleModelId: 'g',
+        targetVehicleModelIds: [],
+        nodeId: 'n',
+      }).errors,
+    ).toContain('targetVehicleModelIds');
   });
 });

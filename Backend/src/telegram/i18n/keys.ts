@@ -25,6 +25,7 @@ export interface BotStrings {
   'start.notRegistered': string;
   'start.awaitingApproval': string;
   'start.accountRejected': string;
+  'start.storeSuspended': string;
   'seller.approved': string;
   'help.message': string;
 

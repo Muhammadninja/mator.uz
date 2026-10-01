@@ -38,6 +38,7 @@ import {
   toVehicleFitContext,
   vehicleFitWhere,
 } from '../compatibility/vehicle-fitment';
+import { BUYER_VISIBLE_PART } from '../buyer-visibility';
 
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 100;
@@ -164,8 +165,8 @@ export class PartsService {
     vehicleId?: string,
     lang: AppLang = DEFAULT_APP_LANG,
   ) {
-    const part = await this.prisma.catalogPart.findUnique({
-      where: { id: partId },
+    const part = await this.prisma.catalogPart.findFirst({
+      where: { id: partId, ...BUYER_VISIBLE_PART },
       include: PART_INCLUDE,
     });
     if (!part) throw new NotFoundException('Part not found');
@@ -356,7 +357,8 @@ export class PartsService {
     q: ListPartsQueryDto,
     vehicle: VehicleFitContext | null,
   ): Prisma.CatalogPartWhereInput {
-    const and: Prisma.CatalogPartWhereInput[] = [];
+    // A suspended dealer's parts are never listed (see buyer-visibility.ts).
+    const and: Prisma.CatalogPartWhereInput[] = [BUYER_VISIBLE_PART];
 
     // Category filter — three-way, unified around PartCategory being the source
     // of truth while staying fully back-compatible:

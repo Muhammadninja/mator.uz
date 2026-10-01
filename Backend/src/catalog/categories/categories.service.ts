@@ -13,6 +13,7 @@ import {
   vehicleFitWhere,
 } from '../compatibility/vehicle-fitment';
 import { VEHICLE_CATEGORIES } from './part-categories.catalog';
+import { buyerVisible } from '../buyer-visibility';
 
 /**
  * Serves the two-level part category hierarchy with LIVE per-category inventory
@@ -32,7 +33,11 @@ export class CategoriesService {
    */
   async list(query: ListCategoriesQueryDto, lang: AppLang = DEFAULT_APP_LANG) {
     const scope = query.scope ?? 'main';
-    const vehicleWhere = await this.vehicleScopeWhere(query.vehicle_id);
+    // Counts cover exactly what the listing can show: buyer-visible parts
+    // (no suspended dealer), scoped to the garage vehicle when one is given.
+    const vehicleWhere = buyerVisible(
+      await this.vehicleScopeWhere(query.vehicle_id),
+    );
 
     if (scope === 'vehicle') {
       const grouped = await this.prisma.catalogPart.groupBy({

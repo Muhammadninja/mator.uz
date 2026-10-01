@@ -68,6 +68,8 @@ interface PartSpec {
   fits?: [string, string][]; // [make, model] legacy rows
   makeFits?: string[]; // legacy make-wide make names
   compat?: { trimId: string | null; engineId: string | null; status: string }[];
+  /** The dealer storefront's DealerStatus (default PENDING, like projections). */
+  sellerStatus?: string;
 }
 
 export function part(spec: PartSpec) {
@@ -84,6 +86,7 @@ export function part(spec: PartSpec) {
       makeName: mk,
     })),
     compatibilities: (spec.compat ?? []).map((c) => ({ ...c, years: [] })),
+    seller: { status: spec.sellerStatus ?? 'PENDING' },
   };
 }
 

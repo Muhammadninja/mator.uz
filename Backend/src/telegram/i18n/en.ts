@@ -22,6 +22,8 @@ export const EN: BotStrings = {
   'start.awaitingApproval':
     '⏳ Your application has not been approved yet. Please wait.',
   'start.accountRejected': '⛔ Your account was rejected by an administrator.',
+  'start.storeSuspended':
+    '⛔ Your store has been suspended by an administrator. Publishing is unavailable.',
   'seller.approved':
     '✅ Your application has been approved!\n\n' +
     'You can now publish products on Mator.\n\n' +

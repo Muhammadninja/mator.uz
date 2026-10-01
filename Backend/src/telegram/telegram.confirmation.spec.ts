@@ -255,6 +255,9 @@ function makePrisma() {
       deleteMany: upsert('partModel.deleteMany', { count: 0 }),
     },
     stock: { upsert: upsert('stock', { id: 500 }) },
+    // The publish-time storefront check (sellerMayPublish): no CatalogSeller
+    // row → not suspended. Not recorded in `calls` (it is a read).
+    catalogSeller: { findUnique: () => Promise.resolve(null as unknown) },
   };
 }
 
@@ -311,7 +314,8 @@ function makeService(
     // Needed by the DB fallback that runs when the `pending` cache misses: the
     // preview actions resolve the seller, then look up their awaiting-preview draft.
     sellers: {
-      findByTgId: jest.fn().mockResolvedValue({ id: 1, status: 'ACTIVE' }),
+      // id 7 = the sellerId every pending fixture below carries.
+      findByTgId: jest.fn().mockResolvedValue({ id: 7, status: 'ACTIVE' }),
     },
     queue: makeQueue(),
     telemetry: { event: jest.fn(), metric: jest.fn() },
@@ -403,6 +407,73 @@ describe('TelegramService — confirmation session', () => {
     expect(ctx.replies.some((r) => r.includes('Название'))).toBe(false);
     expect(ctx.replies.some((r) => r.includes('OEM'))).toBe(false);
     expect(ctx.replies.some((r) => r.includes('Product ID'))).toBe(false);
+  });
+
+  describe('publish-time seller gate (status re-checked at publication)', () => {
+    async function commitAs(
+      seller: Record<string, unknown> | null,
+      storefront: { status: string } | null = null,
+    ) {
+      const prisma = makePrisma();
+      prisma.catalogSeller.findUnique = () => Promise.resolve(storefront);
+      const svc = makeService(prisma, makeCloudinary(), undefined, {
+        sellers: { findByTgId: jest.fn().mockResolvedValue(seller) },
+      });
+      const ctx = makeCtx();
+      svc.storePending(draft(1));
+      await svc.commitPending(ctx, 1);
+      return { prisma, ctx };
+    }
+
+    it('ACTIVE seller with an active storefront → published', async () => {
+      const { prisma } = await commitAs(
+        { id: 7, status: 'ACTIVE', catalogSellerId: null },
+        { status: 'ACTIVE' },
+      );
+      expect(prisma.calls).toContain('product');
+      expect(prisma.calls).toContain('stock');
+    });
+
+    it('SUSPENDED storefront → publication refused, nothing written', async () => {
+      const { prisma, ctx } = await commitAs(
+        { id: 7, status: 'ACTIVE', catalogSellerId: null },
+        { status: 'SUSPENDED' },
+      );
+      expect(prisma.calls).toEqual([]);
+      expect(ctx.replies.some((r) => r.includes('приостановлен'))).toBe(true);
+    });
+
+    it('REJECTED seller → publication refused, nothing written', async () => {
+      const { prisma, ctx } = await commitAs({ id: 7, status: 'REJECTED' });
+      expect(prisma.calls).toEqual([]);
+      expect(ctx.replies.some((r) => r.includes('отклонён'))).toBe(true);
+    });
+
+    it('PENDING seller → publication refused, nothing written', async () => {
+      const { prisma } = await commitAs({ id: 7, status: 'PENDING' });
+      expect(prisma.calls).toEqual([]);
+    });
+
+    it('a seller that is not the draft owner → refused', async () => {
+      const { prisma } = await commitAs({ id: 99, status: 'ACTIVE' });
+      expect(prisma.calls).toEqual([]);
+    });
+
+    it('a refused publication leaves the draft unclaimed (no COMMITTING transition)', async () => {
+      const prisma = makePrisma();
+      prisma.catalogSeller.findUnique = () =>
+        Promise.resolve({ status: 'SUSPENDED' });
+      const drafts = makeDrafts();
+      const svc = makeService(prisma, makeCloudinary(), undefined, {
+        drafts,
+        sellers: {
+          findByTgId: jest.fn().mockResolvedValue({ id: 7, status: 'ACTIVE' }),
+        },
+      });
+      svc.storePending(draft(1));
+      await svc.commitPending(makeCtx(), 1);
+      expect(drafts.tryTransition).not.toHaveBeenCalled();
+    });
   });
 
   it('a MOTOR_OIL commit stores the product as UNIVERSAL and creates NO compatibility rows', async () => {
