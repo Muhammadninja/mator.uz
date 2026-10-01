@@ -27,6 +27,7 @@ import { CreateOrderDto } from './dto/create-order.dto';
 import { ListOrdersQueryDto } from './dto/list-orders.query.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { canTransition } from './order-transitions';
+import { assertAllAvailable, findUnavailableParts } from './order-availability';
 
 const DEFAULT_ORDER_LIMIT = 20;
 
@@ -54,6 +55,15 @@ export class OrdersService {
     if (!cart || cart.items.length === 0) {
       throw new BadRequestException('Cart is empty');
     }
+    // Never create an order for parts that can no longer be sold (out of stock,
+    // removed, or a suspended dealer) — 409 PART_UNAVAILABLE naming them, so
+    // the app can tell the buyer which cart lines to remove.
+    assertAllAvailable(
+      await findUnavailableParts(
+        this.prisma,
+        cart.items.map((i) => ({ partId: i.partId, title: i.title })),
+      ),
+    );
 
     // Ownership: a caller may only attach their OWN vehicle / delivery address to
     // an order. Without these checks the ids are persisted verbatim, letting a

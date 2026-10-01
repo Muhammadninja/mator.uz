@@ -1,4 +1,9 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  ConflictException,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { prefixedId, IdPrefix } from '../common/ulid.util';
 import { AddCartItemDto, MAX_CART_ITEM_QUANTITY } from './dto/add-cart-item.dto';
@@ -12,6 +17,8 @@ import {
 } from './cart.presenter';
 import { priceCartLines } from './cart-pricing.util';
 import { DiscountService } from '../sales/discount.service';
+import { BUYER_VISIBLE_PART } from '../catalog/buyer-visibility';
+import { PART_UNAVAILABLE } from '../orders/order-availability';
 
 @Injectable()
 export class CartService {
@@ -65,7 +72,9 @@ export class CartService {
           serviceId: svc.id,
           providerId: dto.provider_id,
           vehicleId: dto.vehicle_id,
-          scheduledAt: dto.scheduled_at ? new Date(dto.scheduled_at) : undefined,
+          scheduledAt: dto.scheduled_at
+            ? new Date(dto.scheduled_at)
+            : undefined,
           title: svc.name,
           priceUzsSnapshot: svc.priceUzs,
           quantity: 1,
@@ -73,19 +82,33 @@ export class CartService {
       });
     } else {
       const partId = dto.part_id ?? dto.id;
-      if (!partId) throw new BadRequestException('part_id or service_id is required');
-      const part = await this.prisma.catalogPart.findUnique({ where: { id: partId } });
+      if (!partId)
+        throw new BadRequestException('part_id or service_id is required');
+      // Same visibility as the catalog: a suspended dealer's part 404s here too.
+      const part = await this.prisma.catalogPart.findFirst({
+        where: { id: partId, ...BUYER_VISIBLE_PART },
+      });
       if (!part) throw new NotFoundException('Part not found');
+      if (!part.inStock) {
+        throw new ConflictException({
+          code: PART_UNAVAILABLE,
+          message: 'Part is out of stock',
+        });
+      }
       const qty = dto.quantity ?? 1;
 
       // Merge: an existing part line increments its quantity. The merged total is
       // capped server-side — DTO @Max(999) bounds a single request, but repeated
       // adds could otherwise stack past the ceiling.
-      const existing = cart.items.find((i) => i.partId === partId && !i.serviceId);
+      const existing = cart.items.find(
+        (i) => i.partId === partId && !i.serviceId,
+      );
       if (existing) {
         await this.prisma.cartItem.update({
           where: { id: existing.id },
-          data: { quantity: Math.min(existing.quantity + qty, MAX_CART_ITEM_QUANTITY) },
+          data: {
+            quantity: Math.min(existing.quantity + qty, MAX_CART_ITEM_QUANTITY),
+          },
         });
       } else {
         await this.prisma.cartItem.create({

@@ -13,6 +13,7 @@ import { buildPaymeCheckoutUrl } from './webhooks/payme-checkout.util';
 import { PaymeFiscalService } from './webhooks/payme-fiscal.service';
 import { isPayableOrderStatus } from './order-transitions';
 import { isClickEnabled } from './webhooks/click.config';
+import { assertAllAvailable, findUnavailableParts } from './order-availability';
 
 @Injectable()
 export class PaymentsService {
@@ -24,6 +25,17 @@ export class PaymentsService {
 
   async createPaymeInvoice(userId: string, dto: CreateInvoiceDto) {
     const order = await this.loadPayableOrder(userId, dto.order_id);
+    // Stock can change between placing the order and paying it: refuse a
+    // checkout link for an order whose parts can no longer be sold.
+    assertAllAvailable(
+      await findUnavailableParts(
+        this.prisma,
+        await this.prisma.orderItem.findMany({
+          where: { orderId: order.id },
+          select: { partId: true, title: true },
+        }),
+      ),
+    );
     // Refuse BEFORE a checkout link exists. An order whose items lack fiscal
     // data (typically a dealer whose ИНН / ставка НДС is not configured yet)
     // must never reach Payme, and the customer should learn that here — while

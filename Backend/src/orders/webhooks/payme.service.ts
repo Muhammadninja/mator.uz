@@ -13,6 +13,7 @@ import { prefixedId, IdPrefix } from '../../common/ulid.util';
 import { SettlementService } from './settlement.service';
 import { readPaymeConfig } from './payme.config';
 import { isPayableOrderStatus } from '../order-transitions';
+import { findUnavailableParts } from '../order-availability';
 import {
   FiscalDataIncompleteException,
   PaymeFiscalService,
@@ -300,6 +301,23 @@ export class PaymeService {
         'Another transaction is in progress for this order',
         this.accountField,
       );
+    }
+
+    // Availability backstop (the checkout path refuses first — see
+    // PaymentsService.createPaymeInvoice): never let Payme hold money for an
+    // order whose parts went out of stock or whose dealer was suspended after
+    // the link was issued. Checked here, BEFORE funds are held, and not at
+    // PerformTransaction, where refusing would bounce a payment the customer
+    // already confirmed.
+    const unavailable = await findUnavailableParts(
+      this.prisma,
+      await this.prisma.orderItem.findMany({
+        where: { orderId: order.id },
+        select: { partId: true, title: true },
+      }),
+    );
+    if (unavailable.length > 0) {
+      throw new PaymeError(-31008, 'Order items are no longer available');
     }
 
     // Fiscalization. Payme takes the receipt from THIS reply, so the items are

@@ -256,7 +256,8 @@ describe('PaymeService (Merchant API)', () => {
             packageCodeSingle: '1417722',
             packageCodeSet: '1417723',
           },
-          seller: { tin: '301234567', vatPercent: 0 },
+          inStock: true,
+          seller: { status: 'ACTIVE', tin: '301234567', vatPercent: 0 },
         },
       ]);
 
@@ -331,7 +332,8 @@ describe('PaymeService (Merchant API)', () => {
             packageCodeSingle: '1417722',
             packageCodeSet: null,
           },
-          seller: { tin: null, vatPercent: null },
+          inStock: true,
+          seller: { status: 'ACTIVE', tin: null, vatPercent: null },
         },
       ]);
 
