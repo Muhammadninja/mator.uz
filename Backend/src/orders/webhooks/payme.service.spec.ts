@@ -1100,6 +1100,26 @@ describe('PaymeService.PerformTransaction end-to-end (in-memory store)', () => {
     expect(notifications.emit).not.toHaveBeenCalled();
   });
 
+  it.each([
+    OrderStatus.PAID,
+    OrderStatus.PROCESSING,
+    OrderStatus.SHIPPED,
+    OrderStatus.DELIVERED,
+    OrderStatus.REFUNDED,
+    OrderStatus.EXPIRED,
+  ])(
+    '%s order → Perform → -31008; never settled a second time',
+    async (status) => {
+      const { store, perform, notifications } = build(status);
+      const res = await perform();
+      expect(res.error.code).toBe(-31008);
+      expect(store.order('ord_1').status).toBe(status);
+      expect(store.payment('pay_1').providerState).toBe(1);
+      expect(store.history()).toEqual([]);
+      expect(notifications.emit).not.toHaveBeenCalled();
+    },
+  );
+
   it('two concurrent Performs: both answer state 2 with the SAME perform_time, one settlement', async () => {
     const { store, perform, notifications } = build(
       OrderStatus.PENDING_PAYMENT,

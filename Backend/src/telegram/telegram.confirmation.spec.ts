@@ -454,6 +454,20 @@ describe('TelegramService — confirmation session', () => {
       expect(prisma.calls).toEqual([]);
     });
 
+    it('a seller that no longer exists (removed / unregistered) → refused, nothing written', async () => {
+      const { prisma, ctx } = await commitAs(null);
+      expect(prisma.calls).toEqual([]);
+      expect(ctx.replies.length).toBeGreaterThan(0);
+    });
+
+    it('ACTIVE seller with a PENDING storefront (the projection default) → published', async () => {
+      const { prisma } = await commitAs(
+        { id: 7, status: 'ACTIVE', catalogSellerId: null },
+        { status: 'PENDING' },
+      );
+      expect(prisma.calls).toContain('product');
+    });
+
     it('a seller that is not the draft owner → refused', async () => {
       const { prisma } = await commitAs({ id: 99, status: 'ACTIVE' });
       expect(prisma.calls).toEqual([]);

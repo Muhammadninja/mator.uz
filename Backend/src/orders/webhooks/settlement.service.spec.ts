@@ -346,15 +346,19 @@ describe('SettlementService.markPaid — concurrency and order state (in-memory 
     expect(notifications.emit).not.toHaveBeenCalled();
   });
 
-  it.each([OrderStatus.EXPIRED, OrderStatus.REFUNDED, OrderStatus.DELIVERED])(
-    'an order in %s is not payable either',
-    async (status) => {
-      const { store, svc } = build(status);
-      await expect(svc.markPaid('pay_1')).resolves.toBe('order_not_payable');
-      expect(store.order('ord_1').status).toBe(status);
-      expect(store.history()).toEqual([]);
-    },
-  );
+  it.each([
+    OrderStatus.PAID,
+    OrderStatus.PROCESSING,
+    OrderStatus.SHIPPED,
+    OrderStatus.DELIVERED,
+    OrderStatus.REFUNDED,
+    OrderStatus.EXPIRED,
+  ])('an order in %s is not payable either', async (status) => {
+    const { store, svc } = build(status);
+    await expect(svc.markPaid('pay_1')).resolves.toBe('order_not_payable');
+    expect(store.order('ord_1').status).toBe(status);
+    expect(store.history()).toEqual([]);
+  });
 
   it('a cancelled payment is not settleable', async () => {
     const { store, svc } = build(OrderStatus.PENDING_PAYMENT, {
