@@ -50,9 +50,7 @@ export class ClickService {
     if (!this.verifySign(p, false))
       return this.reply(p, ERR.SIGN_FAILED, 'Sign check failed');
 
-    const order = await this.prisma.order.findUnique({
-      where: { id: String(p.merchant_trans_id) },
-    });
+    const order = await this.prisma.order.findUnique({ where: { id: String(p.merchant_trans_id) } });
     if (!order) return this.reply(p, ERR.ORDER_NOT_FOUND, 'Order not found');
     if (Math.round(Number(order.totalUzs)) !== Math.round(Number(p.amount))) {
       return this.reply(p, ERR.BAD_AMOUNT, 'Incorrect amount');
@@ -69,12 +67,7 @@ export class ClickService {
       amountTiyin: null,
     };
     const bindable = await this.prisma.payment.findFirst({
-      where: {
-        orderId: order.id,
-        provider: PaymentProvider.CLICK,
-        providerTransactionId: null,
-        status: PaymentStatus.PENDING,
-      },
+      where: { orderId: order.id, provider: PaymentProvider.CLICK, providerTransactionId: null, status: PaymentStatus.PENDING },
       orderBy: { createdAt: 'desc' },
     });
     if (bindable) {
@@ -102,43 +95,22 @@ export class ClickService {
       return this.reply(p, ERR.SIGN_FAILED, 'Sign check failed');
 
     const payment = await this.prisma.payment.findFirst({
-      where: {
-        provider: PaymentProvider.CLICK,
-        providerTransactionId: String(p.click_trans_id),
-      },
+      where: { provider: PaymentProvider.CLICK, providerTransactionId: String(p.click_trans_id) },
     });
-    if (
-      !payment ||
-      String(payment.providerPrepareId) !== String(p.merchant_prepare_id)
-    ) {
+    if (!payment || String(payment.providerPrepareId) !== String(p.merchant_prepare_id)) {
       return this.reply(p, ERR.TXN_NOT_FOUND, 'Transaction not found');
     }
     if (payment.status === PaymentStatus.PAID) {
-      return this.reply(
-        p,
-        ERR.SUCCESS,
-        'Already confirmed',
-        payment.providerPrepareId,
-      );
+      return this.reply(p, ERR.SUCCESS, 'Already confirmed', payment.providerPrepareId);
     }
 
     // Click signals its own failure via a negative `error` field.
     if (Number(p.error) < 0) {
       await this.settlement.markCancelled(payment.id, Number(p.error), false);
-      return this.reply(
-        p,
-        ERR.CANCELLED,
-        'Transaction cancelled',
-        payment.providerPrepareId,
-      );
+      return this.reply(p, ERR.CANCELLED, 'Transaction cancelled', payment.providerPrepareId);
     }
     if (Number(p.action) !== 1) {
-      return this.reply(
-        p,
-        ERR.ACTION_NOT_FOUND,
-        'Action not found',
-        payment.providerPrepareId,
-      );
+      return this.reply(p, ERR.ACTION_NOT_FOUND, 'Action not found', payment.providerPrepareId);
     }
 
     await this.settlement.markPaid(payment.id);
@@ -162,12 +134,7 @@ export class ClickService {
     return timingSafeEqual(Buffer.from(expected), Buffer.from(provided));
   }
 
-  private reply(
-    p: Record<string, any>,
-    error: number,
-    note: string,
-    prepareId?: string | null,
-  ) {
+  private reply(p: Record<string, any>, error: number, note: string, prepareId?: string | null) {
     return {
       click_trans_id: p.click_trans_id,
       merchant_trans_id: p.merchant_trans_id,

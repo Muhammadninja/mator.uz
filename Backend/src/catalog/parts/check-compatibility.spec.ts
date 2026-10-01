@@ -162,13 +162,7 @@ describe('PartsService.checkCompatibility — contract mapping', () => {
       part: {
         isUniversal: false,
         compatibilities: [
-          {
-            trimId: 't1',
-            engineId: null,
-            years: [2022],
-            status: CompatibilityStatus.FITS,
-            confidence: 1,
-          },
+          { trimId: 't1', engineId: null, years: [2022], status: CompatibilityStatus.FITS, confidence: 1 },
         ],
       },
       vehicleByVin: VEHICLE,

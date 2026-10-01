@@ -45,9 +45,7 @@ export class CategoriesService {
         where: vehicleWhere,
         _count: { _all: true },
       });
-      const counts = new Map(
-        grouped.map((g) => [g.vehicleCategory, g._count._all]),
-      );
+      const counts = new Map(grouped.map((g) => [g.vehicleCategory, g._count._all]));
       return {
         items: VEHICLE_CATEGORIES.map((c) => ({
           id: c.id,

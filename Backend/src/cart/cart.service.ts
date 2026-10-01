@@ -72,9 +72,7 @@ export class CartService {
           serviceId: svc.id,
           providerId: dto.provider_id,
           vehicleId: dto.vehicle_id,
-          scheduledAt: dto.scheduled_at
-            ? new Date(dto.scheduled_at)
-            : undefined,
+          scheduledAt: dto.scheduled_at ? new Date(dto.scheduled_at) : undefined,
           title: svc.name,
           priceUzsSnapshot: svc.priceUzs,
           quantity: 1,
@@ -100,15 +98,11 @@ export class CartService {
       // Merge: an existing part line increments its quantity. The merged total is
       // capped server-side — DTO @Max(999) bounds a single request, but repeated
       // adds could otherwise stack past the ceiling.
-      const existing = cart.items.find(
-        (i) => i.partId === partId && !i.serviceId,
-      );
+      const existing = cart.items.find((i) => i.partId === partId && !i.serviceId);
       if (existing) {
         await this.prisma.cartItem.update({
           where: { id: existing.id },
-          data: {
-            quantity: Math.min(existing.quantity + qty, MAX_CART_ITEM_QUANTITY),
-          },
+          data: { quantity: Math.min(existing.quantity + qty, MAX_CART_ITEM_QUANTITY) },
         });
       } else {
         await this.prisma.cartItem.create({

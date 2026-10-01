@@ -273,12 +273,7 @@ export class PartsService {
     // A universal product (oil, chemistry, generic fastener/bulb) fits every
     // vehicle by definition — answer UNIVERSAL without touching the match rows.
     if (part.isUniversal) {
-      return this.presentCompatibility(
-        part.id,
-        echoedVehicleId,
-        'universal',
-        oemNumber,
-      );
+      return this.presentCompatibility(part.id, echoedVehicleId, 'universal', oemNumber);
     }
 
     // No vehicle resolved (neither id nor vin matched a row) → we genuinely
@@ -692,9 +687,7 @@ export class PartsService {
       },
     });
     const bucketIds = new Set<string>(Object.values(MAIN_CATEGORY_TO_SLUG));
-    const countById = new Map(
-      grouped.map((g) => [g.categoryId, g._count._all]),
-    );
+    const countById = new Map(grouped.map((g) => [g.categoryId, g._count._all]));
 
     return cats
       .filter((c) => !bucketIds.has(c.id))

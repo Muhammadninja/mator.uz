@@ -69,28 +69,18 @@ export class OrdersService {
     // an order. Without these checks the ids are persisted verbatim, letting a
     // user reference another user's vehicle or address (cross-tenant reference).
     await this.assertOwnedVehicle(userId, dto.vehicle_id);
-    await this.assertOwnedAddress(
-      userId,
-      dto.cart_snapshot?.delivery_address_id,
-    );
+    await this.assertOwnedAddress(userId, dto.cart_snapshot?.delivery_address_id);
 
     // Apply active sales per line, so the order is charged the SAME discounted
     // price the buyer saw in the catalog and cart. A line's charged unit price is
     // its sale price when a campaign applies, else its snapshot price.
-    const lineDiscounts = await priceCartLines(
-      this.prisma,
-      this.discounts,
-      cart.items,
-    );
+    const lineDiscounts = await priceCartLines(this.prisma, this.discounts, cart.items);
     const unitPriceOf = (i: (typeof cart.items)[number]): number => {
       const d = lineDiscounts.get(i.id);
       return d?.appliedSale ? d.finalPrice : Number(i.priceUzsSnapshot);
     };
 
-    const subtotal = cart.items.reduce(
-      (s, i) => s + unitPriceOf(i) * i.quantity,
-      0,
-    );
+    const subtotal = cart.items.reduce((s, i) => s + unitPriceOf(i) * i.quantity, 0);
     const snap = dto.cart_snapshot ?? {};
     const deliveryMethod =
       String(snap.delivery_method ?? 'courier').toUpperCase() === 'PICKUP'
@@ -109,16 +99,9 @@ export class OrdersService {
     const paymentType = dto.payment_type
       ? PAYMENT_TYPE_MAP[dto.payment_type]
       : undefined;
-    const serviceFeeUzs = Number(
-      this.config.get<string>('SERVICE_FEE_UZS') ?? 5000,
-    );
-    const discount = cart.promoCode
-      ? resolvePromo(cart.promoCode, subtotal).discountUzs
-      : 0;
-    const total = Math.max(
-      0,
-      subtotal + deliveryUzs + serviceFeeUzs - discount,
-    );
+    const serviceFeeUzs = Number(this.config.get<string>('SERVICE_FEE_UZS') ?? 5000);
+    const discount = cart.promoCode ? resolvePromo(cart.promoCode, subtotal).discountUzs : 0;
+    const total = Math.max(0, subtotal + deliveryUzs + serviceFeeUzs - discount);
 
     // Spread the promo discount INTO the line prices, in tiyin, so the charged
     // amount is carried entirely by the items. A Payme receipt has no negative
@@ -138,8 +121,7 @@ export class OrdersService {
     const expiresAt = new Date(Date.now() + ttlMin * 60_000);
     const contactPhone =
       dto.contact_phone_e164 ??
-      (await this.prisma.appUser.findUnique({ where: { id: userId } }))
-        ?.phoneE164 ??
+      (await this.prisma.appUser.findUnique({ where: { id: userId } }))?.phoneE164 ??
       undefined;
 
     const order = await this.prisma.$transaction(async (tx) => {
@@ -193,11 +175,7 @@ export class OrdersService {
 
       // First history entry: the order's creation. Written in the same tx so an
       // order can never exist without its opening audit row.
-      await this.orderStatus.recordCreation(
-        tx,
-        created.id,
-        OrderStatus.PENDING_PAYMENT,
-      );
+      await this.orderStatus.recordCreation(tx, created.id, OrderStatus.PENDING_PAYMENT);
 
       // The cart is consumed by the order.
       await tx.cartItem.deleteMany({ where: { cartId: cart.id } });
@@ -244,8 +222,7 @@ export class OrdersService {
       where: { id: orderId },
       include: ORDER_INCLUDE,
     });
-    if (!order || order.userId !== userId)
-      throw new NotFoundException('Order not found');
+    if (!order || order.userId !== userId) throw new NotFoundException('Order not found');
     return presentOrder(order);
   }
 
@@ -256,11 +233,7 @@ export class OrdersService {
    * the payment webhook already uses (realtime socket + inbox/push notification)
    * so the app reflects the change without waiting for the next poll.
    */
-  async updateStatus(
-    orderId: string,
-    dto: UpdateOrderStatusDto,
-    actor?: StatusActor,
-  ) {
+  async updateStatus(orderId: string, dto: UpdateOrderStatusDto, actor?: StatusActor) {
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
       include: ORDER_INCLUDE,
@@ -314,37 +287,25 @@ export class OrdersService {
       data: { order_id: order.id, status: to.toLowerCase() },
       deeplinkPath: '/(tabs)/(cart)/order-confirmation',
     });
-    this.logger.log(
-      `Order ${order.id} status ${from.toLowerCase()} → ${to.toLowerCase()} (operator)`,
-    );
+    this.logger.log(`Order ${order.id} status ${from.toLowerCase()} → ${to.toLowerCase()} (operator)`);
 
     return presentOrder(updated);
   }
 
   // ── ownership helpers ────────────────────────────────────────────────────────
   /** Ensure the referenced vehicle (if any) belongs to the caller. */
-  private async assertOwnedVehicle(
-    userId: string,
-    vehicleId?: string,
-  ): Promise<void> {
+  private async assertOwnedVehicle(userId: string, vehicleId?: string): Promise<void> {
     if (!vehicleId) return;
-    const vehicle = await this.prisma.vehicle.findUnique({
-      where: { id: vehicleId },
-    });
+    const vehicle = await this.prisma.vehicle.findUnique({ where: { id: vehicleId } });
     if (!vehicle || vehicle.userId !== userId || vehicle.deletedAt) {
       throw new NotFoundException('Vehicle not found');
     }
   }
 
   /** Ensure the referenced delivery address (if any) belongs to the caller. */
-  private async assertOwnedAddress(
-    userId: string,
-    addressId?: string,
-  ): Promise<void> {
+  private async assertOwnedAddress(userId: string, addressId?: string): Promise<void> {
     if (!addressId) return;
-    const address = await this.prisma.address.findUnique({
-      where: { id: addressId },
-    });
+    const address = await this.prisma.address.findUnique({ where: { id: addressId } });
     if (!address || address.userId !== userId) {
       throw new NotFoundException('Address not found');
     }

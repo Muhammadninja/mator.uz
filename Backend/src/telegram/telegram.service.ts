@@ -659,8 +659,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       // "У меня есть" deep-link (`/start offer_<ticketId>`) → the sourcing offer
       // DM flow, BEFORE any seller-wizard logic. Consumed here when it matches.
       const startPayload =
-        typeof (ctx as Context & { startPayload?: string }).startPayload ===
-        'string'
+        typeof (ctx as Context & { startPayload?: string }).startPayload === 'string'
           ? (ctx as Context & { startPayload?: string }).startPayload!
           : 'text' in ctx.message
             ? ctx.message.text.split(/\s+/).slice(1).join(' ')
@@ -737,10 +736,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     this.bot.command('help', async (ctx) => {
       const from = ctx.from;
       await ctx.reply(
-        t(
-          from ? await this.resolveLang(from.id) : DEFAULT_APP_LANG,
-          'help.message',
-        ),
+        t(from ? await this.resolveLang(from.id) : DEFAULT_APP_LANG, 'help.message'),
       );
     });
 
@@ -802,10 +798,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       // `categoryId` holds the node the seller PICKED, and pinning the parent to
       // that would reject every option on the re-rendered keyboard as stale.
       const expectedParent = session?.categoryOptionsParentId ?? null;
-      const category = await this.selectableCategory(
-        categoryId,
-        expectedParent,
-      );
+      const category = await this.selectableCategory(categoryId, expectedParent);
       if (!category) {
         await this.rejectStaleCategoryTap(ctx);
         return;
@@ -2340,9 +2333,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
    */
   private async handleWizardAction(
     ctx: Context,
-    transition: (
-      session: WizardSession,
-    ) => WizardResult | Promise<WizardResult>,
+    transition: (session: WizardSession) => WizardResult | Promise<WizardResult>,
   ): Promise<void> {
     try {
       await ctx.answerCbQuery();
@@ -2560,36 +2551,31 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         parentId === null
           ? await this.categories.findRootCategories()
           : await this.categories.findChildren(parentId);
-      return (
-        rows
-          // Hide the 12 mainCategory BUCKETS from the seller drill: they are the
-          // home-grid taxonomy (and the classifier's auto-fallback target), NOT a
-          // pickable node. A bucket id is exactly a key of MAIN_CATEGORY_BY_SLUG.
-          // Sellers now drill roots → the real subcategories; mainCategory is still
-          // set from the classifier, so the bucket linkage/counts are unaffected.
-          .filter((row) => !MAIN_CATEGORY_BY_SLUG.has(row.id))
-          .map((row) => ({
-            id: row.id,
-            // The BUTTON label, in the seller's language. Resolved here (not in the
-            // pure wizard module) because the cached tree carries all three names
-            // and only this side knows whose dialogue is being rendered.
-            name: localizedCategoryName(row, lang),
-            vehicleCategoryEnum: VEHICLE_CATEGORY_BY_SLUG.get(row.id) ?? null,
-            mainCategoryEnum: MAIN_CATEGORY_BY_SLUG.get(row.id) ?? null,
-            // Resolved from the category's STABLE ID, never its name, so renaming
-            // "Моторные масла" in the admin panel cannot change what it does.
-            // Undefined for an ordinary category, which makes it a spare part.
-            // Own-property check only: a bare index would let an admin category
-            // whose id is 'constructor' or 'toString' inherit a truthy value off
-            // Object.prototype and pass a non-ProductKind into the wizard.
-            kind: Object.prototype.hasOwnProperty.call(
-              CATEGORY_ID_TO_KIND,
-              row.id,
-            )
-              ? CATEGORY_ID_TO_KIND[row.id]
-              : undefined,
-          }))
-      );
+      return rows
+        // Hide the 12 mainCategory BUCKETS from the seller drill: they are the
+        // home-grid taxonomy (and the classifier's auto-fallback target), NOT a
+        // pickable node. A bucket id is exactly a key of MAIN_CATEGORY_BY_SLUG.
+        // Sellers now drill roots → the real subcategories; mainCategory is still
+        // set from the classifier, so the bucket linkage/counts are unaffected.
+        .filter((row) => !MAIN_CATEGORY_BY_SLUG.has(row.id))
+        .map((row) => ({
+        id: row.id,
+        // The BUTTON label, in the seller's language. Resolved here (not in the
+        // pure wizard module) because the cached tree carries all three names
+        // and only this side knows whose dialogue is being rendered.
+        name: localizedCategoryName(row, lang),
+        vehicleCategoryEnum: VEHICLE_CATEGORY_BY_SLUG.get(row.id) ?? null,
+        mainCategoryEnum: MAIN_CATEGORY_BY_SLUG.get(row.id) ?? null,
+        // Resolved from the category's STABLE ID, never its name, so renaming
+        // "Моторные масла" in the admin panel cannot change what it does.
+        // Undefined for an ordinary category, which makes it a spare part.
+        // Own-property check only: a bare index would let an admin category
+        // whose id is 'constructor' or 'toString' inherit a truthy value off
+        // Object.prototype and pass a non-ProductKind into the wizard.
+        kind: Object.prototype.hasOwnProperty.call(CATEGORY_ID_TO_KIND, row.id)
+          ? CATEGORY_ID_TO_KIND[row.id]
+          : undefined,
+      }));
     } catch (err) {
       this.logger.error(
         `Failed to load categories (parentId=${parentId ?? 'root'}): ${
@@ -3412,20 +3398,12 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       // "change photos" replaces them (re-runs the image pipeline).
       [
         Markup.button.callback(t(lang, 'btn.back'), CONFIRM_BACK),
-        Markup.button.callback(
-          t(lang, 'btn.changePhotos'),
-          CONFIRM_CHANGE_PHOTOS,
-        ),
+        Markup.button.callback(t(lang, 'btn.changePhotos'), CONFIRM_CHANGE_PHOTOS),
       ],
     ]);
     return { caption, buttons };
   }
 
-  /**
-   * Commit a confirmed pending product: perform the database writes, then send a
-   * simple success message (the preview already showed the full product). No-op
-   * with a notice if there is nothing to confirm. Uploaded assets are kept.
-   */
   /**
    * May this seller publish right now? ACTIVE supply-side status AND a
    * storefront (the CatalogSeller its listings project into) that an admin has
@@ -3462,6 +3440,11 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     return true;
   }
 
+  /**
+   * Commit a confirmed pending product: perform the database writes, then send a
+   * simple success message (the preview already showed the full product). No-op
+   * with a notice if there is nothing to confirm. Uploaded assets are kept.
+   */
   private async commitPending(ctx: Context, tgUserId: number): Promise<void> {
     // Take the session (without deleting its Cloudinary assets — the saved
     // product keeps them). A cache miss (TTL eviction / restart) falls back to the
