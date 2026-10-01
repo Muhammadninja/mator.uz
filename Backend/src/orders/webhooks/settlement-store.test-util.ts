@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-return -- an untyped in-memory Prisma stand-in by design (rows are loose records) */
+/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-argument -- an untyped in-memory Prisma stand-in by design (rows are loose records) */
 /**
  * TEST-ONLY in-memory stand-in for the payment/order tables, used to exercise
  * settlement under CONCURRENT callbacks.
