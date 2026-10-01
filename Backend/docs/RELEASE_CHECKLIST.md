@@ -22,7 +22,7 @@ existing force-update gate:
   "min_supported_version": "1.0.0",
   "latest_version": "1.0.0",
   "ios_store_url": null,
-  "android_store_url": "https://play.google.com/store/apps/details?id=com.fotih12.mator",
+  "android_store_url": "https://play.google.com/store/apps/details?id=com.mator.myapp",
   "privacy_policy_url": "https://mator.uz/legal/privacy",
   "terms_url": "https://mator.uz/legal/terms"
 }
