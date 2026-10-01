@@ -57,6 +57,19 @@ import { TokenService } from '../auth/tokens/token.service';
  * Note there is no favourites/likes table in this schema — the buyer app keeps
  * them client-side — so there is nothing of that kind to delete server-side.
  *
+ * OPEN BUSINESS DECISIONS — deliberately NOT decided in code (current
+ * behaviour is kept until the product owner rules):
+ *   • ACTIVE ORDERS. Deletion is not blocked or deferred by order status. A
+ *     PAID / PROCESSING / SHIPPED order keeps going with its contact phone and
+ *     delivery address already detached (see above), and an open Payme
+ *     transaction on a PENDING_PAYMENT order can still settle. Whether to
+ *     refuse (409) or defer anonymization until such orders are terminal is a
+ *     product rule, not an implementation detail.
+ *   • SOURCING TICKETS. `sourcing_tickets` rows carry the customer's raw chat
+ *     request and the LLM extraction (which may include a VIN) under a non-FK
+ *     `user_id`; they are NOT deleted or anonymized here. Whether they are
+ *     personal data to erase or operational records to keep is undecided.
+ *
  * ── Ordering and failure strategy ───────────────────────────────────────────
  * The database work runs in ONE transaction: it either fully commits or changes
  * nothing, so the account can never be left half-deleted. Cloudinary is external
