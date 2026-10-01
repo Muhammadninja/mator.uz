@@ -377,6 +377,18 @@ describe('FitmentStudioService.propagateNode — validated before any write', ()
     expect(prisma.fitmentBinding.createMany).not.toHaveBeenCalled();
   });
 
+  it('duplicate targets reaching the service are collapsed: no false 400, one copy each', async () => {
+    const prisma = propagatePrisma();
+    const res = await svcWith(prisma).propagateNode(
+      dto({ targetVehicleModelIds: ['cobalt', 'nexia-3', 'cobalt'] }),
+    );
+    expect(prisma.vehicleModelRef.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: { in: ['cobalt', 'nexia-3'] } } }),
+    );
+    expect(prisma.fitmentBinding.createMany).toHaveBeenCalledTimes(2);
+    expect(res).toMatchObject({ targets: 2 });
+  });
+
   it('an unknown node → 404', async () => {
     const prisma = propagatePrisma({
       vehicleNode: { findUnique: jest.fn().mockResolvedValue(null) },

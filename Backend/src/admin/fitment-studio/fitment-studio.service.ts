@@ -237,10 +237,11 @@ export class FitmentStudioService {
    *   • the node and the source model must exist (404, like bind/getNodes);
    *   • a model cannot be its own target (400);
    *   • every target model id must exist (400, naming the unknown ids).
-   * Duplicate targets are collapsed by the DTO.
+   * Duplicate targets are collapsed (by the DTO, and again here for any other
+   * caller) so a repeated id is neither a false "unknown" nor a double copy.
    */
   async propagateNode(dto: PropagateFitmentDto) {
-    const targets = dto.targetVehicleModelIds;
+    const targets = [...new Set(dto.targetVehicleModelIds)];
     if (targets.includes(dto.sourceVehicleModelId)) {
       throw new BadRequestException(
         `Vehicle model ${dto.sourceVehicleModelId} cannot be its own propagation target`,
@@ -274,12 +275,12 @@ export class FitmentStudioService {
       return {
         copied: 0,
         sourceCount: 0,
-        targets: dto.targetVehicleModelIds.length,
+        targets: targets.length,
       };
     }
 
     const results = await this.prisma.$transaction(
-      dto.targetVehicleModelIds.map((targetId) =>
+      targets.map((targetId) =>
         this.prisma.fitmentBinding.createMany({
           data: source.map((s) => ({
             partId: s.partId,
@@ -295,7 +296,7 @@ export class FitmentStudioService {
     return {
       copied: results.reduce((a, r) => a + r.count, 0),
       sourceCount: source.length,
-      targets: dto.targetVehicleModelIds.length,
+      targets: targets.length,
     };
   }
 
