@@ -25,6 +25,7 @@
     "import:drivers-village": "ts-node --compiler-options '{\"module\":\"commonjs\"}' scripts/import-drivers-village.ts",
     "backfill:root-buckets": "ts-node --compiler-options '{\"module\":\"commonjs\"}' prisma/backfill-root-buckets.ts",
     "backfill:fitment-priority": "ts-node --compiler-options '{\"module\":\"commonjs\"}' prisma/backfill-fitment-priority.ts",
+    "fitment:top300": "ts-node --compiler-options '{\"module\":\"commonjs\"}' scripts/fitment-top300.ts",
     "seed": "ts-node --compiler-options '{\"module\":\"commonjs\"}' src/prisma/seed.ts",
     "seed:categories": "ts-node --compiler-options '{\"module\":\"commonjs\"}' prisma/seed-categories.ts",
     "seed:oem": "ts-node --compiler-options '{\"module\":\"commonjs\"}' prisma/seed-oem.ts",

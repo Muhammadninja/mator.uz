@@ -1,6 +1,11 @@
 /**
  * RE-RUNNABLE BACKFILL: seed the Fitment Studio queue (`catalog_parts.fitment_priority`).
  *
+ * NOTE: this NO LONGER defines `filter=top300`. The business TOP-300 is the
+ * explicit, ordered list in src/admin/fitment-studio/top300/fitment-top300.list.ts
+ * (validate with `npm run fitment:top300 -- --dry-run`). `fitment_priority` now
+ * only orders the `all` / `unmapped` queue tabs.
+ *
  * §2 of the Fitment Studio backend plan picked an explicit column over deriving
  * "top 300" from order lines, because a derived queue can never contain a new
  * SKU nobody has bought yet — and those are exactly the rows an operator wants

@@ -11,12 +11,19 @@
  * Query discipline: the queue is ONE count + ONE findMany that pulls each
  * part's bindings inline (no N+1, no per-row round trip), because the operator
  * pulls 300 rows and then navigates them by arrow key.
+ *
+ * `filter=top300` is the EXPLICIT business list (top300/fitment-top300.list.ts):
+ * exactly those CatalogPart ids, in that order — never a ranking derived from
+ * sales, ratings or `fitment_priority`, and never padded with other parts.
  */
 
 import {
   BadRequestException,
+  Inject,
   Injectable,
+  Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { NodeCategory, Prisma } from '@prisma/client';
 
@@ -27,6 +34,14 @@ import {
   isCategoryAllowedOnNode,
   suggestedNodeFor,
 } from './fitment-node.config';
+import { FITMENT_TOP300_PART_IDS } from './top300/fitment-top300.list';
+import {
+  FITMENT_TOP300_LIST,
+  Top300Report,
+  sortByTop300,
+  top300Positions,
+  validateTop300List,
+} from './top300/top300-list';
 
 /** Node order used to pick ONE `nodeKey` for a part bound at several nodes. */
 const NODE_ORDER: NodeCategory[] = [
@@ -58,18 +73,60 @@ const queueSelect = {
 
 type QueueRow = Prisma.CatalogPartGetPayload<{ select: typeof queueSelect }>;
 
+/** What `filter=top300` reports about the explicit list (meta.top300). */
+export interface Top300QueueMeta {
+  listSize: number;
+  targetSize: number;
+  /** Listed ids that exist in the catalog. */
+  resolved: number;
+  /** Listed ids with no CatalogPart — reported, never substituted. */
+  missing: string[];
+  duplicates: string[];
+  invalid: string[];
+}
+
+export interface PartsQueueResponse {
+  data: ReturnType<FitmentQueueService['mapRow']>[];
+  /** `top300` is present only for filter=top300 (additive to `total`). */
+  meta: { total: number; top300?: Top300QueueMeta };
+}
+
 @Injectable()
 export class FitmentQueueService {
-  constructor(private readonly prisma: PrismaService) {}
+  private readonly logger = new Logger(FitmentQueueService.name);
+  /** The validated explicit TOP-300 list (first occurrence of each id). */
+  private readonly top300: Top300Report;
+  private readonly top300Rank: Map<string, number>;
+
+  constructor(
+    private readonly prisma: PrismaService,
+    @Optional()
+    @Inject(FITMENT_TOP300_LIST)
+    top300List: readonly unknown[] = FITMENT_TOP300_PART_IDS,
+  ) {
+    this.top300 = validateTop300List(top300List);
+    this.top300Rank = top300Positions(this.top300.ids);
+    // The CI spec rejects these for the shipped list; an injected list that
+    // still carries them is used (first occurrence wins) but never silently.
+    if (this.top300.duplicates.length || this.top300.invalid.length) {
+      this.logger.warn(
+        `TOP-300 list: ${this.top300.duplicates.length} duplicate and ` +
+          `${this.top300.invalid.length} invalid entr(y/ies) ignored — run ` +
+          '`npm run fitment:top300 -- --dry-run`.',
+      );
+    }
+  }
 
   /**
-   * The conveyor. Ordering is [fitmentPriority asc (nulls last), id asc] and is
-   * the SAME for every filter — the operator builds muscle memory on row
-   * position, so a queue that reshuffles between fetches is worse than a slow
-   * one.
+   * The conveyor. For `all` / `unmapped` the ordering is [fitmentPriority asc
+   * (nulls last), id asc]; for `top300` it is the explicit list's order. Both
+   * are stable — the operator builds muscle memory on row position, so a queue
+   * that reshuffles between fetches is worse than a slow one.
    */
-  async getPartsQueue(q: GetPartsQueueQueryDto) {
-    const where = await this.queueWhere(q);
+  async getPartsQueue(q: GetPartsQueueQueryDto): Promise<PartsQueueResponse> {
+    if (q.filter === 'top300') return this.getTop300Queue(q);
+
+    const where = this.queueWhere(q);
 
     const [total, rows] = await this.prisma.$transaction([
       this.prisma.catalogPart.count({ where }),
@@ -87,6 +144,58 @@ export class FitmentQueueService {
     return {
       data: (rows as QueueRow[]).map((r) => this.mapRow(r)),
       meta: { total },
+    };
+  }
+
+  /**
+   * `filter=top300`: exactly the explicit list, in list order.
+   *
+   * Two reads in one transaction: which listed ids exist at all (so a missing
+   * id is REPORTED in `meta.top300.missing`, never replaced by another part),
+   * and the rows themselves (narrowed by `search`, if any). Ordering is applied
+   * in memory from the list — independent of sales, ratings, fitment state or
+   * whatever order the database returns.
+   */
+  private async getTop300Queue(
+    q: GetPartsQueueQueryDto,
+  ): Promise<PartsQueueResponse> {
+    const ids = this.top300.ids;
+    const report = (resolved: number, missing: string[]): Top300QueueMeta => ({
+      listSize: ids.length,
+      targetSize: this.top300.targetSize,
+      resolved,
+      missing,
+      duplicates: this.top300.duplicates.map((e) => e.identifier),
+      invalid: this.top300.invalid.map((e) => e.identifier),
+    });
+    if (ids.length === 0) {
+      return { data: [], meta: { total: 0, top300: report(0, []) } };
+    }
+
+    const inList: Prisma.CatalogPartWhereInput = { id: { in: ids } };
+    const search = this.searchWhere(q.search);
+    const [present, rows] = await this.prisma.$transaction([
+      this.prisma.catalogPart.findMany({
+        where: inList,
+        select: { id: true },
+      }),
+      this.prisma.catalogPart.findMany({
+        where: search ? { AND: [inList, search] } : inList,
+        select: queueSelect,
+      }),
+    ]);
+
+    const found = new Set((present as { id: string }[]).map((p) => p.id));
+    const ordered = sortByTop300(rows as QueueRow[], this.top300Rank);
+    return {
+      data: ordered.slice(0, q.limit).map((r) => this.mapRow(r)),
+      meta: {
+        total: ordered.length,
+        top300: report(
+          found.size,
+          ids.filter((id) => !found.has(id)),
+        ),
+      },
     };
   }
 
@@ -180,11 +289,17 @@ export class FitmentQueueService {
   // ── helpers ───────────────────────────────────────────────────────────────
 
   /** filter + search → one Prisma predicate. */
-  private async queueWhere(
-    q: GetPartsQueueQueryDto,
-  ): Promise<Prisma.CatalogPartWhereInput> {
-    const search = q.search?.trim();
-    const searchWhere: Prisma.CatalogPartWhereInput | undefined = search
+  private queueWhere(q: GetPartsQueueQueryDto): Prisma.CatalogPartWhereInput {
+    return {
+      ...this.filterWhere(q.filter),
+      ...(this.searchWhere(q.search) ?? {}),
+    };
+  }
+
+  /** Case-insensitive name/brand/id match, exact OEM/GM membership. */
+  private searchWhere(raw?: string): Prisma.CatalogPartWhereInput | undefined {
+    const search = raw?.trim();
+    return search
       ? {
           OR: [
             { title: { contains: search, mode: 'insensitive' } },
@@ -195,28 +310,16 @@ export class FitmentQueueService {
           ],
         }
       : undefined;
-
-    const filterWhere = await this.filterWhere(q.filter);
-    return { ...filterWhere, ...(searchWhere ?? {}) };
   }
 
-  private async filterWhere(
+  /** `all` / `unmapped` (top300 has its own path: getTop300Queue). */
+  private filterWhere(
     filter: GetPartsQueueQueryDto['filter'],
-  ): Promise<Prisma.CatalogPartWhereInput> {
-    if (filter === 'all') return {};
+  ): Prisma.CatalogPartWhereInput {
     // Vehicle-agnostic on purpose: part-first has no vehicle in scope, so
     // "unmapped" means "bound to nothing at all", not "missing from this car".
     if (filter === 'unmapped') return { fitmentBindings: { none: {} } };
-
-    // top300: the curated slice. Until fitment_priority is backfilled nothing
-    // carries a rank, and a literally empty queue would read as "all done" — so
-    // it degrades to `unmapped`, which is the work anyway.
-    const prioritized = await this.prisma.catalogPart.count({
-      where: { fitmentPriority: { not: null } },
-    });
-    return prioritized > 0
-      ? { fitmentPriority: { not: null } }
-      : { fitmentBindings: { none: {} } };
+    return {};
   }
 
   private mapRow(r: QueueRow) {
@@ -249,6 +352,9 @@ export class FitmentQueueService {
         ...new Set(r.fitmentBindings.map((b) => b.vehicleModelId)),
       ],
       nodeKey,
+      // 1-based rank in the explicit business TOP-300 list; null when the part
+      // is not on it. Additive — clients that do not read it are unaffected.
+      top300Position: this.top300Rank.get(r.id) ?? null,
     };
   }
 }
