@@ -11,6 +11,7 @@ import { CreateInvoiceDto } from './dto/create-invoice.dto';
 import { readPaymeConfig } from './webhooks/payme.config';
 import { buildPaymeCheckoutUrl } from './webhooks/payme-checkout.util';
 import { PaymeFiscalService } from './webhooks/payme-fiscal.service';
+import { isPayableOrderStatus } from './order-transitions';
 
 @Injectable()
 export class PaymentsService {
@@ -133,7 +134,7 @@ export class PaymentsService {
     });
     if (!order || order.userId !== userId)
       throw new NotFoundException('Order not found');
-    if (order.status !== OrderStatus.PENDING_PAYMENT) {
+    if (!isPayableOrderStatus(order.status)) {
       throw new BadRequestException('Order is not awaiting payment');
     }
     return order;

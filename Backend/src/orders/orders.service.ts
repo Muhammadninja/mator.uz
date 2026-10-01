@@ -1,4 +1,10 @@
-import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  BadRequestException,
+  ConflictException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   DeliveryMethod,
@@ -20,29 +26,12 @@ import { OrderStatusService, TransitionActor } from './order-status.service';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { ListOrdersQueryDto } from './dto/list-orders.query.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
+import { canTransition } from './order-transitions';
 
 const DEFAULT_ORDER_LIMIT = 20;
 
 /** Re-exported for the controller: the acting user shape for an operator write. */
 export type StatusActor = TransitionActor;
-
-/**
- * Server-authoritative order state machine for operator status writes.
- * Mapped onto the existing Prisma `OrderStatus` enum (not the contract's
- * `confirmed/packed/out_for_delivery` vocabulary, which has no schema column):
- * `PENDING_PAYMENT → PAID → PROCESSING → SHIPPED → DELIVERED`, with
- * `CANCELLED`/`REFUNDED`/`EXPIRED` terminal. Illegal jumps are rejected with 400.
- */
-const ALLOWED_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
-  [OrderStatus.PENDING_PAYMENT]: [OrderStatus.PAID, OrderStatus.CANCELLED, OrderStatus.EXPIRED],
-  [OrderStatus.PAID]: [OrderStatus.PROCESSING, OrderStatus.CANCELLED, OrderStatus.REFUNDED],
-  [OrderStatus.PROCESSING]: [OrderStatus.SHIPPED, OrderStatus.CANCELLED, OrderStatus.REFUNDED],
-  [OrderStatus.SHIPPED]: [OrderStatus.DELIVERED, OrderStatus.CANCELLED],
-  [OrderStatus.DELIVERED]: [],
-  [OrderStatus.CANCELLED]: [],
-  [OrderStatus.REFUNDED]: [],
-  [OrderStatus.EXPIRED]: [],
-};
 
 @Injectable()
 export class OrdersService {
@@ -70,18 +59,28 @@ export class OrdersService {
     // an order. Without these checks the ids are persisted verbatim, letting a
     // user reference another user's vehicle or address (cross-tenant reference).
     await this.assertOwnedVehicle(userId, dto.vehicle_id);
-    await this.assertOwnedAddress(userId, dto.cart_snapshot?.delivery_address_id);
+    await this.assertOwnedAddress(
+      userId,
+      dto.cart_snapshot?.delivery_address_id,
+    );
 
     // Apply active sales per line, so the order is charged the SAME discounted
     // price the buyer saw in the catalog and cart. A line's charged unit price is
     // its sale price when a campaign applies, else its snapshot price.
-    const lineDiscounts = await priceCartLines(this.prisma, this.discounts, cart.items);
+    const lineDiscounts = await priceCartLines(
+      this.prisma,
+      this.discounts,
+      cart.items,
+    );
     const unitPriceOf = (i: (typeof cart.items)[number]): number => {
       const d = lineDiscounts.get(i.id);
       return d?.appliedSale ? d.finalPrice : Number(i.priceUzsSnapshot);
     };
 
-    const subtotal = cart.items.reduce((s, i) => s + unitPriceOf(i) * i.quantity, 0);
+    const subtotal = cart.items.reduce(
+      (s, i) => s + unitPriceOf(i) * i.quantity,
+      0,
+    );
     const snap = dto.cart_snapshot ?? {};
     const deliveryMethod =
       String(snap.delivery_method ?? 'courier').toUpperCase() === 'PICKUP'
@@ -100,9 +99,16 @@ export class OrdersService {
     const paymentType = dto.payment_type
       ? PAYMENT_TYPE_MAP[dto.payment_type]
       : undefined;
-    const serviceFeeUzs = Number(this.config.get<string>('SERVICE_FEE_UZS') ?? 5000);
-    const discount = cart.promoCode ? resolvePromo(cart.promoCode, subtotal).discountUzs : 0;
-    const total = Math.max(0, subtotal + deliveryUzs + serviceFeeUzs - discount);
+    const serviceFeeUzs = Number(
+      this.config.get<string>('SERVICE_FEE_UZS') ?? 5000,
+    );
+    const discount = cart.promoCode
+      ? resolvePromo(cart.promoCode, subtotal).discountUzs
+      : 0;
+    const total = Math.max(
+      0,
+      subtotal + deliveryUzs + serviceFeeUzs - discount,
+    );
 
     // Spread the promo discount INTO the line prices, in tiyin, so the charged
     // amount is carried entirely by the items. A Payme receipt has no negative
@@ -122,7 +128,8 @@ export class OrdersService {
     const expiresAt = new Date(Date.now() + ttlMin * 60_000);
     const contactPhone =
       dto.contact_phone_e164 ??
-      (await this.prisma.appUser.findUnique({ where: { id: userId } }))?.phoneE164 ??
+      (await this.prisma.appUser.findUnique({ where: { id: userId } }))
+        ?.phoneE164 ??
       undefined;
 
     const order = await this.prisma.$transaction(async (tx) => {
@@ -176,7 +183,11 @@ export class OrdersService {
 
       // First history entry: the order's creation. Written in the same tx so an
       // order can never exist without its opening audit row.
-      await this.orderStatus.recordCreation(tx, created.id, OrderStatus.PENDING_PAYMENT);
+      await this.orderStatus.recordCreation(
+        tx,
+        created.id,
+        OrderStatus.PENDING_PAYMENT,
+      );
 
       // The cart is consumed by the order.
       await tx.cartItem.deleteMany({ where: { cartId: cart.id } });
@@ -223,18 +234,23 @@ export class OrdersService {
       where: { id: orderId },
       include: ORDER_INCLUDE,
     });
-    if (!order || order.userId !== userId) throw new NotFoundException('Order not found');
+    if (!order || order.userId !== userId)
+      throw new NotFoundException('Order not found');
     return presentOrder(order);
   }
 
   /**
    * Operator status write (PATCH /v1/orders/:id/status). Enforces the
-   * server-authoritative state machine ({@link ALLOWED_TRANSITIONS}), persists
+   * server-authoritative state machine (order-transitions.ts), persists
    * the new status, then broadcasts to the owning customer via the same channels
    * the payment webhook already uses (realtime socket + inbox/push notification)
    * so the app reflects the change without waiting for the next poll.
    */
-  async updateStatus(orderId: string, dto: UpdateOrderStatusDto, actor?: StatusActor) {
+  async updateStatus(
+    orderId: string,
+    dto: UpdateOrderStatusDto,
+    actor?: StatusActor,
+  ) {
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
       include: ORDER_INCLUDE,
@@ -243,7 +259,7 @@ export class OrdersService {
 
     const from = order.status;
     const to = dto.status.toUpperCase() as OrderStatus;
-    if (from !== to && !ALLOWED_TRANSITIONS[from]?.includes(to)) {
+    if (from !== to && !canTransition(from, to)) {
       throw new BadRequestException(
         `Illegal transition ${from.toLowerCase()} → ${to.toLowerCase()}`,
       );
@@ -253,11 +269,19 @@ export class OrdersService {
     if (from === to) return presentOrder(order);
 
     // Persist the transition + its audit row atomically through the single
-    // status chokepoint, then re-read for the broadcast/response.
-    await this.orderStatus.transition(orderId, to, {
+    // status chokepoint, then re-read for the broadcast/response. CONDITIONAL on
+    // the status we validated against: if a payment webhook (or another
+    // operator) moved the order meanwhile, this write must not silently
+    // overwrite it — e.g. cancel an order that was paid a moment ago.
+    const moved = await this.orderStatus.transitionIf(orderId, [from], to, {
       actor,
       note: dto.note ?? dto.reason ?? null,
     });
+    if (!moved) {
+      throw new ConflictException(
+        'Order status changed meanwhile — reload and try again',
+      );
+    }
     const updated = await this.prisma.order.findUniqueOrThrow({
       where: { id: orderId },
       include: ORDER_INCLUDE,
@@ -280,25 +304,37 @@ export class OrdersService {
       data: { order_id: order.id, status: to.toLowerCase() },
       deeplinkPath: '/(tabs)/(cart)/order-confirmation',
     });
-    this.logger.log(`Order ${order.id} status ${from.toLowerCase()} → ${to.toLowerCase()} (operator)`);
+    this.logger.log(
+      `Order ${order.id} status ${from.toLowerCase()} → ${to.toLowerCase()} (operator)`,
+    );
 
     return presentOrder(updated);
   }
 
   // ── ownership helpers ────────────────────────────────────────────────────────
   /** Ensure the referenced vehicle (if any) belongs to the caller. */
-  private async assertOwnedVehicle(userId: string, vehicleId?: string): Promise<void> {
+  private async assertOwnedVehicle(
+    userId: string,
+    vehicleId?: string,
+  ): Promise<void> {
     if (!vehicleId) return;
-    const vehicle = await this.prisma.vehicle.findUnique({ where: { id: vehicleId } });
+    const vehicle = await this.prisma.vehicle.findUnique({
+      where: { id: vehicleId },
+    });
     if (!vehicle || vehicle.userId !== userId || vehicle.deletedAt) {
       throw new NotFoundException('Vehicle not found');
     }
   }
 
   /** Ensure the referenced delivery address (if any) belongs to the caller. */
-  private async assertOwnedAddress(userId: string, addressId?: string): Promise<void> {
+  private async assertOwnedAddress(
+    userId: string,
+    addressId?: string,
+  ): Promise<void> {
     if (!addressId) return;
-    const address = await this.prisma.address.findUnique({ where: { id: addressId } });
+    const address = await this.prisma.address.findUnique({
+      where: { id: addressId },
+    });
     if (!address || address.userId !== userId) {
       throw new NotFoundException('Address not found');
     }
