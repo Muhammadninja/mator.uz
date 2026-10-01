@@ -7,14 +7,20 @@ import {
   localizedCategoryName,
 } from '../../common/app-lang.util';
 import { ListCategoriesQueryDto } from './dto/list-categories.query.dto';
+import {
+  VEHICLE_FIT_SELECT,
+  toVehicleFitContext,
+  vehicleFitWhere,
+} from '../compatibility/vehicle-fitment';
 import { VEHICLE_CATEGORIES } from './part-categories.catalog';
 
 /**
  * Serves the two-level part category hierarchy with LIVE per-category inventory
  * counts, so the frontend can render the home-page grid (main) and the make/model
  * grouping (vehicle) without any client-side processing. When a garage vehicle is
- * supplied, counts are scoped to parts that fit that vehicle (universal parts plus
- * parts whose make/model fit rows match).
+ * supplied, counts are scoped to parts that fit that vehicle — through the SAME
+ * decision path as GET /v1/catalog/parts?vehicle_id= (vehicleFitWhere), so a
+ * count can never include a part the listing then refuses to show.
  */
 @Injectable()
 export class CategoriesService {
@@ -34,7 +40,9 @@ export class CategoriesService {
         where: vehicleWhere,
         _count: { _all: true },
       });
-      const counts = new Map(grouped.map((g) => [g.vehicleCategory, g._count._all]));
+      const counts = new Map(
+        grouped.map((g) => [g.vehicleCategory, g._count._all]),
+      );
       return {
         items: VEHICLE_CATEGORIES.map((c) => ({
           id: c.id,
@@ -107,9 +115,9 @@ export class CategoriesService {
   }
 
   /**
-   * Build the where-clause that scopes counts to a garage vehicle: universal
-   * parts plus parts whose make/model fit rows match the vehicle. Returns
-   * undefined (no scoping) when no/unknown vehicle is given.
+   * Build the where-clause that scopes counts to a garage vehicle (the shared
+   * vehicleFitWhere). Returns undefined (no scoping) when no/unknown vehicle is
+   * given.
    */
   private async vehicleScopeWhere(
     vehicleId?: string,
@@ -117,24 +125,9 @@ export class CategoriesService {
     if (!vehicleId) return undefined;
     const v = await this.prisma.vehicle.findUnique({
       where: { id: vehicleId },
-      select: { make: { select: { name: true } }, model: { select: { name: true } } },
+      select: VEHICLE_FIT_SELECT,
     });
     if (!v) return undefined;
-
-    const fitConds: Prisma.CatalogPartFitWhereInput[] = [];
-    if (v.model?.name) fitConds.push({ modelName: { equals: v.model.name, mode: 'insensitive' } });
-    if (v.make?.name) fitConds.push({ makeName: { equals: v.make.name, mode: 'insensitive' } });
-
-    const or: Prisma.CatalogPartWhereInput[] = [{ isUniversal: true }];
-    if (fitConds.length > 0) or.push({ fits: { some: { OR: fitConds } } });
-    // Make-wide parts ("every model of this make") fit the vehicle by make.
-    if (v.make?.name) {
-      or.push({
-        makeFits: {
-          some: { makeName: { equals: v.make.name, mode: 'insensitive' } },
-        },
-      });
-    }
-    return { OR: or };
+    return vehicleFitWhere(toVehicleFitContext(v));
   }
 }

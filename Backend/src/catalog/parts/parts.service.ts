@@ -27,9 +27,17 @@ import {
   PartWithRelations,
   presentPartItem,
   computeCompatibility,
+  curatedModelIds,
   VehicleCompatContext,
 } from './part.presenter';
 import { ActiveSale, DiscountResult, DiscountService } from '../../sales/discount.service';
+import {
+  HAS_NO_CURATED_FITMENT,
+  VEHICLE_FIT_SELECT,
+  VehicleFitContext,
+  toVehicleFitContext,
+  vehicleFitWhere,
+} from '../compatibility/vehicle-fitment';
 
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 100;
@@ -57,35 +65,10 @@ const SLUG_TO_MAIN_CATEGORY = new Map<string, PartMainCategory>(
   ),
 );
 
-/** Garage-vehicle context for compatibility: trim/engine (fine) + make/model names. */
-interface VehicleFilterContext extends VehicleCompatContext {
-  makeName: string | null;
-  modelName: string | null;
-}
-
-/** Shared Prisma select for the vehicle fields a compatibility check needs —
- *  used by both the by-id and by-VIN lookups so they stay in lockstep. */
-const VEHICLE_CONTEXT_SELECT = {
-  trimId: true,
-  engineId: true,
-  year: true,
-  make: { select: { name: true } },
-  model: { select: { name: true } },
-} satisfies Prisma.VehicleSelect;
-
-type VehicleContextRow = Prisma.VehicleGetPayload<{
-  select: typeof VEHICLE_CONTEXT_SELECT;
-}>;
-
-function mapVehicleContext(v: VehicleContextRow): VehicleFilterContext {
-  return {
-    trimId: v.trimId,
-    engineId: v.engineId,
-    year: v.year,
-    makeName: v.make?.name ?? null,
-    modelName: v.model?.name ?? null,
-  };
-}
+/** Only the curated model ids — what a compatibility decision reads. */
+const CURATED_IDS_SELECT = {
+  select: { vehicleModelId: true },
+} satisfies Prisma.FitmentBindingFindManyArgs;
 
 @Injectable()
 export class PartsService {
@@ -194,12 +177,17 @@ export class PartsService {
   async compatibility(partId: string, vehicleId: string) {
     const part = await this.prisma.catalogPart.findUnique({
       where: { id: partId },
-      include: { compatibilities: true },
+      include: { compatibilities: true, fitmentBindings: CURATED_IDS_SELECT },
     });
     if (!part) throw new NotFoundException('Part not found');
 
     const vehicle = await this.loadVehicle(vehicleId);
-    const result = computeCompatibility(part.compatibilities, vehicle);
+    const curated = curatedModelIds(part);
+    const result = computeCompatibility(part.compatibilities, vehicle, curated);
+    const curatedFit =
+      !!vehicle?.modelId &&
+      curated.includes(vehicle.modelId) &&
+      result?.status === 'fits';
 
     // A universal product fits every vehicle by definition, so answer `fits`
     // outright rather than falling through to the "maybe" default. Motor oils
@@ -232,7 +220,10 @@ export class PartsService {
             .map((c) => c.engineId as string),
         ),
       ],
-      source: part.compatibilities[0]?.source ?? null,
+      // 'fitment' when the answer came from a curated Fitment Studio binding.
+      source: curatedFit
+        ? 'fitment'
+        : (part.compatibilities[0]?.source ?? null),
     };
   }
 
@@ -243,10 +234,17 @@ export class PartsService {
    * status is mapped onto the mobile contract (EXACT_MATCH / UNIVERSAL /
    * NOT_COMPATIBLE / UNCERTAIN) with a ready-to-render badge. The older GET
    * endpoint is kept untouched for backwards compatibility.
+   *
+   * The vehicle is resolved ONLY among the caller's own garage (`userId`, from
+   * the optional bearer token): a VIN is not a secret, so an unscoped lookup
+   * let anyone probe whether some other user registered a car. An anonymous
+   * caller has no garage, so it gets UNCERTAIN (never a false red) for a
+   * non-universal part — exactly as for an unknown vehicle.
    */
   async checkCompatibility(
     partId: string,
     input: { vehicleId?: string; vin?: string },
+    userId?: string | null,
   ) {
     const part = await this.prisma.catalogPart.findUnique({
       where: { id: partId },
@@ -255,15 +253,18 @@ export class PartsService {
         isUniversal: true,
         oemNumbers: true,
         compatibilities: true,
+        fitmentBindings: CURATED_IDS_SELECT,
       },
     });
     if (!part) throw new NotFoundException('Part not found');
 
-    const vehicle = input.vehicleId
-      ? await this.loadVehicle(input.vehicleId)
-      : input.vin
-        ? await this.loadVehicleByVin(input.vin)
-        : null;
+    const vehicle = !userId
+      ? null
+      : input.vehicleId
+        ? await this.loadOwnedVehicle(userId, input.vehicleId)
+        : input.vin
+          ? await this.loadOwnedVehicleByVin(userId, input.vin)
+          : null;
 
     const oemNumber = part.oemNumbers?.[0] ?? null;
     const echoedVehicleId = input.vehicleId ?? null;
@@ -271,13 +272,26 @@ export class PartsService {
     // A universal product (oil, chemistry, generic fastener/bulb) fits every
     // vehicle by definition — answer UNIVERSAL without touching the match rows.
     if (part.isUniversal) {
-      return this.presentCompatibility(part.id, echoedVehicleId, 'universal', oemNumber);
+      return this.presentCompatibility(
+        part.id,
+        echoedVehicleId,
+        'universal',
+        oemNumber,
+      );
     }
 
     // No vehicle resolved (neither id nor vin matched a row) → we genuinely
-    // can't tell, so UNCERTAIN rather than a false negative.
-    const internal = computeCompatibility(part.compatibilities, vehicle)?.status ?? 'maybe';
-    return this.presentCompatibility(part.id, echoedVehicleId, internal, oemNumber);
+    // can't tell, so UNCERTAIN rather than a false negative. A curated binding
+    // to the vehicle's exact model is enough for EXACT_MATCH on its own.
+    const internal =
+      computeCompatibility(part.compatibilities, vehicle, curatedModelIds(part))
+        ?.status ?? 'maybe';
+    return this.presentCompatibility(
+      part.id,
+      echoedVehicleId,
+      internal,
+      oemNumber,
+    );
   }
 
   /** Map an internal fit status onto the app contract (status + badge + details). */
@@ -340,7 +354,7 @@ export class PartsService {
   // ── helpers ────────────────────────────────────────────────────────────────
   private buildWhere(
     q: ListPartsQueryDto,
-    vehicle: VehicleFilterContext | null,
+    vehicle: VehicleFitContext | null,
   ): Prisma.CatalogPartWhereInput {
     const and: Prisma.CatalogPartWhereInput[] = [];
 
@@ -386,18 +400,17 @@ export class PartsService {
       }
     }
 
-    // Make / model filters — independent of the garage filter. Match on the
-    // denormalized fit rows by slug OR canonical name (case-insensitive), so both
-    // "make_chevrolet" and "Chevrolet" work. Universal parts (no fit rows) are
-    // included since they fit every make/model.
+    // Make / model filters — independent of the garage filter. Curated bindings
+    // match through their VehicleModelRef (id or name); uncurated parts match
+    // their denormalized fit rows by slug OR canonical name (case-insensitive),
+    // so both "make_chevrolet" and "Chevrolet" work. Universal parts (no fit
+    // rows) are included since they fit every make/model.
     if (q.make) and.push(this.makeWhere(q.make));
     if (q.model) and.push(this.modelWhere(q.model, q.make));
 
-    // Garage vehicle: only compatible parts. A part fits when it is universal, OR
-    // its make/model fit rows match the vehicle, OR its trim/engine compatibility
-    // rows are not an explicit miss. We approximate at the make/model level here
-    // (indexed); the per-item compatibility annotation still uses trim/engine.
-    if (vehicle) and.push(this.vehicleWhere(vehicle));
+    // Garage vehicle: only compatible parts — the shared decision path (curated
+    // model id, legacy make+model names, make-wide, trim/engine, universal).
+    if (vehicle) and.push(vehicleFitWhere(vehicle));
 
     if (q.brand) {
       and.push({
@@ -503,42 +516,74 @@ export class PartsService {
     return conds;
   }
 
-  /** Match universal parts OR parts whose fit rows reference the make. */
+  /**
+   * Match universal parts, parts CURATED to a model of the make (reference make
+   * by id, name or `make_<id>` slug), OR — for uncurated parts only — parts
+   * whose fit rows reference the make. A curated part is decided by its
+   * bindings alone (see catalog/compatibility/vehicle-fitment.ts).
+   */
   private makeWhere(make: string): Prisma.CatalogPartWhereInput {
     const value = make.trim();
+    const makeRef: Prisma.VehicleMakeWhereInput[] = [
+      { id: value },
+      { name: { equals: value, mode: 'insensitive' } },
+    ];
+    const slugMake = /^make_(.+)$/.exec(value)?.[1];
+    if (slugMake) makeRef.push({ id: slugMake });
     return {
       OR: [
         { isUniversal: true },
         {
-          fits: {
-            some: {
-              OR: [
-                { makeSlug: value },
-                { makeName: { equals: value, mode: 'insensitive' } },
-              ],
-            },
+          fitmentBindings: {
+            some: { vehicleModel: { make: { OR: makeRef } } },
           },
         },
-        // Make-wide parts ("every model of this make") match their make.
-        { makeFits: { some: this.makeFitMatch(value) } },
+        {
+          AND: [
+            HAS_NO_CURATED_FITMENT,
+            {
+              OR: [
+                {
+                  fits: {
+                    some: {
+                      OR: [
+                        { makeSlug: value },
+                        { makeName: { equals: value, mode: 'insensitive' } },
+                      ],
+                    },
+                  },
+                },
+                // Make-wide parts ("every model of this make") match their make.
+                { makeFits: { some: this.makeFitMatch(value) } },
+              ],
+            },
+          ],
+        },
       ],
     };
   }
 
   /**
-   * Match universal parts OR parts whose fit rows reference the model, OR
-   * make-wide parts of that model's make. The make is known from a model SLUG
-   * (model_<make>_<model>) or from an explicit `make` filter; a bare model
-   * name with no make gives no make to match, so make-wide parts are not
-   * claimed for it.
+   * Match universal parts, parts CURATED to the model (reference model by id,
+   * name, or a `model_<makeId>_<modelId>` slug), OR — for uncurated parts only —
+   * parts whose fit rows reference the model, or make-wide parts of that
+   * model's make. The make is known from a model SLUG (model_<make>_<model>)
+   * or from an explicit `make` filter; a bare model name with no make gives no
+   * make to match, so make-wide parts are not claimed for it.
    */
   private modelWhere(
     model: string,
     make?: string,
   ): Prisma.CatalogPartWhereInput {
     const value = model.trim();
-    const or: Prisma.CatalogPartWhereInput[] = [
-      { isUniversal: true },
+    const slug = /^model_([a-z0-9-]+)_(.+)$/.exec(value);
+    const modelRef: Prisma.VehicleModelRefWhereInput[] = [
+      { id: value },
+      { name: { equals: value, mode: 'insensitive' } },
+    ];
+    if (slug) modelRef.push({ makeId: slug[1], id: slug[2] });
+
+    const legacy: Prisma.CatalogPartWhereInput[] = [
       {
         fits: {
           some: {
@@ -550,14 +595,19 @@ export class PartsService {
         },
       },
     ];
-    const slugMake = /^model_([a-z0-9-]+)_/.exec(value)?.[1];
-    if (slugMake) {
-      or.push({ makeFits: { some: { makeSlug: `make_${slugMake}` } } });
+    if (slug) {
+      legacy.push({ makeFits: { some: { makeSlug: `make_${slug[1]}` } } });
     }
     if (make?.trim()) {
-      or.push({ makeFits: { some: this.makeFitMatch(make.trim()) } });
+      legacy.push({ makeFits: { some: this.makeFitMatch(make.trim()) } });
     }
-    return { OR: or };
+    return {
+      OR: [
+        { isUniversal: true },
+        { fitmentBindings: { some: { vehicleModel: { OR: modelRef } } } },
+        { AND: [HAS_NO_CURATED_FITMENT, { OR: legacy }] },
+      ],
+    };
   }
 
   /** A make-wide fit row matching a make given as slug or canonical name. */
@@ -568,60 +618,6 @@ export class PartsService {
         { makeName: { equals: value, mode: 'insensitive' } },
       ],
     };
-  }
-
-  /**
-   * Garage-vehicle compatibility filter. A part is returned when:
-   *   • it is universal, OR
-   *   • its make/model fit rows match the vehicle's make/model, OR
-   *   • it has a trim/engine compatibility row for the vehicle that is not an
-   *     explicit DOES_NOT_FIT.
-   * Parts with no fitment data at all are excluded (they can't be confirmed to
-   * fit the selected vehicle).
-   */
-  private vehicleWhere(
-    vehicle: VehicleFilterContext,
-  ): Prisma.CatalogPartWhereInput {
-    const or: Prisma.CatalogPartWhereInput[] = [{ isUniversal: true }];
-
-    if (vehicle.makeName || vehicle.modelName) {
-      const fitConds: Prisma.CatalogPartFitWhereInput[] = [];
-      if (vehicle.modelName)
-        fitConds.push({
-          modelName: { equals: vehicle.modelName, mode: 'insensitive' },
-        });
-      if (vehicle.makeName)
-        fitConds.push({
-          makeName: { equals: vehicle.makeName, mode: 'insensitive' },
-        });
-      or.push({ fits: { some: { AND: [{ OR: fitConds }] } } });
-    }
-    // A make-wide part fits every model of its make, so the garage vehicle's
-    // make alone is enough to match it.
-    if (vehicle.makeName) {
-      or.push({
-        makeFits: {
-          some: {
-            makeName: { equals: vehicle.makeName, mode: 'insensitive' },
-          },
-        },
-      });
-    }
-
-    if (vehicle.trimId || vehicle.engineId) {
-      const compatOr: Prisma.PartCompatibilityWhereInput[] = [];
-      if (vehicle.trimId) compatOr.push({ trimId: vehicle.trimId });
-      if (vehicle.engineId) compatOr.push({ engineId: vehicle.engineId });
-      or.push({
-        compatibilities: {
-          some: {
-            AND: [{ OR: compatOr }, { NOT: { status: 'DOES_NOT_FIT' } }],
-          },
-        },
-      });
-    }
-
-    return { OR: or };
   }
 
   private buildOrderBy(
@@ -694,7 +690,9 @@ export class PartsService {
       },
     });
     const bucketIds = new Set<string>(Object.values(MAIN_CATEGORY_TO_SLUG));
-    const countById = new Map(grouped.map((g) => [g.categoryId, g._count._all]));
+    const countById = new Map(
+      grouped.map((g) => [g.categoryId, g._count._all]),
+    );
 
     return cats
       .filter((c) => !bucketIds.has(c.id))
@@ -717,27 +715,40 @@ export class PartsService {
 
   private async loadVehicle(
     vehicleId?: string,
-  ): Promise<VehicleFilterContext | null> {
+  ): Promise<VehicleFitContext | null> {
     if (!vehicleId) return null;
     const v = await this.prisma.vehicle.findUnique({
       where: { id: vehicleId },
-      select: VEHICLE_CONTEXT_SELECT,
+      select: VEHICLE_FIT_SELECT,
     });
-    return v ? mapVehicleContext(v) : null;
+    return v ? toVehicleFitContext(v) : null;
+  }
+
+  /** A vehicle of the caller's OWN (not soft-deleted) garage, or null. */
+  private async loadOwnedVehicle(
+    userId: string,
+    vehicleId: string,
+  ): Promise<VehicleFitContext | null> {
+    const v = await this.prisma.vehicle.findFirst({
+      where: { id: vehicleId, userId, deletedAt: null },
+      select: VEHICLE_FIT_SELECT,
+    });
+    return v ? toVehicleFitContext(v) : null;
   }
 
   /** Resolve a vehicle context by raw VIN (fallback path for the app when it
-   *  only holds a VIN). VIN is not unique in the schema, so take the first
-   *  match — any vehicle with this VIN yields the same trim/engine context. */
-  private async loadVehicleByVin(
+   *  only holds a VIN) — searched ONLY in the caller's own garage. VIN is not
+   *  unique in the schema, so take the first of the caller's matches. */
+  private async loadOwnedVehicleByVin(
+    userId: string,
     vin: string,
-  ): Promise<VehicleFilterContext | null> {
+  ): Promise<VehicleFitContext | null> {
     if (!vin) return null;
     const v = await this.prisma.vehicle.findFirst({
-      where: { vin },
-      select: VEHICLE_CONTEXT_SELECT,
+      where: { vin, userId, deletedAt: null },
+      select: VEHICLE_FIT_SELECT,
     });
-    return v ? mapVehicleContext(v) : null;
+    return v ? toVehicleFitContext(v) : null;
   }
 
   private async brandFacet(
@@ -838,13 +849,17 @@ export class PartsService {
   ) {
     const all = await this.prisma.catalogPart.findMany({
       where,
-      select: { compatibilities: true },
+      select: { compatibilities: true, fitmentBindings: CURATED_IDS_SELECT },
     });
     let fits = 0;
     let maybe = 0;
     let doesNotFit = 0;
     for (const p of all) {
-      const c = computeCompatibility(p.compatibilities, vehicle);
+      const c = computeCompatibility(
+        p.compatibilities,
+        vehicle,
+        curatedModelIds(p),
+      );
       if (c?.status === 'fits') fits++;
       else if (c?.status === 'does_not_fit') doesNotFit++;
       else maybe++;

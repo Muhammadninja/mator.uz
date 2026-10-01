@@ -6,11 +6,14 @@ import {
   Param,
   Post,
   Query,
+  Request,
+  UseGuards,
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiHeader } from '@nestjs/swagger';
 import { resolveRequestLang } from '../../common/app-lang.util';
+import { OptionalJwtAuthGuard } from '../../auth/guards/optional-jwt-auth.guard';
 import { PartsService } from './parts.service';
 import { ListPartsQueryDto } from './dto/list-parts.query.dto';
 import { CheckCompatibilityDto } from './dto/check-compatibility.dto';
@@ -69,20 +72,27 @@ export class PartsController {
     return this.parts.compatibility(id, vehicleId);
   }
 
+  // Optional auth: the route stays public (universal parts answer for anyone),
+  // but `vehicleId` / `vin` resolve ONLY within the bearer's own garage.
   @Post(':id/check-compatibility')
   @HttpCode(HttpStatus.OK)
+  @UseGuards(OptionalJwtAuthGuard)
   @ApiOperation({
     summary: 'Check part↔vehicle compatibility (app contract)',
     description:
-      'Resolves the buyer vehicle by `vehicleId` or `vin` and returns the ' +
+      'Resolves the buyer vehicle by `vehicleId` or `vin` — only among the ' +
+      "authenticated caller's own garage vehicles — and returns the " +
       'app-facing status (EXACT_MATCH | UNIVERSAL | NOT_COMPATIBLE | UNCERTAIN) ' +
-      'with a ready-to-render badge. Universal parts always answer UNIVERSAL. ' +
+      'with a ready-to-render badge. Universal parts always answer UNIVERSAL; ' +
+      'a curated Fitment Studio binding to the vehicle model answers ' +
+      'EXACT_MATCH. Without a token no vehicle resolves (UNCERTAIN). ' +
       'The legacy `GET :id/compatibility` remains for backwards compatibility.',
   })
   checkCompatibility(
     @Param('id') id: string,
     @Body() body: CheckCompatibilityDto,
+    @Request() req: { user?: { id: string } | null },
   ) {
-    return this.parts.checkCompatibility(id, body);
+    return this.parts.checkCompatibility(id, body, req.user?.id ?? null);
   }
 }

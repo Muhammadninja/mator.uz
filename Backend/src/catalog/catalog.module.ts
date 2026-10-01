@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { PrismaModule } from '../prisma/prisma.module';
 import { SalesModule } from '../sales/sales.module';
+import { AuthModule } from '../auth/auth.module';
 import { PartsService } from './parts/parts.service';
 import { PartsController } from './parts/parts.controller';
 import { SearchService } from './search/search.service';
@@ -11,8 +12,15 @@ import { CatalogProjectionService } from './projection/catalog-projection.servic
 
 @Module({
   // SalesModule exports DiscountService so buyer part prices reflect active sales.
-  imports: [PrismaModule, SalesModule],
-  providers: [PartsService, SearchService, CategoriesService, CatalogProjectionService],
+  // AuthModule provides the passport JWT strategy behind the OptionalJwtAuthGuard
+  // on check-compatibility (scopes the vehicle lookup to the caller's garage).
+  imports: [PrismaModule, SalesModule, AuthModule],
+  providers: [
+    PartsService,
+    SearchService,
+    CategoriesService,
+    CatalogProjectionService,
+  ],
   controllers: [PartsController, SearchController, CategoriesController],
   // CatalogProjectionService is exported so the Telegram pipeline (and future
   // admin/seller tools) can project supply-side writes into the buyer catalog

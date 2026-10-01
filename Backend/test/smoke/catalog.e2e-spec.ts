@@ -159,11 +159,17 @@ describe('Catalog/Search smoke', () => {
     expect(where.AND).toContainEqual({ mainCategory: 'BRAKES' });
   });
 
-  it('filters by make via fit rows OR universal (independent of garage)', async () => {
+  it('filters by make via curated bindings, fit rows OR universal (independent of garage)', async () => {
     const where = await whereForQuery({ make: 'Chevrolet' });
-    const makeClause = where.AND.find((c: any) => c.OR?.some((o: any) => o.fits));
+    const makeClause = where.AND.find((c: any) =>
+      c.OR?.some((o: any) => o.fitmentBindings),
+    );
     expect(makeClause.OR).toContainEqual({ isUniversal: true });
     expect(JSON.stringify(makeClause)).toContain('Chevrolet');
+    // Legacy fit rows only decide for parts that carry no curated binding.
+    expect(JSON.stringify(makeClause)).toContain(
+      '{"fitmentBindings":{"none":{}}}',
+    );
   });
 
   it('filters by region, gm_only and oem_only', async () => {
