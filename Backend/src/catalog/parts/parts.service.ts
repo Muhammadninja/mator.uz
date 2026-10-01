@@ -533,18 +533,12 @@ export class PartsService {
    */
   private makeWhere(make: string): Prisma.CatalogPartWhereInput {
     const value = make.trim();
-    const makeRef: Prisma.VehicleMakeWhereInput[] = [
-      { id: value },
-      { name: { equals: value, mode: 'insensitive' } },
-    ];
-    const slugMake = /^make_(.+)$/.exec(value)?.[1];
-    if (slugMake) makeRef.push({ id: slugMake });
     return {
       OR: [
         { isUniversal: true },
         {
           fitmentBindings: {
-            some: { vehicleModel: { make: { OR: makeRef } } },
+            some: { vehicleModel: { make: { OR: this.makeRefs(value) } } },
           },
         },
         {
@@ -579,44 +573,69 @@ export class PartsService {
    * model's make. The make is known from a model SLUG (model_<make>_<model>)
    * or from an explicit `make` filter; a bare model name with no make gives no
    * make to match, so make-wide parts are not claimed for it.
+   *
+   * With an explicit `make` (the garage screen sends both names), the model
+   * and the make must hold on the SAME binding / fit row: a part fitting
+   * "Chevrolet Spark" and "Ravon Cobalt" is not a Chevrolet Cobalt part just
+   * because each name appears on one of its rows.
    */
   private modelWhere(
     model: string,
     make?: string,
   ): Prisma.CatalogPartWhereInput {
     const value = model.trim();
+    const makeValue = make?.trim() || undefined;
     const slug = /^model_([a-z0-9-]+)_(.+)$/.exec(value);
     const modelRef: Prisma.VehicleModelRefWhereInput[] = [
       { id: value },
       { name: { equals: value, mode: 'insensitive' } },
     ];
     if (slug) modelRef.push({ makeId: slug[1], id: slug[2] });
+    const curatedModel: Prisma.VehicleModelRefWhereInput = makeValue
+      ? { AND: [{ OR: modelRef }, { make: { OR: this.makeRefs(makeValue) } }] }
+      : { OR: modelRef };
 
+    const fitModel: Prisma.CatalogPartFitWhereInput = {
+      OR: [
+        { modelSlug: value },
+        { modelName: { equals: value, mode: 'insensitive' } },
+      ],
+    };
+    const fitMake: Prisma.CatalogPartFitWhereInput | null = makeValue
+      ? {
+          OR: [
+            { makeSlug: makeValue },
+            { makeName: { equals: makeValue, mode: 'insensitive' } },
+          ],
+        }
+      : null;
     const legacy: Prisma.CatalogPartWhereInput[] = [
-      {
-        fits: {
-          some: {
-            OR: [
-              { modelSlug: value },
-              { modelName: { equals: value, mode: 'insensitive' } },
-            ],
-          },
-        },
-      },
+      { fits: { some: fitMake ? { AND: [fitModel, fitMake] } : fitModel } },
     ];
     if (slug) {
       legacy.push({ makeFits: { some: { makeSlug: `make_${slug[1]}` } } });
     }
-    if (make?.trim()) {
-      legacy.push({ makeFits: { some: this.makeFitMatch(make.trim()) } });
+    if (makeValue) {
+      legacy.push({ makeFits: { some: this.makeFitMatch(makeValue) } });
     }
     return {
       OR: [
         { isUniversal: true },
-        { fitmentBindings: { some: { vehicleModel: { OR: modelRef } } } },
+        { fitmentBindings: { some: { vehicleModel: curatedModel } } },
         { AND: [HAS_NO_CURATED_FITMENT, { OR: legacy }] },
       ],
     };
+  }
+
+  /** A reference make given as id, canonical name or `make_<id>` slug. */
+  private makeRefs(value: string): Prisma.VehicleMakeWhereInput[] {
+    const refs: Prisma.VehicleMakeWhereInput[] = [
+      { id: value },
+      { name: { equals: value, mode: 'insensitive' } },
+    ];
+    const slugMake = /^make_(.+)$/.exec(value)?.[1];
+    if (slugMake) refs.push({ id: slugMake });
+    return refs;
   }
 
   /** A make-wide fit row matching a make given as slug or canonical name. */

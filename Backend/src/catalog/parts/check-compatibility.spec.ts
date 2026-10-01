@@ -303,6 +303,64 @@ describe('PartsService.checkCompatibility — curated Fitment Studio bindings', 
     expect(res.isCompatible).toBe(false);
   });
 
+  it('a seller/import row naming the exact make+model never yields EXACT_MATCH on its own', async () => {
+    const { svc, prisma } = makeService({
+      part: { isUniversal: false, compatibilities: [] },
+      vehicleById: VEHICLE,
+    });
+    // Even were the legacy rows returned, they are not evidence this check
+    // reads: they are seller-entered names, so at most the listing shows the
+    // part — the verdict stays UNCERTAIN.
+    prisma.catalogPart.findUnique.mockResolvedValue({
+      id: 'part_1',
+      isUniversal: false,
+      oemNumbers: [],
+      compatibilities: [],
+      fitmentBindings: [],
+      fits: [{ makeName: 'Chevrolet', modelName: 'Cobalt' }],
+      makeFits: [{ makeName: 'Chevrolet' }],
+    });
+    const res = await svc.checkCompatibility(
+      'part_1',
+      { vehicleId: 'v1' },
+      USER,
+    );
+    expect(res.status).toBe('UNCERTAIN');
+    const [{ select }] = prisma.catalogPart.findUnique.mock.calls[0] as [
+      { select: Record<string, unknown> },
+    ];
+    expect(select).not.toHaveProperty('fits');
+    expect(select).not.toHaveProperty('makeFits');
+  });
+
+  it('curated to Cobalt, seller said "every Chevrolet": a Spark gets NOT_COMPATIBLE', async () => {
+    const spark = {
+      ...VEHICLE,
+      modelId: 'spark',
+      trimId: null,
+      engineId: null,
+      model: { name: 'Spark' },
+    };
+    const { svc, prisma } = makeService({
+      part: { isUniversal: false, compatibilities: [] },
+      vehicleById: spark,
+    });
+    prisma.catalogPart.findUnique.mockResolvedValue({
+      id: 'part_1',
+      isUniversal: false,
+      oemNumbers: [],
+      compatibilities: [],
+      fitmentBindings: [{ vehicleModelId: 'cobalt' }],
+      makeFits: [{ makeName: 'Chevrolet' }],
+    });
+    const res = await svc.checkCompatibility(
+      'part_1',
+      { vehicleId: 'v1' },
+      USER,
+    );
+    expect(res.status).toBe('NOT_COMPATIBLE');
+  });
+
   it('Nexia 2 binding never answers EXACT_MATCH for a Nexia 3 (distinct model ids)', async () => {
     const nexia3 = {
       ...VEHICLE,
