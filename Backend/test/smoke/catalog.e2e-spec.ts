@@ -107,9 +107,9 @@ describe('Catalog/Search smoke', () => {
         { trimId: 'trim_lt', engineId: null, years: [2022], status: 'FITS', confidence: 1, source: 'oem' },
       ],
     });
-    prisma.vehicle.findUnique.mockResolvedValue({ trimId: 'trim_lt', engineId: null, year: 2022 });
+    prisma.vehicle.findFirst.mockResolvedValue({ trimId: 'trim_lt', engineId: null, year: 2022 });
 
-    const res = await svc.compatibility('part_belt', 'veh_1');
+    const res = await svc.compatibility('part_belt', 'veh_1', 'usr_1');
     expect(res.status).toBe('fits');
     expect(res.matched_trims).toEqual([{ trim_id: 'trim_lt', years: [2022] }]);
   });
@@ -143,14 +143,14 @@ describe('Catalog/Search smoke', () => {
   });
 
   // Capture the `where` the service builds so we can assert the server-side filters.
-  async function whereForQuery(query: any) {
+  async function whereForQuery(query: any, userId: string | null = null) {
     const svc = new PartsService(prisma, fakeDiscounts());
     prisma.catalogPart.count.mockResolvedValue(0);
     prisma.catalogPart.findMany.mockResolvedValue([]);
     prisma.catalogPart.groupBy.mockResolvedValue([]);
     prisma.catalogPart.aggregate.mockResolvedValue({ _min: { priceUzs: 0 }, _max: { priceUzs: 0 } });
     prisma.partBrand.findMany.mockResolvedValue([]);
-    await svc.list(query);
+    await svc.list(query, 'ru', userId);
     return prisma.catalogPart.findMany.mock.calls[0][0].where;
   }
 
@@ -180,14 +180,14 @@ describe('Catalog/Search smoke', () => {
   });
 
   it('garage vehicle restricts to compatible parts (universal OR make/model OR trim)', async () => {
-    prisma.vehicle.findUnique.mockResolvedValue({
+    prisma.vehicle.findFirst.mockResolvedValue({
       trimId: 'trim_lt',
       engineId: null,
       year: 2019,
       make: { name: 'Chevrolet' },
       model: { name: 'Cobalt' },
     });
-    const where = await whereForQuery({ vehicle_id: 'veh_1' });
+    const where = await whereForQuery({ vehicle_id: 'veh_1' }, 'usr_1');
     const vClause = where.AND.find((c: any) => Array.isArray(c.OR));
     expect(vClause.OR).toContainEqual({ isUniversal: true });
     expect(JSON.stringify(vClause)).toContain('Cobalt');
@@ -269,15 +269,73 @@ describe('Catalog/Categories smoke', () => {
 
   it('scopes counts to a garage vehicle (universal OR fitting make/model)', async () => {
     const svc = new CategoriesService(prisma);
-    prisma.vehicle.findUnique.mockResolvedValue({ make: { name: 'Chevrolet' }, model: { name: 'Cobalt' } });
+    prisma.vehicle.findFirst.mockResolvedValue({ make: { name: 'Chevrolet' }, model: { name: 'Cobalt' } });
     prisma.catalogPart.groupBy.mockResolvedValue([]);
 
-    await svc.list({ vehicle_id: 'veh_1' });
+    await svc.list({ vehicle_id: 'veh_1' }, 'ru', 'usr_1');
     const where = prisma.catalogPart.groupBy.mock.calls[0][0].where;
     // [buyer-visible (no suspended dealer), the garage vehicle's fit clause]
     const [visible, vehicleClause] = where.AND;
     expect(visible).toEqual({ seller: { status: { not: 'SUSPENDED' } } });
     expect(vehicleClause.OR).toContainEqual({ isUniversal: true });
     expect(JSON.stringify(where)).toContain('Cobalt');
+  });
+});
+
+// `vehicle_id` resolves ONLY within the authenticated caller's own garage. The
+// double answers like the database would: the vehicle row comes back only for a
+// lookup scoped to its live (not soft-deleted) owner.
+describe('Catalog — vehicle_id resolves only in the caller garage', () => {
+  const OWNER = 'usr_owner';
+  let prisma: PrismaMock;
+
+  beforeEach(() => {
+    prisma = createPrismaMock();
+    prisma.vehicle.findFirst.mockImplementation(({ where }: any) =>
+      Promise.resolve(
+        where.userId === OWNER && where.deletedAt === null
+          ? {
+              modelId: 'cobalt',
+              trimId: null,
+              engineId: null,
+              year: 2022,
+              make: { name: 'Chevrolet' },
+              model: { name: 'Cobalt' },
+            }
+          : null,
+      ),
+    );
+    // A part the operator curated to the Cobalt.
+    prisma.catalogPart.findFirst.mockResolvedValue(
+      buildPart({
+        isUniversal: false,
+        fitmentBindings: [
+          {
+            vehicleModelId: 'cobalt',
+            vehicleModel: { name: 'Cobalt', make: { name: 'Chevrolet' } },
+          },
+        ],
+      }),
+    );
+  });
+
+  it('part detail: the owner gets the verdict for their own car', async () => {
+    const svc = new PartsService(prisma, fakeDiscounts());
+    const res = await svc.detail('part_belt', 'veh_1', 'ru', OWNER);
+    expect(res.compatibility).toMatchObject({ status: 'fits' });
+  });
+
+  it("part detail: another user's vehicle_id is treated as unknown (no verdict)", async () => {
+    const svc = new PartsService(prisma, fakeDiscounts());
+    const res = await svc.detail('part_belt', 'veh_1', 'ru', 'usr_other');
+    expect(res.compatibility).toBeNull();
+  });
+
+  it('part detail: an anonymous caller never looks a vehicle up', async () => {
+    const svc = new PartsService(prisma, fakeDiscounts());
+    const res = await svc.detail('part_belt', 'veh_1', 'ru', null);
+    expect(res.compatibility).toBeNull();
+    expect(prisma.vehicle.findFirst).not.toHaveBeenCalled();
+    expect(prisma.vehicle.findUnique).not.toHaveBeenCalled();
   });
 });

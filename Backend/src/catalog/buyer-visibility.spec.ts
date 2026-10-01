@@ -55,11 +55,11 @@ describe('buyer visibility — suspended dealers', () => {
   });
 
   it('…also when a garage vehicle filters the listing', async () => {
-    prisma.vehicle.findUnique.mockResolvedValue(
+    prisma.vehicle.findFirst.mockResolvedValue(
       fx.vehicleRow(fx.VEHICLES.cobalt),
     );
     const svc = new PartsService(prisma, noDiscounts as never);
-    await svc.list({ vehicle_id: 'veh_1' });
+    await svc.list({ vehicle_id: 'veh_1' }, 'ru', 'usr_1');
     const { where } = prisma.catalogPart.findMany.mock.calls[0][0];
     expect(selectIds(PARTS, where)).not.toContain('suspended_dealer_part');
   });

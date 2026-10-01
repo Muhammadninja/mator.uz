@@ -210,21 +210,26 @@ export class CatalogToolsService {
    * find that part"), not abort the user's turn. Unknown tool names land here
    * too, so a model that hallucinates a tool gets a corrective answer instead of
    * a 500.
+   *
+   * `userId` is the session's AUTHENTICATED owner. A model-supplied `vehicle_id`
+   * resolves only within that user's garage — the same rule as the buyer API —
+   * so an injected id ("use vehicle X") can never reach another user's car.
    */
   async run(
     name: string,
     rawInput: unknown,
     lang: AppLang = DEFAULT_APP_LANG,
+    userId: string | null = null,
   ): Promise<ToolRunResult> {
     const input = (rawInput ?? {}) as Record<string, unknown>;
     try {
       switch (name) {
         case 'search_catalog':
-          return await this.searchCatalog(input);
+          return await this.searchCatalog(input, userId);
         case 'get_categories':
-          return await this.getCategories(input, lang);
+          return await this.getCategories(input, lang, userId);
         case 'get_product':
-          return await this.getProduct(input);
+          return await this.getProduct(input, userId);
         case 'find_motor_oil':
           return await this.findMotorOil(input);
         default:
@@ -244,6 +249,7 @@ export class CatalogToolsService {
 
   private async searchCatalog(
     input: Record<string, unknown>,
+    userId: string | null,
   ): Promise<ToolRunResult> {
     const query = this.toPartsQuery({
       q: input.q,
@@ -254,7 +260,7 @@ export class CatalogToolsService {
       sort: input.sort,
       page_size: this.pageSize(input.page_size),
     });
-    const result = await this.parts.list(query);
+    const result = await this.parts.list(query, DEFAULT_APP_LANG, userId);
     // The presenter returns a wider row than the model may see; narrowing to
     // PresentedPart here is what makes the allowlist in slimPart the boundary.
     return this.present(
@@ -294,6 +300,7 @@ export class CatalogToolsService {
   private async getCategories(
     input: Record<string, unknown>,
     lang: AppLang,
+    userId: string | null,
   ): Promise<ToolRunResult> {
     const scope = input.scope === 'vehicle' ? 'vehicle' : 'main';
     const vehicleId =
@@ -304,6 +311,7 @@ export class CatalogToolsService {
         vehicle_id: vehicleId,
       } as never,
       lang,
+      userId,
     );
     const items = result.items.map(
       (c: { id: string; label: string; count: number }) => ({
@@ -318,6 +326,7 @@ export class CatalogToolsService {
 
   private async getProduct(
     input: Record<string, unknown>,
+    userId: string | null,
   ): Promise<ToolRunResult> {
     const partId =
       typeof input.part_id === 'string' ? input.part_id.trim() : '';
@@ -325,7 +334,12 @@ export class CatalogToolsService {
     const vehicleId =
       typeof input.vehicle_id === 'string' ? input.vehicle_id : undefined;
     try {
-      const part = await this.parts.detail(partId, vehicleId);
+      const part = await this.parts.detail(
+        partId,
+        vehicleId,
+        DEFAULT_APP_LANG,
+        userId,
+      );
       return this.present([this.detailPart(part)], 1);
     } catch {
       // A NotFoundException is an ANSWER ("no such part"), not a failure.

@@ -31,12 +31,16 @@ export class CategoriesService {
    * The category grid. `lang` picks each row's display `label`; ids, slugs,
    * counts and ordering are identical in every language.
    */
-  async list(query: ListCategoriesQueryDto, lang: AppLang = DEFAULT_APP_LANG) {
+  async list(
+    query: ListCategoriesQueryDto,
+    lang: AppLang = DEFAULT_APP_LANG,
+    userId: string | null = null,
+  ) {
     const scope = query.scope ?? 'main';
     // Counts cover exactly what the listing can show: buyer-visible parts
     // (no suspended dealer), scoped to the garage vehicle when one is given.
     const vehicleWhere = buyerVisible(
-      await this.vehicleScopeWhere(query.vehicle_id),
+      await this.vehicleScopeWhere(query.vehicle_id, userId),
     );
 
     if (scope === 'vehicle') {
@@ -120,14 +124,16 @@ export class CategoriesService {
   /**
    * Build the where-clause that scopes counts to a garage vehicle (the shared
    * vehicleFitWhere). Returns undefined (no scoping) when no/unknown vehicle is
-   * given.
+   * given — and a vehicle outside `userId`'s own garage (or any vehicle for an
+   * anonymous caller) counts as unknown, exactly like the parts listing.
    */
   private async vehicleScopeWhere(
     vehicleId?: string,
+    userId?: string | null,
   ): Promise<Prisma.CatalogPartWhereInput | undefined> {
-    if (!vehicleId) return undefined;
-    const v = await this.prisma.vehicle.findUnique({
-      where: { id: vehicleId },
+    if (!vehicleId || !userId) return undefined;
+    const v = await this.prisma.vehicle.findFirst({
+      where: { id: vehicleId, userId, deletedAt: null },
       select: VEHICLE_FIT_SELECT,
     });
     if (!v) return undefined;

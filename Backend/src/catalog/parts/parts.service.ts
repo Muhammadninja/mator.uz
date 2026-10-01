@@ -94,9 +94,16 @@ export class PartsService {
    * Faceted parts listing. `lang` reaches presentation only — the where-clause,
    * the facets' grouping keys and the sort are all language-independent, so the
    * same query returns the same rows in the same order in every language.
+   *
+   * `vehicle_id` resolves only within `userId`'s own garage (see
+   * loadGarageVehicle); anything else lists as if no vehicle were given.
    */
-  async list(query: ListPartsQueryDto, lang: AppLang = DEFAULT_APP_LANG) {
-    const vehicle = await this.loadVehicle(query.vehicle_id);
+  async list(
+    query: ListPartsQueryDto,
+    lang: AppLang = DEFAULT_APP_LANG,
+    userId: string | null = null,
+  ) {
+    const vehicle = await this.loadGarageVehicle(userId, query.vehicle_id);
     const where = this.buildWhere(query, vehicle);
     const rollup = this.rollupMainCategory(query);
     // A macro-category rollup defaults to bestseller-first; an explicit sort wins.
@@ -164,25 +171,30 @@ export class PartsService {
     partId: string,
     vehicleId?: string,
     lang: AppLang = DEFAULT_APP_LANG,
+    userId: string | null = null,
   ) {
     const part = await this.prisma.catalogPart.findFirst({
       where: { id: partId, ...BUYER_VISIBLE_PART },
       include: PART_INCLUDE,
     });
     if (!part) throw new NotFoundException('Part not found');
-    const vehicle = await this.loadVehicle(vehicleId);
+    const vehicle = await this.loadGarageVehicle(userId, vehicleId);
     const sales = await this.discounts.loadActiveSales();
     return presentPartItem(part, vehicle, this.discountFor(part, sales), lang);
   }
 
-  async compatibility(partId: string, vehicleId: string) {
+  async compatibility(
+    partId: string,
+    vehicleId: string,
+    userId: string | null = null,
+  ) {
     const part = await this.prisma.catalogPart.findUnique({
       where: { id: partId },
       include: { compatibilities: true, fitmentBindings: CURATED_IDS_SELECT },
     });
     if (!part) throw new NotFoundException('Part not found');
 
-    const vehicle = await this.loadVehicle(vehicleId);
+    const vehicle = await this.loadGarageVehicle(userId, vehicleId);
     const curated = curatedModelIds(part);
     const result = computeCompatibility(part.compatibilities, vehicle, curated);
     const curatedFit =
@@ -708,15 +720,18 @@ export class PartsService {
       .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
   }
 
-  private async loadVehicle(
+  /**
+   * The garage vehicle a `vehicle_id` names — resolved ONLY for its owner. For
+   * anyone else (another user, or no authenticated user at all) it is null:
+   * the same answer as for an unknown id, so a foreign id neither filters by
+   * somebody else's car nor reveals that it exists.
+   */
+  private async loadGarageVehicle(
+    userId: string | null,
     vehicleId?: string,
   ): Promise<VehicleFitContext | null> {
-    if (!vehicleId) return null;
-    const v = await this.prisma.vehicle.findUnique({
-      where: { id: vehicleId },
-      select: VEHICLE_FIT_SELECT,
-    });
-    return v ? toVehicleFitContext(v) : null;
+    if (!userId || !vehicleId) return null;
+    return this.loadOwnedVehicle(userId, vehicleId);
   }
 
   /** A vehicle of the caller's OWN (not soft-deleted) garage, or null. */

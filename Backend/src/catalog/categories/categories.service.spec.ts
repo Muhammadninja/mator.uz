@@ -9,6 +9,7 @@
 import { CategoriesService } from './categories.service';
 import { createPrismaMock, PrismaMock } from '../../../test/utils/harness';
 import { vehicleFitWhere } from '../compatibility/vehicle-fitment';
+import { buyerVisible } from '../buyer-visibility';
 import { selectIds } from '../compatibility/where-eval.test-util';
 import * as fx from '../compatibility/fitment-fixtures.test-util';
 
@@ -152,11 +153,23 @@ describe('CategoriesService — grid localization', () => {
 describe('CategoriesService — garage-scoped counts', () => {
   const PARTS = fx.PARTS.map((p) => ({ ...p, mainCategory: 'BRAKES' }));
 
-  async function brakesCountFor(garage: fx.VehicleKey) {
+  const OWNER = 'usr_owner';
+
+  /** Counts as `userId` sees them; the garage vehicle belongs to OWNER. */
+  async function brakesCountFor(
+    garage: fx.VehicleKey,
+    userId: string | null = OWNER,
+  ) {
     const prisma: PrismaMock = createPrismaMock();
     prisma.partCategory.findMany.mockResolvedValue(ROWS);
-    prisma.vehicle.findUnique.mockResolvedValue(
-      fx.vehicleRow(fx.VEHICLES[garage]),
+    // Like the database: the row comes back only for its (live) owner.
+    prisma.vehicle.findFirst.mockImplementation(
+      ({ where }: { where: { userId?: string; deletedAt?: null } }) =>
+        Promise.resolve(
+          where.userId === OWNER && where.deletedAt === null
+            ? fx.vehicleRow(fx.VEHICLES[garage])
+            : null,
+        ),
     );
     prisma.catalogPart.groupBy.mockImplementation(
       ({ where }: { where: unknown }) =>
@@ -167,9 +180,11 @@ describe('CategoriesService — garage-scoped counts', () => {
           },
         ]),
     );
-    const res = await new CategoriesService(prisma).list({
-      vehicle_id: 'veh_1',
-    });
+    const res = await new CategoriesService(prisma).list(
+      { vehicle_id: 'veh_1' },
+      'ru',
+      userId,
+    );
     return res.items.find((c) => c.id === 'brakes')!.count;
   }
 
@@ -187,6 +202,13 @@ describe('CategoriesService — garage-scoped counts', () => {
     // trim_t_cobalt, universal_oil — and NOT curated_spark / legacy_spark /
     // curated_overrides_legacy.
     expect(withSparkOnly).toBe(6);
+  });
+
+  it("another user's vehicle_id does not scope the counts (treated as unknown)", async () => {
+    const unscoped = selectIds(PARTS, buyerVisible(undefined)).length;
+    expect(await brakesCountFor('cobalt', 'usr_other')).toBe(unscoped);
+    expect(await brakesCountFor('cobalt', null)).toBe(unscoped);
+    expect(unscoped).toBeGreaterThan(await brakesCountFor('cobalt'));
   });
 
   it('Nexia 2 and Nexia 3 counts differ by their own curated parts', async () => {

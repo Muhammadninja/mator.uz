@@ -47,9 +47,13 @@ function makePrisma() {
       aggregate: jest.fn().mockResolvedValue({ _min: {}, _max: {} }),
     },
     partBrand: { findMany: jest.fn().mockResolvedValue([]) },
-    vehicle: { findUnique: jest.fn().mockResolvedValue(null) },
+    // Garage vehicles resolve only for their owner (findFirst scoped by userId).
+    vehicle: { findFirst: jest.fn().mockResolvedValue(null) },
   };
 }
+
+/** The authenticated caller every garage-vehicle listing below runs as. */
+const OWNER = 'usr_owner';
 
 /** A DiscountService stub that never discounts — these tests exercise
  *  filtering/faceting, not pricing, so every part keeps its raw price. */
@@ -302,7 +306,7 @@ describe('PartsService — the compatibility endpoint', () => {
     const prisma = makePrisma();
     (prisma.catalogPart as unknown as { findUnique: jest.Mock }).findUnique =
       jest.fn().mockResolvedValue(part);
-    prisma.vehicle.findUnique.mockResolvedValue({
+    prisma.vehicle.findFirst.mockResolvedValue({
       trimId: 'trim_1',
       engineId: null,
       year: 2020,
@@ -399,14 +403,14 @@ describe('PartsService — spare-part queries do not silently change', () => {
     // This is intended, not a leak: a motor oil fits every vehicle, so it must
     // appear for a selected car exactly like any other universal product.
     const { svc, prisma } = makeService();
-    prisma.vehicle.findUnique.mockResolvedValue({
+    prisma.vehicle.findFirst.mockResolvedValue({
       trimId: 'trim_1',
       engineId: null,
       year: 2020,
       make: { name: 'Chevrolet' },
       model: { name: 'Cobalt' },
     });
-    await svc.list({ vehicle_id: 'v1' });
+    await svc.list({ vehicle_id: 'v1' }, 'ru', OWNER);
     const where = JSON.stringify(
       (prisma.calls.findMany as { where: unknown }).where,
     );
@@ -454,7 +458,7 @@ describe('PartsService — make-wide fitment (imported "all models of a make")',
 
   it('a garage vehicle matches make-wide parts of its make', async () => {
     const { svc, prisma } = makeService();
-    prisma.vehicle.findUnique.mockResolvedValue({
+    prisma.vehicle.findFirst.mockResolvedValue({
       modelId: 'kodiaq',
       trimId: null,
       engineId: null,
@@ -462,7 +466,7 @@ describe('PartsService — make-wide fitment (imported "all models of a make")',
       make: { name: 'Skoda' },
       model: { name: 'Kodiaq' },
     });
-    await svc.list({ vehicle_id: 'v1' });
+    await svc.list({ vehicle_id: 'v1' }, 'ru', OWNER);
     const where = (prisma.calls.findMany as { where: unknown }).where;
     expect(selectIds(SKODA_PARTS, where)).toEqual(['makewide_skoda']);
   });
@@ -476,10 +480,10 @@ describe('PartsService — curated fitment (fitment_bindings) reaches GET /v1/ca
   ) {
     const { svc, prisma } = makeService();
     if (garage)
-      prisma.vehicle.findUnique.mockResolvedValue(
+      prisma.vehicle.findFirst.mockResolvedValue(
         fx.vehicleRow(fx.VEHICLES[garage]),
       );
-    await svc.list(query);
+    await svc.list(query, 'ru', OWNER);
     return selectIds(
       fx.PARTS,
       (prisma.calls.findMany as { where: unknown }).where,

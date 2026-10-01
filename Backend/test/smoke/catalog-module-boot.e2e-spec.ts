@@ -25,7 +25,9 @@ import {
  *   • an anonymous call still answers (no vehicle lookup at all);
  *   • with a real bearer token the vehicle is looked up ONLY in that user's
  *     garage, and a curated Fitment Studio binding to its model answers
- *     EXACT_MATCH.
+ *     EXACT_MATCH;
+ *   • GET listings (parts, categories) verify a token only when `vehicle_id`
+ *     is given, and then resolve it ONLY in the bearer's garage.
  */
 describe('CatalogModule boot + check-compatibility over HTTP (e2e)', () => {
   let app: INestApplication;
@@ -141,5 +143,52 @@ describe('CatalogModule boot + check-compatibility over HTTP (e2e)', () => {
       .expect(200);
     expect(res.body.status).toBe('UNCERTAIN');
     expect(prisma.vehicle.findFirst).not.toHaveBeenCalled();
+  });
+
+  describe('GET listings: vehicle_id resolves only in the bearer garage', () => {
+    beforeEach(() => {
+      prisma.catalogPart.aggregate.mockResolvedValue({ _min: {}, _max: {} });
+      prisma.appUser.findUnique.mockClear();
+    });
+
+    it('no vehicle_id: no token verification and no user lookup at all', async () => {
+      await request(app.getHttpServer())
+        .get('/v1/catalog/parts')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+      expect(prisma.appUser.findUnique).not.toHaveBeenCalled();
+      expect(prisma.vehicle.findFirst).not.toHaveBeenCalled();
+    });
+
+    it("vehicle_id + token: looked up only in the caller's own garage", async () => {
+      await request(app.getHttpServer())
+        .get('/v1/catalog/parts?vehicle_id=veh_1')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+      expect(prisma.vehicle.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'veh_1', userId: USER.id, deletedAt: null },
+        }),
+      );
+    });
+
+    it('vehicle_id without a token: no vehicle lookup (unknown vehicle)', async () => {
+      await request(app.getHttpServer())
+        .get('/v1/catalog/parts?vehicle_id=veh_1')
+        .expect(200);
+      expect(prisma.vehicle.findFirst).not.toHaveBeenCalled();
+    });
+
+    it("category counts: vehicle_id + token → only the caller's own garage", async () => {
+      await request(app.getHttpServer())
+        .get('/v1/categories?vehicle_id=veh_1')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+      expect(prisma.vehicle.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'veh_1', userId: USER.id, deletedAt: null },
+        }),
+      );
+    });
   });
 });
