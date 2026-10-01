@@ -1,5 +1,6 @@
 import { OrderStatus } from '@prisma/client';
 import {
+  ACTIVE_ORDER_STATUSES,
   ALLOWED_TRANSITIONS,
   PAYABLE_ORDER_STATUSES,
   canTransition,
@@ -27,6 +28,22 @@ describe('order-transitions (single source of truth)', () => {
     expect(canTransition(OrderStatus.PAID, OrderStatus.PAID)).toBe(false);
     expect(ALLOWED_TRANSITIONS[OrderStatus.CANCELLED]).toEqual([]);
     expect(canTransition(OrderStatus.CANCELLED, OrderStatus.PAID)).toBe(false);
+  });
+
+  it('active (in-progress) orders = exactly the non-terminal statuses', () => {
+    expect([...ACTIVE_ORDER_STATUSES].sort()).toEqual(
+      [
+        OrderStatus.PENDING_PAYMENT,
+        OrderStatus.PAID,
+        OrderStatus.PROCESSING,
+        OrderStatus.SHIPPED,
+      ].sort(),
+    );
+    for (const s of Object.values(OrderStatus)) {
+      expect(ACTIVE_ORDER_STATUSES.includes(s)).toBe(
+        ALLOWED_TRANSITIONS[s].length > 0,
+      );
+    }
   });
 
   it('covers every OrderStatus', () => {

@@ -130,9 +130,17 @@ export class UserController {
       'addresses, garage, notifications, devices/push tokens, AI sessions, ' +
       'identities and MyID records) and revokes every session. Orders are ' +
       'RETAINED for financial/legal records with buyer PII detached. ' +
-      'Irreversible — the access and refresh tokens stop working immediately.',
+      'Irreversible — the access and refresh tokens stop working immediately. ' +
+      'Refused while an order is still in progress (see 409).',
   })
   @ApiNoContentResponse({ description: 'Account deleted. No response body.' })
+  @ApiConflictResponse({
+    description:
+      '`ACCOUNT_HAS_ACTIVE_ORDERS` — the account has an order in progress ' +
+      '(PENDING_PAYMENT, PAID, PROCESSING or SHIPPED) or an open Payme ' +
+      'payment. Nothing was deleted or revoked; retry once the orders are ' +
+      'delivered or cancelled.',
+  })
   @ApiUnauthorizedResponse({
     description:
       'Missing or invalid token — including a token belonging to an ' +

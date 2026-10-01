@@ -130,6 +130,22 @@ export const PaymeState = {
  */
 export const PAYME_TRANSACTION_TIMEOUT_MS = 43_200_000;
 
+/**
+ * Has this created-but-unperformed transaction outlived the 12-hour window
+ * (so Payme can no longer perform it)? Measured from the create time Payme
+ * assigned, against `now` (defaulting to the current clock). Only a CREATED
+ * (state 1) row can expire; a row without a create time never does.
+ */
+export function isPaymeTransactionExpired(
+  payment: Pick<Payment, 'providerState' | 'providerCreateTime'>,
+  now: number = Date.now(),
+): boolean {
+  if (payment.providerState !== PaymeState.CREATED) return false;
+  const createdAt = Number(payment.providerCreateTime ?? 0);
+  if (!createdAt) return false;
+  return now - createdAt > PAYME_TRANSACTION_TIMEOUT_MS;
+}
+
 /** Payme cancellation reason for "transaction timed out". */
 export const PAYME_TIMEOUT_REASON = 4;
 
@@ -666,16 +682,9 @@ export class PaymeService {
     );
   }
 
-  /**
-   * Has this created-but-unperformed transaction outlived the 12-hour window?
-   * Measured from the create time Payme assigned, against `now` (defaulting to
-   * the current clock).
-   */
+  /** See {@link isPaymeTransactionExpired}. */
   private isExpired(payment: Payment, now: number = Date.now()): boolean {
-    if (payment.providerState !== PaymeState.CREATED) return false;
-    const createdAt = Number(payment.providerCreateTime ?? 0);
-    if (!createdAt) return false;
-    return now - createdAt > PAYME_TRANSACTION_TIMEOUT_MS;
+    return isPaymeTransactionExpired(payment, now);
   }
 
   /**

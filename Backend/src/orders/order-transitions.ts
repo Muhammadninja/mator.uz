@@ -58,3 +58,15 @@ export const PAYABLE_ORDER_STATUSES: readonly OrderStatus[] = (
 export function isPayableOrderStatus(status: OrderStatus): boolean {
   return PAYABLE_ORDER_STATUSES.includes(status);
 }
+
+/**
+ * Orders still IN PROGRESS — every status the state machine can still move on
+ * from (a terminal status has no outgoing transition). Today exactly
+ * `PENDING_PAYMENT`, `PAID`, `PROCESSING` and `SHIPPED`; `DELIVERED`,
+ * `CANCELLED`, `REFUNDED` and `EXPIRED` are finished. Derived from the table,
+ * so a status added with outgoing transitions is active automatically.
+ * Account deletion is refused while an order is in one of these.
+ */
+export const ACTIVE_ORDER_STATUSES: readonly OrderStatus[] = (
+  Object.keys(ALLOWED_TRANSITIONS) as OrderStatus[]
+).filter((s) => ALLOWED_TRANSITIONS[s].length > 0);

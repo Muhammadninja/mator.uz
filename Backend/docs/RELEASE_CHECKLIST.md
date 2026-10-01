@@ -77,6 +77,13 @@ about data handling the backend now guarantees.
 
 `DELETE /v1/me`, app-user bearer token, `204 No Content`.
 
+- **Refused with `409 ACCOUNT_HAS_ACTIVE_ORDERS`** while the user has an order
+  in progress (`PENDING_PAYMENT`, `PAID`, `PROCESSING`, `SHIPPED` — every status
+  the order state machine can still move on from) or an open Payme transaction
+  (state 1, inside the 12-hour window). Nothing is anonymized or revoked then;
+  the user can delete once those orders are delivered, cancelled, refunded or
+  expired. Not covered by the backend change: how the mobile app presents this
+  409, and whether the Privacy Policy (§15) should mention the rule.
 - Deletes: addresses, garage vehicles, bookings, cart, notifications +
   preferences, devices (push tokens), AI sessions, auth identities, MyID
   sessions/verifications, email verification tokens, refresh tokens.
