@@ -12,6 +12,7 @@ import { readPaymeConfig } from './webhooks/payme.config';
 import { buildPaymeCheckoutUrl } from './webhooks/payme-checkout.util';
 import { PaymeFiscalService } from './webhooks/payme-fiscal.service';
 import { isPayableOrderStatus } from './order-transitions';
+import { isClickEnabled } from './webhooks/click.config';
 
 @Injectable()
 export class PaymentsService {
@@ -71,6 +72,11 @@ export class PaymentsService {
   }
 
   async createClickInvoice(userId: string, dto: CreateInvoiceDto) {
+    // A disabled provider (not listed, or no CLICK_SECRET_KEY) must not hand
+    // out payment links whose callbacks the webhook would then refuse.
+    if (!isClickEnabled((k) => this.config.get<string>(k))) {
+      throw new BadRequestException('Click payments are not enabled');
+    }
     const order = await this.loadPayableOrder(userId, dto.order_id);
     const amountUzs = Number(order.totalUzs);
     const serviceId = this.config.get<string>('CLICK_SERVICE_ID') ?? '12345';
