@@ -6,9 +6,9 @@
  * evaluator runs the predicate over fixture rows so a test can assert the
  * RESULT ("Cobalt sees X, Spark does not"). It implements only the subset the
  * catalog filters use — AND / OR / NOT, to-many `some` / `none`, to-one
- * nested filters, `equals` (+ `mode: 'insensitive'`), `in`, `has`, `not`, and
- * plain equality — and throws on anything else, so an unsupported operator
- * fails loudly instead of silently matching.
+ * nested filters, `equals` / `contains` (+ `mode: 'insensitive'`), `in`, `has`,
+ * `not`, and plain equality — and throws on anything else, so an unsupported
+ * operator fails loudly instead of silently matching.
  *
  * It is NOT a substitute for PostgreSQL: it proves the predicate's logic, not
  * the SQL Prisma generates for it.
@@ -33,6 +33,13 @@ function matchScalar(actual: unknown, filter: unknown): boolean {
         break;
       case 'equals':
         if (norm(actual) !== norm(expected)) return false;
+        break;
+      case 'contains':
+        if (
+          typeof actual !== 'string' ||
+          !(norm(actual) as string).includes(norm(expected) as string)
+        )
+          return false;
         break;
       case 'in':
         if (!(expected as unknown[]).map(norm).includes(norm(actual)))
