@@ -8,6 +8,11 @@ import { OrderStatus, PaymentStatus } from '@prisma/client';
 import { SettlementService } from './settlement.service';
 import { OrderStatusService } from '../order-status.service';
 import {
+  order,
+  pendingPaymePayment,
+  settlementStore,
+} from './settlement-store.test-util';
+import {
   createPrismaMock,
   fakeConfig,
   PrismaMock,
@@ -21,6 +26,10 @@ describe('SettlementService', () => {
 
   beforeEach(() => {
     prisma = createPrismaMock();
+    // Conditional writes match by default; tests that model a lost race or a
+    // no-longer-payable order override these.
+    prisma.payment.updateMany.mockResolvedValue({ count: 1 });
+    prisma.order.updateMany.mockResolvedValue({ count: 1 });
     notifications = { emit: jest.fn().mockResolvedValue(undefined) };
     realtime = { emit: jest.fn() };
     svc = new SettlementService(
@@ -45,11 +54,14 @@ describe('SettlementService', () => {
     it('flips the payment and order inside one transaction', async () => {
       prisma.payment.findUnique.mockResolvedValue(pendingPayment());
 
-      await svc.markPaid('pay_1', 1_700_000_111_000);
+      await expect(svc.markPaid('pay_1', 1_700_000_111_000)).resolves.toBe(
+        'paid',
+      );
 
-      expect(prisma.payment.update).toHaveBeenCalledWith(
+      // The payment is CLAIMED conditionally (only a PENDING row can move)…
+      expect(prisma.payment.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { id: 'pay_1' },
+          where: { id: 'pay_1', status: { in: [PaymentStatus.PENDING] } },
           data: expect.objectContaining({
             status: PaymentStatus.PAID,
             providerState: 2,
@@ -57,9 +69,12 @@ describe('SettlementService', () => {
           }),
         }),
       );
-      expect(prisma.order.update).toHaveBeenCalledWith(
-        expect.objectContaining({ data: { status: OrderStatus.PAID } }),
-      );
+      // …and the order moves only from a payable status.
+      expect(prisma.order.updateMany).toHaveBeenCalledWith({
+        where: { id: 'ord_1', status: { in: [OrderStatus.PENDING_PAYMENT] } },
+        data: { status: OrderStatus.PAID },
+      });
+      expect(prisma.order.update).not.toHaveBeenCalled();
       // The audit row is written in the same transaction as the status flip.
       expect(prisma.orderStatusHistory.create).toHaveBeenCalled();
     });
@@ -69,9 +84,9 @@ describe('SettlementService', () => {
         pendingPayment({ status: PaymentStatus.PAID }),
       );
 
-      await svc.markPaid('pay_1');
+      await expect(svc.markPaid('pay_1')).resolves.toBe('already_paid');
 
-      expect(prisma.payment.update).not.toHaveBeenCalled();
+      expect(prisma.payment.updateMany).not.toHaveBeenCalled();
       expect(realtime.emit).not.toHaveBeenCalled();
       expect(notifications.emit).not.toHaveBeenCalled();
     });
@@ -82,10 +97,10 @@ describe('SettlementService', () => {
       prisma.payment.findUnique.mockResolvedValue(pendingPayment());
       notifications.emit.mockRejectedValue(new Error('expo push down'));
 
-      await expect(
-        svc.markPaid('pay_1', 1_700_000_111_000),
-      ).resolves.toBeUndefined();
-      expect(prisma.payment.update).toHaveBeenCalled();
+      await expect(svc.markPaid('pay_1', 1_700_000_111_000)).resolves.toBe(
+        'paid',
+      );
+      expect(prisma.payment.updateMany).toHaveBeenCalled();
     });
 
     it('survives a failing realtime emit and still sends the push', async () => {
@@ -94,7 +109,7 @@ describe('SettlementService', () => {
         throw new Error('socket gone');
       });
 
-      await expect(svc.markPaid('pay_1')).resolves.toBeUndefined();
+      await expect(svc.markPaid('pay_1')).resolves.toBe('paid');
       // One transport failing must not suppress the other.
       expect(notifications.emit).toHaveBeenCalled();
     });
@@ -110,8 +125,8 @@ describe('SettlementService', () => {
 
     it('ignores an unknown payment id', async () => {
       prisma.payment.findUnique.mockResolvedValue(null);
-      await expect(svc.markPaid('nope')).resolves.toBeUndefined();
-      expect(prisma.payment.update).not.toHaveBeenCalled();
+      await expect(svc.markPaid('nope')).resolves.toBe('not_found');
+      expect(prisma.payment.updateMany).not.toHaveBeenCalled();
     });
   });
 
@@ -128,8 +143,14 @@ describe('SettlementService', () => {
 
       await svc.markCancelled('pay_1', 4, false);
 
-      expect(prisma.payment.update).toHaveBeenCalledWith(
+      expect(prisma.payment.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
+          where: {
+            id: 'pay_1',
+            status: {
+              notIn: [PaymentStatus.CANCELLED, PaymentStatus.REFUNDED],
+            },
+          },
           data: expect.objectContaining({
             status: PaymentStatus.CANCELLED,
             providerState: -1,
@@ -192,7 +213,7 @@ describe('SettlementService', () => {
 
       await svc.markCancelled('pay_1', 5, true);
 
-      expect(prisma.payment.update).toHaveBeenCalledWith(
+      expect(prisma.payment.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({
             status: PaymentStatus.REFUNDED,
@@ -218,7 +239,7 @@ describe('SettlementService', () => {
 
       await svc.markCancelled('pay_1', 4, false);
 
-      expect(prisma.payment.update).toHaveBeenCalledWith(
+      expect(prisma.payment.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({ cancelReason: 4 }),
         }),
@@ -240,8 +261,151 @@ describe('SettlementService', () => {
 
       await svc.markCancelled('pay_1', 4, false);
 
-      expect(prisma.payment.update).not.toHaveBeenCalled();
+      expect(prisma.payment.updateMany).not.toHaveBeenCalled();
       expect(prisma.orderStatusHistory.create).not.toHaveBeenCalled();
     });
+
+    it('a concurrent cancel that lost the claim writes no history row', async () => {
+      prisma.payment.findUnique.mockResolvedValue({
+        id: 'pay_1',
+        orderId: 'ord_1',
+        status: PaymentStatus.PAID,
+      });
+      prisma.payment.updateMany.mockResolvedValue({ count: 0 });
+
+      await svc.markCancelled('pay_1', 5, true);
+
+      expect(prisma.order.update).not.toHaveBeenCalled();
+      expect(prisma.orderStatusHistory.create).not.toHaveBeenCalled();
+    });
+  });
+});
+
+/**
+ * Settlement against an in-memory store that models row-lock serialisation and
+ * rollback (settlement-store.test-util.ts) — the real SettlementService and
+ * OrderStatusService, no mocks of the logic under test. Proves the conditional
+ * claim's behaviour, not PostgreSQL's SQL.
+ */
+describe('SettlementService.markPaid — concurrency and order state (in-memory store)', () => {
+  function build(orderStatus: OrderStatus, paymentOver = {}) {
+    const store = settlementStore({
+      payments: [pendingPaymePayment(paymentOver)],
+      orders: [order(orderStatus)],
+    });
+    const notifications = { emit: jest.fn().mockResolvedValue(undefined) };
+    const realtime = { emit: jest.fn() };
+    const svc = new SettlementService(
+      store.prisma as any,
+      notifications as any,
+      realtime as any,
+      new OrderStatusService(store.prisma as any),
+      fakeConfig({ ORDER_TTL_MIN: '30' }),
+    );
+    return { store, svc, notifications, realtime };
+  }
+
+  const paidRows = (store: ReturnType<typeof settlementStore>) =>
+    store.history().filter((h) => h.status === OrderStatus.PAID);
+
+  it('PENDING_PAYMENT → paid: one history row, one notification', async () => {
+    const { store, svc, notifications } = build(OrderStatus.PENDING_PAYMENT);
+    await expect(svc.markPaid('pay_1', 1_700_000_111_000)).resolves.toBe(
+      'paid',
+    );
+    expect(store.order('ord_1').status).toBe(OrderStatus.PAID);
+    expect(store.payment('pay_1').status).toBe(PaymentStatus.PAID);
+    expect(paidRows(store)).toHaveLength(1);
+    expect(notifications.emit).toHaveBeenCalledTimes(1);
+  });
+
+  it('two CONCURRENT calls settle once: one "paid", one "already_paid"', async () => {
+    const { store, svc, notifications, realtime } = build(
+      OrderStatus.PENDING_PAYMENT,
+    );
+    const outcomes = await Promise.all([
+      svc.markPaid('pay_1', 1_700_000_111_000),
+      svc.markPaid('pay_1', 1_700_000_222_000),
+    ]);
+    expect([...outcomes].sort()).toEqual(['already_paid', 'paid']);
+    expect(paidRows(store)).toHaveLength(1);
+    expect(notifications.emit).toHaveBeenCalledTimes(1);
+    expect(realtime.emit).toHaveBeenCalledTimes(1);
+    // The winner's perform time stays; the loser never overwrote it.
+    const winnerTime =
+      outcomes[0] === 'paid' ? 1_700_000_111_000 : 1_700_000_222_000;
+    expect(store.payment('pay_1').providerPerformTime).toBe(BigInt(winnerTime));
+  });
+
+  it('a CANCELLED order is never resurrected as PAID; the claim is rolled back', async () => {
+    const { store, svc, notifications } = build(OrderStatus.CANCELLED);
+    await expect(svc.markPaid('pay_1')).resolves.toBe('order_not_payable');
+    expect(store.order('ord_1').status).toBe(OrderStatus.CANCELLED);
+    expect(store.payment('pay_1').status).toBe(PaymentStatus.PENDING);
+    expect(store.history()).toEqual([]);
+    expect(notifications.emit).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    OrderStatus.PAID,
+    OrderStatus.PROCESSING,
+    OrderStatus.SHIPPED,
+    OrderStatus.DELIVERED,
+    OrderStatus.REFUNDED,
+    OrderStatus.EXPIRED,
+  ])('an order in %s is not payable either', async (status) => {
+    const { store, svc } = build(status);
+    await expect(svc.markPaid('pay_1')).resolves.toBe('order_not_payable');
+    expect(store.order('ord_1').status).toBe(status);
+    expect(store.history()).toEqual([]);
+  });
+
+  it('a cancelled payment is not settleable', async () => {
+    const { store, svc } = build(OrderStatus.PENDING_PAYMENT, {
+      status: PaymentStatus.CANCELLED,
+      providerState: -1,
+    });
+    await expect(svc.markPaid('pay_1')).resolves.toBe('not_settleable');
+    expect(store.order('ord_1').status).toBe(OrderStatus.PENDING_PAYMENT);
+  });
+
+  it('a repeat after settlement is a no-op', async () => {
+    const { store, svc, notifications } = build(OrderStatus.PENDING_PAYMENT);
+    await svc.markPaid('pay_1');
+    await expect(svc.markPaid('pay_1')).resolves.toBe('already_paid');
+    expect(paidRows(store)).toHaveLength(1);
+    expect(notifications.emit).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('settlement store sanity — it really exposes the old race', () => {
+  it('the PRE-FIX algorithm (status read outside the tx, unconditional writes) double-settles', async () => {
+    const store = settlementStore({
+      payments: [pendingPaymePayment()],
+      orders: [order(OrderStatus.PENDING_PAYMENT)],
+    });
+    const db = store.prisma as any;
+    // Verbatim shape of the old SettlementService.markPaid.
+    const oldMarkPaid = async () => {
+      const payment = await db.payment.findUnique({ where: { id: 'pay_1' } });
+      if (payment.status === PaymentStatus.PAID) return;
+      await db.$transaction(async (tx: any) => {
+        await tx.payment.updateMany({
+          where: { id: 'pay_1' },
+          data: { status: PaymentStatus.PAID },
+        });
+        await tx.order.update({
+          where: { id: 'ord_1' },
+          data: { status: OrderStatus.PAID },
+        });
+        await tx.orderStatusHistory.create({
+          data: { orderId: 'ord_1', status: OrderStatus.PAID },
+        });
+      });
+    };
+    await Promise.all([oldMarkPaid(), oldMarkPaid()]);
+    expect(
+      store.history().filter((h) => h.status === OrderStatus.PAID),
+    ).toHaveLength(2);
   });
 });

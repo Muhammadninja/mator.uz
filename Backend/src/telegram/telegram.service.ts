@@ -7,6 +7,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { OnEvent } from '@nestjs/event-emitter';
 import {
+  DealerStatus,
   DraftStatus,
   OilType,
   PackageForm,
@@ -3404,6 +3405,42 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * May this seller publish right now? ACTIVE supply-side status AND a
+   * storefront (the CatalogSeller its listings project into) that an admin has
+   * not SUSPENDED. Replies with the reason and returns false otherwise. The
+   * seller is looked up again by Telegram id and must be the draft's seller.
+   */
+  private async sellerMayPublish(
+    ctx: Context,
+    tgUserId: number,
+    sellerId: number,
+    lang: AppLang,
+  ): Promise<boolean> {
+    const seller = await this.sellers.findByTgId(BigInt(tgUserId));
+    if (!seller || seller.id !== sellerId) {
+      await ctx.reply(t(lang, 'start.notRegistered'));
+      return false;
+    }
+    if (seller.status === SellerStatus.PENDING) {
+      await ctx.reply(t(lang, 'start.awaitingApproval'));
+      return false;
+    }
+    if (seller.status !== SellerStatus.ACTIVE) {
+      await ctx.reply(t(lang, 'start.accountRejected'));
+      return false;
+    }
+    const storefront = await this.prisma.catalogSeller.findUnique({
+      where: { id: CatalogProjectionService.catalogSellerIdFor(seller) },
+      select: { status: true },
+    });
+    if (storefront?.status === DealerStatus.SUSPENDED) {
+      await ctx.reply(t(lang, 'start.storeSuspended'));
+      return false;
+    }
+    return true;
+  }
+
+  /**
    * Commit a confirmed pending product: perform the database writes, then send a
    * simple success message (the preview already showed the full product). No-op
    * with a notice if there is nothing to confirm. Uploaded assets are kept.
@@ -3419,6 +3456,14 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       (await this.rebuildPendingFromDraft(tgUserId));
     if (!session) {
       await ctx.reply(t(lang, 'confirm.nothingPending'));
+      return;
+    }
+
+    // Re-gate the seller at PUBLICATION, not only at /start: an admin may have
+    // rejected the seller or suspended their storefront while the draft was in
+    // progress. Checked before the claim, so a refused draft stays as it was
+    // (READY_FOR_PREVIEW) and its TTL sweep reclaims it — nothing is published.
+    if (!(await this.sellerMayPublish(ctx, tgUserId, session.sellerId, lang))) {
       return;
     }
 

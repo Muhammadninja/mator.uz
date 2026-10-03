@@ -1,8 +1,26 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { MyIdStatus, OrderActorType } from '@prisma/client';
+import {
+  ConflictException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
+import {
+  MyIdStatus,
+  OrderActorType,
+  PaymentProvider,
+  Prisma,
+} from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CloudinaryService } from '../cloudinary/cloudinary.service';
 import { TokenService } from '../auth/tokens/token.service';
+import { ACTIVE_ORDER_STATUSES } from '../orders/order-transitions';
+import {
+  isPaymeTransactionExpired,
+  PaymeState,
+} from '../orders/webhooks/payme.service';
+
+/** Machine-readable code the client switches on (see HttpExceptionFilter). */
+export const ACCOUNT_HAS_ACTIVE_ORDERS = 'ACCOUNT_HAS_ACTIVE_ORDERS';
 
 /**
  * Permanent account deletion — DELETE /v1/me.
@@ -57,6 +75,22 @@ import { TokenService } from '../auth/tokens/token.service';
  * Note there is no favourites/likes table in this schema — the buyer app keeps
  * them client-side — so there is nothing of that kind to delete server-side.
  *
+ * ── Active orders block deletion (business rule) ────────────────────────────
+ * While the account has an order IN PROGRESS — any status the order state
+ * machine can still move on from (ACTIVE_ORDER_STATUSES: PENDING_PAYMENT, PAID,
+ * PROCESSING, SHIPPED) — or an OPEN Payme transaction (created, inside Payme's
+ * 12-hour window) on any of its orders, deletion is refused with
+ * 409 ACCOUNT_HAS_ACTIVE_ORDERS and NOTHING is changed: no anonymization, no
+ * detached phone/address on the order being delivered, no revoked session.
+ * The user can delete once those orders are delivered, cancelled, refunded or
+ * expired.
+ *
+ * OPEN BUSINESS DECISION — deliberately NOT decided in code:
+ *   • SOURCING TICKETS. `sourcing_tickets` rows carry the customer's raw chat
+ *     request and the LLM extraction (which may include a VIN) under a non-FK
+ *     `user_id`; they are NOT deleted or anonymized here. Whether they are
+ *     personal data to erase or operational records to keep is undecided.
+ *
  * ── Ordering and failure strategy ───────────────────────────────────────────
  * The database work runs in ONE transaction: it either fully commits or changes
  * nothing, so the account can never be left half-deleted. Cloudinary is external
@@ -86,6 +120,8 @@ export class AccountDeletionService {
    * already-deleted row is treated as gone rather than re-anonymized.
    *
    * @param userId the id of the AUTHENTICATED principal — never a client value.
+   * @throws ConflictException (409 ACCOUNT_HAS_ACTIVE_ORDERS) while an order is
+   *   in progress — see the class doc; nothing is written in that case.
    */
   async deleteAccount(userId: string): Promise<void> {
     const user = await this.prisma.appUser.findUnique({
@@ -95,6 +131,14 @@ export class AccountDeletionService {
     if (!user || user.deletedAt) throw new NotFoundException('User not found');
 
     await this.prisma.$transaction(async (tx) => {
+      // ── 0. Refuse while an order is in progress — BEFORE any write ────────
+      // Lock the account row first. Inserting an order takes a key-share lock
+      // on its buyer row (the FK check), so an order being placed right now
+      // either committed before this lock (and the check below sees it) or
+      // waits for this transaction to finish.
+      await tx.$queryRaw`SELECT id FROM app_users WHERE id = ${userId}::uuid FOR UPDATE`;
+      await this.assertNoActiveOrders(tx, userId);
+
       // ── 1. Detach buyer PII from the RETAINED orders ──────────────────────
       // Done BEFORE the addresses are deleted so the detach is explicit and not
       // dependent on the FK's SetNull firing.
@@ -213,5 +257,44 @@ export class AccountDeletionService {
     this.logger.log(
       `Account ${userId} deleted (orders retained, PII anonymized)`,
     );
+  }
+
+  /**
+   * 409 ACCOUNT_HAS_ACTIVE_ORDERS while an order of this account is still in
+   * progress, or a Payme transaction on one of its orders is still open — one
+   * that Payme may yet perform (state 1, not past the 12-hour window).
+   */
+  private async assertNoActiveOrders(
+    tx: Prisma.TransactionClient,
+    userId: string,
+  ): Promise<void> {
+    const activeOrders = await tx.order.count({
+      where: { userId, status: { in: [...ACTIVE_ORDER_STATUSES] } },
+    });
+    if (activeOrders > 0) {
+      throw new ConflictException({
+        code: ACCOUNT_HAS_ACTIVE_ORDERS,
+        message:
+          `The account has ${activeOrders} order(s) in progress. It can be ` +
+          'deleted once they are delivered or cancelled.',
+      });
+    }
+
+    const createdPayme = await tx.payment.findMany({
+      where: {
+        provider: PaymentProvider.PAYME,
+        providerState: PaymeState.CREATED,
+        order: { userId },
+      },
+      select: { providerState: true, providerCreateTime: true },
+    });
+    if (createdPayme.some((p) => !isPaymeTransactionExpired(p))) {
+      throw new ConflictException({
+        code: ACCOUNT_HAS_ACTIVE_ORDERS,
+        message:
+          'A payment for one of the account orders is still being processed. ' +
+          'The account can be deleted once it completes or is cancelled.',
+      });
+    }
   }
 }

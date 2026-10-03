@@ -7,14 +7,21 @@ import {
   localizedCategoryName,
 } from '../../common/app-lang.util';
 import { ListCategoriesQueryDto } from './dto/list-categories.query.dto';
+import {
+  VEHICLE_FIT_SELECT,
+  toVehicleFitContext,
+  vehicleFitWhere,
+} from '../compatibility/vehicle-fitment';
 import { VEHICLE_CATEGORIES } from './part-categories.catalog';
+import { buyerVisible } from '../buyer-visibility';
 
 /**
  * Serves the two-level part category hierarchy with LIVE per-category inventory
  * counts, so the frontend can render the home-page grid (main) and the make/model
  * grouping (vehicle) without any client-side processing. When a garage vehicle is
- * supplied, counts are scoped to parts that fit that vehicle (universal parts plus
- * parts whose make/model fit rows match).
+ * supplied, counts are scoped to parts that fit that vehicle — through the SAME
+ * decision path as GET /v1/catalog/parts?vehicle_id= (vehicleFitWhere), so a
+ * count can never include a part the listing then refuses to show.
  */
 @Injectable()
 export class CategoriesService {
@@ -24,9 +31,17 @@ export class CategoriesService {
    * The category grid. `lang` picks each row's display `label`; ids, slugs,
    * counts and ordering are identical in every language.
    */
-  async list(query: ListCategoriesQueryDto, lang: AppLang = DEFAULT_APP_LANG) {
+  async list(
+    query: ListCategoriesQueryDto,
+    lang: AppLang = DEFAULT_APP_LANG,
+    userId: string | null = null,
+  ) {
     const scope = query.scope ?? 'main';
-    const vehicleWhere = await this.vehicleScopeWhere(query.vehicle_id);
+    // Counts cover exactly what the listing can show: buyer-visible parts
+    // (no suspended dealer), scoped to the garage vehicle when one is given.
+    const vehicleWhere = buyerVisible(
+      await this.vehicleScopeWhere(query.vehicle_id, userId),
+    );
 
     if (scope === 'vehicle') {
       const grouped = await this.prisma.catalogPart.groupBy({
@@ -107,34 +122,21 @@ export class CategoriesService {
   }
 
   /**
-   * Build the where-clause that scopes counts to a garage vehicle: universal
-   * parts plus parts whose make/model fit rows match the vehicle. Returns
-   * undefined (no scoping) when no/unknown vehicle is given.
+   * Build the where-clause that scopes counts to a garage vehicle (the shared
+   * vehicleFitWhere). Returns undefined (no scoping) when no/unknown vehicle is
+   * given — and a vehicle outside `userId`'s own garage (or any vehicle for an
+   * anonymous caller) counts as unknown, exactly like the parts listing.
    */
   private async vehicleScopeWhere(
     vehicleId?: string,
+    userId?: string | null,
   ): Promise<Prisma.CatalogPartWhereInput | undefined> {
-    if (!vehicleId) return undefined;
-    const v = await this.prisma.vehicle.findUnique({
-      where: { id: vehicleId },
-      select: { make: { select: { name: true } }, model: { select: { name: true } } },
+    if (!vehicleId || !userId) return undefined;
+    const v = await this.prisma.vehicle.findFirst({
+      where: { id: vehicleId, userId, deletedAt: null },
+      select: VEHICLE_FIT_SELECT,
     });
     if (!v) return undefined;
-
-    const fitConds: Prisma.CatalogPartFitWhereInput[] = [];
-    if (v.model?.name) fitConds.push({ modelName: { equals: v.model.name, mode: 'insensitive' } });
-    if (v.make?.name) fitConds.push({ makeName: { equals: v.make.name, mode: 'insensitive' } });
-
-    const or: Prisma.CatalogPartWhereInput[] = [{ isUniversal: true }];
-    if (fitConds.length > 0) or.push({ fits: { some: { OR: fitConds } } });
-    // Make-wide parts ("every model of this make") fit the vehicle by make.
-    if (v.make?.name) {
-      or.push({
-        makeFits: {
-          some: { makeName: { equals: v.make.name, mode: 'insensitive' } },
-        },
-      });
-    }
-    return { OR: or };
+    return vehicleFitWhere(toVehicleFitContext(v));
   }
 }

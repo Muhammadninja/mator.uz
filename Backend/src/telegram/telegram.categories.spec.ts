@@ -510,6 +510,8 @@ describe('commit: draft category IDs → Product', () => {
     },
     brand: { upsert: jest.fn().mockResolvedValue({ id: 40 }) },
     carModel: { upsert: jest.fn().mockResolvedValue({ id: 50 }) },
+    // Publish-time storefront check: no CatalogSeller row → not suspended.
+    catalogSeller: { findUnique: jest.fn().mockResolvedValue(null) },
   });
 
   function commitService(draft: Record<string, unknown>) {

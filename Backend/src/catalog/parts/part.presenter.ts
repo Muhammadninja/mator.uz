@@ -20,6 +20,12 @@ import {
   unitOf,
 } from '../../common/product-kind';
 
+/** Curated (admin Fitment Studio) bindings, as the card and checks need them. */
+export const CURATED_FITMENT_SELECT = {
+  vehicleModelId: true,
+  vehicleModel: { select: { name: true, make: { select: { name: true } } } },
+} satisfies Prisma.FitmentBindingSelect;
+
 export const PART_INCLUDE = {
   brand: true,
   category: true,
@@ -27,6 +33,7 @@ export const PART_INCLUDE = {
   compatibilities: true,
   fits: true,
   makeFits: true,
+  fitmentBindings: { select: CURATED_FITMENT_SELECT },
 } satisfies Prisma.CatalogPartInclude;
 
 export type PartWithRelations = Prisma.CatalogPartGetPayload<{
@@ -34,9 +41,21 @@ export type PartWithRelations = Prisma.CatalogPartGetPayload<{
 }>;
 
 export interface VehicleCompatContext {
+  /** VehicleModelRef id of the garage vehicle — matched against curated
+   *  fitment. Optional so callers without a garage model keep working. */
+  modelId?: string | null;
   trimId: string | null;
   engineId: string | null;
   year: number;
+}
+
+/** Distinct VehicleModelRef ids a part is curated to (empty = not curated). */
+export function curatedModelIds(part: {
+  fitmentBindings?: { vehicleModelId: string }[] | null;
+}): string[] {
+  return [
+    ...new Set((part.fitmentBindings ?? []).map((b) => b.vehicleModelId)),
+  ];
 }
 
 export interface CompatibilityResult {
@@ -52,13 +71,26 @@ export function formatUzs(amount: Prisma.Decimal | number): string {
 }
 
 /**
- * Project a part's stored compatibility rows onto a specific vehicle.
- * Trim+year match is strongest; engine match is next; an explicit miss is
- * "does_not_fit"; absence of data is "maybe".
+ * Project a part's stored compatibility onto a specific vehicle.
+ *
+ * Order of evidence (strongest first):
+ *   1. a trim(+year) row in part_compatibilities — its own status;
+ *   2. a CURATED binding (fitment_bindings) to the vehicle's exact model
+ *      (VehicleModelRef id) — "fits";
+ *   3. an engine row — FITS is downgraded to "maybe" (trim unconfirmed);
+ *   4. data exists but none of it covers this vehicle — "does_not_fit": trim/
+ *      engine rows that all miss, or a curated model list without this model
+ *      (curation is the operator's complete answer for the part);
+ *   5. no data at all — "maybe".
+ *
+ * Legacy name-based fit rows (catalog_part_fits) never produce "fits" here:
+ * they are seller-entered and unverified, so they only widen the LISTING (see
+ * catalog/compatibility/vehicle-fitment.ts), never assert an exact match.
  */
 export function computeCompatibility(
   compatibilities: PartWithRelations['compatibilities'],
   vehicle: VehicleCompatContext | null,
+  curatedModels: readonly string[] = [],
 ): CompatibilityResult | null {
   if (!vehicle) return null;
 
@@ -76,6 +108,10 @@ export function computeCompatibility(
     };
   }
 
+  if (vehicle.modelId && curatedModels.includes(vehicle.modelId)) {
+    return { status: 'fits', confidence: 1, notes: null };
+  }
+
   const engineMatch = compatibilities.find(
     (c) => c.engineId && c.engineId === vehicle.engineId,
   );
@@ -90,10 +126,71 @@ export function computeCompatibility(
     };
   }
 
-  if (compatibilities.length > 0) {
+  if (compatibilities.length > 0 || curatedModels.length > 0) {
     return { status: 'does_not_fit', confidence: 1, notes: null };
   }
   return { status: 'maybe', confidence: 0, notes: null };
+}
+
+/** Slug rule shared with CatalogProjectionService (make_<x> / model_<x>_<y>). */
+function fitSlug(name: string): string {
+  return name
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+/**
+ * The card's `fits[]` / `make_fits[]`. A part with curated bindings shows its
+ * curated models (and no make-wide claim) — the same set the garage filter and
+ * the compatibility check use — so the card never advertises a model a buyer's
+ * garage would then be refused. Uncurated parts keep the legacy projected rows.
+ * The wire shape is identical either way.
+ */
+function presentFitment(part: PartWithRelations) {
+  const curated = part.fitmentBindings ?? [];
+  if (curated.length > 0) {
+    const byModel = new Map<
+      string,
+      {
+        make_slug: string;
+        make_name: string;
+        model_slug: string;
+        model_name: string;
+      }
+    >();
+    for (const b of curated) {
+      if (byModel.has(b.vehicleModelId)) continue;
+      const makeName = b.vehicleModel.make.name;
+      const modelName = b.vehicleModel.name;
+      byModel.set(b.vehicleModelId, {
+        make_slug: `make_${fitSlug(makeName)}`,
+        make_name: makeName,
+        model_slug: `model_${fitSlug(makeName)}_${fitSlug(modelName)}`,
+        model_name: modelName,
+      });
+    }
+    return {
+      fits: [...byModel.values()].sort((a, b) =>
+        a.model_slug.localeCompare(b.model_slug),
+      ),
+      make_fits: [] as { make_slug: string; make_name: string }[],
+    };
+  }
+  return {
+    fits: [...part.fits]
+      .sort((a, b) => a.modelSlug.localeCompare(b.modelSlug))
+      .map((f) => ({
+        make_slug: f.makeSlug,
+        make_name: f.makeName,
+        model_slug: f.modelSlug,
+        model_name: f.modelName,
+      })),
+    make_fits: [...(part.makeFits ?? [])]
+      .sort((a, b) => a.makeSlug.localeCompare(b.makeSlug))
+      .map((f) => ({ make_slug: f.makeSlug, make_name: f.makeName })),
+  };
 }
 
 /**
@@ -261,28 +358,20 @@ export function presentPartItem(
     // listing's own isUniversal (not on the kind), so a motor oil sold FOR a
     // specific car still reports its real compatibility.
     compatibility: hasCompatibility(part.kind, part.isUniversal)
-      ? computeCompatibility(part.compatibilities, vehicle)
+      ? computeCompatibility(
+          part.compatibilities,
+          vehicle,
+          curatedModelIds(part),
+        )
       : null,
-    // Static make/model fitment for this part, projected from the supply-side
-    // PartModel links into catalog_part_fits. Purely additive surfacing of data
-    // that already exists — lets the buyer show "Fits: Chevrolet Cobalt, …"
-    // without a per-vehicle compatibility check. Sorted by model slug for a
-    // stable order. Empty for universal parts (they carry no fit rows).
-    fits: [...part.fits]
-      .sort((a, b) => a.modelSlug.localeCompare(b.modelSlug))
-      .map((f) => ({
-        make_slug: f.makeSlug,
-        make_name: f.makeName,
-        model_slug: f.modelSlug,
-        model_name: f.modelName,
-      })),
-    // Make-wide fitment: the part fits EVERY model of these makes (e.g. an
-    // imported dealer position whose source names a make but no model).
-    // Additive — clients that do not read it are unaffected; `fits` above keeps
-    // its one-model-per-entry shape. Empty for most parts.
-    make_fits: [...(part.makeFits ?? [])]
-      .sort((a, b) => a.makeSlug.localeCompare(b.makeSlug))
-      .map((f) => ({ make_slug: f.makeSlug, make_name: f.makeName })),
+    // Static make/model fitment for this part — "Fits: Chevrolet Cobalt, …"
+    // without a per-vehicle compatibility check. Curated bindings when the part
+    // has any, otherwise the projected seller/import rows (see presentFitment).
+    // Sorted by model slug for a stable order. Empty for universal parts.
+    // `make_fits`: the part fits EVERY model of these makes (e.g. an imported
+    // dealer position whose source names a make but no model); `fits` keeps
+    // its one-model-per-entry shape.
+    ...presentFitment(part),
     images: part.images,
     // Curated PRODUCT rating (admin-maintained; distinct from `seller.rating_avg`
     // below, which rates the DEALER). `Number(...)` unwraps the Prisma Decimal —

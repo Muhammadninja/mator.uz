@@ -10,6 +10,32 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { NotificationsService } from '../../notifications/notifications.service';
 import { RealtimeGateway } from '../../realtime/realtime.gateway';
 import { OrderStatusService } from '../order-status.service';
+import { PAYABLE_ORDER_STATUSES } from '../order-transitions';
+
+/**
+ * What a settlement attempt did. Callers (the Payme / Click webhooks) map these
+ * onto their protocol replies; nothing but `paid` changed anything.
+ *   paid              — THIS call settled the payment and moved the order to PAID
+ *   already_paid      — the payment was already PAID (a repeat, or a concurrent
+ *                       call won); nothing written, nothing notified
+ *   not_settleable    — the payment is in a final non-paid state (cancelled,
+ *                       refunded, …); nothing written
+ *   order_not_payable — the order left PENDING_PAYMENT (e.g. an operator
+ *                       cancelled it); the payment claim was rolled back
+ *   not_found         — no such payment
+ */
+export type MarkPaidOutcome =
+  | 'paid'
+  | 'already_paid'
+  | 'not_settleable'
+  | 'order_not_payable'
+  | 'not_found';
+
+/** The only payment status a successful provider callback may settle from. */
+const SETTLEABLE_PAYMENT_STATUSES: PaymentStatus[] = [PaymentStatus.PENDING];
+
+/** Thrown inside the settlement transaction to roll back the payment claim. */
+class OrderNotPayableError extends Error {}
 
 /**
  * Final state transitions shared by the Payme and Click webhooks. Idempotent:
@@ -28,30 +54,78 @@ export class SettlementService {
     private readonly config: ConfigService,
   ) {}
 
-  async markPaid(paymentId: string, performTimeMs?: number): Promise<void> {
+  /**
+   * Settle a payment and its order — exactly once, even under concurrent
+   * callbacks.
+   *
+   * The payment is CLAIMED with a conditional update (PENDING → PAID) inside
+   * the transaction, and the order is moved with a conditional transition
+   * (payable → PAID). Both are single guarded UPDATEs, so of two simultaneous
+   * Performs only one matches; the other sees `already_paid` and neither writes
+   * a second history row nor sends a second notification. If the order is no
+   * longer payable (an operator cancelled it, it expired …) the claim is rolled
+   * back and NOTHING is written — a payment can never resurrect a CANCELLED
+   * order as PAID.
+   */
+  async markPaid(
+    paymentId: string,
+    performTimeMs?: number,
+  ): Promise<MarkPaidOutcome> {
     const payment = await this.prisma.payment.findUnique({
       where: { id: paymentId },
       include: { order: true },
     });
-    if (!payment) return;
-    if (payment.status === PaymentStatus.PAID) return; // idempotent
+    if (!payment) return 'not_found';
+    if (payment.status === PaymentStatus.PAID) return 'already_paid';
+    if (!SETTLEABLE_PAYMENT_STATUSES.includes(payment.status)) {
+      return 'not_settleable';
+    }
 
-    // Flip payment + order (and its history row) atomically; notify after commit.
-    await this.prisma.$transaction(async (tx) => {
-      await tx.payment.update({
+    let claimed: boolean;
+    try {
+      claimed = await this.prisma.$transaction(async (tx) => {
+        const claim = await tx.payment.updateMany({
+          where: {
+            id: paymentId,
+            status: { in: SETTLEABLE_PAYMENT_STATUSES },
+          },
+          data: {
+            status: PaymentStatus.PAID,
+            paidAt: new Date(),
+            providerState: 2,
+            providerPerformTime: BigInt(performTimeMs ?? Date.now()),
+          },
+        });
+        if (claim.count === 0) return false; // a concurrent call settled/cancelled it
+
+        const moved = await this.orderStatus.transitionIf(
+          payment.orderId,
+          PAYABLE_ORDER_STATUSES,
+          OrderStatus.PAID,
+          { tx, note: 'Payment received' },
+        );
+        if (!moved) throw new OrderNotPayableError();
+        return true;
+      });
+    } catch (err) {
+      if (err instanceof OrderNotPayableError) {
+        this.logger.warn(
+          `Payment ${paymentId} NOT settled: order ${payment.orderId} is no longer awaiting payment`,
+        );
+        return 'order_not_payable';
+      }
+      throw err;
+    }
+
+    if (!claimed) {
+      const now = await this.prisma.payment.findUnique({
         where: { id: paymentId },
-        data: {
-          status: PaymentStatus.PAID,
-          paidAt: new Date(),
-          providerState: 2,
-          providerPerformTime: BigInt(performTimeMs ?? Date.now()),
-        },
+        select: { status: true },
       });
-      await this.orderStatus.transition(payment.orderId, OrderStatus.PAID, {
-        tx,
-        note: 'Payment received',
-      });
-    });
+      return now?.status === PaymentStatus.PAID
+        ? 'already_paid'
+        : 'not_settleable';
+    }
 
     this.logger.log(
       `Order ${payment.orderId} marked PAID via payment ${paymentId}`,
@@ -61,8 +135,9 @@ export class SettlementService {
     // been taken and the settlement is committed, so a failing socket or push
     // must not propagate. If it did, PerformTransaction would answer -32400 and
     // Payme would retry a payment that already succeeded. Failures are logged
-    // for follow-up instead.
+    // for follow-up instead. Only the call that settled notifies.
     await this.notifyPaid(payment);
+    return 'paid';
   }
 
   /**
@@ -124,8 +199,15 @@ export class SettlementService {
       return;
     }
     await this.prisma.$transaction(async (tx) => {
-      await tx.payment.update({
-        where: { id: paymentId },
+      // Conditional claim (same pattern as markPaid): of two concurrent cancel
+      // callbacks only one matches, so the order history gets one row.
+      const claim = await tx.payment.updateMany({
+        where: {
+          id: paymentId,
+          status: {
+            notIn: [PaymentStatus.CANCELLED, PaymentStatus.REFUNDED],
+          },
+        },
         data: {
           status: performedBefore
             ? PaymentStatus.REFUNDED
@@ -135,6 +217,7 @@ export class SettlementService {
           cancelReason: reason,
         },
       });
+      if (claim.count === 0) return;
       if (performedBefore) {
         // The money was already taken, so this is a refund — the order follows
         // into REFUNDED (never CANCELLED, which would lose the fact that a

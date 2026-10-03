@@ -1,6 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  enabledPaymentProviders,
+  isClickEnabled,
+} from '../orders/webhooks/click.config';
 
 @Injectable()
 export class AccountService {
@@ -37,10 +41,13 @@ export class AccountService {
    * checkout supports rather than stored instruments.
    */
   paymentMethods() {
-    const enabled = (this.config.get<string>('PAYMENT_PROVIDERS') ?? 'payme,click')
-      .split(',')
-      .map((p) => p.trim().toLowerCase())
-      .filter(Boolean);
+    const get = (k: string) => this.config.get<string>(k);
+    // Click is listed only when it is actually enabled (listed AND its secret
+    // configured — see click.config.ts); otherwise the app would offer a
+    // method whose invoices and webhook are refused.
+    const enabled = enabledPaymentProviders(get).filter(
+      (provider) => provider !== 'click' || isClickEnabled(get),
+    );
     return { items: enabled.map((provider) => ({ provider, saved: false })) };
   }
 }

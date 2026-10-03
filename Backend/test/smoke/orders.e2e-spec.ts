@@ -5,7 +5,24 @@ import { createPrismaMock, fakeConfig, fakeNotifications, fakeRealtime, buildCar
 
 describe('Orders smoke', () => {
   let prisma: PrismaMock;
-  beforeEach(() => (prisma = createPrismaMock()));
+  beforeEach(() => {
+    prisma = createPrismaMock();
+    // Every part the cart names exists, is in stock and its dealer is active —
+    // the availability gate (order-availability.ts) and the sale pricing both
+    // read these rows. Tests about unavailable parts override this.
+    prisma.catalogPart.findMany.mockImplementation(
+      ({ where }: { where?: { id?: { in?: string[] } } }) =>
+        Promise.resolve(
+          (where?.id?.in ?? []).map((id) => ({
+            id,
+            inStock: true,
+            seller: { status: 'ACTIVE' },
+            categoryId: 'cat_1',
+            sellerId: 'seller_1',
+          })),
+        ),
+    );
+  });
 
   it('creates an order from the cart with correct totals and consumes the cart', async () => {
     const svc = new OrdersService(prisma, fakeConfig(), fakeNotifications(), fakeRealtime(), new OrderStatusService(prisma), fakeDiscounts());

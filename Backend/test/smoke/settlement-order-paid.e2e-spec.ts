@@ -10,6 +10,10 @@ describe('Settlement order_paid WS emit smoke', () => {
 
   beforeEach(() => {
     prisma = createPrismaMock();
+    // The settlement claims the payment and moves the order with conditional
+    // writes; here both match (a payable order, a pending payment).
+    prisma.payment.updateMany.mockResolvedValue({ count: 1 });
+    prisma.order.updateMany.mockResolvedValue({ count: 1 });
     notifications = { emit: jest.fn().mockResolvedValue(undefined) };
     realtime = { emit: jest.fn() };
     svc = new SettlementService(prisma, notifications as any, realtime as any, new OrderStatusService(prisma), fakeConfig());

@@ -153,10 +153,13 @@ export class AiAdvisorController {
     // Reusing it (rather than reading a header here) keeps ONE language context
     // for the conversation, so a mid-chat request cannot switch the model's
     // vocabulary. An unset/unsupported locale falls back to the default.
+    // The session owner: catalogue tools resolve a garage vehicle only within
+    // this user's garage, whatever id the model passes.
     const reply = await this.claude.reply(
       system,
       messages,
       resolveRequestLang(session.locale),
+      req.user.id,
     );
     const structured = this.ai.buildStructured(reply.citedItems, reply.outcome);
     const saved = await this.ai.persistAssistantMessage(

@@ -55,4 +55,14 @@ describe('MobileConfigService.getConfig', () => {
     expect(config.min_supported_version).toBe('0.0.0');
     expect(config.android_store_url).toContain('play.google.com');
   });
+
+  it('defaults the Android store link to the app package com.mator.myapp', () => {
+    // app.json android.package — NOT the iOS bundle id (com.fotih12.mator),
+    // which is a different identifier namespace and no Play listing.
+    delete process.env.APP_ANDROID_STORE_URL; // the default, not an override
+    const config = new MobileConfigService().getConfig();
+    expect(config.android_store_url).toBe(
+      'https://play.google.com/store/apps/details?id=com.mator.myapp',
+    );
+  });
 });

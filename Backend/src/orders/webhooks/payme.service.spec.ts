@@ -8,7 +8,7 @@
  * timestamps, refund refusal after delivery, malformed JSON, and settlement
  * rollback.
  */
-import { Prisma } from '@prisma/client';
+import { OrderStatus, Prisma } from '@prisma/client';
 import {
   PaymeService,
   PAYME_TRANSACTION_TIMEOUT_MS,
@@ -21,6 +21,13 @@ import {
   buildOrder,
   PrismaMock,
 } from '../../../test/utils/harness';
+import { SettlementService } from './settlement.service';
+import { OrderStatusService } from '../order-status.service';
+import {
+  order,
+  pendingPaymePayment,
+  settlementStore,
+} from './settlement-store.test-util';
 
 const KEY = 'merchant-secret';
 const AUTH = 'Basic ' + Buffer.from(`Paycom:${KEY}`).toString('base64');
@@ -249,7 +256,8 @@ describe('PaymeService (Merchant API)', () => {
             packageCodeSingle: '1417722',
             packageCodeSet: '1417723',
           },
-          seller: { tin: '301234567', vatPercent: 0 },
+          inStock: true,
+          seller: { status: 'ACTIVE', tin: '301234567', vatPercent: 0 },
         },
       ]);
 
@@ -324,7 +332,8 @@ describe('PaymeService (Merchant API)', () => {
             packageCodeSingle: '1417722',
             packageCodeSet: null,
           },
-          seller: { tin: null, vatPercent: null },
+          inStock: true,
+          seller: { status: 'ACTIVE', tin: null, vatPercent: null },
         },
       ]);
 
@@ -888,5 +897,250 @@ describe('PaymeService (Merchant API)', () => {
       const res = await call('GetStatement', { from: 1, to: 2 });
       expect(res.result).toEqual({ transactions: [] });
     });
+  });
+});
+
+// ── Release fixes: params, active transaction, order state, concurrency ─────
+describe('PaymeService — request validation, order state, active transaction', () => {
+  let prisma: PrismaMock;
+  let settlement: { markPaid: jest.Mock; markCancelled: jest.Mock };
+  let svc: PaymeService;
+
+  beforeEach(() => {
+    prisma = createPrismaMock();
+    settlement = {
+      markPaid: jest.fn().mockResolvedValue('paid'),
+      markCancelled: jest.fn().mockResolvedValue(undefined),
+    };
+    svc = new PaymeService(
+      prisma,
+      CONFIG,
+      settlement as any,
+      fakeFiscal(prisma),
+    );
+  });
+
+  const call = (method: string, params: unknown) =>
+    svc.handle(AUTH, { id: 7, method, params } as any) as Promise<any>;
+
+  describe('invalid params → -32600, before any lookup', () => {
+    it.each([
+      ['PerformTransaction', {}],
+      ['CheckTransaction', { id: '' }],
+      ['CancelTransaction', { id: 42 }],
+      [
+        'CreateTransaction',
+        { time: 1, amount: 100, account: { order_id: 'o' } },
+      ],
+    ])('%s without a usable id', async (method, params) => {
+      const res = await call(method, params);
+      expect(res.error.code).toBe(-32600);
+      expect(res.error.data).toBe('id');
+      // Never coerced into a lookup for the string "undefined".
+      expect(prisma.payment.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('a mistyped amount is a malformed request (a wrong NUMBER stays -31001)', async () => {
+      const res = await call('CheckPerformTransaction', {
+        amount: '21500000',
+        account: { order_id: 'ord_1' },
+      });
+      expect(res.error.code).toBe(-32600);
+      expect(res.error.data).toBe('amount');
+      expect(prisma.order.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('a non-integer cancel reason', async () => {
+      const res = await call('CancelTransaction', {
+        id: 'pmt-xyz',
+        reason: 'x',
+      });
+      expect(res.error.code).toBe(-32600);
+    });
+
+    it('GetStatement without from/to', async () => {
+      expect((await call('GetStatement', { to: 1 })).error.data).toBe('from');
+      expect((await call('GetStatement', { from: 1 })).error.data).toBe('to');
+    });
+
+    it('params that are not an object', async () => {
+      const res = await call('CheckTransaction', ['pmt-xyz']);
+      expect(res.error.code).toBe(-32600);
+    });
+
+    it('an unknown method is still -32601', async () => {
+      expect((await call('Refund', {})).error.code).toBe(-32601);
+    });
+  });
+
+  describe('CheckPerformTransaction — one active transaction per order', () => {
+    const params = { amount: 21_500_000, account: { order_id: 'ord_1' } };
+
+    beforeEach(() => {
+      prisma.order.findUnique.mockResolvedValue(
+        buildOrder({ id: 'ord_1', totalUzs: 215000 }),
+      );
+    });
+
+    it('refuses while another transaction is open (same code as CreateTransaction)', async () => {
+      prisma.payment.findFirst.mockResolvedValue(buildPayment());
+      const res = await call('CheckPerformTransaction', params);
+      expect(res.error.code).toBe(-31050);
+      expect(res.error.data).toBe('order_id');
+    });
+
+    it('allows when the open transaction is past the 12h window (Create would expire it)', async () => {
+      prisma.payment.findFirst.mockResolvedValue(
+        buildPayment({
+          providerCreateTime: BigInt(
+            Date.now() - PAYME_TRANSACTION_TIMEOUT_MS - 1,
+          ),
+        }),
+      );
+      const res = await call('CheckPerformTransaction', params);
+      expect(res.result.allow).toBe(true);
+    });
+
+    it('refuses a CANCELLED order with -31008', async () => {
+      prisma.order.findUnique.mockResolvedValue(
+        buildOrder({ id: 'ord_1', totalUzs: 215000, status: 'CANCELLED' }),
+      );
+      const res = await call('CheckPerformTransaction', params);
+      expect(res.error.code).toBe(-31008);
+    });
+  });
+
+  describe('CreateTransaction — order re-checked under the row lock', () => {
+    it('refuses when the order was cancelled between the first read and the lock', async () => {
+      prisma.payment.findUnique.mockResolvedValue(null);
+      prisma.order.findUnique
+        .mockResolvedValueOnce(buildOrder({ id: 'ord_1', totalUzs: 215000 }))
+        .mockResolvedValueOnce({ status: 'CANCELLED' });
+      prisma.payment.findFirst.mockResolvedValue(null);
+
+      const res = await call('CreateTransaction', {
+        id: 'pmt-new',
+        time: 1_700_000_000_000,
+        amount: 21_500_000,
+        account: { order_id: 'ord_1' },
+      });
+      expect(res.error.code).toBe(-31008);
+      expect(prisma.payment.create).not.toHaveBeenCalled();
+      expect(prisma.payment.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('PerformTransaction — honours the settlement outcome', () => {
+    it('order no longer payable → -31008, never state 2', async () => {
+      prisma.payment.findUnique.mockResolvedValue(buildPayment());
+      settlement.markPaid.mockResolvedValue('order_not_payable');
+      const res = await call('PerformTransaction', { id: 'pmt-xyz' });
+      expect(res.error.code).toBe(-31008);
+    });
+
+    it('cancelled concurrently (not settleable, stored state -1) → -31008', async () => {
+      prisma.payment.findUnique
+        .mockResolvedValueOnce(buildPayment())
+        .mockResolvedValueOnce(buildPayment({ providerState: -1 }));
+      settlement.markPaid.mockResolvedValue('not_settleable');
+      const res = await call('PerformTransaction', { id: 'pmt-xyz' });
+      expect(res.error.code).toBe(-31008);
+    });
+  });
+});
+
+/**
+ * PaymeService + the REAL SettlementService/OrderStatusService over an
+ * in-memory store that serialises transactions and rolls back on error
+ * (settlement-store.test-util.ts). Not PostgreSQL — it proves the logic.
+ */
+describe('PaymeService.PerformTransaction end-to-end (in-memory store)', () => {
+  function build(orderStatus: OrderStatus) {
+    const store = settlementStore({
+      payments: [pendingPaymePayment()],
+      orders: [order(orderStatus)],
+    });
+    const notifications = { emit: jest.fn().mockResolvedValue(undefined) };
+    const settlementSvc = new SettlementService(
+      store.prisma as any,
+      notifications as any,
+      { emit: jest.fn() } as any,
+      new OrderStatusService(store.prisma as any),
+      CONFIG,
+    );
+    const payme = new PaymeService(
+      store.prisma as any,
+      CONFIG,
+      settlementSvc,
+      {} as any,
+    );
+    const perform = () =>
+      payme.handle(AUTH, {
+        id: 1,
+        method: 'PerformTransaction',
+        params: { id: 'pmt-xyz' },
+      }) as Promise<any>;
+    return { store, perform, notifications };
+  }
+
+  it('PENDING_PAYMENT order → Perform → state 2 and the order is PAID', async () => {
+    const { store, perform } = build(OrderStatus.PENDING_PAYMENT);
+    const res = await perform();
+    expect(res.result.state).toBe(2);
+    expect(store.order('ord_1').status).toBe(OrderStatus.PAID);
+  });
+
+  it('CANCELLED order → Perform → -31008; the order stays CANCELLED, nothing written', async () => {
+    const { store, perform, notifications } = build(OrderStatus.CANCELLED);
+    const res = await perform();
+    expect(res.error.code).toBe(-31008);
+    expect(store.order('ord_1').status).toBe(OrderStatus.CANCELLED);
+    expect(store.payment('pay_1').providerState).toBe(1);
+    expect(store.history()).toEqual([]);
+    expect(notifications.emit).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    OrderStatus.PAID,
+    OrderStatus.PROCESSING,
+    OrderStatus.SHIPPED,
+    OrderStatus.DELIVERED,
+    OrderStatus.REFUNDED,
+    OrderStatus.EXPIRED,
+  ])(
+    '%s order → Perform → -31008; never settled a second time',
+    async (status) => {
+      const { store, perform, notifications } = build(status);
+      const res = await perform();
+      expect(res.error.code).toBe(-31008);
+      expect(store.order('ord_1').status).toBe(status);
+      expect(store.payment('pay_1').providerState).toBe(1);
+      expect(store.history()).toEqual([]);
+      expect(notifications.emit).not.toHaveBeenCalled();
+    },
+  );
+
+  it('two concurrent Performs: both answer state 2 with the SAME perform_time, one settlement', async () => {
+    const { store, perform, notifications } = build(
+      OrderStatus.PENDING_PAYMENT,
+    );
+    const [a, b] = await Promise.all([perform(), perform()]);
+    expect(a.result.state).toBe(2);
+    expect(b.result.state).toBe(2);
+    expect(a.result.perform_time).toBe(b.result.perform_time);
+    expect(
+      store.history().filter((h) => h.status === OrderStatus.PAID),
+    ).toHaveLength(1);
+    expect(notifications.emit).toHaveBeenCalledTimes(1);
+  });
+
+  it('a repeated Perform after success is idempotent', async () => {
+    const { store, perform } = build(OrderStatus.PENDING_PAYMENT);
+    const first = await perform();
+    const second = await perform();
+    expect(second.result).toEqual(first.result);
+    expect(
+      store.history().filter((h) => h.status === OrderStatus.PAID),
+    ).toHaveLength(1);
   });
 });

@@ -26,6 +26,8 @@ export const UZ: BotStrings = {
   'start.awaitingApproval':
     '⏳ Arizangiz hali tasdiqlanmagan. Iltimos, kuting.',
   'start.accountRejected': '⛔ Hisobingiz administrator tomonidan rad etilgan.',
+  'start.storeSuspended':
+    '⛔ Do‘koningiz administrator tomonidan to‘xtatilgan. E’lon joylashtirib bo‘lmaydi.',
   'seller.approved':
     '✅ Arizangiz muvaffaqiyatli tasdiqlandi!\n\n' +
     'Endi Mator’da mahsulot joylashtirishingiz mumkin.\n\n' +

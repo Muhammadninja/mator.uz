@@ -88,6 +88,36 @@ export class OrderStatusService {
   }
 
   /**
+   * Move an order to `status` ONLY if it is still in one of `from`, and append
+   * the history row only when it actually moved. A single conditional UPDATE,
+   * not a read-then-write: under concurrent writers (a payment webhook and an
+   * operator, two Performs, …) the database re-checks the guard after the
+   * winner commits, so the loser matches nothing and writes no history.
+   *
+   * @returns true when this call moved the order, false when it was no longer
+   *          in an allowed source status (the caller decides what that means).
+   */
+  async transitionIf(
+    orderId: string,
+    from: readonly OrderStatus[],
+    status: OrderStatus,
+    opts: TransitionOptions = {},
+  ): Promise<boolean> {
+    const run = async (client: Prisma.TransactionClient) => {
+      const moved = await client.order.updateMany({
+        where: { id: orderId, status: { in: [...from] } },
+        data: { status },
+      });
+      if (moved.count === 0) return false;
+      await client.orderStatusHistory.create({
+        data: this.historyData(orderId, status, opts.actor, opts.note ?? null),
+      });
+      return true;
+    };
+    return opts.tx ? run(opts.tx) : this.prisma.$transaction(run);
+  }
+
+  /**
    * Expire every overdue unpaid order (the sweeper cron). Each expiry is applied
    * under a status guard and, only when it actually flips a row, writes one
    * SYSTEM history entry — so a concurrent payment landing between the scan and

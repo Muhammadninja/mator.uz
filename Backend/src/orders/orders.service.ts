@@ -1,4 +1,10 @@
-import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  BadRequestException,
+  ConflictException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   DeliveryMethod,
@@ -20,29 +26,13 @@ import { OrderStatusService, TransitionActor } from './order-status.service';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { ListOrdersQueryDto } from './dto/list-orders.query.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
+import { canTransition } from './order-transitions';
+import { assertAllAvailable, findUnavailableParts } from './order-availability';
 
 const DEFAULT_ORDER_LIMIT = 20;
 
 /** Re-exported for the controller: the acting user shape for an operator write. */
 export type StatusActor = TransitionActor;
-
-/**
- * Server-authoritative order state machine for operator status writes.
- * Mapped onto the existing Prisma `OrderStatus` enum (not the contract's
- * `confirmed/packed/out_for_delivery` vocabulary, which has no schema column):
- * `PENDING_PAYMENT → PAID → PROCESSING → SHIPPED → DELIVERED`, with
- * `CANCELLED`/`REFUNDED`/`EXPIRED` terminal. Illegal jumps are rejected with 400.
- */
-const ALLOWED_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
-  [OrderStatus.PENDING_PAYMENT]: [OrderStatus.PAID, OrderStatus.CANCELLED, OrderStatus.EXPIRED],
-  [OrderStatus.PAID]: [OrderStatus.PROCESSING, OrderStatus.CANCELLED, OrderStatus.REFUNDED],
-  [OrderStatus.PROCESSING]: [OrderStatus.SHIPPED, OrderStatus.CANCELLED, OrderStatus.REFUNDED],
-  [OrderStatus.SHIPPED]: [OrderStatus.DELIVERED, OrderStatus.CANCELLED],
-  [OrderStatus.DELIVERED]: [],
-  [OrderStatus.CANCELLED]: [],
-  [OrderStatus.REFUNDED]: [],
-  [OrderStatus.EXPIRED]: [],
-};
 
 @Injectable()
 export class OrdersService {
@@ -65,6 +55,15 @@ export class OrdersService {
     if (!cart || cart.items.length === 0) {
       throw new BadRequestException('Cart is empty');
     }
+    // Never create an order for parts that can no longer be sold (out of stock,
+    // removed, or a suspended dealer) — 409 PART_UNAVAILABLE naming them, so
+    // the app can tell the buyer which cart lines to remove.
+    assertAllAvailable(
+      await findUnavailableParts(
+        this.prisma,
+        cart.items.map((i) => ({ partId: i.partId, title: i.title })),
+      ),
+    );
 
     // Ownership: a caller may only attach their OWN vehicle / delivery address to
     // an order. Without these checks the ids are persisted verbatim, letting a
@@ -229,7 +228,7 @@ export class OrdersService {
 
   /**
    * Operator status write (PATCH /v1/orders/:id/status). Enforces the
-   * server-authoritative state machine ({@link ALLOWED_TRANSITIONS}), persists
+   * server-authoritative state machine (order-transitions.ts), persists
    * the new status, then broadcasts to the owning customer via the same channels
    * the payment webhook already uses (realtime socket + inbox/push notification)
    * so the app reflects the change without waiting for the next poll.
@@ -243,7 +242,7 @@ export class OrdersService {
 
     const from = order.status;
     const to = dto.status.toUpperCase() as OrderStatus;
-    if (from !== to && !ALLOWED_TRANSITIONS[from]?.includes(to)) {
+    if (from !== to && !canTransition(from, to)) {
       throw new BadRequestException(
         `Illegal transition ${from.toLowerCase()} → ${to.toLowerCase()}`,
       );
@@ -253,11 +252,19 @@ export class OrdersService {
     if (from === to) return presentOrder(order);
 
     // Persist the transition + its audit row atomically through the single
-    // status chokepoint, then re-read for the broadcast/response.
-    await this.orderStatus.transition(orderId, to, {
+    // status chokepoint, then re-read for the broadcast/response. CONDITIONAL on
+    // the status we validated against: if a payment webhook (or another
+    // operator) moved the order meanwhile, this write must not silently
+    // overwrite it — e.g. cancel an order that was paid a moment ago.
+    const moved = await this.orderStatus.transitionIf(orderId, [from], to, {
       actor,
       note: dto.note ?? dto.reason ?? null,
     });
+    if (!moved) {
+      throw new ConflictException(
+        'Order status changed meanwhile — reload and try again',
+      );
+    }
     const updated = await this.prisma.order.findUniqueOrThrow({
       where: { id: orderId },
       include: ORDER_INCLUDE,

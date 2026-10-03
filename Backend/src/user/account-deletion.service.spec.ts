@@ -7,11 +7,19 @@
 //   • sessions are revoked through the existing TokenService entry point;
 //   • the surviving app_users row carries no personal data and is marked deleted;
 //   • the Cloudinary avatar is destroyed, by the STORED public id;
-//   • external cleanup failures never fail an already-committed deletion.
+//   • external cleanup failures never fail an already-committed deletion;
+//   • an order still in progress (or an open Payme payment) refuses deletion
+//     with 409 before anything is written.
 
-import { NotFoundException } from '@nestjs/common';
-import { AccountDeletionService } from './account-deletion.service';
+import { ConflictException, NotFoundException } from '@nestjs/common';
+import { OrderStatus, PaymentProvider } from '@prisma/client';
+import {
+  ACCOUNT_HAS_ACTIVE_ORDERS,
+  AccountDeletionService,
+} from './account-deletion.service';
 import { createPrismaMock, PrismaMock } from '../../test/utils/harness';
+import { matchesWhere } from '../catalog/compatibility/where-eval.test-util';
+import { PAYME_TRANSACTION_TIMEOUT_MS } from '../orders/webhooks/payme.service';
 
 const USER_ID = 'usr_1';
 
@@ -205,5 +213,172 @@ describe('AccountDeletionService', () => {
     );
     expect(prisma.appUser.update).not.toHaveBeenCalled();
     expect(cloudinary.deleteAssets).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The account's orders and payments in memory: `order.count` and
+ * `payment.findMany` evaluate the service's REAL where-clauses over them
+ * (where-eval), so these tests assert WHICH rows block deletion.
+ */
+function withOrders(
+  prisma: PrismaMock,
+  orders: { userId: string; status: OrderStatus }[],
+  payments: Record<string, unknown>[] = [],
+) {
+  prisma.order.count.mockImplementation(({ where }: { where: unknown }) =>
+    Promise.resolve(orders.filter((o) => matchesWhere(o, where)).length),
+  );
+  prisma.payment.findMany.mockImplementation(({ where }: { where: unknown }) =>
+    Promise.resolve(payments.filter((p) => matchesWhere(p, where))),
+  );
+}
+
+/** A Payme payment row of one of USER_ID's orders. */
+const paymePayment = (providerState: number, createdMsAgo = 60_000) => ({
+  provider: PaymentProvider.PAYME,
+  providerState,
+  providerCreateTime: BigInt(Date.now() - createdMsAgo),
+  order: { userId: USER_ID },
+});
+
+const PERSONAL_DATA_MODELS = [
+  'cart',
+  'booking',
+  'notification',
+  'notificationPreference',
+  'device',
+  'aiSession',
+  'vehicle',
+  'address',
+  'authIdentity',
+  'emailVerificationToken',
+  'myIdVerification',
+  'myIdSession',
+];
+
+async function refusal(service: AccountDeletionService) {
+  const err: unknown = await service.deleteAccount(USER_ID).then(
+    () => null,
+    (e: unknown) => e,
+  );
+  expect(err).toBeInstanceOf(ConflictException);
+  return (err as ConflictException).getResponse();
+}
+
+describe('AccountDeletionService — an order in progress blocks deletion', () => {
+  it.each([
+    OrderStatus.PENDING_PAYMENT,
+    OrderStatus.PAID,
+    OrderStatus.PROCESSING,
+    OrderStatus.SHIPPED,
+  ])(
+    'a %s order → 409 ACCOUNT_HAS_ACTIVE_ORDERS, and NOTHING is changed',
+    async (status) => {
+      const { service, prisma, tokens, cloudinary } = build();
+      withOrders(prisma, [{ userId: USER_ID, status }]);
+
+      expect(await refusal(service)).toMatchObject({
+        code: ACCOUNT_HAS_ACTIVE_ORDERS,
+      });
+
+      // The active order keeps its delivery phone and address…
+      expect(prisma.order.updateMany).not.toHaveBeenCalled();
+      expect(prisma.orderStatusHistory.updateMany).not.toHaveBeenCalled();
+      expect(prisma.legalAcceptance.updateMany).not.toHaveBeenCalled();
+      // …no personal data is deleted, the account is not anonymized…
+      for (const model of PERSONAL_DATA_MODELS) {
+        expect(prisma[model].deleteMany).not.toHaveBeenCalled();
+      }
+      expect(prisma.appUser.update).not.toHaveBeenCalled();
+      // …and every session stays alive.
+      expect(tokens.revokeAllSessions).not.toHaveBeenCalled();
+      expect(tokens.notifySessionsRevoked).not.toHaveBeenCalled();
+      expect(cloudinary.deleteAssets).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    OrderStatus.DELIVERED,
+    OrderStatus.CANCELLED,
+    OrderStatus.REFUNDED,
+    OrderStatus.EXPIRED,
+  ])('only %s orders → the existing deletion flow runs', async (status) => {
+    const { service, prisma, tokens } = build();
+    withOrders(prisma, [{ userId: USER_ID, status }]);
+
+    await service.deleteAccount(USER_ID);
+
+    expect(prisma.order.updateMany).toHaveBeenCalledWith({
+      where: { userId: USER_ID },
+      data: { contactPhoneE164: null, deliveryAddressId: null },
+    });
+    expect(tokens.revokeAllSessions).toHaveBeenCalled();
+    expect(prisma.appUser.update).toHaveBeenCalled();
+  });
+
+  it('no orders at all → the existing deletion flow runs', async () => {
+    const { service, prisma } = build();
+    withOrders(prisma, []);
+    await expect(service.deleteAccount(USER_ID)).resolves.toBeUndefined();
+    expect(prisma.appUser.update).toHaveBeenCalled();
+  });
+
+  it("only another user's order is active → this account is deleted", async () => {
+    const { service, prisma } = build();
+    withOrders(prisma, [{ userId: 'usr_other', status: OrderStatus.PAID }]);
+    await expect(service.deleteAccount(USER_ID)).resolves.toBeUndefined();
+  });
+
+  it('an OPEN Payme transaction (state 1, inside 12 h) blocks even on a cancelled order', async () => {
+    const { service, prisma, tokens } = build();
+    withOrders(
+      prisma,
+      [{ userId: USER_ID, status: OrderStatus.CANCELLED }],
+      [paymePayment(1)],
+    );
+
+    expect(await refusal(service)).toMatchObject({
+      code: ACCOUNT_HAS_ACTIVE_ORDERS,
+    });
+    expect(prisma.appUser.update).not.toHaveBeenCalled();
+    expect(tokens.revokeAllSessions).not.toHaveBeenCalled();
+  });
+
+  it('expired (past 12 h), performed and cancelled Payme transactions do not block', async () => {
+    const { service, prisma } = build();
+    withOrders(
+      prisma,
+      [{ userId: USER_ID, status: OrderStatus.REFUNDED }],
+      [
+        paymePayment(1, PAYME_TRANSACTION_TIMEOUT_MS + 1),
+        paymePayment(2),
+        paymePayment(-1),
+        paymePayment(-2),
+        { ...paymePayment(1), provider: PaymentProvider.CLICK },
+      ],
+    );
+    await expect(service.deleteAccount(USER_ID)).resolves.toBeUndefined();
+  });
+
+  it('locks the account row and checks BEFORE the first write', async () => {
+    const { service, prisma } = build();
+    const steps: string[] = [];
+    prisma.$queryRaw.mockImplementation((sql: TemplateStringsArray) => {
+      steps.push(sql.join('?').includes('FOR UPDATE') ? 'lock' : 'sql');
+      return Promise.resolve([]);
+    });
+    prisma.order.count.mockImplementation(() => {
+      steps.push('check');
+      return Promise.resolve(0);
+    });
+    prisma.order.updateMany.mockImplementation(() => {
+      steps.push('first write');
+      return Promise.resolve({ count: 0 });
+    });
+
+    await service.deleteAccount(USER_ID);
+
+    expect(steps).toEqual(['lock', 'check', 'first write']);
   });
 });

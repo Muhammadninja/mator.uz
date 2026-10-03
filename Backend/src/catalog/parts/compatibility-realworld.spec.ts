@@ -38,6 +38,8 @@ const MALIBU_2020 = {
   make: { name: 'Chevrolet' },
   model: { name: 'Malibu' },
 };
+// The garage owner every check runs as (vehicles resolve only in their garage).
+const OWNER = 'user_owner';
 // A real GM-Uzbekistan Cobalt VIN prefix (WMI XWB = UzAuto Motors).
 const COBALT_VIN = 'XWBLB69V6M0000123';
 
@@ -79,11 +81,21 @@ function makeService(opts: {
         isUniversal: opts.part.isUniversal,
         oemNumbers: opts.part.oemNumbers ?? [],
         compatibilities: opts.part.compatibilities ?? [],
+        fitmentBindings: [],
       }),
     },
     vehicle: {
       findUnique: jest.fn().mockResolvedValue(opts.vehicleById ?? null),
-      findFirst: jest.fn().mockResolvedValue(opts.vehicleByVin ?? null),
+      // Owned lookups go through findFirst; route on the key the service used.
+      findFirst: jest
+        .fn()
+        .mockImplementation(({ where }: { where: { vin?: string } }) =>
+          Promise.resolve(
+            where.vin !== undefined
+              ? (opts.vehicleByVin ?? null)
+              : (opts.vehicleById ?? null),
+          ),
+        ),
     },
   };
   // Compatibility never prices a part, so a bare DiscountService stub suffices.
@@ -93,7 +105,11 @@ function makeService(opts: {
 describe('Real-world fitment — Chevrolet garage', () => {
   it('Cobalt 2022 (Premier, 1.5L) + Cobalt brake pads → EXACT_MATCH (green, buyable)', async () => {
     const { svc } = makeService({ part: COBALT_BRAKE_PADS, vehicleById: COBALT_2022 });
-    const res = await svc.checkCompatibility(COBALT_BRAKE_PADS.id, { vehicleId: 'veh_cobalt' });
+    const res = await svc.checkCompatibility(
+      COBALT_BRAKE_PADS.id,
+      { vehicleId: 'veh_cobalt' },
+      OWNER,
+    );
     expect(res.status).toBe('EXACT_MATCH');
     expect(res.isCompatible).toBe(true);
     expect(res.badge.color).toBe('green');
@@ -102,7 +118,11 @@ describe('Real-world fitment — Chevrolet garage', () => {
 
   it('Malibu 2020 (2.0T) + Cobalt brake pads → NOT_COMPATIBLE (red, Safety Gate)', async () => {
     const { svc } = makeService({ part: COBALT_BRAKE_PADS, vehicleById: MALIBU_2020 });
-    const res = await svc.checkCompatibility(COBALT_BRAKE_PADS.id, { vehicleId: 'veh_malibu' });
+    const res = await svc.checkCompatibility(
+      COBALT_BRAKE_PADS.id,
+      { vehicleId: 'veh_malibu' },
+      OWNER,
+    );
     expect(res.status).toBe('NOT_COMPATIBLE');
     expect(res.isCompatible).toBe(false);
     expect(res.badge.color).toBe('red');
@@ -110,7 +130,11 @@ describe('Real-world fitment — Chevrolet garage', () => {
 
   it('5W-30 motor oil is UNIVERSAL for any car (green), even a Malibu', async () => {
     const { svc } = makeService({ part: OIL_5W30, vehicleById: MALIBU_2020 });
-    const res = await svc.checkCompatibility(OIL_5W30.id, { vehicleId: 'veh_malibu' });
+    const res = await svc.checkCompatibility(
+      OIL_5W30.id,
+      { vehicleId: 'veh_malibu' },
+      OWNER,
+    );
     expect(res.status).toBe('UNIVERSAL');
     expect(res.isCompatible).toBe(true);
     expect(res.badge).toEqual({ text: 'Универсальный товар', color: 'green' });
@@ -119,16 +143,26 @@ describe('Real-world fitment — Chevrolet garage', () => {
 
   it('Cobalt 2022 + a 1.5L engine-only coil → UNCERTAIN (yellow — engine matches, trim unconfirmed)', async () => {
     const { svc } = makeService({ part: ENGINE_ONLY_PART, vehicleById: COBALT_2022 });
-    const res = await svc.checkCompatibility(ENGINE_ONLY_PART.id, { vehicleId: 'veh_cobalt' });
+    const res = await svc.checkCompatibility(
+      ENGINE_ONLY_PART.id,
+      { vehicleId: 'veh_cobalt' },
+      OWNER,
+    );
     expect(res.status).toBe('UNCERTAIN');
     expect(res.badge.color).toBe('yellow');
   });
 
   it('resolves a Cobalt by its real VIN and confirms the brake-pad fit → EXACT_MATCH', async () => {
     const { svc, prisma } = makeService({ part: COBALT_BRAKE_PADS, vehicleByVin: COBALT_2022 });
-    const res = await svc.checkCompatibility(COBALT_BRAKE_PADS.id, { vin: COBALT_VIN });
+    const res = await svc.checkCompatibility(
+      COBALT_BRAKE_PADS.id,
+      { vin: COBALT_VIN },
+      OWNER,
+    );
     expect(prisma.vehicle.findFirst).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { vin: COBALT_VIN } }),
+      expect.objectContaining({
+        where: { vin: COBALT_VIN, userId: OWNER, deletedAt: null },
+      }),
     );
     expect(res.status).toBe('EXACT_MATCH');
     expect(res.isCompatible).toBe(true);
