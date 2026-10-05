@@ -1,6 +1,6 @@
 import { Logger, Optional } from '@nestjs/common';
 import { OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq';
-import type { Job } from 'bullmq';
+import { type Job, UnrecoverableError } from 'bullmq';
 import axios from 'axios';
 import { ImageProcessingStage } from '@prisma/client';
 import {
@@ -15,7 +15,10 @@ import type {
 } from './queue.service';
 import { isSmsOtpJob } from './queue.service';
 import { CloudinaryService } from '../cloudinary/cloudinary.service';
-import { ImageEnhanceService } from '../ai/image-enhance.service';
+import {
+  ImageEnhanceError,
+  ImageEnhanceService,
+} from '../ai/image-enhance.service';
 import { ProductDraftService } from '../telegram/product-draft.service';
 import { DraftCoordinator } from '../telegram/draft-coordinator';
 import { TelegramFileService } from '../telegram/telegram-file.service';
@@ -60,8 +63,10 @@ const DOWNLOAD_TIMEOUT_MS = 20_000;
  *     originalUrl/originalPublicId. Skipped on any retry once originalUrl is set —
  *     so a re-run never re-touches Telegram (the short-lived file_id is only
  *     needed on the first pickup).
- *   • Phase B (ENHANCE): download the stored original, run FLUX (unchanged), upload
- *     the PROCESSED result, mark the row READY.
+ *   • Phase B (ENHANCE): download the stored original, run FLUX, upload the
+ *     PROCESSED result, mark the row READY. A FLUX failure that a retry would
+ *     only repeat fails the job at once (UnrecoverableError) instead of using up
+ *     the remaining attempts.
  * On success or terminal failure it calls DraftCoordinator.onImageSettled, which
  * evaluates the rendezvous and emits the preview/failure domain event. The worker
  * itself NEVER messages Telegram — only TelegramFileService.getFileUrl (a download).
@@ -91,8 +96,8 @@ export class ImageProcessingProcessor extends WorkerHost {
     private readonly coordinator: DraftCoordinator,
     private readonly cloudinary: CloudinaryService,
     private readonly telegramFiles: TelegramFileService,
-    // The FLUX pipeline (prompt/model/params unchanged — only the call site moved
-    // here). Injected so it is mockable and shares one instance app-wide.
+    // The FLUX pipeline (BFL FLUX 3 Image, see image-enhance.service.ts).
+    // Injected so it is mockable and shares one instance app-wide.
     private readonly imageEnhance: ImageEnhanceService,
     private readonly telemetry: DraftTelemetry,
     // Prometheus. `@Optional()` so the existing processor unit tests, which
@@ -131,9 +136,7 @@ export class ImageProcessingProcessor extends WorkerHost {
     await this.drafts.setImageStage(imageId, ImageProcessingStage.ENHANCING);
     const originalBuf = await this.download(originalUrl);
     this.telemetry.event('image.flux_started', ids);
-    const cleaned = await this.imageEnhance.removeBackground(
-      Buffer.from(originalBuf),
-    );
+    const cleaned = await this.enhance(Buffer.from(originalBuf));
     this.telemetry.event('image.flux_finished', ids);
     await this.drafts.setImageStage(
       imageId,
@@ -150,6 +153,24 @@ export class ImageProcessingProcessor extends WorkerHost {
     this.telemetry.event('image.ready', ids);
     this.telemetry.metric(DraftMetric.IMAGE_COMPLETED, ids);
     await this.coordinator.onImageSettled(draftId);
+  }
+
+  /**
+   * Run FLUX on the original. A failure FLUX classifies as permanent (key
+   * rejected, no credits, invalid request, moderated input) is rethrown as
+   * UnrecoverableError, so BullMQ fails the job now rather than repeating the
+   * same rejection through every remaining attempt and backoff. Anything else
+   * propagates unchanged into the normal bounded retry.
+   */
+  private async enhance(original: Buffer): Promise<Buffer> {
+    try {
+      return await this.imageEnhance.removeBackground(original);
+    } catch (err) {
+      if (err instanceof ImageEnhanceError && !err.retryable) {
+        throw new UnrecoverableError(err.message);
+      }
+      throw err;
+    }
   }
 
   /** Download bytes to a Buffer with a bounded timeout. */
@@ -179,6 +200,10 @@ export class ImageProcessingProcessor extends WorkerHost {
    * BullMQ has exhausted all retries — otherwise a transient blip would prematurely
    * flip the row to FAILED. On the final attempt: mark the row FAILED (stage=FAILED,
    * pinpointing where it died) and settle so the coordinator can emit images_failed.
+   *
+   * An UnrecoverableError is ALWAYS the final attempt: BullMQ does not retry it,
+   * yet attemptsMade is still below attempts — so without that check the row
+   * would wait for a retry that never comes and stay PROCESSING.
    */
   @OnWorkerEvent('failed')
   async onFailed(
@@ -191,7 +216,9 @@ export class ImageProcessingProcessor extends WorkerHost {
     );
     if (!job) return;
     const maxAttempts = job.opts.attempts ?? 1;
-    if (job.attemptsMade < maxAttempts) return; // more retries to come
+    const finalAttempt =
+      job.attemptsMade >= maxAttempts || err instanceof UnrecoverableError;
+    if (!finalAttempt) return; // more retries to come
 
     // Recorded only once retries are exhausted, so the failure counters count
     // JOBS that ultimately failed, not attempts — otherwise one flaky job with

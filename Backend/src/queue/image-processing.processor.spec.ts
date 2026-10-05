@@ -6,9 +6,13 @@
 //     only re-runs enhance — the short-lived file_id is never re-fetched.
 //   • stage advances INGESTING_ORIGINAL → ENHANCING → UPLOADING_RESULT (observability).
 //   • onFailed marks FAILED + settles ONLY on the final attempt (not mid-retry).
+//   • a FLUX failure a retry would only repeat fails the job at once
+//     (UnrecoverableError), and onFailed treats that as the final attempt.
 
 import { ImageProcessingStage } from '@prisma/client';
 import axios from 'axios';
+import { UnrecoverableError } from 'bullmq';
+import { ImageEnhanceError } from '../ai/image-enhance.service';
 import { ImageProcessingProcessor } from './queue.processors';
 
 jest.mock('axios');
@@ -177,5 +181,68 @@ describe('ImageProcessingProcessor (two-phase)', () => {
       ctx.proc.onFailed(undefined, new Error('x')),
     ).resolves.toBeUndefined();
     expect(ctx.drafts.markImageFailed).not.toHaveBeenCalled();
+  });
+
+  /** A retry pickup (original already stored) whose FLUX step rejects with `err`. */
+  function enhanceFailing(err: Error) {
+    const ctx = build();
+    ctx.drafts.markImageProcessing.mockResolvedValue({
+      id: 'dimg_1',
+      tgFileId: 'tgfile',
+      originalUrl: 'https://cdn/original.jpg',
+    });
+    mockedAxios.get.mockResolvedValue({ data: new ArrayBuffer(8) });
+    ctx.imageEnhance.removeBackground.mockRejectedValue(err);
+    const run = ctx.proc.process({
+      id: 'j1',
+      data: { draftId: 'draft_1', imageId: 'dimg_1' },
+      opts: { attempts: 3 },
+    } as never);
+    return { ctx, run };
+  }
+
+  it('a permanent FLUX failure fails the job now (UnrecoverableError); nothing stored', async () => {
+    const { ctx, run } = enhanceFailing(
+      new ImageEnhanceError(
+        'ImageEnhanceService: flux-3-image edit failed — submit HTTP 402: {} (BFL account is out of credits)',
+        false,
+      ),
+    );
+
+    await expect(run).rejects.toBeInstanceOf(UnrecoverableError);
+    await expect(run).rejects.toThrow('submit HTTP 402');
+    expect(ctx.imageEnhance.removeBackground).toHaveBeenCalledTimes(1);
+    expect(ctx.cloudinary.uploadBuffer).not.toHaveBeenCalled();
+    expect(ctx.drafts.markImageReady).not.toHaveBeenCalled();
+    // Settling is onFailed's job, once BullMQ reports the failure.
+    expect(ctx.coordinator.onImageSettled).not.toHaveBeenCalled();
+  });
+
+  it('a transient FLUX failure propagates unchanged into the bounded retry', async () => {
+    const transient = new ImageEnhanceError(
+      'ImageEnhanceService: flux-3-image edit failed — submit HTTP 503: {}',
+      true,
+    );
+    const { ctx, run } = enhanceFailing(transient);
+
+    await expect(run).rejects.toBe(transient);
+    expect(ctx.drafts.markImageReady).not.toHaveBeenCalled();
+  });
+
+  it('onFailed treats an UnrecoverableError as final even on the first attempt', async () => {
+    const ctx = build();
+    await ctx.proc.onFailed(
+      {
+        data: { draftId: 'draft_1', imageId: 'dimg_1' },
+        attemptsMade: 1,
+        opts: { attempts: 3 },
+      } as never,
+      new UnrecoverableError('flux-3-image edit failed — submit HTTP 401'),
+    );
+    expect(ctx.drafts.markImageFailed).toHaveBeenCalledWith(
+      'dimg_1',
+      'flux-3-image edit failed — submit HTTP 401',
+    );
+    expect(ctx.coordinator.onImageSettled).toHaveBeenCalledWith('draft_1');
   });
 });
