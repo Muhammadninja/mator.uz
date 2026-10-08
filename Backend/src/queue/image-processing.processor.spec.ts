@@ -204,7 +204,7 @@ describe('ImageProcessingProcessor (two-phase)', () => {
   it('a permanent FLUX failure fails the job now (UnrecoverableError); nothing stored', async () => {
     const { ctx, run } = enhanceFailing(
       new ImageEnhanceError(
-        'ImageEnhanceService: flux-3-image edit failed — submit HTTP 402: {} (BFL account is out of credits)',
+        'ImageEnhanceService: FLUX.2 Pro edit failed — submit HTTP 402: {} (BFL account is out of credits)',
         false,
       ),
     );
@@ -220,7 +220,7 @@ describe('ImageProcessingProcessor (two-phase)', () => {
 
   it('a transient FLUX failure propagates unchanged into the bounded retry', async () => {
     const transient = new ImageEnhanceError(
-      'ImageEnhanceService: flux-3-image edit failed — submit HTTP 503: {}',
+      'ImageEnhanceService: FLUX.2 Pro edit failed — submit HTTP 503: {}',
       true,
     );
     const { ctx, run } = enhanceFailing(transient);
@@ -237,11 +237,11 @@ describe('ImageProcessingProcessor (two-phase)', () => {
         attemptsMade: 1,
         opts: { attempts: 3 },
       } as never,
-      new UnrecoverableError('flux-3-image edit failed — submit HTTP 401'),
+      new UnrecoverableError('FLUX.2 Pro edit failed — submit HTTP 401'),
     );
     expect(ctx.drafts.markImageFailed).toHaveBeenCalledWith(
       'dimg_1',
-      'flux-3-image edit failed — submit HTTP 401',
+      'FLUX.2 Pro edit failed — submit HTTP 401',
     );
     expect(ctx.coordinator.onImageSettled).toHaveBeenCalledWith('draft_1');
   });

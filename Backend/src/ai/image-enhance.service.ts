@@ -1,34 +1,24 @@
 import { Injectable } from '@nestjs/common';
 import axios, { type AxiosResponse } from 'axios';
-import { type BflConfig, resolveBflConfig } from './bfl.config';
 
-// Black Forest Labs FLUX 3 Image (model from BFL_FLUX_MODEL, see bfl.config.ts).
-// One endpoint serves generation and editing; an edit is the prompt plus the
-// source photo in `images`. The API is asynchronous: POST the request, receive a
-// polling_url, then GET that url until the job is Ready (or errors), and finally
-// download the produced image from the signed result URL. Field names below are
-// taken from the official BFL API schema (Flux3ImageInputs) — not assumed. That
-// schema rejects unknown fields with 422, so FLUX.2's input_image / width /
-// height / output_format must not be sent.
+// Black Forest Labs FLUX.2 Pro — the production model in the FLUX.2 family.
+// The API is asynchronous: POST the edit request, receive a polling_url, then GET
+// that url until the job is Ready (or errors), and finally download the produced
+// image from the signed result URL. Endpoint and parameter names below are taken
+// from the official BFL API schema (Flux2Inputs) — not assumed.
+const FLUX_ENDPOINT = 'https://api.bfl.ai/v1/flux-2-pro';
 
-// Target canvas. FLUX 3 has no width/height: the size is an aspect ratio plus an
-// equal-pixel-area resolution tier, and BFL picks the exact pixels for the tier.
-// 1:1 at `1k` (about 1 MP) is the tier closest to the previous exact 1000×1000.
-// The prompt handles composition inside it (centered, ~85–90% fill, even
-// margins) — these two only set the canvas.
-const OUTPUT_ASPECT_RATIO = '1:1';
-const OUTPUT_RESOLUTION = '1k';
-
-// FLUX 3 grounds the prompt in web and image search unless told not to. Here the
-// seller's photo is the only source of truth: a looked-up picture of "the same"
-// part is exactly what the prompt forbids (invented logos, redrawn markings), so
-// grounding is off — which is how FLUX.2 [pro] behaved, having no such feature.
-const GROUNDING = false;
+// Target canvas. FLUX.2 accepts explicit width/height (nullable ints, min 64) to
+// fix the output resolution; there is no aspect_ratio field, so this is how the
+// exact 1000×1000 output is requested. The prompt handles composition inside it
+// (centered, ~85–90% fill, even margins) — width/height only set the canvas.
+const OUTPUT_WIDTH = 1000;
+const OUTPUT_HEIGHT = 1000;
 
 // The single prompt used for every request. It treats the input as ground truth
 // and demands a DOCUMENTARY result (same object, better camera/lighting), not an
 // idealized product render: place the part on a pure white background, centered
-// and scaled to ~85–90% of the square canvas, and improve only *global* image
+// and scaled to ~85–90% of the 1000×1000 canvas, and improve only *global* image
 // quality — deliberately no "sharpness", so the model does not read it as license
 // to reconstruct detail. Only background pixels may change; the object is
 // immutable (every part pixel stays visually identical apart from global
@@ -39,7 +29,7 @@ const GROUNDING = false;
 // do not soften it.
 const FLUX_PROMPT =
   'Create a professional automotive marketplace product photograph from the input image.\n\n' +
-  'The output image must be square (1:1) with a pure white (#FFFFFF) background.\n\n' +
+  'The output image must be exactly 1000×1000 pixels with a pure white (#FFFFFF) background.\n\n' +
   'The automotive part must remain the exact same physical object.\n\n' +
   'CRITICAL REQUIREMENTS\n\n' +
   'This is NOT a restoration task.\n' +
@@ -136,15 +126,15 @@ const FLUX_PROMPT =
   '- better global color balance\n\n' +
   'Nothing else should appear changed.';
 
-// Output container: FLUX 3 Image always returns PNG (there is no output_format
-// field). The result is an opaque image on a white background (no alpha is
-// requested or relied on); the caller uploads it to Cloudinary as-is.
+// Output container. The result is an opaque image on a white background (no alpha
+// is requested or relied on). PNG keeps the white background lossless; the caller
+// uploads it to Cloudinary as-is.
+const OUTPUT_FORMAT = 'png';
 
 // Timeouts. The submit and each poll GET are quick HTTP calls; the actual
-// generation happens on BFL's side and is observed through polling. The signed
-// result URL is short-lived, so it is downloaded the moment the job is Ready, and
-// the polling wall-clock is capped at 4 minutes so a stuck job fails (and goes to
-// the queue's bounded retry) instead of holding a worker slot indefinitely.
+// generation happens on FLUX's side and is observed through polling. Signed
+// result URLs are only valid for ~10 minutes, so the whole job must finish well
+// inside that — we cap the polling wall-clock at 4 minutes.
 const SUBMIT_TIMEOUT_MS = 30_000;
 const POLL_TIMEOUT_MS = 15_000;
 const DOWNLOAD_TIMEOUT_MS = 30_000;
@@ -200,7 +190,7 @@ const PERMANENT_FAILURE_STATUSES_ON_503: ReadonlySet<string> = new Set([
 const STATUS_HINTS: Readonly<Record<number, string>> = {
   401: 'BFL rejected the API key, check BFL_API_KEY',
   402: 'BFL account is out of credits',
-  403: 'BFL API key may not use this model, check BFL_API_KEY / BFL_FLUX_MODEL',
+  403: 'BFL API key may not use this model, check BFL_API_KEY',
   429: 'BFL rate limit, too many active tasks on this account',
 };
 
@@ -236,29 +226,31 @@ export class ImageEnhanceError extends Error {
 
 /**
  * ImageEnhanceService — the single, minimal image step for seller uploads,
- * backed by Black Forest Labs FLUX 3 Image.
+ * backed by Black Forest Labs FLUX.2 Pro.
  *
  * Pipeline (nothing else — no local resize, compositing, or post-processing):
  *   1. receive the uploaded image buffer,
- *   2. submit it to FLUX 3 Image (base64, in `images`) with the preservation
- *      prompt, aspect_ratio=1:1, resolution=1k and grounding off, asking for the
- *      part centered on a pure white background,
- *   3. poll until the job is Ready, download the produced square PNG,
+ *   2. submit it to FLUX.2 Pro (base64) with the preservation prompt,
+ *      output_format=png, and width=height=1000, asking for the part centered
+ *      on a pure white background,
+ *   3. poll until the job is Ready, download the produced 1000×1000 PNG,
  *   4. return that PNG buffer, exactly as received from FLUX.
  *
  * The caller uploads the returned buffer to Cloudinary unchanged.
  */
 @Injectable()
 export class ImageEnhanceService {
-  private readonly config: BflConfig;
+  private readonly apiKey: string;
 
   constructor() {
-    this.config = resolveBflConfig(process.env);
+    const key = process.env.BFL_API_KEY;
+    if (!key) throw new Error('BFL_API_KEY is not set');
+    this.apiKey = key;
   }
 
   /**
-   * Produce a square professional product photo of the part on a pure white
-   * background via FLUX 3 Image, returning the PNG it produces with no further
+   * Produce a 1000×1000 professional product photo of the part on a pure white
+   * background via FLUX.2 Pro, returning the PNG it produces with no further
    * processing. Throws an {@link ImageEnhanceError} on failure (there is no
    * meaningful fallback — without the processed image there is nothing to
    * upload); its `retryable` flag drives the image worker's retry decision.
@@ -275,9 +267,7 @@ export class ImageEnhanceService {
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       throw new ImageEnhanceError(
-        this.redact(
-          `ImageEnhanceService: ${this.config.model} edit failed — ${detail}`,
-        ),
+        this.redact(`ImageEnhanceService: FLUX.2 Pro edit failed — ${detail}`),
         // Anything unclassified gets the queue's bounded retry.
         error instanceof ImageEnhanceError ? error.retryable : true,
       );
@@ -288,17 +278,17 @@ export class ImageEnhanceService {
   private async submit(imageBuffer: Buffer): Promise<string> {
     const response = await httpCall('submit', () =>
       axios.post<SubmitResponse>(
-        this.config.endpoint,
+        FLUX_ENDPOINT,
         {
           prompt: FLUX_PROMPT,
-          images: [imageBuffer.toString('base64')],
-          aspect_ratio: OUTPUT_ASPECT_RATIO,
-          resolution: OUTPUT_RESOLUTION,
-          grounding: GROUNDING,
+          input_image: imageBuffer.toString('base64'),
+          width: OUTPUT_WIDTH,
+          height: OUTPUT_HEIGHT,
+          output_format: OUTPUT_FORMAT,
         },
         {
           headers: {
-            'x-key': this.config.apiKey,
+            'x-key': this.apiKey,
             'Content-Type': 'application/json',
             Accept: 'application/json',
           },
@@ -374,7 +364,7 @@ export class ImageEnhanceService {
   private async poll(pollingUrl: string): Promise<AxiosResponse<PollResponse>> {
     const response = await httpCall('poll', () =>
       axios.get<PollResponse>(pollingUrl, {
-        headers: { 'x-key': this.config.apiKey, Accept: 'application/json' },
+        headers: { 'x-key': this.apiKey, Accept: 'application/json' },
         timeout: POLL_TIMEOUT_MS,
         validateStatus: (code) => (code >= 200 && code < 300) || code === 503,
       }),
@@ -409,7 +399,7 @@ export class ImageEnhanceService {
 
   /** Belt and braces: an error body that echoes the key must not carry it on. */
   private redact(text: string): string {
-    return text.replaceAll(this.config.apiKey, '[REDACTED]');
+    return text.replaceAll(this.apiKey, '[REDACTED]');
   }
 }
 
