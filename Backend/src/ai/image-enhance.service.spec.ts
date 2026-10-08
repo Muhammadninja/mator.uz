@@ -1,11 +1,11 @@
-// Tests for the ImageEnhanceService (BFL FLUX 3 Image): submit the base64 photo
-// in `images` with the preservation prompt, aspect_ratio=1:1, resolution=1k and
-// grounding off; poll the returned polling_url until Ready; then download the
-// signed result URL and return that PNG buffer. Failures carry a `retryable`
-// flag (the image worker turns it into "retry" or "fail now") and never carry
-// the API key. All HTTP calls (axios.post / axios.get) are mocked — no network,
-// no paid BFL calls. The poll loop sleeps between GETs, so every run is driven
-// by fake timers.
+// Tests for the ImageEnhanceService (FLUX.2 Pro): submit the base64 image with
+// the preservation prompt, width=height=1000, and output_format=png; poll the
+// returned polling_url until Ready; then download the signed result URL and
+// return that PNG buffer (a 1000×1000 product photo on a white background).
+// Failures carry a `retryable` flag (the image worker turns it into "retry" or
+// "fail now") and never carry the API key. All HTTP calls (axios.post /
+// axios.get) are mocked — no network, no paid BFL calls. The poll loop sleeps
+// between GETs, so every run is driven by fake timers.
 
 import axios from 'axios';
 import {
@@ -31,7 +31,6 @@ beforeEach(() => {
     actualAxios.isAxiosError(payload),
   );
   process.env = { ...OLD_ENV, BFL_API_KEY: KEY };
-  delete process.env.BFL_FLUX_MODEL;
 });
 
 afterEach(() => {
@@ -94,23 +93,14 @@ describe('ImageEnhanceService configuration', () => {
     delete process.env.BFL_API_KEY;
     expect(() => new ImageEnhanceService()).toThrow('BFL_API_KEY is not set');
   });
-
-  it('refuses to start pointed at FLUX.2 [pro]', () => {
-    process.env.BFL_FLUX_MODEL = 'flux-2-pro';
-    expect(() => new ImageEnhanceService()).toThrow(
-      'BFL_FLUX_MODEL="flux-2-pro" is not supported',
-    );
-  });
 });
 
 describe('ImageEnhanceService.removeBackground', () => {
-  it('submits the photo to FLUX 3 Image, polls until Ready, and returns the PNG unchanged', async () => {
+  it('submits the base64 image to FLUX.2 Pro, polls until Ready, and returns the PNG unchanged', async () => {
     const source = Buffer.from('source-png');
     const png = Buffer.from('WHITE_BG_PNG_BYTES');
 
-    mockedAxios.post.mockResolvedValueOnce({
-      data: { id: 'job-1', polling_url: POLL, cost: 4.8 },
-    });
+    mockedAxios.post.mockResolvedValueOnce(submitted());
     // Every "still working" status keeps it polling — proves it actually polls.
     mockedAxios.get
       .mockResolvedValueOnce({ data: { status: 'Pending' } })
@@ -124,26 +114,26 @@ describe('ImageEnhanceService.removeBackground', () => {
     // Returned byte-for-byte, no post-processing.
     expect(out.equals(png)).toBe(true);
 
-    // Submit: the FLUX 3 Image endpoint with x-key auth.
+    // Submit: the FLUX.2 Pro endpoint with x-key auth.
     expect(mockedAxios.post.mock.calls).toHaveLength(1);
     const [url, , config] = mockedAxios.post.mock.calls[0];
-    expect(url).toBe('https://api.bfl.ai/v1/flux-3-image');
+    expect(url).toBe('https://api.bfl.ai/v1/flux-2-pro');
     expect(xKey(config)).toBe(KEY);
 
-    // Exactly the FLUX 3 fields — the schema rejects unknown ones (422), so
-    // none of FLUX.2's input_image / width / height / output_format remain.
+    // Exactly the FLUX.2 fields: the photo as base64 in input_image, the exact
+    // 1000×1000 canvas and PNG output — nothing else is sent.
     const body = submittedBody();
     expect(Object.keys(body).sort()).toEqual([
-      'aspect_ratio',
-      'grounding',
-      'images',
+      'height',
+      'input_image',
+      'output_format',
       'prompt',
-      'resolution',
+      'width',
     ]);
-    expect(body.images).toEqual([source.toString('base64')]);
-    expect(body.aspect_ratio).toBe('1:1');
-    expect(body.resolution).toBe('1k');
-    expect(body.grounding).toBe(false);
+    expect(body.input_image).toBe(source.toString('base64'));
+    expect(body.width).toBe(1000);
+    expect(body.height).toBe(1000);
+    expect(body.output_format).toBe('png');
 
     // Polled the returned polling_url with the key, then downloaded the signed
     // sample URL WITHOUT it — the key only ever goes to BFL's API.
@@ -154,7 +144,7 @@ describe('ImageEnhanceService.removeBackground', () => {
     expect(gets[4][1]?.responseType).toBe('arraybuffer');
   });
 
-  it('keeps the preservation prompt, adapted only to the FLUX 3 canvas', async () => {
+  it('sends the preservation prompt for the exact 1000×1000 canvas', async () => {
     mockedAxios.post.mockResolvedValueOnce(submitted());
     mockedAxios.get
       .mockResolvedValueOnce(ready())
@@ -183,10 +173,8 @@ describe('ImageEnhanceService.removeBackground', () => {
     // "sharpness" was deliberately removed so the model does not read it as
     // license to reconstruct local detail — guard against it creeping back.
     expect(prompt).not.toContain('sharpness');
-    // FLUX 3 sizes the canvas by aspect ratio + tier, so the prompt asks for a
-    // square rather than a pixel size the request can no longer set.
-    expect(prompt).toContain('must be square (1:1)');
-    expect(prompt).not.toContain('1000×1000');
+    // The same exact canvas the request sets with width/height.
+    expect(prompt).toContain('must be exactly 1000×1000 pixels');
   });
 
   it.each([
@@ -208,7 +196,7 @@ describe('ImageEnhanceService.removeBackground', () => {
 
     expect(error.retryable).toBe(retryable);
     expect(error.message).toContain(
-      `flux-3-image edit failed — submit HTTP ${status}: {"detail":"nope"}`,
+      `FLUX.2 Pro edit failed — submit HTTP ${status}: {"detail":"nope"}`,
     );
     expect(mockedAxios.get.mock.calls).toHaveLength(0); // nothing polled
   });

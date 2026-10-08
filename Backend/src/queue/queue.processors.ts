@@ -96,8 +96,8 @@ export class ImageProcessingProcessor extends WorkerHost {
     private readonly coordinator: DraftCoordinator,
     private readonly cloudinary: CloudinaryService,
     private readonly telegramFiles: TelegramFileService,
-    // The FLUX pipeline (BFL FLUX 3 Image, see image-enhance.service.ts).
-    // Injected so it is mockable and shares one instance app-wide.
+    // The FLUX pipeline (prompt/model/params unchanged — only the call site moved
+    // here). Injected so it is mockable and shares one instance app-wide.
     private readonly imageEnhance: ImageEnhanceService,
     private readonly telemetry: DraftTelemetry,
     // Prometheus. `@Optional()` so the existing processor unit tests, which
