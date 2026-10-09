@@ -40,19 +40,19 @@ const HEADER_ALIASES = {
   categoryId: ['category_id'],
   subcategoryId: ['subcategory_id'],
   gmNumber: ['gm_number'],
-  // `manufacturer_part_number` is the column the CURRENT export carries. It
-  // holds the vehicle manufacturer's part numbers — i.e. OEM numbers, space
-  // separated, possibly with letters — so it feeds oem_numbers. It is never
-  // stored under its own name, and never read as a GM number.
+  // `manufacturer_part_number` is the column the CURRENT export carries: free
+  // text that may mix Cyrillic, Latin, digits, spaces and punctuation. The cell
+  // is stored verbatim (products.source_part_number) and also feeds the
+  // oem_numbers search index. Never read as a GM number.
   oemNumbers: ['oem_numbers', 'manufacturer_part_number'],
 } as const;
 
 export type Field = keyof typeof HEADER_ALIASES;
 
+// `quantity` is optional: the current export has no such column (see parseRow).
 const REQUIRED: Field[] = [
   'code1c',
   'name',
-  'quantity',
   'unit',
   'price',
   'vehicleMake',
@@ -207,28 +207,49 @@ export function parseRow(
       `unit "${sourceUnit}" is not a recognized unit (шт. / л)`,
     );
 
-  // Whole numbers only: Stock.quantity is an integer count and the source
-  // carries no fractions. A fractional value is rejected, never rounded.
-  const qty = parseDecimal(get('quantity'), 3);
-  if (!qty.ok)
-    err(
-      'invalid_quantity',
-      'quantity',
-      `quantity "${get('quantity')}": ${qty.reason}`,
-    );
-  else if (qty.value.lt(0))
-    err('invalid_quantity', 'quantity', 'quantity must not be negative');
-  else if (qty.value.gt(MAX_QUANTITY))
-    err('invalid_quantity', 'quantity', `quantity exceeds ${MAX_QUANTITY}`);
-  else if (!qty.value.isInteger())
-    err(
-      'invalid_quantity',
-      'quantity',
-      `fractional quantity ${qty.value.toString()} — quantities must be whole numbers`,
-    );
+  // Optional. No `quantity` column or an empty cell means "not given" (null):
+  // the write then omits it, so a new stock gets the schema default (1) and an
+  // existing stock keeps the count it has. A given value must be a whole
+  // number: Stock.quantity is an integer count, so a fraction is rejected,
+  // never rounded.
+  let quantity: number | null = null;
+  if (get('quantity').trim()) {
+    const qty = parseDecimal(get('quantity'), 3);
+    if (!qty.ok)
+      err(
+        'invalid_quantity',
+        'quantity',
+        `quantity "${get('quantity')}": ${qty.reason}`,
+      );
+    else if (qty.value.lt(0))
+      err('invalid_quantity', 'quantity', 'quantity must not be negative');
+    else if (qty.value.gt(MAX_QUANTITY))
+      err('invalid_quantity', 'quantity', `quantity exceeds ${MAX_QUANTITY}`);
+    else if (!qty.value.isInteger())
+      err(
+        'invalid_quantity',
+        'quantity',
+        `fractional quantity ${qty.value.toString()} — quantities must be whole numbers`,
+      );
+    else quantity = qty.value.toNumber();
+  }
 
   const gmNumber = parseGm(get('gmNumber'), err);
-  const oemNumbers = parseOem(get('oemNumbers'), err, warn);
+  // The part-number cell EXACTLY as the file holds it — not split, trimmed,
+  // normalized or case-changed. Only an all-blank cell counts as empty. Too
+  // long is rejected rather than cut, so a stored value is always complete.
+  const rawPartNumber = get('oemNumbers');
+  const sourcePartNumber = rawPartNumber.trim() ? rawPartNumber : null;
+  if (
+    sourcePartNumber &&
+    sourcePartNumber.length > FIELD_LIMITS.sourcePartNumber
+  )
+    err(
+      'part_number_too_long',
+      'oemNumbers',
+      `part number longer than ${FIELD_LIMITS.sourcePartNumber} characters`,
+    );
+  const oemNumbers = indexOem(rawPartNumber, warn);
   const vehicle = parseVehicle(get('vehicleMake'), get('vehicleModel'), err);
   const categoryId = parseCategoryId(get('categoryId'), 'categoryId', err);
   const subcategoryId = parseCategoryId(
@@ -248,10 +269,11 @@ export function parseRow(
       code1c: code1c!,
       name,
       priceUzs: price.ok ? price.value.toFixed(2) : '',
-      quantity: qty.ok ? qty.value.toNumber() : 0,
+      quantity,
       unit,
       sourceUnit,
       gmNumber,
+      sourcePartNumber,
       oemNumbers,
       vehicle: vehicle!.spec,
       vehicleMappings: vehicle!.mappings,
@@ -312,12 +334,16 @@ function parseGm(raw: string, err: Report): string | null {
 }
 
 /**
- * oem_numbers: space-separated values → normalized (normalizeOem: uppercase,
- * separators removed), deduplicated, source order kept. A value with anything
- * but Latin letters, digits and . - / is malformed — normalizeOem would
- * silently delete e.g. a Cyrillic look-alike letter, so it is rejected instead.
+ * oem_numbers: the SEARCH INDEX derived from the part-number cell, never the
+ * stored value (that is sourcePartNumber, verbatim). Space-separated parts are
+ * normalized (normalizeOem: uppercase, separators removed), deduplicated,
+ * source order kept. A part that is not a plausible number — anything but
+ * Latin letters, digits and . - /, or under 3 / over 50 characters once
+ * normalized — is left out of the index with a warning: normalizeOem would
+ * silently delete e.g. a Cyrillic look-alike letter and index a different
+ * number. Nothing here rejects the row.
  */
-function parseOem(raw: string, err: Report, warn: Report): string[] {
+function indexOem(raw: string, warn: Report): string[] {
   const value = raw.trim();
   if (!value) return [];
   if (value.includes(',') || value.includes(';')) {
@@ -328,22 +354,15 @@ function parseOem(raw: string, err: Report, warn: Report): string[] {
     );
   }
   const out: string[] = [];
+  const notIndexed: string[] = [];
   for (const token of value.split(/[\s,;]+/).filter(Boolean)) {
-    if (!/^[A-Za-z0-9./-]+$/.test(token)) {
-      err(
-        'malformed_oem',
-        'oemNumbers',
-        `oem value "${token}" contains unsupported characters`,
-      );
-      continue;
-    }
     const normalized = normalizeOem(token);
-    if (normalized.length < 3 || normalized.length > FIELD_LIMITS.partNumber) {
-      err(
-        'malformed_oem',
-        'oemNumbers',
-        `oem value "${token}" has an implausible length`,
-      );
+    if (
+      !/^[A-Za-z0-9./-]+$/.test(token) ||
+      normalized.length < 3 ||
+      normalized.length > FIELD_LIMITS.partNumber
+    ) {
+      notIndexed.push(token);
       continue;
     }
     if (/^\d{16}$/.test(normalized)) {
@@ -354,6 +373,13 @@ function parseOem(raw: string, err: Report, warn: Report): string[] {
       );
     }
     if (!out.includes(normalized)) out.push(normalized);
+  }
+  if (notIndexed.length) {
+    warn(
+      'oem_not_indexed',
+      'oemNumbers',
+      `"${notIndexed.join('", "')}" kept in source_part_number but not added to the OEM search index (only Latin letters, digits and . - /, 3–50 characters)`,
+    );
   }
   return out;
 }
@@ -402,10 +428,14 @@ function parseVehicle(
     };
   }
 
-  // Split on ';', trim, drop blanks, dedupe. ',' is NOT a separator: it occurs
-  // inside real codes (MALIBU-1,5-TURBO); a ", " list is reported instead.
+  // One cell lists every model the part fits: split on ',' (the export's
+  // separator) or ';' (the earlier one), trim, drop blanks, dedupe. Model codes
+  // never contain either character. The row stays ONE product; each model
+  // becomes its own compatibility link.
   const codes = [
-    ...new Set(modelField.split(';').map(normalizeVehicleCode).filter(Boolean)),
+    ...new Set(
+      modelField.split(/[,;]/).map(normalizeVehicleCode).filter(Boolean),
+    ),
   ];
   const models: string[] = [];
   const mappings: VehicleMapping[] = [];
@@ -415,13 +445,9 @@ function parseVehicle(
     if (!resolved) {
       failed = true;
       err(
-        code.includes(', ')
-          ? 'vehicle_model_comma_list'
-          : 'unknown_vehicle_model',
+        'unknown_vehicle_model',
         'vehicleModel',
-        code.includes(', ')
-          ? `vehicle_model "${code}" looks like a ','-separated list — separate models with ';'`
-          : `vehicle_model "${code}" is not a known ${make.make} model`,
+        `vehicle_model "${code}" is not a known ${make.make} model`,
       );
       continue;
     }

@@ -21,7 +21,8 @@ export interface RowReport {
   /** Import-owned fields that change (update only). */
   changes: string[];
   price?: { from: string | null; to: string };
-  quantity?: { from: number | null; to: number };
+  /** `to: null` = not in the file (create → schema default 1; update → kept). */
+  quantity?: { from: number | null; to: number | null };
   /** Real run only: what was actually done. */
   written?: 'created' | 'updated' | 'skipped_unchanged' | 'not_written';
   projected?: boolean;
@@ -83,6 +84,8 @@ export interface ImportReport {
     lookAlikeGroups: number;
     positionsNotInFile: number;
     existingPositionsWithPhotos: number;
+    /** Valid rows without a quantity (create → schema default 1; update → kept). */
+    rowsWithoutQuantity: number;
     written: {
       created: number;
       updated: number;
@@ -98,6 +101,12 @@ export interface ImportReport {
     multiModelRows: number;
     modelLinks: number;
     mappings: VehicleMappingSummary[];
+    /**
+     * Canonical make/model (model null = make-wide) with no same-named row in
+     * this database's vehicle_makes / vehicle_models. The fit is still stored;
+     * no garage vehicle matches it until the reference has that name.
+     */
+    notInBuyerReference: { make: string; model: string | null; rows: number }[];
   };
   units: Record<string, number>;
   lookAlikes: { key: string; codes: string[] }[];

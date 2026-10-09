@@ -20,6 +20,7 @@ import type {
   CategoryNode,
   ExistingPosition,
   PositionWrite,
+  VehicleReference,
 } from '../../src/imports/drivers-village/drivers-village.types';
 
 interface FakeProduct {
@@ -27,6 +28,7 @@ interface FakeProduct {
   gmNumber: string | null;
   title: string;
   gmNumbers: string[];
+  sourcePartNumber?: string | null;
   oemNumbers: string[];
   categoryId: string | null;
   vehicleCategoryId: string | null;
@@ -65,6 +67,8 @@ export interface FakeState {
   partMakes: { partId: number; brandId: number }[];
   productImages: { productId: number; url: string }[];
   catalogParts: string[];
+  /** Buyer vehicle reference names (vehicle_makes / vehicle_models). */
+  vehicleReference: VehicleReference;
   seq: number;
 }
 
@@ -88,6 +92,7 @@ export class FakeDb {
       partMakes: [],
       productImages: [],
       catalogParts: [],
+      vehicleReference: { makes: [], models: [] },
       seq: 1000,
       ...seed,
     };
@@ -144,7 +149,8 @@ export class FakeDb {
             sourceSystem: data.sourceSystem as string,
             sourceCode: data.sourceCode as string,
             priceUzs: str(data.priceUzs),
-            quantity: data.quantity as number,
+            // The column default, as the database applies it (DEFAULT 1).
+            quantity: (data.quantity as number | undefined) ?? 1,
             unit: data.unit as string,
           };
           s().stocks.push(row);
@@ -159,10 +165,12 @@ export class FakeDb {
         }) => {
           log('stock.update');
           const st = s().stocks.find((x) => x.id === where.id)!;
+          // Like an UPDATE: only the columns the write names change.
           Object.assign(st, {
-            priceUzs: str(data.priceUzs),
-            quantity: data.quantity as number,
-            unit: data.unit,
+            ...data,
+            ...(data.priceUzs === undefined
+              ? {}
+              : { priceUzs: str(data.priceUzs) }),
           });
           return { id: st.id };
         },
@@ -302,6 +310,10 @@ export class FakeDriversVillageStore implements DriversVillageStore {
     return this.db.state.categories;
   }
 
+  async loadVehicleReference() {
+    return this.db.state.vehicleReference;
+  }
+
   async loadPositions(sellerId: number, codes: string[]) {
     const st = this.db.state;
     const out = new Map<string, ExistingPosition>();
@@ -331,6 +343,7 @@ export class FakeDriversVillageStore implements DriversVillageStore {
         unit: s.unit,
         title: p.title,
         gmNumbers: p.gmNumbers,
+        sourcePartNumber: p.sourcePartNumber ?? null,
         oemNumbers: p.oemNumbers,
         categoryId: p.categoryId,
         vehicleCategoryId: p.vehicleCategoryId,
@@ -443,5 +456,16 @@ export function driversVillageFixture(): Partial<FakeState> {
         isActive: true,
       },
     ],
+    // Names as the buyer reference spells them (garage fitment matches names).
+    vehicleReference: {
+      makes: ['Chevrolet', 'Skoda'],
+      models: [
+        'Chevrolet|Cobalt',
+        'Chevrolet|Damas',
+        'Chevrolet|Labo',
+        'Chevrolet|Malibu',
+        'Chevrolet|Tracker',
+      ],
+    },
   };
 }

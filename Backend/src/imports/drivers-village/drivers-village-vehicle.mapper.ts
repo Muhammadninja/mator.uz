@@ -6,15 +6,18 @@
  *
  * Resolution is deterministic and never fuzzy:
  *   1. the explicit 1C code table below (generation-suffixed codes and names
- *      the canonical catalog does not carry), then
- *   2. an EXACT alias match in VEHICLE_CATALOG for the resolved make, after the
- *      one normalization 1C codes need: '-' → ' ' ("NEXIA-3" → "nexia 3").
+ *      the canonical catalog does not carry), where a space and a dash are the
+ *      same separator ("CAPTIVA 5" = "CAPTIVA-5"), then
+ *   2. an EXACT alias match in VEHICLE_CATALOG for the resolved make — the code
+ *      as written ("H-1" → "h-1"), else with '-' → ' ' ("NEXIA-3" → "nexia 3").
  * Anything else is unresolved and reported — never guessed.
  *
  * Every table entry is a reviewed business decision. In particular a
- * generation code (DAMAS-2, DAMAS-3-MOVE, MALIBU-2, CAPTIVA-5, TRACKER-1)
- * collapses into its base model, because the buyer catalog has no generation
- * level; the dry-run lists every mapping so it can be checked.
+ * generation code (DAMAS-2, DAMAS-3-MOVE, MALIBU-2, CAPTIVA-5, TRACKER-1,
+ * TRACKER-2, TAHOE-2) collapses into its base model, because the buyer catalog
+ * has no generation level (its model names are the base names, e.g. both
+ * Chevrolet "Tracker" rows); the dry-run lists every mapping so it can be
+ * checked.
  */
 import { VEHICLE_CATALOG } from '../../ai/vehicle-catalog';
 
@@ -30,18 +33,24 @@ const MODEL_CODE_TABLE: Readonly<Record<string, string>> = {
   'Chevrolet|DAMAS-2': 'Damas',
   'Chevrolet|DAMAS-3-MOVE': 'Damas',
   'Chevrolet|MALIBU-2': 'Malibu',
-  'Chevrolet|MALIBU-1,5-TURBO': 'Malibu',
   'Chevrolet|CAPTIVA-5': 'Captiva',
   'Chevrolet|TRACKER-1': 'Tracker',
+  'Chevrolet|TRACKER-2': 'Tracker',
+  'Chevrolet|TAHOE-2': 'Tahoe',
   // Chevrolet-badged models the canonical catalog does not list under Chevrolet.
   'Chevrolet|NEXIA-1': 'Nexia 1',
   'Chevrolet|EPICA': 'Epica',
   'Chevrolet|TACUMA': 'Tacuma',
+  'Chevrolet|MONZA': 'Monza',
+  // Models the canonical catalog does not list (Niva = the buyer reference name).
+  'Lada|NIVA': 'Niva',
+  'Lada|LARGUS': 'Largus',
   // Makes outside the canonical catalog.
   'SsangYong|REXTON': 'Rexton',
   'SsangYong|TORRES': 'Torres',
   'SsangYong|KORANDO': 'Korando',
   'SsangYong|MUSSO': 'Musso',
+  'SsangYong|TIVOLI': 'Tivoli',
   'Genesis|G90': 'G90',
 };
 
@@ -96,20 +105,29 @@ export function resolveModel(
   const inCanon = (model: string) =>
     !!brand?.models.some((m) => m.canonical === model);
 
-  const tabled = MODEL_CODE_TABLE[`${canonicalMake}|${code}`];
+  const tabled =
+    MODEL_CODE_TABLE[`${canonicalMake}|${code}`] ??
+    MODEL_CODE_TABLE[`${canonicalMake}|${code.replace(/ /g, '-')}`];
   if (tabled) {
     return { model: tabled, via: 'table', inCanonicalCatalog: inCanon(tabled) };
   }
 
   if (!brand) return null;
-  const key = code.toLowerCase().replace(/-/g, ' ');
-  const matches = brand.models.filter(
-    (m) => m.canonical.toLowerCase() === key || m.aliases.includes(key),
-  );
-  if (matches.length !== 1) return null; // none, or an ambiguous alias
-  return {
-    model: matches[0].canonical,
-    via: 'alias',
-    inCanonicalCatalog: true,
-  };
+  for (const key of new Set([
+    code.toLowerCase(),
+    code.toLowerCase().replace(/-/g, ' '),
+  ])) {
+    const matches = brand.models.filter(
+      (m) => m.canonical.toLowerCase() === key || m.aliases.includes(key),
+    );
+    if (matches.length > 1) return null; // an ambiguous alias — never pick one
+    if (matches.length === 1) {
+      return {
+        model: matches[0].canonical,
+        via: 'alias',
+        inCanonicalCatalog: true,
+      };
+    }
+  }
+  return null;
 }

@@ -14,6 +14,7 @@ import type {
   ImportIssue,
   ParsedRow,
   PositionWrite,
+  VehicleReference,
 } from './drivers-village.types';
 
 export interface CategoryResolution {
@@ -141,6 +142,7 @@ export function buildWrite(
     product: {
       title: row.name,
       gmNumbers: row.gmNumber ? [row.gmNumber] : [],
+      sourcePartNumber: row.sourcePartNumber,
       oemNumbers: row.oemNumbers,
       ...categories,
       isUniversal: row.vehicle.kind === 'universal',
@@ -165,10 +167,14 @@ export function diffPosition(w: PositionWrite, e: ExistingPosition): string[] {
     a.length !== b.length || a.some((v, i) => v !== b[i]);
 
   if (decimalDiffers(w.priceUzs, e.priceUzs)) changes.push('price');
-  if (w.quantity !== e.quantity) changes.push('quantity');
+  // No quantity in the file leaves the stored count alone — never a change.
+  if (w.quantity !== null && w.quantity !== e.quantity)
+    changes.push('quantity');
   if (w.unit !== e.unit) changes.push('unit');
   if (w.product.title !== e.title) changes.push('name');
   if (listDiffers(w.product.gmNumbers, e.gmNumbers)) changes.push('gm_number');
+  if (w.product.sourcePartNumber !== e.sourcePartNumber)
+    changes.push('part_number');
   if (listDiffers(w.product.oemNumbers, e.oemNumbers))
     changes.push('oem_numbers');
   if (
@@ -185,6 +191,69 @@ export function diffPosition(w: PositionWrite, e: ExistingPosition): string[] {
   )
     changes.push('vehicles');
   return changes;
+}
+
+export interface FitNotInReference {
+  make: string;
+  /** Null for a make-wide fit. */
+  model: string | null;
+  rows: number;
+}
+
+/**
+ * Fits whose canonical name this database's buyer vehicle reference does not
+ * have. The garage filter matches catalog_part_fits / catalog_part_make_fits by
+ * make and model NAME (case-insensitive), so such a fit is stored but matches
+ * no garage vehicle until vehicle_makes / vehicle_models carry that name. A
+ * reference warning, never a block: the mapping is right, the reference lags.
+ */
+export function findFitsNotInReference(
+  rows: ParsedRow[],
+  reference: VehicleReference,
+): { missing: FitNotInReference[]; issues: ImportIssue[] } {
+  const makes = new Set(reference.makes.map((m) => m.toLowerCase()));
+  const models = new Set(reference.models.map((m) => m.toLowerCase()));
+  const missing = new Map<string, FitNotInReference>();
+  const issues: ImportIssue[] = [];
+  for (const row of rows) {
+    const v = row.vehicle;
+    const fits =
+      v.kind === 'models'
+        ? v.models.map((model) => ({ make: v.make, model }))
+        : v.kind === 'make'
+          ? [{ make: v.make, model: null }]
+          : [];
+    for (const f of fits) {
+      const known =
+        f.model === null
+          ? makes.has(f.make.toLowerCase())
+          : models.has(`${f.make}|${f.model}`.toLowerCase());
+      if (known) continue;
+      const key = `${f.make}|${f.model ?? ''}`;
+      const agg = missing.get(key) ?? { ...f, rows: 0 };
+      agg.rows += 1;
+      missing.set(key, agg);
+      issues.push({
+        line: row.line,
+        code1c: row.code1c,
+        kind: 'reference',
+        severity: 'warning',
+        code: 'vehicle_not_in_reference',
+        field: f.model === null ? 'vehicleMake' : 'vehicleModel',
+        message: `"${f.make}${f.model === null ? '' : ` ${f.model}`}" has no same-named row in vehicle_makes / vehicle_models — the fit is stored, but no garage vehicle matches it yet`,
+      });
+    }
+  }
+  return {
+    missing: [...missing.values()].sort(
+      (a, b) =>
+        b.rows - a.rows ||
+        `${a.make}|${a.model ?? ''}`.localeCompare(
+          `${b.make}|${b.model ?? ''}`,
+        ),
+    ),
+    issues,
+  };
 }
 
 /**

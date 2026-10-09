@@ -14,6 +14,7 @@ function write(over: Partial<PositionWrite> = {}): PositionWrite {
     product: {
       title: 'Стартер',
       gmNumbers: [],
+      sourcePartNumber: '13520817',
       oemNumbers: ['13520817'],
       categoryId: 'starters',
       vehicleCategoryId: 'electrical-and-lighting',
@@ -51,6 +52,47 @@ describe('writePosition (Prisma write contract)', () => {
       }),
     ]);
     expect(db.state.products).toHaveLength(1);
+  });
+
+  it('a quantity the file does not give is never written: create → column default, update → count kept', async () => {
+    const db = new FakeDb(driversVillageFixture());
+    await writePosition(db.tx, 7, write({ quantity: null }));
+    expect(db.state.stocks[0].quantity).toBe(1); // DEFAULT 1, not set by code
+
+    db.state.stocks[0].quantity = 9; // an explicitly stored count
+    await writePosition(
+      db.tx,
+      7,
+      write({ quantity: null, priceUzs: '1.00', unit: 'L' }),
+    );
+    expect(db.state.stocks[0]).toMatchObject({
+      quantity: 9,
+      priceUzs: '1',
+      unit: 'L',
+    });
+
+    await writePosition(db.tx, 7, write({ quantity: 4 }));
+    expect(db.state.stocks[0].quantity).toBe(4); // a given value still wins
+  });
+
+  it('writes the source part number verbatim on create and update', async () => {
+    const db = new FakeDb(driversVillageFixture());
+    const raw = ' Аккумулятор STARTER EH 100 AMP  CMF60038 ';
+    await writePosition(
+      db.tx,
+      7,
+      write({
+        product: { ...write().product, sourcePartNumber: raw, oemNumbers: [] },
+      }),
+    );
+    expect(db.state.products[0].sourcePartNumber).toBe(raw);
+
+    await writePosition(
+      db.tx,
+      7,
+      write({ product: { ...write().product, sourcePartNumber: null } }),
+    );
+    expect(db.state.products[0].sourcePartNumber).toBeNull();
   });
 
   it('never writes photos, image_url, description, rating or the Telegram GM key', async () => {

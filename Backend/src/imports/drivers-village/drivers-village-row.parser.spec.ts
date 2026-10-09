@@ -79,6 +79,12 @@ describe('mapHeaders', () => {
       /both map to oemNumbers/,
     );
   });
+
+  it('accepts an export without a quantity column', () => {
+    const m = mapHeaders(CURRENT.filter((h) => h !== 'quantity'));
+    expect(m.errors).toEqual([]);
+    expect(m.index.quantity).toBeUndefined();
+  });
 });
 
 describe('parseDecimal (prices / quantities)', () => {
@@ -113,6 +119,7 @@ describe('parseRow', () => {
       unit: 'PCS',
       sourceUnit: 'шт.',
       gmNumber: null,
+      sourcePartNumber: '96611630',
       oemNumbers: ['96611630'],
       vehicle: { kind: 'models', make: 'Chevrolet', models: ['Damas'] },
       categoryId: 'suspension-and-steering',
@@ -132,7 +139,20 @@ describe('parseRow', () => {
     expect(codes({ quantity: '2,5' })).toEqual(['invalid_quantity']);
     expect(codes({ unit: 'л', quantity: '2,5' })).toEqual(['invalid_quantity']);
     expect(codes({ quantity: '-1' })).toEqual(['invalid_quantity']);
-    expect(codes({ quantity: '' })).toEqual(['invalid_quantity']);
+  });
+
+  it('quantity: an empty cell or no column at all is "not given" (null), not an error', () => {
+    for (const quantity of ['', '   ']) {
+      const r = parse({ quantity });
+      expect(r.issues).toEqual([]);
+      expect(r.row?.quantity).toBeNull();
+    }
+    const noColumn = parse(
+      {},
+      CURRENT.filter((h) => h !== 'quantity'),
+    );
+    expect(noColumn.issues).toEqual([]);
+    expect(noColumn.row?.quantity).toBeNull();
   });
 
   it('unit is kept separately from quantity; unknown units are errors', () => {
@@ -201,7 +221,7 @@ describe('parseRow', () => {
     expect(parse({ manufacturer_part_number: '' }).row?.oemNumbers).toEqual([]);
   });
 
-  it('OEM: a comma separator and a concatenated pair are warnings; foreign letters are errors', () => {
+  it('OEM index: a comma separator and a concatenated pair are warnings', () => {
     const comma = parse({ manufacturer_part_number: '13271190, 13503675' });
     expect(comma.row?.oemNumbers).toEqual(['13271190', '13503675']);
     expect(comma.issues.map((i) => [i.code, i.severity])).toEqual([
@@ -210,13 +230,59 @@ describe('parseRow', () => {
     expect(
       codes({ manufacturer_part_number: '96852631 9549372195493722' }),
     ).toEqual(['oem_suspect_concatenated']);
-    // Cyrillic "С" look-alike would be silently dropped by normalization.
+  });
+
+  it('part number: the cell is kept verbatim; only plausible parts enter the OEM index', () => {
+    const cases: [string, string[]][] = [
+      ['Solite 57412', ['SOLITE', '57412']],
+      ['SCT SB 061-0868', ['SCT', '0610868']],
+      // A Cyrillic look-alike would be silently dropped by normalization and
+      // index a different number, so the part is not indexed at all.
+      ['13502180А', []],
+      ['АФГ94582132&94582135&94582157', []],
+      [' LADA NIVA', ['LADA', 'NIVA']],
+      ['96273708PMC(EU)', []],
+      ['12 34', []],
+    ];
+    for (const [raw, index] of cases) {
+      const r = parse({ manufacturer_part_number: raw });
+      expect(r.row).toMatchObject({ sourcePartNumber: raw, oemNumbers: index });
+      expect(r.issues.every((i) => i.severity === 'warning')).toBe(true);
+    }
+    expect(codes({ manufacturer_part_number: 'SCT SB 061-0868' })).toEqual([
+      'oem_not_indexed',
+    ]);
     expect(codes({ manufacturer_part_number: 'С4511006' })).toEqual([
-      'malformed_oem',
+      'oem_not_indexed',
     ]);
   });
 
-  it('vehicles: splits on ";", trims, drops blanks, dedupes', () => {
+  it('part number: blank is null; over the limit is rejected, never cut', () => {
+    expect(parse({ manufacturer_part_number: '' }).row?.sourcePartNumber).toBe(
+      null,
+    );
+    expect(
+      parse({ manufacturer_part_number: '   ' }).row?.sourcePartNumber,
+    ).toBeNull();
+    expect(codes({ manufacturer_part_number: 'A'.repeat(256) })).toEqual([
+      'part_number_too_long',
+      'oem_not_indexed',
+    ]);
+  });
+
+  it('vehicles: one cell lists every fitting model — splits on "," and ";", trims, drops blanks, dedupes', () => {
+    expect(parse({ vehicle_model: 'DAMAS-2, LABO' }).row?.vehicle).toEqual({
+      kind: 'models',
+      make: 'Chevrolet',
+      models: ['Damas', 'Labo'],
+    });
+    expect(
+      parse({ vehicle_model: 'LACETTI, NEXIA 3, SPARK, COBALT' }).row?.vehicle,
+    ).toEqual({
+      kind: 'models',
+      make: 'Chevrolet',
+      models: ['Lacetti', 'Nexia 3', 'Spark', 'Cobalt'],
+    });
     expect(
       parse({ vehicle_model: 'COBALT;NEXIA 3;LACETTI' }).row?.vehicle,
     ).toEqual({
@@ -224,13 +290,10 @@ describe('parseRow', () => {
       make: 'Chevrolet',
       models: ['Cobalt', 'Nexia 3', 'Lacetti'],
     });
+    // Two generation codes of one model collapse into one link.
     expect(
-      parse({ vehicle_model: ' TRACKER; TRAVERSE ;; tracker ' }).row?.vehicle,
-    ).toEqual({
-      kind: 'models',
-      make: 'Chevrolet',
-      models: ['Tracker', 'Traverse'],
-    });
+      parse({ vehicle_model: ' TRACKER, TRACKER-2 ;, tracker ' }).row?.vehicle,
+    ).toEqual({ kind: 'models', make: 'Chevrolet', models: ['Tracker'] });
   });
 
   it('vehicles: make-wide and global universal are valid states', () => {
@@ -242,7 +305,7 @@ describe('parseRow', () => {
     expect(universal.row?.vehicle).toEqual({ kind: 'universal' });
   });
 
-  it('vehicles: model without make, unknown make/model and comma lists are errors', () => {
+  it('vehicles: model without make and unknown make/model are errors — one unknown model rejects the row', () => {
     expect(codes({ vehicle_make: '' })).toEqual([
       'invalid_vehicle_combination',
     ]);
@@ -252,9 +315,11 @@ describe('parseRow', () => {
     expect(codes({ vehicle_make: 'SKODA', vehicle_model: 'SKODA' })).toEqual([
       'unknown_vehicle_model',
     ]);
-    expect(codes({ vehicle_model: 'MALIBU-2, EQUINOX, CAPTIVA' })).toEqual([
-      'vehicle_model_comma_list',
+    // Never guessed: Tico is Daewoo's, a bare "NEXIA" names no generation.
+    expect(codes({ vehicle_model: 'SPARK, NEXIA' })).toEqual([
+      'unknown_vehicle_model',
     ]);
+    expect(codes({ vehicle_model: 'TICO' })).toEqual(['unknown_vehicle_model']);
   });
 
   it('categories are passed through verbatim; only a blank or non-id value is an error', () => {
