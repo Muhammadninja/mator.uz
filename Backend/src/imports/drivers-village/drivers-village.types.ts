@@ -59,16 +59,33 @@ export interface ParsedRow {
    * the precision the file supplies. No markup, conversion or rounding.
    */
   priceUzs: string;
-  /** Whole number (fractions are rejected by the parser). */
-  quantity: number;
+  /**
+   * Whole number (fractions are rejected by the parser), or null when the file
+   * gives none — no `quantity` column, or an empty cell. Null is never written:
+   * a new stock gets the schema default (1), an existing one keeps its count.
+   */
+  quantity: number | null;
   unit: StockUnit;
   sourceUnit: string;
   gmNumber: string | null;
+  /** The part-number cell exactly as the file holds it; null when empty. */
+  sourcePartNumber: string | null;
+  /** Search index derived from sourcePartNumber (normalized, valid parts only). */
   oemNumbers: string[];
   vehicle: VehicleSpec;
   vehicleMappings: VehicleMapping[];
   categoryId: string;
   subcategoryId: string;
+}
+
+/**
+ * The buyer vehicle reference by NAME (vehicle_makes / vehicle_models) — the
+ * names the garage filter compares catalog_part_fits rows with.
+ */
+export interface VehicleReference {
+  makes: string[];
+  /** 'Make|Model' pairs. */
+  models: string[];
 }
 
 /** Category row as the planner needs it. */
@@ -89,6 +106,7 @@ export interface ExistingPosition {
   unit: string | null;
   title: string;
   gmNumbers: string[];
+  sourcePartNumber: string | null;
   oemNumbers: string[];
   categoryId: string | null;
   vehicleCategoryId: string | null;
@@ -105,11 +123,13 @@ export interface ExistingPosition {
 export interface PositionWrite {
   code1c: string;
   priceUzs: string;
-  quantity: number;
+  /** Null = not in the file: omitted from the write (see ParsedRow.quantity). */
+  quantity: number | null;
   unit: StockUnit;
   product: {
     title: string;
     gmNumbers: string[];
+    sourcePartNumber: string | null;
     oemNumbers: string[];
     categoryId: string;
     vehicleCategoryId: string;

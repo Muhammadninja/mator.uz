@@ -30,6 +30,7 @@ import type {
   CategoryNode,
   ExistingPosition,
   PositionWrite,
+  VehicleReference,
 } from './drivers-village.types';
 
 export interface CatalogSellerRef {
@@ -51,16 +52,21 @@ export interface WrittenPosition {
   created: boolean;
 }
 
-/** The migration that adds every column the importer reads and writes. */
-export const REQUIRED_MIGRATION = '20260923000000_drivers_village_1c_import';
+/** The migrations that add every column the importer reads and writes. */
+export const REQUIRED_MIGRATIONS = [
+  '20260923000000_drivers_village_1c_import',
+  '20261009000000_drivers_village_source_part_number',
+] as const;
 
 export interface DriversVillageStore {
-  /** False when the database predates REQUIRED_MIGRATION. Read-only check. */
+  /** False when the database predates REQUIRED_MIGRATIONS. Read-only check. */
   schemaReady(): Promise<boolean>;
   findCatalogSeller(id: string): Promise<CatalogSellerRef | null>;
   /** The supply-side seller explicitly linked to the catalog dealer, if any. */
   findLinkedSeller(catalogSellerId: string): Promise<LinkedSellerRef | null>;
   loadCategories(): Promise<CategoryNode[]>;
+  /** Buyer vehicle reference names, to check fitment against. Read-only. */
+  loadVehicleReference(): Promise<VehicleReference>;
   /** Existing imported positions of this seller, keyed by code_1c. */
   loadPositions(
     sellerId: number,
@@ -104,8 +110,8 @@ export class PrismaDriversVillageStore implements DriversVillageStore {
       WHERE table_schema = current_schema()
         AND ((table_name = 'stocks' AND column_name IN ('source_system', 'source_code', 'unit'))
           OR (table_name = 'sellers' AND column_name = 'catalog_seller_id')
-          OR (table_name = 'products' AND column_name IN ('gm_numbers', 'oem_numbers')))`;
-    return Number(rows[0]?.n ?? 0) === 6;
+          OR (table_name = 'products' AND column_name IN ('gm_numbers', 'oem_numbers', 'source_part_number')))`;
+    return Number(rows[0]?.n ?? 0) === 7;
   }
 
   findCatalogSeller(id: string): Promise<CatalogSellerRef | null> {
@@ -126,6 +132,22 @@ export class PrismaDriversVillageStore implements DriversVillageStore {
     return this.prisma.partCategory.findMany({
       select: { id: true, parentId: true, level: true, isActive: true },
     });
+  }
+
+  async loadVehicleReference(): Promise<VehicleReference> {
+    const [makes, models] = await Promise.all([
+      this.prisma.vehicleMake.findMany({ select: { id: true, name: true } }),
+      this.prisma.vehicleModelRef.findMany({
+        select: { makeId: true, name: true },
+      }),
+    ]);
+    const makeName = new Map(makes.map((m) => [m.id, m.name]));
+    return {
+      makes: makes.map((m) => m.name),
+      models: models
+        .filter((m) => makeName.has(m.makeId))
+        .map((m) => `${makeName.get(m.makeId)}|${m.name}`),
+    };
   }
 
   async loadPositions(
@@ -151,6 +173,7 @@ export class PrismaDriversVillageStore implements DriversVillageStore {
             select: {
               title: true,
               gmNumbers: true,
+              sourcePartNumber: true,
               oemNumbers: true,
               categoryId: true,
               vehicleCategoryId: true,
@@ -193,6 +216,7 @@ export class PrismaDriversVillageStore implements DriversVillageStore {
           unit: s.unit,
           title: s.product.title,
           gmNumbers: s.product.gmNumbers,
+          sourcePartNumber: s.product.sourcePartNumber,
           oemNumbers: s.product.oemNumbers,
           categoryId: s.product.categoryId,
           vehicleCategoryId: s.product.vehicleCategoryId,
@@ -263,6 +287,7 @@ export async function writePosition(
   const productData = {
     title: w.product.title,
     gmNumbers: w.product.gmNumbers,
+    sourcePartNumber: w.product.sourcePartNumber,
     oemNumbers: w.product.oemNumbers,
     ...numberLabels(w.product.gmNumbers, w.product.oemNumbers),
     isUniversal: w.product.isUniversal,
@@ -310,9 +335,12 @@ export async function writePosition(
     });
   }
 
+  // A quantity the file does not give is left out of the write: a new stock
+  // gets the column default (stocks.quantity DEFAULT 1) and an existing one
+  // keeps its count. The default lives in the schema only, never here.
   const stockData = {
     priceUzs: new Prisma.Decimal(w.priceUzs),
-    quantity: w.quantity,
+    ...(w.quantity === null ? {} : { quantity: w.quantity }),
     unit: w.unit,
   };
   const stock = existing

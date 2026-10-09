@@ -99,11 +99,22 @@ function printSummary(report: ImportReport, files: string[]): void {
     'Reference errors / warnings': `${s.referenceErrors} / ${s.referenceWarnings}`,
     'Look-alike product groups (not merged)': s.lookAlikeGroups,
     'DB positions not in this file (untouched)': s.positionsNotInFile,
+    'Rows without quantity (new → 1, existing → kept)': s.rowsWithoutQuantity,
   });
   const v = report.vehicles;
   console.log(
     `Vehicles: ${v.specificModelRows} specific-model rows (${v.multiModelRows} multi-model, ${v.modelLinks} links), ${v.makeWideRows} make-wide, ${v.universalRows} universal. Units: ${JSON.stringify(report.units)}`,
   );
+  if (v.notInBuyerReference.length) {
+    console.log(
+      `Fits with no same-named vehicle_makes / vehicle_models row (stored, but no garage vehicle matches yet): ${v.notInBuyerReference
+        .map(
+          (f) =>
+            `${f.make}${f.model ? ` ${f.model}` : ' (make-wide)'} ×${f.rows}`,
+        )
+        .join(', ')}`,
+    );
+  }
   if (report.environment.issues.length) {
     console.log('\nEnvironment (this database, not the source file):');
     for (const i of report.environment.issues) console.log(`  • ${i.message}`);

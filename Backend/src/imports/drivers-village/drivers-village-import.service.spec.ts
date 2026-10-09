@@ -43,7 +43,7 @@ const BASE = [
   row({
     code: 'БП-01071006',
     name: 'Стартер',
-    model: 'MALIBU-2; TRACKER-1; MALIBU-1,5-TURBO',
+    model: 'MALIBU-2, TRACKER-1; MALIBU',
     price: '2 031 708,59',
     qty: '2',
   }),
@@ -164,7 +164,7 @@ describe('DriversVillageImportService', () => {
     });
   });
 
-  it('writes the three vehicle states: specific models (split on ;), make-wide, universal', async () => {
+  it('writes the three vehicle states: specific models (split on , and ;), make-wide, universal', async () => {
     const { db, service } = setup();
     await service.run(file(...BASE), 'dv.txt', { dryRun: false });
     const st = db.state;
@@ -175,7 +175,7 @@ describe('DriversVillageImportService', () => {
         .sort();
 
     expect(modelsOf('00-00001431')).toEqual(['Damas']);
-    // MALIBU-2 and MALIBU-1,5-TURBO both resolve to Malibu → one link, no duplicate.
+    // MALIBU-2 and MALIBU both resolve to Malibu → one link, no duplicate.
     expect(modelsOf('БП-01071006')).toEqual(['Malibu', 'Tracker']);
     // Make-wide: no model links, one make link, not universal.
     expect(modelsOf('БП-01074051')).toEqual([]);
@@ -195,6 +195,106 @@ describe('DriversVillageImportService', () => {
       '96273708',
       'S4510017',
     ]);
+  });
+
+  it('stores the part number cell verbatim; Cyrillic, spaces and symbols never reject a row', async () => {
+    const { db, service } = setup();
+    const cells = [
+      '13502180А',
+      'Solite 57412',
+      'АФГ94582132&94582135&94582157',
+      ' LADA NIVA',
+    ];
+    const report = await service.run(
+      file(...cells.map((oem, i) => row({ code: `PN-${i}`, oem }))),
+      'dv.txt',
+      { dryRun: false },
+    );
+    expect(report.summary).toMatchObject({ rejectedRows: 0, rowsToCreate: 4 });
+    cells.forEach((oem, i) =>
+      expect(productOf(db, `PN-${i}`).sourcePartNumber).toBe(oem),
+    );
+    expect(productOf(db, 'PN-0').oemNumbers).toEqual([]);
+    expect(productOf(db, 'PN-1').oemNumbers).toEqual(['SOLITE', '57412']);
+    expect(
+      report.rows.find((r) => r.code1c === 'PN-0')!.issues.map((i) => i.code),
+    ).toEqual(['oem_not_indexed']);
+  });
+
+  it('one row with comma-listed models is ONE product with one fit link per model', async () => {
+    const { db, service } = setup();
+    await service.run(
+      file(row({ code: 'M-1', model: 'MATIZ, DAMAS-2, LABO' })),
+      'dv.txt',
+      { dryRun: false },
+    );
+    expect(db.state.products).toHaveLength(1);
+    expect(db.state.stocks).toHaveLength(1);
+    const names = db.state.partModels.map(
+      (pm) => db.state.carModels.find((m) => m.id === pm.modelId)!.name,
+    );
+    expect(names.sort()).toEqual(['Damas', 'Labo', 'Matiz']);
+  });
+
+  it('a file without a quantity column imports: new stocks get the column default 1, existing counts are kept', async () => {
+    const { db, service } = setup();
+    const noQty = (...rows: string[]) =>
+      Buffer.from(
+        [
+          'name\tmanufacturer_part_number\tunit\tprice\tvehicle_make\tvehicle_model\tcategory_id\tsubcategory_id\tcode_1c',
+          ...rows,
+        ].join('\r'),
+        'utf-8',
+      );
+    const lines = [
+      'Амортизатор\t42792442\tшт.\t490000,00\tCHEVROLET\tDAMAS-2, LABO\tsuspension-and-steering\tshock-absorbers\t1',
+      'Масло\t\tл\t95000,00\t\t\tmotor-oil\tsynthetic-motor-oil\t2',
+    ];
+
+    const first = await service.run(noQty(...lines), 'dv.txt', {
+      dryRun: false,
+    });
+    expect(first.meta.aborted).toBe(false);
+    expect(first.summary).toMatchObject({
+      rowsToCreate: 2,
+      rejectedRows: 0,
+      rowsWithoutQuantity: 2,
+    });
+    expect(first.rows[0].quantity).toEqual({ from: null, to: null });
+    expect(db.state.stocks.map((s) => s.quantity)).toEqual([1, 1]);
+
+    // A count set since (e.g. by a file that had one) is never reset to 1.
+    stockOf(db, '1').quantity = 12;
+    const again = await service.run(noQty(...lines), 'dv.txt', {
+      dryRun: false,
+    });
+    expect(again.summary).toMatchObject({ rowsUnchanged: 2, rowsToUpdate: 0 });
+    expect(stockOf(db, '1').quantity).toBe(12);
+  });
+
+  it('reports fits the buyer vehicle reference does not name, without blocking them', async () => {
+    const { db, service } = setup();
+    const report = await service.run(
+      file(
+        row({ code: 'R-1', model: 'COBALT, EQUINOX' }),
+        row({ code: 'R-2', model: '', make: 'LADA' }),
+      ),
+      'dv.txt',
+      { dryRun: false },
+    );
+    expect(report.vehicles.notInBuyerReference).toEqual([
+      { make: 'Chevrolet', model: 'Equinox', rows: 1 },
+      { make: 'Lada', model: null, rows: 1 },
+    ]);
+    expect(report.rows.find((r) => r.code1c === 'R-1')!.issues).toEqual([
+      expect.objectContaining({
+        kind: 'reference',
+        severity: 'warning',
+        code: 'vehicle_not_in_reference',
+      }),
+    ]);
+    expect(report.summary).toMatchObject({ rowsToCreate: 2, blockedRows: 0 });
+    expect(db.state.stocks).toHaveLength(2);
   });
 
   it('second import with a new price/quantity updates the SAME stock and product', async () => {

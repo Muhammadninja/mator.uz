@@ -43,4 +43,9 @@ export const FIELD_LIMITS = {
   title: 255,
   categoryId: 64,
   partNumber: 50,
+  /**
+   * products.source_part_number is TEXT (no DB limit); this only catches a
+   * shifted column. A longer value is rejected, never cut.
+   */
+  sourcePartNumber: 255,
 } as const;

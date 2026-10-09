@@ -465,6 +465,12 @@ model Product {
   // The projection unions these into CatalogPart.gmNumbers / oemNumbers.
   gmNumbers          String[]             @default([]) @map("gm_numbers")
   oemNumbers         String[]             @default([]) @map("oem_numbers")
+  // The part-number cell of a source import EXACTLY as the file holds it — one
+  // string, never split, normalized, trimmed or case-changed (Driver's Village:
+  // `manufacturer_part_number`, which may mix Cyrillic, Latin, spaces and
+  // punctuation). `oemNumbers` above is only the search index derived from it.
+  // NULL for Telegram listings and for an empty source cell.
+  sourcePartNumber   String?              @map("source_part_number")
   title              String               @db.VarChar(255)
   description        String?              @db.Text
   imageUrl           String?              @map("image_url") // primary image mirror (back-compat)

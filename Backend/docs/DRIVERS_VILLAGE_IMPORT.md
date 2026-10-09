@@ -16,13 +16,14 @@ Mator mobile app
 ```
 
 Code: `src/imports/drivers-village/`, CLI: `scripts/import-drivers-village.ts`,
-migration: `prisma/migrations/20260923000000_drivers_village_1c_import`.
+migrations: `prisma/migrations/20260923000000_drivers_village_1c_import`,
+`prisma/migrations/20261009000000_drivers_village_source_part_number`.
 
 ## 1. Prerequisites (per database)
 
 | Requirement | Why | Dry-run reports it as |
 |---|---|---|
-| Migration `20260923000000_drivers_village_1c_import` applied | adds seller type, source identity on stocks, number lists, make-wide fitment tables | `schema_not_migrated` |
+| Migrations `20260923000000_drivers_village_1c_import` and `20261009000000_drivers_village_source_part_number` applied | add seller type, source identity on stocks, number lists, make-wide fitment tables, `products.source_part_number` | `schema_not_migrated` |
 | Catalog seller `drivers-village` exists | every position is listed under this dealer | `catalog_seller_missing` |
 | A **BUSINESS** seller linked to it | `stocks.seller_id` points at a supply-side `sellers` row; the importer never creates one | `linked_seller_missing` / `linked_seller_not_business` |
 | Every `category_id` / `subcategory_id` of the file exists | FK on `products.category_id` and `catalog_parts.category_id` | `blocked` rows + `environment.missingCategoryIds` |
@@ -32,9 +33,11 @@ writes nothing.
 
 ### Deploy order
 
-1. Apply both migrations with `npx prisma migrate deploy`:
+1. Apply the migrations with `npx prisma migrate deploy`:
    `20260923000000_drivers_village_1c_import`, then
-   `20260923010000_drivers_village_photo_updates`.
+   `20260923010000_drivers_village_photo_updates`, then
+   `20261009000000_drivers_village_source_part_number` (one nullable column,
+   additive; the new client selects it, so it must precede the code).
 2. Deploy the backend built from this code.
 3. Only then run the one-time setup below, which creates the BUSINESS seller.
 
@@ -108,8 +111,8 @@ Export from 1C to Excel, then **File → Save As → "Tab-delimited Text (.txt)"
 | `code_1c` | yes | Position id in 1C; stored as `stocks.source_code` verbatim (trimmed). Never a part number. |
 | `name` | yes | `products.title`, whitespace collapsed, text unchanged. |
 | `gm_number` | no | One all-digit value → `products.gm_numbers`. |
-| `oem_numbers` **or** `manufacturer_part_number` | no | Space-separated → normalized (`normalizeOem`), deduped → `products.oem_numbers`. The current export's `manufacturer_part_number` column is read as OEM numbers; it is never stored as an "MPN" and never as a GM number. |
-| `quantity` | yes | Whole number → `stocks.quantity` (integer). A fractional value is rejected, never rounded. |
+| `oem_numbers` **or** `manufacturer_part_number` | no | The cell **exactly as the file holds it** → `products.source_part_number` (never split, trimmed, normalized or case-changed; Cyrillic, mixed alphabets, spaces and punctuation are kept; blank → NULL; over 255 characters → row rejected, never cut). Separately, its space-separated parts that are plausible numbers (Latin letters, digits, `.-/`, 3–50 characters) are normalized (`normalizeOem`), deduped → `products.oem_numbers`, the search index. Other parts are only reported (`oem_not_indexed`); they never reject the row. Never read as a GM number. |
+| `quantity` | no | Whole number → `stocks.quantity` (integer); a fractional value is rejected, never rounded. **No column or an empty cell** = not given: a new stock gets the column default `stocks.quantity DEFAULT 1`, an existing stock keeps its count. |
 | `unit` | yes | `шт.`/`шт` → `PCS`, `л`/`литр` → `L` → `stocks.unit`. Anything else is rejected. |
 | `price` | yes | Price for one unit, UZS, `490 000,00` format → `stocks.price_uzs` exactly (see Price below). |
 | `vehicle_make`, `vehicle_model` | — | See §4. |
@@ -136,8 +139,8 @@ that text value is what is imported, unchanged.
 
 | Target | Value |
 |---|---|
-| `products` (one per `code_1c`) | `title`, `gm_numbers`, `oem_numbers`, `part_number_type`/`is_gm`/`is_oem` (from which lists are populated), `is_universal`, `category_id = subcategory_id`, `vehicle_category_id` = level-0 root of `category_id`, legacy `main_category`/`vehicle_category` enums mirrored only where the ids map to one (never guessed). `gm_number` stays NULL. |
-| `stocks` | seller = the linked BUSINESS seller, `source_system = DRIVERS_VILLAGE_1C`, `source_code = code_1c`, `price_uzs` (exact), `quantity` (integer), `unit`. |
+| `products` (one per `code_1c`) | `title`, `source_part_number` (verbatim), `gm_numbers`, `oem_numbers`, `part_number_type`/`is_gm`/`is_oem` (from which lists are populated), `is_universal`, `category_id = subcategory_id`, `vehicle_category_id` = level-0 root of `category_id`, legacy `main_category`/`vehicle_category` enums mirrored only where the ids map to one (never guessed). `gm_number` stays NULL. |
+| `stocks` | seller = the linked BUSINESS seller, `source_system = DRIVERS_VILLAGE_1C`, `source_code = code_1c`, `price_uzs` (exact), `quantity` (integer; omitted when the file gives none — see §2), `unit`. |
 | `part_models` | specific models (§4), reconciled on every import. |
 | `part_makes` | make-wide rows (§4), reconciled on every import. |
 | `catalog_parts` | via the existing projection: seller `drivers-village`, `price_uzs` = the source price, `stock_qty` = quantity, `in_stock` = quantity > 0, number arrays, fits. |
@@ -157,19 +160,31 @@ pump). Such groups are listed in the report under `lookAlikes` for review.
 | neither | every vehicle | `is_universal = true`, no links |
 | model without make | invalid | row rejected |
 
-`vehicle_model` is split on `;`, trimmed, blanks dropped, duplicates removed.
-A `,`-separated list is rejected (`,` appears inside real codes such as
-`MALIBU-1,5-TURBO`).
+`vehicle_model` lists every model the part fits: it is split on `,` (the
+export's separator) or `;`, trimmed, blanks dropped, duplicates removed. The
+row stays **one** product with one `part_models` row (and one
+`catalog_part_fits` row) per model, e.g. `DAMAS-2, LABO` → Damas + Labo.
+Model codes never contain `,` or `;`.
 
 Codes resolve to the canonical names the app filters on, deterministically:
-first the explicit table in `drivers-village-vehicle.mapper.ts`, then an
-exact alias in `src/ai/vehicle-catalog.ts` after `-` → space (`NEXIA-3` →
-`Nexia 3`). Unknown codes are rejected, never guessed. **Review the table:**
-generation codes (`DAMAS-2`, `DAMAS-3-MOVE`, `MALIBU-2`, `CAPTIVA-5`,
-`TRACKER-1`) collapse into the base model because the buyer catalog has no
-generation level, and `Epica`, `Tacuma`, `Nexia 1` (Chevrolet), SsangYong and
-Genesis are outside the canonical catalog. The dry-run lists every mapping
-used, with its row count, under `vehicles.mappings`.
+first the explicit table in `drivers-village-vehicle.mapper.ts` (a space and a
+`-` are the same separator there: `CAPTIVA 5` = `CAPTIVA-5`), then an exact
+alias in `src/ai/vehicle-catalog.ts`, as written (`H-1`) or after `-` → space
+(`NEXIA-3` → `Nexia 3`). Unknown codes are rejected, never guessed — e.g.
+`TICO` under `CHEVROLET` (Tico is Daewoo's: set `vehicle_make` to `DAEWOO`) or
+a bare `NEXIA` (no generation). **Review the table:** generation codes
+(`DAMAS-2`, `DAMAS-3-MOVE`, `MALIBU-2`, `CAPTIVA-5`, `TRACKER-1`, `TRACKER-2`,
+`TAHOE-2`) collapse into the base model because the buyer catalog has no
+generation level, and `Epica`, `Tacuma`, `Nexia 1`, `Monza` (Chevrolet),
+`Niva`, `Largus` (Lada), SsangYong and Genesis are outside the canonical
+catalog. The dry-run lists every mapping used, with its row count, under
+`vehicles.mappings`.
+
+The garage filter matches fit rows by make and model **name**. The dry-run
+reads this database's `vehicle_makes` / `vehicle_models` (read-only) and lists
+every fit with no same-named row under `vehicles.notInBuyerReference` (warning
+`vehicle_not_in_reference`). Such a fit is still written; it matches no garage
+vehicle until the reference has that name.
 
 ## 5. Commands
 
@@ -195,8 +210,8 @@ typical on a dev DB, not a source-data problem).
 - A position is identified by `(seller, DRIVERS_VILLAGE_1C, code_1c)`
   (unique index). Re-importing updates it in place; unchanged rows are not
   rewritten.
-- The import owns: title, GM/OEM lists, category ids and mirrors, vehicle
-  links, price, quantity, unit.
+- The import owns: title, source part number, GM/OEM lists, category ids and
+  mirrors, vehicle links, price, quantity (only when the file gives one), unit.
 - The import never touches: product photos and `image_url`, description,
   rating, kind, sale form, sellers, catalog sellers, categories.
 - Positions in the database but absent from the file are **listed**

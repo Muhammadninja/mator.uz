@@ -36,6 +36,7 @@ import { mapHeaders, parseRow } from './drivers-village-row.parser';
 import {
   buildWrite,
   diffPosition,
+  findFitsNotInReference,
   findLookAlikes,
   resolveCategories,
 } from './drivers-village.planner';
@@ -45,7 +46,7 @@ import type {
   VehicleMappingSummary,
 } from './drivers-village.report';
 import {
-  REQUIRED_MIGRATION,
+  REQUIRED_MIGRATIONS,
   type DriversVillageStore,
 } from './drivers-village.store';
 import type {
@@ -202,7 +203,7 @@ export class DriversVillageImportService {
       report.environment.issues.push(
         envIssue(
           'schema_not_migrated',
-          `This database does not have migration ${REQUIRED_MIGRATION} yet (run \`npx prisma migrate deploy\`). Existing positions cannot be read, so every valid row is planned as a create.`,
+          `This database does not have migrations ${REQUIRED_MIGRATIONS.join(' and ')} yet (run \`npx prisma migrate deploy\`). Existing positions cannot be read, so every valid row is planned as a create.`,
         ),
       );
     }
@@ -257,6 +258,13 @@ export class DriversVillageImportService {
       (await this.store.loadCategories()).map((c) => [c.id, c]),
     );
     report.environment.categoriesInDatabase = tree.size;
+    const fitCheck = findFitsNotInReference(
+      valid,
+      await this.store.loadVehicleReference(),
+    );
+    report.vehicles.notInBuyerReference = fitCheck.missing;
+    for (const issue of fitCheck.issues)
+      rowReports.get(issue.line!)!.issues.push(issue);
 
     // ── 4. Plan ──────────────────────────────────────────────────────────────
     const existing = linked
@@ -402,6 +410,7 @@ export class DriversVillageImportService {
     const mappings = new Map<string, VehicleMappingSummary>();
     for (const r of rows) {
       report.units[r.unit] = (report.units[r.unit] ?? 0) + 1;
+      if (r.quantity === null) report.summary.rowsWithoutQuantity += 1;
       const v = report.vehicles;
       if (r.vehicle.kind === 'universal') v.universalRows += 1;
       else if (r.vehicle.kind === 'make') v.makeWideRows += 1;
@@ -498,6 +507,7 @@ function emptyReport(
       lookAlikeGroups: 0,
       positionsNotInFile: 0,
       existingPositionsWithPhotos: 0,
+      rowsWithoutQuantity: 0,
       written: null,
     },
     vehicles: {
@@ -507,6 +517,7 @@ function emptyReport(
       multiModelRows: 0,
       modelLinks: 0,
       mappings: [],
+      notInBuyerReference: [],
     },
     units: {},
     lookAlikes: [],
