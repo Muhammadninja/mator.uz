@@ -16,10 +16,6 @@ function write(over: Partial<PositionWrite> = {}): PositionWrite {
       gmNumbers: [],
       sourcePartNumber: '13520817',
       oemNumbers: ['13520817'],
-      categoryId: 'starters',
-      vehicleCategoryId: 'electrical-and-lighting',
-      mainCategory: null,
-      vehicleCategory: 'ELECTRICAL_AND_LIGHTING',
       isUniversal: false,
     },
     models: [
@@ -52,6 +48,60 @@ describe('writePosition (Prisma write contract)', () => {
       }),
     ]);
     expect(db.state.products).toHaveLength(1);
+  });
+
+  it('a match by the 8-digit key updates the stock stored under the previous code and moves it to the new one — never creates one', async () => {
+    const db = new FakeDb(driversVillageFixture());
+    const first = await writePosition(db.tx, 7, write({ code1c: '96273708' }));
+    const moved = await writePosition(
+      db.tx,
+      7,
+      write({
+        code1c: '96273708 GMB',
+        previousCode1c: '96273708',
+        priceUzs: '5.00',
+        quantity: null,
+      }),
+    );
+
+    expect(moved).toEqual({
+      code1c: '96273708 GMB',
+      stockId: first.stockId,
+      productId: first.productId,
+      created: false,
+    });
+    expect(db.state.stocks).toEqual([
+      expect.objectContaining({
+        id: first.stockId,
+        sourceCode: '96273708 GMB',
+        priceUzs: '5',
+        quantity: 2,
+      }),
+    ]);
+    expect(db.state.products).toHaveLength(1);
+
+    // A stale plan — the previous code is gone: the write fails, so its batch
+    // rolls back, instead of creating a second stock.
+    await expect(
+      writePosition(
+        db.tx,
+        7,
+        write({ code1c: '96273708 OEM', previousCode1c: '96273708' }),
+      ),
+    ).rejects.toThrow(/"96273708".*no longer exists/);
+    // The unique index refuses a code another stock already has.
+    await writePosition(db.tx, 7, write({ code1c: 'TAKEN-1' }));
+    await expect(
+      writePosition(
+        db.tx,
+        7,
+        write({ code1c: 'TAKEN-1', previousCode1c: '96273708 GMB' }),
+      ),
+    ).rejects.toThrow(/Unique constraint/);
+    expect(db.state.stocks.map((s) => s.sourceCode)).toEqual([
+      '96273708 GMB',
+      'TAKEN-1',
+    ]);
   });
 
   it('a quantity the file does not give is never written: create → column default, update → count kept', async () => {
@@ -124,6 +174,36 @@ describe('writePosition (Prisma write contract)', () => {
       description: 'manual',
       ratingAvg: '4.5',
       reviewCount: 3,
+    });
+  });
+
+  it('never writes a category: a new product starts unclassified, an existing one keeps the category Mator gave it', async () => {
+    const db = new FakeDb(driversVillageFixture());
+    await writePosition(db.tx, 7, write());
+    expect(db.state.products[0]).toMatchObject({
+      categoryId: null,
+      vehicleCategoryId: null,
+      mainCategory: null,
+      vehicleCategory: null,
+    });
+
+    const manual = {
+      categoryId: 'starters',
+      vehicleCategoryId: 'electrical-and-lighting',
+      mainCategory: 'ELECTRICAL_PARTS',
+      vehicleCategory: 'ELECTRICAL_AND_LIGHTING',
+    };
+    Object.assign(db.state.products[0], manual);
+    await writePosition(
+      db.tx,
+      7,
+      write({ priceUzs: '2100000.00', quantity: 0 }),
+    );
+
+    expect(db.state.products[0]).toMatchObject(manual);
+    expect(db.state.stocks[0]).toMatchObject({
+      priceUzs: '2100000',
+      quantity: 0,
     });
   });
 

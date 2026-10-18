@@ -633,4 +633,26 @@ describe('CatalogProjectionService — imported dealer positions (Driver\'s Vill
     expect(prisma.catalogPartMakeFit.deleteMany).toHaveBeenCalledWith({ where: { partId: 'part_stock_500' } });
     expect(prisma.catalogPartMakeFit.createMany).not.toHaveBeenCalled();
   });
+
+  it('writes an imported position\'s classification on create only, so a category set in Mator survives', () => {
+    svc.buildProjectionOps(imported({ product: { categoryId: null, mainCategory: null, vehicleCategory: null } }));
+    const part = upsertArg(prisma, 'catalogPart');
+    // A new imported position lands in the fallback bucket…
+    expect(part.create).toMatchObject({ categoryId: 'cat_uncategorized', mainCategory: null, vehicleCategory: null });
+    // …and no later projection (re-import, photo update, rating edit) moves it.
+    for (const key of ['categoryId', 'mainCategory', 'vehicleCategory']) {
+      expect(part.update).not.toHaveProperty(key);
+    }
+    // Everything the source owns still updates.
+    expect(part.update).toMatchObject({ title: 'Timing belt', priceUzs: 185000, stockQty: 8, inStock: true });
+  });
+
+  it('a Telegram listing still updates its classification from the product', () => {
+    svc.buildProjectionOps(buildStock());
+    expect(upsertArg(prisma, 'catalogPart').update).toMatchObject({
+      categoryId: 'belts-and-hoses',
+      mainCategory: 'BELTS_AND_HOSES',
+      vehicleCategory: 'ENGINE',
+    });
+  });
 });

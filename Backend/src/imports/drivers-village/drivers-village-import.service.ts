@@ -14,6 +14,18 @@
  *     method of the store is ever called.
  *   • Idempotent: a position is keyed by (seller, DRIVERS_VILLAGE_1C, code_1c);
  *     a re-import updates it in place, and an unchanged row is not rewritten.
+ *     A code_1c without a position of its own may take over the position of a
+ *     changed code through its 8-digit key (`96273708` → `96273708 GMB`) —
+ *     only when that is unambiguous; otherwise the row is a 'conflict' and
+ *     nothing is written for it (drivers-village-code-key.ts).
+ *   • code_1c is the part number: it is written to products.source_part_number
+ *     (and the oem_numbers index) on create and update, so a wrong stored
+ *     number is corrected by the next import. The export's
+ *     manufacturer_part_number / oem_numbers cells are never read, and a
+ *     stored part number never decides which position a row updates.
+ *   • One position per code_1c: a code on several rows is written once, at the
+ *     highest valid price among them (resolveDuplicateCodes); a code with no
+ *     valid price writes nothing, so its stored price stays.
  *   • Batched: each batch is one transaction — all of its positions or none.
  *     A failed batch stops the run; committed batches stand, and re-running the
  *     same file resumes (committed rows plan as unchanged, missing
@@ -22,23 +34,42 @@
  *     linked to the catalog dealer 'drivers-village' (sellers.catalog_seller_id,
  *     tg_id NULL). The importer never creates a seller; a missing or
  *     non-BUSINESS link is a setup error that blocks the import.
- *   • Exact price: the file's price is written to Stock.priceUzs and projected
- *     to CatalogPart.priceUzs verbatim — no markup, no retail conversion, no
- *     rounding (see drivers-village-row.parser.ts).
+ *   • One price rule, applied once: the file's price goes through
+ *     normalizeSourcePrice (below 1000 → ×1000) while the row is parsed, and
+ *     the result is written to Stock.priceUzs and projected to
+ *     CatalogPart.priceUzs — no markup, no rounding. A stored price is never
+ *     an input, so re-importing a file cannot scale a price twice.
+ *   • Mator owns classification: the import writes no category. A new
+ *     position is created unclassified; an existing one keeps its category
+ *     (the projection does not overwrite an imported position's category).
+ *   • Absence is not deletion: positions missing from a file are listed, never
+ *     changed, zeroed or deleted.
  */
 import { createHash } from 'crypto';
 import {
   DRIVERS_VILLAGE_CATALOG_SELLER_ID,
   DRIVERS_VILLAGE_SOURCE_SYSTEM,
   IMPORT_LIMITS,
+  PRICE_JUMP_REVIEW_RATIO,
 } from './drivers-village.constants';
 import { mapHeaders, parseRow } from './drivers-village-row.parser';
 import {
+  keyConflictIssue,
+  keyMatchIssue,
+  keySharedIssue,
+  resolveCodeKeys,
+} from './drivers-village-code-key';
+import type { NumberFormat } from './drivers-village-price';
+import {
   buildWrite,
+  detectRowNumberCodes,
   diffPosition,
   findFitsNotInReference,
   findLookAlikes,
-  resolveCategories,
+  isPriceJump,
+  isUnclassified,
+  resolveDuplicateCodes,
+  type SourceLine,
 } from './drivers-village.planner';
 import type {
   ImportReport,
@@ -55,7 +86,18 @@ import type {
   ParsedRow,
   RowPlan,
 } from './drivers-village.types';
-import { decodeSource, parseTsv, type SourceEncoding } from './tsv-reader';
+import {
+  decodeSource,
+  detectDelimiter,
+  parseDelimited,
+  type SourceEncoding,
+} from './tsv-reader';
+
+/** The number format follows the export format (see NumberFormat). */
+const NUMBER_FORMAT = {
+  tab: 'decimal-comma',
+  semicolon: 'thousands-comma',
+} as const satisfies Record<string, NumberFormat>;
 
 export interface ImportOptions {
   dryRun: boolean;
@@ -111,10 +153,19 @@ export class DriversVillageImportService {
       );
     }
     let decoded: ReturnType<typeof decodeSource>;
-    let parsedRecords: ReturnType<typeof parseTsv>;
+    let parsedRecords: ReturnType<typeof parseDelimited>;
+    let delimiter: ReturnType<typeof detectDelimiter>;
     try {
       decoded = decodeSource(bytes, options.encoding);
-      parsedRecords = parseTsv(decoded.text);
+      // The delimiter comes from the header's structure: the one that yields
+      // every required column; a header valid both ways is refused.
+      delimiter = detectDelimiter(
+        decoded.text,
+        (cells) => mapHeaders(cells).errors.length === 0,
+      );
+      parsedRecords = delimiter.ok
+        ? parseDelimited(decoded.text, delimiter.delimiter)
+        : [];
     } catch (error) {
       return abort(
         `Cannot read the file: ${error instanceof Error ? error.message : String(error)}`,
@@ -122,6 +173,10 @@ export class DriversVillageImportService {
     }
     report.meta.encoding = decoded.encoding;
     report.meta.encodingDetected = decoded.detected;
+    if (!delimiter.ok) return abort(delimiter.reason);
+    const numberFormat = NUMBER_FORMAT[delimiter.name];
+    report.meta.delimiter = delimiter.name;
+    report.meta.numberFormat = numberFormat;
     const [header, ...records] = parsedRecords;
     if (!header) return abort('The file has no header row.');
     if (records.length > IMPORT_LIMITS.maxRows) {
@@ -134,15 +189,16 @@ export class DriversVillageImportService {
       columns: header.cells.map((c) => c.trim()),
       mapped: headers.source,
       ignored: headers.ignored,
+      notImported: headers.notImported,
     };
     if (headers.errors.length)
       return abort(`Header problems: ${headers.errors.join(' ')}`);
 
     // ── 2. Parse ─────────────────────────────────────────────────────────────
     const rowReports = new Map<number, RowReport>();
-    const parsed: ParsedRow[] = [];
+    const lines: SourceLine[] = [];
     for (const rec of records) {
-      const result = parseRow(rec.cells, rec.line, headers);
+      const result = parseRow(rec.cells, rec.line, headers, numberFormat);
       rowReports.set(rec.line, {
         line: rec.line,
         code1c: result.code1c,
@@ -150,38 +206,34 @@ export class DriversVillageImportService {
         changes: [],
         issues: result.issues,
       });
-      if (result.row) parsed.push(result.row);
+      lines.push({ line: rec.line, ...result });
     }
     report.summary.totalRows = records.length;
 
-    // Duplicate code_1c: every occurrence is rejected — picking one would be a
-    // silent choice between two different positions.
-    const byCode = new Map<string, number[]>();
-    for (const r of rowReports.values()) {
-      if (r.code1c)
-        byCode.set(r.code1c, [...(byCode.get(r.code1c) ?? []), r.line]);
+    // A code_1c column of row numbers (1…N) means the part numbers are not in
+    // the file at all; importing it would overwrite every part number.
+    const rowNumbers = detectRowNumberCodes(lines.map((l) => l.code1c));
+    if (rowNumbers) {
+      return abort(
+        `code_1c looks like row numbers, not part numbers: ${rowNumbers.distinct} of ${rowNumbers.rows} rows hold distinct whole numbers from ${rowNumbers.min} to ${rowNumbers.max}. Nothing was imported — check that code_1c holds the articles.`,
+      );
     }
-    const duplicateCodes = [...byCode].filter(([, lines]) => lines.length > 1);
-    report.summary.duplicateSourceCodes = duplicateCodes.length;
-    const duplicateLines = new Set(
-      duplicateCodes.flatMap(([, lines]) => lines),
-    );
-    for (const [code, lines] of duplicateCodes) {
-      for (const line of lines) {
-        const r = rowReports.get(line)!;
-        r.outcome = 'rejected';
-        r.issues.push({
-          line,
-          code1c: code,
-          kind: 'data',
-          severity: 'error',
-          code: 'duplicate_code_1c',
-          field: 'code1c',
-          message: `code_1c "${code}" appears on lines ${lines.join(', ')}`,
-        });
-      }
+
+    // One position per code_1c: the rows of a repeated code are folded into
+    // the one with the highest valid price (see resolveDuplicateCodes).
+    const codes = resolveDuplicateCodes(lines);
+    for (const [line, patch] of codes.patches) {
+      const r = rowReports.get(line)!;
+      r.issues = patch.issues;
+      if (patch.outcome) r.outcome = patch.outcome;
     }
-    const valid = parsed.filter((r) => !duplicateLines.has(r.line));
+    report.duplicates = codes.duplicates;
+    report.summary.duplicateSourceCodes = codes.duplicates.length;
+    report.summary.duplicateCodesMaxPrice = codes.duplicates.filter(
+      (d) => d.chosenLine !== null,
+    ).length;
+    report.summary.codesWithoutValidPrice = codes.codesWithoutValidPrice.length;
+    const valid = codes.positions;
     this.summarizeSource(report, valid);
 
     // ── 3. Environment (reference data in THIS database) ────────────────────
@@ -254,10 +306,6 @@ export class DriversVillageImportService {
         ),
       );
     }
-    const tree = new Map(
-      (await this.store.loadCategories()).map((c) => [c.id, c]),
-    );
-    report.environment.categoriesInDatabase = tree.size;
     const fitCheck = findFitsNotInReference(
       valid,
       await this.store.loadVehicleReference(),
@@ -267,47 +315,112 @@ export class DriversVillageImportService {
       rowReports.get(issue.line!)!.issues.push(issue);
 
     // ── 4. Plan ──────────────────────────────────────────────────────────────
+    // A code_1c updates the position stored under it; one without a position
+    // of its own may update the position of a changed code through its 8-digit
+    // key, when that is unambiguous (resolveCodeKeys).
+    const storedCodes = linked
+      ? await this.store.loadAllSourceCodes(linked.id)
+      : [];
+    const keys = resolveCodeKeys(
+      [...rowReports.values()].flatMap((r) => (r.code1c ? [r.code1c] : [])),
+      storedCodes,
+    );
+    const planned = new Set(valid.map((r) => r.code1c));
     const existing = linked
-      ? await this.store.loadPositions(
-          linked.id,
-          valid.map((r) => r.code1c),
-        )
+      ? await this.store.loadPositions(linked.id, [
+          ...planned,
+          ...[...keys.matches]
+            .filter(([code]) => planned.has(code))
+            .map(([, m]) => m.storedCode),
+        ])
       : new Map<string, ExistingPosition>();
-    const missingIds = new Set<string>();
     const plans: RowPlan[] = [];
     for (const row of valid) {
       const rr = rowReports.get(row.line)!;
-      const cats = resolveCategories(row, tree);
-      rr.issues.push(...cats.issues);
-      if (!cats.write) {
-        rr.outcome = 'blocked';
-        for (const id of [row.categoryId, row.subcategoryId])
-          if (!tree.has(id)) missingIds.add(id);
+      const conflict = keys.conflicts.get(row.code1c);
+      if (conflict) {
+        rr.outcome = 'conflict';
+        rr.issues.push(keyConflictIssue(row, conflict));
         continue;
       }
-      const write = buildWrite(row, cats.write);
-      const prev = existing.get(row.code1c) ?? null;
+      const shared = keys.shared.get(row.code1c);
+      if (shared) {
+        rr.issues.push(keySharedIssue(row, shared));
+        report.keyShared.push({
+          ...shared,
+          line: row.line,
+          code1c: row.code1c,
+        });
+      }
+      const match = keys.matches.get(row.code1c);
+      const prev = existing.get(match?.storedCode ?? row.code1c) ?? null;
+      const write = buildWrite(row, {
+        previousCode1c: match && prev ? match.storedCode : undefined,
+        searchKey: keys.searchKeys.get(row.code1c),
+      });
+      if (match && prev) {
+        rr.issues.push(keyMatchIssue(row, match, prev.stockId));
+        report.keyMatches.push({
+          ...match,
+          line: row.line,
+          code1c: row.code1c,
+          stockId: prev.stockId,
+        });
+      }
       const changes = prev ? diffPosition(write, prev) : [];
       const action = !prev ? 'create' : changes.length ? 'update' : 'unchanged';
       rr.outcome = action;
       rr.changes = changes;
-      rr.price = { from: prev?.priceUzs ?? null, to: write.priceUzs };
+      rr.price = {
+        source: row.sourcePrice,
+        scaled: row.priceScaled,
+        from: prev?.priceUzs ?? null,
+        to: write.priceUzs,
+      };
       rr.quantity = { from: prev?.quantity ?? null, to: write.quantity };
+      rr.partNumber = {
+        from: prev?.sourcePartNumber ?? null,
+        to: row.sourcePartNumber,
+      };
+      if (
+        prev &&
+        changes.includes('price') &&
+        isPriceJump(prev.priceUzs, write.priceUzs)
+      )
+        rr.issues.push({
+          line: row.line,
+          code1c: row.code1c,
+          kind: 'data',
+          severity: 'warning',
+          code: 'price_jump',
+          field: 'price',
+          message: `price changes from ${prev.priceUzs} to ${write.priceUzs} UZS (source "${row.sourcePrice}") — ${PRICE_JUMP_REVIEW_RATIO}× or more; check the scale of the export and of the stored price`,
+        });
+      if (prev && isUnclassified(prev.categoryId))
+        report.summary.existingWithoutCategory += 1;
       plans.push({ row, action, write, changes, existing: prev });
     }
-    report.environment.missingCategoryIds = [...missingIds].sort();
     report.summary.existingPositionsWithPhotos = [...existing.values()].filter(
       (p) => p.imageCount > 0,
     ).length;
-    if (linked) {
-      const inFile = new Set([...rowReports.values()].map((r) => r.code1c));
-      report.positionsNotInFile = (
-        await this.store.loadAllSourceCodes(linked.id)
-      )
-        .filter((c) => !inFile.has(c))
-        .sort();
-    }
+    const inFile = new Set([
+      ...[...rowReports.values()].map((r) => r.code1c),
+      ...report.keyMatches.map((m) => m.storedCode),
+    ]);
+    report.positionsNotInFile = storedCodes
+      .filter((c) => !inFile.has(c))
+      .sort();
+    // Reported when the key keeps a valid row from being written.
+    report.keyConflicts = [...new Set(keys.conflicts.values())]
+      .filter((c) => c.codes.some((code) => planned.has(code)))
+      .map((c) => ({
+        ...c,
+        lines: [...rowReports.values()]
+          .filter((r) => r.code1c !== null && c.codes.includes(r.code1c))
+          .map((r) => r.line),
+      }));
     report.rows = [...rowReports.values()].sort((a, b) => a.line - b.line);
+    report.prices.examples = priceExamples(report.rows);
     this.summarizeOutcomes(report);
 
     if (options.dryRun) return finish();
@@ -411,6 +524,7 @@ export class DriversVillageImportService {
     for (const r of rows) {
       report.units[r.unit] = (report.units[r.unit] ?? 0) + 1;
       if (r.quantity === null) report.summary.rowsWithoutQuantity += 1;
+      if (r.priceScaled) report.summary.rowsWithScaledPrice += 1;
       const v = report.vehicles;
       if (r.vehicle.kind === 'universal') v.universalRows += 1;
       else if (r.vehicle.kind === 'make') v.makeWideRows += 1;
@@ -438,10 +552,18 @@ export class DriversVillageImportService {
     const s = report.summary;
     for (const r of report.rows) {
       if (r.outcome === 'rejected') s.rejectedRows += 1;
-      else if (r.outcome === 'blocked') s.blockedRows += 1;
-      else if (r.outcome === 'create') s.rowsToCreate += 1;
-      else if (r.outcome === 'update') s.rowsToUpdate += 1;
+      else if (r.outcome === 'create') {
+        s.rowsToCreate += 1;
+        if (r.issues.some((i) => i.code === 'code_key_shared'))
+          s.rowsToCreateWithSharedKey += 1;
+      } else if (r.outcome === 'update') s.rowsToUpdate += 1;
+      else if (r.outcome === 'merged') s.rowsMerged += 1;
+      else if (r.outcome === 'conflict') s.rowsInKeyConflict += 1;
       else s.rowsUnchanged += 1;
+      if (r.outcome === 'update' && r.changes.includes('price'))
+        s.rowsWithPriceChange += 1;
+      if (r.outcome === 'update' && r.changes.includes('part_number'))
+        s.rowsWithPartNumberChange += 1;
       for (const i of r.issues) {
         const isError = i.severity === 'error';
         if (i.kind === 'data') {
@@ -452,9 +574,29 @@ export class DriversVillageImportService {
       }
     }
     s.validRows = s.totalRows - s.rejectedRows;
+    // Every new position is created unclassified (the import sets no category).
+    s.newWithoutCategory = s.rowsToCreate;
     s.lookAlikeGroups = report.lookAlikes.length;
     s.positionsNotInFile = report.positionsNotInFile.length;
+    s.rowsMatchedByKey = report.keyMatches.length;
+    s.keyConflicts = report.keyConflicts.length;
   }
+}
+
+/**
+ * The first few scaled and unscaled prices of the file, in file order, so a
+ * reviewer sees the rule applied to real cells (×1000 below 1000, as-is above).
+ */
+function priceExamples(
+  rows: RowReport[],
+  perKind = 5,
+): ImportReport['prices']['examples'] {
+  const pick = (scaled: boolean) =>
+    rows
+      .filter((r) => r.price && r.code1c && r.price.scaled === scaled)
+      .slice(0, perKind)
+      .map((r) => ({ line: r.line, code1c: r.code1c!, ...r.price! }));
+  return [...pick(true), ...pick(false)].sort((a, b) => a.line - b.line);
 }
 
 function emptyReport(
@@ -472,6 +614,8 @@ function emptyReport(
       bytes: bytes.length,
       encoding: '',
       encodingDetected: false,
+      delimiter: null,
+      numberFormat: null,
       catalogSellerId,
       sourceSystem: DRIVERS_VILLAGE_SOURCE_SYSTEM,
       currency: 'UZS',
@@ -481,25 +625,34 @@ function emptyReport(
       aborted: false,
       abortReason: null,
     },
-    headers: { columns: [], mapped: {}, ignored: [] },
+    headers: { columns: [], mapped: {}, ignored: [], notImported: [] },
     environment: {
       catalogSeller: null,
       linkedSellerId: null,
       linkedSellerStatus: null,
       linkedSellerType: null,
-      categoriesInDatabase: 0,
-      missingCategoryIds: [],
       issues: [],
     },
     summary: {
       totalRows: 0,
       validRows: 0,
       rejectedRows: 0,
-      blockedRows: 0,
       rowsToCreate: 0,
       rowsToUpdate: 0,
       rowsUnchanged: 0,
+      rowsWithPriceChange: 0,
+      rowsWithScaledPrice: 0,
+      newWithoutCategory: 0,
+      existingWithoutCategory: 0,
+      rowsWithPartNumberChange: 0,
       duplicateSourceCodes: 0,
+      duplicateCodesMaxPrice: 0,
+      rowsMerged: 0,
+      codesWithoutValidPrice: 0,
+      rowsMatchedByKey: 0,
+      keyConflicts: 0,
+      rowsInKeyConflict: 0,
+      rowsToCreateWithSharedKey: 0,
       dataErrors: 0,
       dataWarnings: 0,
       referenceErrors: 0,
@@ -519,7 +672,12 @@ function emptyReport(
       mappings: [],
       notInBuyerReference: [],
     },
+    prices: { examples: [] },
     units: {},
+    duplicates: [],
+    keyMatches: [],
+    keyConflicts: [],
+    keyShared: [],
     lookAlikes: [],
     positionsNotInFile: [],
     projectionFailures: [],

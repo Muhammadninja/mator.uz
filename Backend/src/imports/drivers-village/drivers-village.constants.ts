@@ -32,20 +32,33 @@ export const IMPORT_LIMITS = {
 export const MAX_PRICE_UZS = '999999999999.99';
 
 /**
+ * Price scale of the 1C export (business rule, 2026-10-15). A source price
+ * strictly BELOW this value is in thousands of UZS and is multiplied by
+ * PRICE_THOUSANDS_FACTOR; a price at or above it is already in UZS and is kept.
+ * Applied once, to the source cell — see normalizeSourcePrice.
+ */
+export const PRICE_IN_THOUSANDS_BELOW = 1000;
+export const PRICE_THOUSANDS_FACTOR = 1000;
+
+/**
+ * A planned price this many times higher or lower than the stored one is
+ * reported for review (warning `price_jump`): the signature of a price read in
+ * the wrong scale (×1000). A report only; it never blocks the update.
+ */
+export const PRICE_JUMP_REVIEW_RATIO = 100;
+
+/**
  * Upper bound on a quantity. Stock.quantity and CatalogPart.stockQty are 32-bit
  * integers; the bound keeps well inside that range.
  */
 export const MAX_QUANTITY = '1000000000';
 
-/** Column bounds mirrored from the schema. */
+/**
+ * Column bounds mirrored from the schema. code_1c is also the part number
+ * (products.source_part_number is TEXT), so its 64 bounds that column too.
+ */
 export const FIELD_LIMITS = {
   code1c: 64,
   title: 255,
-  categoryId: 64,
   partNumber: 50,
-  /**
-   * products.source_part_number is TEXT (no DB limit); this only catches a
-   * shifted column. A longer value is rejected, never cut.
-   */
-  sourcePartNumber: 255,
 } as const;

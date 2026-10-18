@@ -7,7 +7,7 @@
  * reconciliation, photo preservation) without a database.
  *
  * Test-only: lives under test/, which the production build excludes. It holds
- * isolated fixtures (a 'drivers-village' dealer, a linked seller, categories);
+ * isolated fixtures (a 'drivers-village' dealer, a linked seller, vehicles);
  * nothing here is seed data for any real database.
  */
 import type { Prisma } from '@prisma/client';
@@ -17,7 +17,6 @@ import type {
 } from '../../src/imports/drivers-village/drivers-village.store';
 import { writePosition } from '../../src/imports/drivers-village/drivers-village.store';
 import type {
-  CategoryNode,
   ExistingPosition,
   PositionWrite,
   VehicleReference,
@@ -32,9 +31,18 @@ interface FakeProduct {
   oemNumbers: string[];
   categoryId: string | null;
   vehicleCategoryId: string | null;
+  mainCategory: string | null;
+  vehicleCategory: string | null;
   isUniversal: boolean;
   imageUrl: string | null;
   description: string | null;
+  [key: string]: unknown;
+}
+
+/** A buyer-side catalog_parts row: only what the import specs look at. */
+export interface FakeCatalogPart {
+  id: string;
+  categoryId: string;
   [key: string]: unknown;
 }
 
@@ -58,7 +66,6 @@ export interface FakeState {
     status: string;
     catalogSellerId: string | null;
   }[];
-  categories: CategoryNode[];
   products: FakeProduct[];
   stocks: FakeStock[];
   brands: { id: number; name: string }[];
@@ -66,7 +73,7 @@ export interface FakeState {
   partModels: { partId: number; modelId: number }[];
   partMakes: { partId: number; brandId: number }[];
   productImages: { productId: number; url: string }[];
-  catalogParts: string[];
+  catalogParts: FakeCatalogPart[];
   /** Buyer vehicle reference names (vehicle_makes / vehicle_models). */
   vehicleReference: VehicleReference;
   seq: number;
@@ -83,7 +90,6 @@ export class FakeDb {
     this.state = {
       catalogSellers: [],
       sellers: [],
-      categories: [],
       products: [],
       stocks: [],
       brands: [],
@@ -165,6 +171,19 @@ export class FakeDb {
         }) => {
           log('stock.update');
           const st = s().stocks.find((x) => x.id === where.id)!;
+          if (
+            data.sourceCode !== undefined &&
+            s().stocks.some(
+              (x) =>
+                x.id !== st.id &&
+                x.sellerId === st.sellerId &&
+                x.sourceSystem === st.sourceSystem &&
+                x.sourceCode === data.sourceCode,
+            )
+          )
+            throw new Error(
+              'Unique constraint failed: stocks_seller_id_source_system_source_code_key',
+            );
           // Like an UPDATE: only the columns the write names change.
           Object.assign(st, {
             ...data,
@@ -178,10 +197,16 @@ export class FakeDb {
       product: {
         create: async ({ data }: { data: Record<string, unknown> }) => {
           log('product.create');
+          // Column defaults, as the database applies them: every column the
+          // write does not name — the category among them — starts NULL.
           const p = {
             gmNumber: null,
             imageUrl: null,
             description: null,
+            categoryId: null,
+            vehicleCategoryId: null,
+            mainCategory: null,
+            vehicleCategory: null,
             ...data,
             id: this.next(),
           } as FakeProduct;
@@ -306,10 +331,6 @@ export class FakeDriversVillageStore implements DriversVillageStore {
     return s ? { id: s.id, status: s.status, sellerType: s.sellerType } : null;
   }
 
-  async loadCategories() {
-    return this.db.state.categories;
-  }
-
   async loadVehicleReference() {
     return this.db.state.vehicleReference;
   }
@@ -334,6 +355,7 @@ export class FakeDriversVillageStore implements DriversVillageStore {
       const makes = st.partMakes
         .filter((pm) => pm.partId === p.id)
         .map((pm) => st.brands.find((b) => b.id === pm.brandId)!.name);
+      const part = st.catalogParts.find((c) => c.id === `part_stock_${s.id}`);
       out.set(s.sourceCode, {
         stockId: s.id,
         productId: p.id,
@@ -345,13 +367,12 @@ export class FakeDriversVillageStore implements DriversVillageStore {
         gmNumbers: p.gmNumbers,
         sourcePartNumber: p.sourcePartNumber ?? null,
         oemNumbers: p.oemNumbers,
-        categoryId: p.categoryId,
-        vehicleCategoryId: p.vehicleCategoryId,
+        categoryId: part?.categoryId ?? p.categoryId,
         isUniversal: p.isUniversal,
         models: models.sort(),
         makes: makes.sort(),
         imageCount: st.productImages.filter((i) => i.productId === p.id).length,
-        hasCatalogPart: st.catalogParts.includes(`part_stock_${s.id}`),
+        hasCatalogPart: part !== undefined,
       });
     }
     return out;
@@ -385,7 +406,12 @@ export class FakeDriversVillageStore implements DriversVillageStore {
   }
 }
 
-/** Projector double: marks the CatalogPart as present, optionally failing. */
+/**
+ * Projector double: marks the CatalogPart as present (in the product's
+ * category, or the fallback bucket), optionally failing. Specs that need the
+ * real Stock → CatalogPart mapping use CatalogProjectionService over
+ * fakeCatalogPrisma (drivers-village-fake-catalog.ts) instead.
+ */
 export class FakeProjector {
   projected: number[] = [];
   constructor(
@@ -398,13 +424,21 @@ export class FakeProjector {
       throw new Error(`projection failed for ${stockId}`);
     this.projected.push(stockId);
     const id = `part_stock_${stockId}`;
-    if (!this.db.state.catalogParts.includes(id))
-      this.db.state.catalogParts.push(id);
+    if (!this.db.state.catalogParts.some((c) => c.id === id)) {
+      const stock = this.db.state.stocks.find((s) => s.id === stockId)!;
+      const product = this.db.state.products.find(
+        (p) => p.id === stock.productId,
+      )!;
+      this.db.state.catalogParts.push({
+        id,
+        categoryId: product.categoryId ?? 'cat_uncategorized',
+      });
+    }
     return id;
   }
 }
 
-/** Isolated fixture: the dealer, its linked supply seller, and a category tree. */
+/** Isolated fixture: the dealer, its linked supply seller, vehicle names. */
 export function driversVillageFixture(): Partial<FakeState> {
   return {
     catalogSellers: [{ id: 'drivers-village', name: 'Drivers Village' }],
@@ -417,43 +451,6 @@ export function driversVillageFixture(): Partial<FakeState> {
         tgId: null,
         status: 'ACTIVE',
         catalogSellerId: 'drivers-village',
-      },
-    ],
-    categories: [
-      {
-        id: 'suspension-and-steering',
-        parentId: null,
-        level: 0,
-        isActive: true,
-      },
-      {
-        id: 'shock-absorbers',
-        parentId: 'suspension-and-steering',
-        level: 1,
-        isActive: true,
-      },
-      { id: 'brake-system', parentId: null, level: 0, isActive: true },
-      { id: 'brakes', parentId: 'brake-system', level: 1, isActive: true },
-      {
-        id: 'front-brake-pads',
-        parentId: 'brake-system',
-        level: 1,
-        isActive: true,
-      },
-      { id: 'motor-oil', parentId: null, level: 0, isActive: true },
-      {
-        id: 'synthetic-motor-oil',
-        parentId: 'motor-oil',
-        level: 1,
-        isActive: true,
-      },
-      { id: 'engine-system', parentId: null, level: 0, isActive: true },
-      { id: 'engine', parentId: 'engine-system', level: 1, isActive: true },
-      {
-        id: 'gaskets-and-seals',
-        parentId: 'engine-system',
-        level: 1,
-        isActive: true,
       },
     ],
     // Names as the buyer reference spells them (garage fitment matches names).

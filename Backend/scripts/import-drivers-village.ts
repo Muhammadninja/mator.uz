@@ -10,21 +10,39 @@
  *   --report-dir=<dir>      Where the JSON report and issues CSV go
  *                           (default: the input file's directory)
  *
- * Input: the 1C export saved from Excel as "Text (Tab delimited)". An .xlsx
- * workbook is not read directly (no spreadsheet dependency is installed) — use
- * Excel's File → Save As → Tab-delimited Text.
+ * Input: 1C's ";"-delimited export (dv_parts_<date>.txt, numbers "1,234.56")
+ * or the file saved from Excel as "Text (Tab delimited)" (numbers "1 234,56");
+ * the delimiter is detected from the header row. An .xlsx workbook is not
+ * read directly (no spreadsheet dependency is installed) — use Excel's
+ * File → Save As → Tab-delimited Text.
  *
  * The target dealer is fixed: catalog seller 'drivers-village' and the
  * supply-side seller linked to it (sellers.catalog_seller_id). The CLI never
- * creates either. Exit codes: 0 = clean, 2 = finished with rejected/blocked
- * rows or projection failures, 1 = aborted (nothing or only earlier batches
- * written — see the report).
+ * creates either. Prices below 1000 are in thousands and are ×1000 (see
+ * drivers-village-price.ts); categories are never imported. code_1c is the
+ * part number (the file's manufacturer_part_number / oem_numbers are never
+ * read), and a code_1c on several rows is one position at the highest valid
+ * price of those rows. A real import holds the host-wide import lock
+ * (src/imports/drivers-village/import-lock.ts, DV_IMPORT_LOCK_FILE), so it
+ * never overlaps another one — manual or started by the Telegram ingest.
+ * Exit codes:
+ * 0 = clean, 2 = finished with rejected rows, 8-digit key conflicts or
+ * projection failures,
+ * 1 = aborted (nothing or only earlier batches written — see the report),
+ * 3 = another import is running; nothing was done.
  */
 import { PrismaClient } from '@prisma/client';
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'fs';
 import { basename, dirname, extname, join, resolve } from 'path';
 import { CatalogProjectionService } from '../src/catalog/projection/catalog-projection.service';
 import { PrismaService } from '../src/prisma/prisma.service';
+import {
+  acquireLock,
+  importLockPath,
+  LOCK_BUSY_EXIT_CODE,
+  LockBusyError,
+  type LockHandle,
+} from '../src/imports/drivers-village/import-lock';
 import { IMPORT_LIMITS } from '../src/imports/drivers-village/drivers-village.constants';
 import { DriversVillageImportService } from '../src/imports/drivers-village/drivers-village-import.service';
 import {
@@ -81,20 +99,34 @@ function describeDatabase(): string {
   }
 }
 
+/** How many per-code examples the console shows; the JSON report has all. */
+const SHOWN = 15;
+
 function printSummary(report: ImportReport, files: string[]): void {
   const s = report.summary;
   console.log(
-    `\n[import:drivers-village] ${report.meta.mode.toUpperCase()} — ${report.meta.file} (${report.meta.encoding}${report.meta.encodingDetected ? ', detected' : ''})`,
+    `\n[import:drivers-village] ${report.meta.mode.toUpperCase()} — ${report.meta.file} (${report.meta.encoding}${report.meta.encodingDetected ? ', detected' : ''}; ${report.meta.delimiter ?? 'unknown'}-delimited, numbers ${report.meta.numberFormat ?? 'unknown'})`,
   );
   console.table({
     'Total rows': s.totalRows,
     'Valid rows (source data)': s.validRows,
-    'Rejected (data errors)': s.rejectedRows,
-    'Blocked (reference data missing in this DB)': s.blockedRows,
+    'Rejected (data errors; stored values untouched)': s.rejectedRows,
     'Rows to create': s.rowsToCreate,
     'Rows to update': s.rowsToUpdate,
     'Rows unchanged': s.rowsUnchanged,
-    'Duplicate code_1c values': s.duplicateSourceCodes,
+    'Updates with a price change': s.rowsWithPriceChange,
+    'Prices in thousands (×1000)': s.rowsWithScaledPrice,
+    'New without category (classify in admin)': s.newWithoutCategory,
+    'Existing still without category': s.existingWithoutCategory,
+    'Part numbers corrected from code_1c': s.rowsWithPartNumberChange,
+    'Duplicate code_1c values (one position each)': s.duplicateSourceCodes,
+    'Duplicates at their highest valid price': s.duplicateCodesMaxPrice,
+    'Rows merged into another row of the same code_1c': s.rowsMerged,
+    'Codes without a valid price (nothing written)': s.codesWithoutValidPrice,
+    'Matched by the 8-digit key (code_1c changed)': s.rowsMatchedByKey,
+    'Rows in an 8-digit key conflict (nothing written)': s.rowsInKeyConflict,
+    'New positions sharing an 8-digit key (separate, not merged)':
+      s.rowsToCreateWithSharedKey,
     'Data errors / warnings': `${s.dataErrors} / ${s.dataWarnings}`,
     'Reference errors / warnings': `${s.referenceErrors} / ${s.referenceWarnings}`,
     'Look-alike product groups (not merged)': s.lookAlikeGroups,
@@ -115,14 +147,86 @@ function printSummary(report: ImportReport, files: string[]): void {
         .join(', ')}`,
     );
   }
+  if (report.prices.examples.length) {
+    console.log('\nPrice rule (source < 1000 → ×1000, otherwise as is):');
+    for (const e of report.prices.examples)
+      console.log(
+        `  line ${e.line} ${e.code1c}: "${e.source}" → ${e.to}${e.scaled ? ' (×1000)' : ''}${e.from === null ? ' (new)' : ` (stored ${e.from})`}`,
+      );
+  }
+  const corrected = report.rows.filter(
+    (r) => r.outcome === 'update' && r.changes.includes('part_number'),
+  );
+  if (corrected.length) {
+    console.log('\nPart number replaced by code_1c (stored → new):');
+    for (const r of corrected.slice(0, SHOWN))
+      console.log(
+        `  line ${r.line}: "${r.partNumber?.from ?? ''}" → "${r.partNumber?.to}"`,
+      );
+    if (corrected.length > SHOWN)
+      console.log(
+        `  … and ${corrected.length - SHOWN} more in the JSON report`,
+      );
+  }
+  const priced = report.duplicates.filter((d) => d.priceUzs !== null);
+  if (priced.length) {
+    console.log(
+      '\nRepeated code_1c — one position at the highest valid price:',
+    );
+    for (const d of priced.slice(0, SHOWN))
+      console.log(
+        `  ${d.code1c}: ${d.rows} rows (lines ${d.lines.join(', ')}) → ${d.priceUzs} UZS from line ${d.chosenLine}${d.differs.length ? `; rows differ in ${d.differs.join(', ')}` : ''}`,
+      );
+    if (priced.length > SHOWN)
+      console.log(
+        `  … and ${priced.length - SHOWN} more in the JSON report (duplicates)`,
+      );
+  }
+  if (report.keyMatches.length) {
+    console.log(
+      '\nFound by the 8-digit key — the stored position takes the new code_1c:',
+    );
+    for (const m of report.keyMatches.slice(0, SHOWN))
+      console.log(`  line ${m.line}: "${m.storedCode}" → "${m.code1c}"`);
+    if (report.keyMatches.length > SHOWN)
+      console.log(
+        `  … and ${report.keyMatches.length - SHOWN} more in the JSON report (keyMatches)`,
+      );
+  }
+  if (report.keyConflicts.length) {
+    console.log(
+      '\n8-digit key conflicts — these codes are not written, stored positions stay:',
+    );
+    for (const c of report.keyConflicts.slice(0, SHOWN))
+      console.log(
+        `  ${c.key}: file ${c.codes.join(', ')} (lines ${c.lines.join(', ')}); stored ${c.storedCodes.join(', ')}`,
+      );
+    if (report.keyConflicts.length > SHOWN)
+      console.log(
+        `  … and ${report.keyConflicts.length - SHOWN} more in the JSON report (keyConflicts)`,
+      );
+  }
+  if (report.keyShared.length) {
+    console.log(
+      `\nShared 8-digit key — ${report.summary.rowsToCreateWithSharedKey} new position(s) of their own, nothing merged (code_key_shared):`,
+    );
+    for (const k of report.keyShared.slice(0, SHOWN))
+      console.log(
+        `  line ${k.line}: "${k.code1c}" shares ${k.key} with ${[...k.fileCodes, ...k.storedCodes.map((c) => `${c} (stored)`)].join(', ')}`,
+      );
+    if (report.keyShared.length > SHOWN)
+      console.log(
+        `  … and ${report.keyShared.length - SHOWN} more in the JSON report (keyShared)`,
+      );
+  }
+  if (report.headers.notImported.length) {
+    console.log(
+      `\nNot imported (categories are assigned in Mator; the part number is code_1c): ${report.headers.notImported.join(', ')}`,
+    );
+  }
   if (report.environment.issues.length) {
     console.log('\nEnvironment (this database, not the source file):');
     for (const i of report.environment.issues) console.log(`  • ${i.message}`);
-  }
-  if (report.environment.missingCategoryIds.length) {
-    console.log(
-      `  • Category ids used by the file but absent here: ${report.environment.missingCategoryIds.join(', ')}`,
-    );
   }
   if (s.written)
     console.table({
@@ -154,6 +258,22 @@ async function main(): Promise<number> {
   }
   if (size > IMPORT_LIMITS.maxFileBytes)
     fail(`File is ${size} bytes; the limit is ${IMPORT_LIMITS.maxFileBytes}.`);
+
+  // One real import at a time (a dry run writes nothing and takes no lock).
+  let lock: LockHandle | null = null;
+  if (!args.dryRun) {
+    try {
+      lock = acquireLock(importLockPath(), {
+        label: 'import:drivers-village',
+      });
+    } catch (error) {
+      if (!(error instanceof LockBusyError)) throw error;
+      console.error(
+        `[import:drivers-village] Another import is running — ${error.message}. Nothing was done.`,
+      );
+      return LOCK_BUSY_EXIT_CODE;
+    }
+  }
 
   console.log(
     `[import:drivers-village] mode=${args.dryRun ? 'dry-run' : 'IMPORT'} database=${describeDatabase()}`,
@@ -193,11 +313,14 @@ async function main(): Promise<number> {
 
     if (report.meta.aborted) return 1;
     const s = report.summary;
-    return s.rejectedRows || s.blockedRows || s.written?.projectionFailures
+    return s.rejectedRows ||
+      s.rowsInKeyConflict ||
+      s.written?.projectionFailures
       ? 2
       : 0;
   } finally {
     await prisma.$disconnect();
+    lock?.release();
   }
 }
 
