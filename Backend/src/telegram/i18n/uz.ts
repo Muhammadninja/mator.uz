@@ -206,6 +206,10 @@ export const UZ: BotStrings = {
 
   'dv.notFound':
     "❌ Driver's Village pozitsiyasi {code} kodi bilan topilmadi. Rasm izohidagi 1C kodini tekshiring.",
+  'dv.invalidCode':
+    '❌ Izohdagi 1C kodini aniqlab bo‘lmadi. Rasmlarni shunday izoh bilan yuboring: 1C 87654321',
+  'dv.ambiguous':
+    "⚠️ {code} kodi bir nechta Driver's Village pozitsiyasiga mos keladi:\n{positions}\nRasmlarni izohda aniq kod bilan qayta yuboring: 1C <kod>",
   'dv.photosReceived':
     '📸 {code} pozitsiyasi uchun rasmlar qabul qilindi ({count}). Ishlov berilmoqda — oldindan ko‘rishni yuboramiz.',
   'dv.previewHeader': "🖼 *Driver's Village pozitsiyasi uchun yangi rasmlar*",

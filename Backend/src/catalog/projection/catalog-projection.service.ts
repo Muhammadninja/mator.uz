@@ -410,10 +410,28 @@ export class CatalogProjectionService {
           CatalogProjectionService.UNCATEGORIZED_ID)
         : CatalogProjectionService.UNCATEGORIZED_ID);
 
+    // The part's classification, kept apart from partData because an imported
+    // position writes it on create only (see the upsert below).
+    const classification = {
+      categoryId,
+      // Classified attributes projected verbatim from the supply-side Product
+      // (set by the Telegram classifier) — enables indexed buyer-side filtering.
+      // Bucket for the home grid. Projected verbatim when the classifier
+      // assigned one; otherwise derived from the category's ROOT, so a listing
+      // filed on a real subcategory (e.g. 'synthetic-motor-oil') still rolls up
+      // to its bucket instead of vanishing from the tile. See
+      // ROOT_TO_MAIN_CATEGORY.
+      mainCategory: CatalogProjectionService.deriveMainCategory(
+        product.mainCategory,
+        categoryId,
+        rootByCategoryId,
+      ),
+      vehicleCategory: product.vehicleCategory,
+    };
+
     const partData = {
       title: product.title,
       brandId,
-      categoryId,
       sellerId,
       oemNumbers,
       gmNumbers,
@@ -430,19 +448,6 @@ export class CatalogProjectionService {
       ...(stock.sourceSystem ? { stockQty: stock.quantity } : {}),
       // deliveryEtaDaysMin/Max: no source → left null (both optional)
       images,
-      // Classified attributes projected verbatim from the supply-side Product
-      // (set by the Telegram classifier) — enables indexed buyer-side filtering.
-      // Bucket for the home grid. Projected verbatim when the classifier
-      // assigned one; otherwise derived from the category's ROOT, so a listing
-      // filed on a real subcategory (e.g. 'synthetic-motor-oil') still rolls up
-      // to its bucket instead of vanishing from the tile. See
-      // ROOT_TO_MAIN_CATEGORY.
-      mainCategory: CatalogProjectionService.deriveMainCategory(
-        product.mainCategory,
-        categoryId,
-        rootByCategoryId,
-      ),
-      vehicleCategory: product.vehicleCategory,
       partBrandName: product.partBrand,
       originRegion: product.originRegion,
       isOem: product.isOem,
@@ -471,11 +476,22 @@ export class CatalogProjectionService {
       reviewCount: product.reviewCount,
     };
 
+    // An IMPORTED position (Stock.sourceSystem set — Driver's Village 1C) is
+    // classified in Mator, never by its source: the import writes no category,
+    // so the part is created in whatever bucket the product resolves to (the
+    // fallback for a new position) and an operator files it from the admin
+    // console, which writes catalog_parts.category_id directly (bulk-move).
+    // Every later projection of that stock — a re-import, a photo update, a
+    // rating edit — must keep that choice, so its classification is written on
+    // CREATE only. A Telegram listing keeps the previous behaviour: its seller
+    // re-picks the category in the bot, and the update carries it.
     ops.push(
       this.prisma.catalogPart.upsert({
         where: { id: partId },
-        update: partData,
-        create: { id: partId, ...partData },
+        update: stock.sourceSystem
+          ? partData
+          : { ...partData, ...classification },
+        create: { id: partId, ...partData, ...classification },
       }),
     );
 

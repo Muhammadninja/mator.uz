@@ -1,141 +1,277 @@
 /**
- * Pure planning steps of the Driver's Village import: resolve a row's
- * categories against the database tree, build the write, and diff it against
- * what is already stored. No I/O.
+ * Pure planning steps of the Driver's Village import: fold the rows of one
+ * code_1c into one position, build the write, diff it against what is already
+ * stored, and flag what an operator should review. No I/O.
  */
 import { Prisma } from '@prisma/client';
-import {
-  MAIN_CATEGORY_BY_SLUG,
-  VEHICLE_CATEGORY_BY_SLUG,
-} from '../../catalog/categories/category-map';
+import { CatalogProjectionService } from '../../catalog/projection/catalog-projection.service';
+import { PRICE_JUMP_REVIEW_RATIO } from './drivers-village.constants';
 import type {
-  CategoryNode,
+  DuplicateCode,
   ExistingPosition,
   ImportIssue,
+  IssueSeverity,
   ParsedRow,
   PositionWrite,
   VehicleReference,
+  VehicleSpec,
 } from './drivers-village.types';
 
-export interface CategoryResolution {
-  /** Null when the row cannot be written in this database. */
-  write: Pick<
-    PositionWrite['product'],
-    'categoryId' | 'vehicleCategoryId' | 'mainCategory' | 'vehicleCategory'
-  > | null;
+/** One source line as the parser left it. */
+export interface SourceLine {
+  line: number;
+  code1c: string | null;
+  /** Null when the parser rejected the line. */
+  row: ParsedRow | null;
   issues: ImportIssue[];
 }
 
+/** What resolveDuplicateCodes decided for one line of a shared code_1c. */
+export interface LinePatch {
+  /** 'merged' = folded into the chosen line; absent = outcome unchanged. */
+  outcome?: 'merged';
+  /** The line's complete issue list after the decision. */
+  issues: ImportIssue[];
+}
+
+export interface CodeResolution {
+  /** The rows to plan: one per code_1c that has an importable row. */
+  positions: ParsedRow[];
+  /** Every code_1c on more than one row, in order of first appearance. */
+  duplicates: DuplicateCode[];
+  /** New outcome / issues for the lines of a shared code_1c. */
+  patches: Map<number, LinePatch>;
+  /** code_1c values on whose rows no price is valid: nothing is written. */
+  codesWithoutValidPrice: string[];
+}
+
+const isPriceError = (i: ImportIssue) =>
+  i.code === 'invalid_price' && i.severity === 'error';
+
+/** Import-owned fields besides the price that duplicate rows may disagree on. */
+const COMPARED_FIELDS: [string, (r: ParsedRow) => string][] = [
+  ['name', (r) => r.name],
+  ['quantity', (r) => String(r.quantity)],
+  ['unit', (r) => r.unit],
+  ['gm_number', (r) => r.gmNumber ?? ''],
+  ['vehicles', (r) => vehicleKey(r.vehicle)],
+];
+
 /**
- * Carry the approved ids through, per the existing Product contract:
- *   categoryId        = subcategory_id (the precise node)
- *   vehicleCategoryId = the ROOT (level 0) of category_id, read from the tree
- *   mainCategory      = the legacy enum mirrored by subcategory_id, else by
- *                       category_id (MAIN_CATEGORY_BY_SLUG) — else null
- *   vehicleCategory   = the legacy enum mirrored by the root — else null
- *
- * Nothing is guessed, created or matched fuzzily. An id missing from THIS
- * database is a 'reference' issue (environment), not a source-data error, and
- * blocks only the write. A pair whose subcategory is not under the category's
- * root is imported as given, with a warning.
+ * One position per code_1c. A code on several rows (the export lists a part
+ * once per batch, at different prices) is ONE position, written once at the
+ * HIGHEST valid price among its rows — an exact Decimal comparison of the
+ * normalized prices, no rounding; on a tie the first row wins — together with
+ * the other fields of that same row. Only rows that pass every data check
+ * compete: an invalid price never wins, and a row rejected for anything else
+ * never feeds the database. The other rows are 'merged' (reported, not
+ * written); a row whose only error is its price is merged too, the error
+ * downgraded to a warning. When no row of a code has a valid price, nothing is
+ * written for it, so a stored price is never replaced by zero or an invalid
+ * value. Pure: no I/O.
  */
-export function resolveCategories(
-  row: ParsedRow,
-  tree: Map<string, CategoryNode>,
-): CategoryResolution {
-  const issues: ImportIssue[] = [];
-  const ref = (
-    code: string,
-    field: string,
-    message: string,
-    severity: 'error' | 'warning' = 'error',
-  ) =>
-    issues.push({
-      line: row.line,
-      code1c: row.code1c,
-      kind: 'reference',
+export function resolveDuplicateCodes(lines: SourceLine[]): CodeResolution {
+  const byCode = new Map<string, SourceLine[]>();
+  for (const l of lines)
+    if (l.code1c) byCode.set(l.code1c, [...(byCode.get(l.code1c) ?? []), l]);
+
+  const out: CodeResolution = {
+    positions: [],
+    duplicates: [],
+    patches: new Map(),
+    codesWithoutValidPrice: [],
+  };
+  for (const [code1c, group] of byCode) {
+    const valid = group.flatMap((l) => (l.row ? [l.row] : []));
+    const chosen = highestPrice(valid);
+    const priced = group.some((l) => l.row || !l.issues.some(isPriceError));
+    if (chosen) out.positions.push(chosen);
+    if (!priced) out.codesWithoutValidPrice.push(code1c);
+    if (group.length === 1) continue;
+
+    const where = `code_1c "${code1c}" is on lines ${group.map((l) => l.line).join(', ')}`;
+    const issue = (
+      l: SourceLine,
+      severity: IssueSeverity,
+      code: string,
+      message: string,
+      field: string = code === 'no_valid_price' ? 'price' : 'code1c',
+    ): ImportIssue => ({
+      line: l.line,
+      code1c,
+      kind: 'data',
       severity,
       code,
       field,
       message,
     });
+    const differs = COMPARED_FIELDS.filter(
+      ([, value]) => new Set(valid.map(value)).size > 1,
+    ).map(([name]) => name);
+    // Differences that may mean different goods, batches or warehouses are
+    // reported on the chosen row on their own, so they can be filtered for
+    // review. The behaviour stays the rule: every field from the chosen row.
+    const chosenLine = group.find((l) => chosen && l.row === chosen);
+    const quantities = [
+      ...new Set(
+        valid.map((r) => (r.quantity === null ? 'none' : `${r.quantity}`)),
+      ),
+    ];
+    const review: ImportIssue[] =
+      chosen && chosenLine
+        ? [
+            ...(differs.includes('quantity')
+              ? [
+                  issue(
+                    chosenLine,
+                    'warning',
+                    'duplicate_quantities_differ',
+                    `${where} with different quantities (${quantities.join(', ')}) — possibly different batches or warehouses. Line ${chosen.line} has the highest valid price, so its quantity (${chosen.quantity ?? 'none'}) is imported with that price; quantities are never added up.`,
+                    'quantity',
+                  ),
+                ]
+              : []),
+            ...(differs.includes('name')
+              ? [
+                  issue(
+                    chosenLine,
+                    'warning',
+                    'duplicate_names_differ',
+                    `${where} under different names — check that they are one part. The name of line ${chosen.line} is imported.`,
+                    'name',
+                  ),
+                ]
+              : []),
+          ]
+        : [];
+    out.duplicates.push({
+      code1c,
+      rows: group.length,
+      lines: group.map((l) => l.line),
+      chosenLine: chosen?.line ?? null,
+      priceUzs: chosen?.priceUzs ?? null,
+      differs,
+    });
 
-  const category = tree.get(row.categoryId);
-  const sub = tree.get(row.subcategoryId);
-  if (!category)
-    ref(
-      'category_not_in_database',
-      'categoryId',
-      `category_id "${row.categoryId}" does not exist in this database (required reference data)`,
-    );
-  if (!sub)
-    ref(
-      'subcategory_not_in_database',
-      'subcategoryId',
-      `subcategory_id "${row.subcategoryId}" does not exist in this database (required reference data)`,
-    );
-  if (!category || !sub) return { write: null, issues };
-
-  const root = rootOf(category, tree);
-  if (!root) {
-    ref(
-      'category_tree_broken',
-      'categoryId',
-      `category_id "${row.categoryId}" has no reachable root in this database`,
-    );
-    return { write: null, issues };
+    for (const l of group) {
+      if (!chosen) {
+        out.patches.set(l.line, {
+          issues: [
+            ...l.issues,
+            priced
+              ? issue(
+                  l,
+                  'warning',
+                  'duplicate_code_1c',
+                  `${where}; no row passes every check, so nothing is written for it`,
+                )
+              : issue(
+                  l,
+                  'error',
+                  'no_valid_price',
+                  `${where}; none has a valid positive price, so nothing is written for it — a stored price stays as it is`,
+                ),
+          ],
+        });
+        continue;
+      }
+      const note =
+        `${where} — one position at the highest valid price, ${chosen.priceUzs} UZS from line ${chosen.line}` +
+        (differs.length
+          ? `, with that line's ${differs.join(', ')} (the rows differ)`
+          : '') +
+        (l.row === chosen ? '' : '; this row is not imported separately');
+      const priceOnly =
+        !l.row &&
+        l.issues.every((i) => i.severity !== 'error' || isPriceError(i));
+      out.patches.set(l.line, {
+        outcome:
+          (l.row && l.row !== chosen) || priceOnly ? 'merged' : undefined,
+        issues: [
+          ...(priceOnly
+            ? l.issues.map((i) =>
+                isPriceError(i)
+                  ? {
+                      ...i,
+                      severity: 'warning' as const,
+                      message: `${i.message} — ignored: line ${chosen.line} has the highest valid price`,
+                    }
+                  : i,
+              )
+            : l.issues),
+          issue(l, 'warning', 'duplicate_code_1c', note),
+          ...(l === chosenLine ? review : []),
+        ],
+      });
+    }
   }
-  if (rootOf(sub, tree)?.id !== root.id) {
-    ref(
-      'category_lineage_mismatch',
-      'subcategoryId',
-      `subcategory_id "${row.subcategoryId}" is not under the root "${root.id}" of category_id "${row.categoryId}" in this database (imported as given)`,
-      'warning',
-    );
-  }
-  for (const node of [category, sub]) {
-    if (!node.isActive)
-      ref(
-        'category_inactive',
-        'categoryId',
-        `category "${node.id}" is inactive in this database (imported as given)`,
-        'warning',
-      );
-  }
-
-  return {
-    issues,
-    write: {
-      categoryId: sub.id,
-      vehicleCategoryId: root.id,
-      mainCategory:
-        MAIN_CATEGORY_BY_SLUG.get(sub.id) ??
-        MAIN_CATEGORY_BY_SLUG.get(category.id) ??
-        null,
-      vehicleCategory: VEHICLE_CATEGORY_BY_SLUG.get(root.id) ?? null,
-    },
-  };
+  return out;
 }
 
-/** Walk parents to the level-0 node (bounded; a cycle yields null). */
-function rootOf(
-  node: CategoryNode,
-  tree: Map<string, CategoryNode>,
-): CategoryNode | null {
-  let current: CategoryNode | undefined = node;
-  for (let depth = 0; current && depth < 8; depth += 1) {
-    if (current.parentId === null) return current.level === 0 ? current : null;
-    current = tree.get(current.parentId);
+const ROW_NUMBER_MIN_ROWS = 10;
+
+/**
+ * A file whose code_1c column holds ROW NUMBERS instead of part numbers (an
+ * export with code_1c = 1, 2, 3 … in any order): at least half of its rows,
+ * and at least ROW_NUMBER_MIN_ROWS, carry distinct whole numbers no larger
+ * than the number of rows. Part numbers do not look like that: in the
+ * dv_parts exports profiled on 2026-10-18 at most 9 of ~4 300 rows hold such
+ * a number (codes such as 294 or 650), and none follows its predecessor + 1.
+ * Long numeric part numbers (8, 10, 13 digits) can never count — they exceed
+ * the row count — so numeric codes as such are never suspect.
+ */
+export function detectRowNumberCodes(
+  codes: (string | null)[],
+): { rows: number; distinct: number; min: number; max: number } | null {
+  const rows = codes.length;
+  if (rows < ROW_NUMBER_MIN_ROWS) return null;
+  const values = new Set<number>();
+  for (const c of codes)
+    if (c && /^[1-9]\d{0,8}$/.test(c) && Number(c) <= rows)
+      values.add(Number(c));
+  if (values.size < Math.max(ROW_NUMBER_MIN_ROWS, rows / 2)) return null;
+  let min = Infinity;
+  let max = -Infinity;
+  for (const v of values) {
+    min = Math.min(min, v);
+    max = Math.max(max, v);
   }
-  return null;
+  return { rows, distinct: values.size, min, max };
 }
 
+/** The row with the highest price; rows in file order, so a tie keeps the first. */
+function highestPrice(rows: ParsedRow[]): ParsedRow | null {
+  let best: ParsedRow | null = null;
+  for (const r of rows)
+    if (!best || new Prisma.Decimal(r.priceUzs).gt(best.priceUzs)) best = r;
+  return best;
+}
+
+/** A vehicle spec as one comparable string; model order does not matter. */
+function vehicleKey(v: VehicleSpec): string {
+  if (v.kind === 'universal') return '*';
+  if (v.kind === 'make') return `${v.make}|*`;
+  return `${v.make}|${[...v.models].sort().join(',')}`;
+}
+
+/**
+ * The write for one row: import-owned fields only. No category — a new
+ * position is created unclassified and an existing one keeps its own.
+ * From the 8-digit key (drivers-village-code-key.ts): `previousCode1c` — the
+ * stored code_1c of the position a key match updates; `searchKey` — the key,
+ * added to the OEM index after the code's own entry (never twice).
+ */
 export function buildWrite(
   row: ParsedRow,
-  categories: NonNullable<CategoryResolution['write']>,
+  key: { previousCode1c?: string; searchKey?: string } = {},
 ): PositionWrite {
+  const oemNumbers =
+    key.searchKey && !row.oemNumbers.includes(key.searchKey)
+      ? [...row.oemNumbers, key.searchKey]
+      : row.oemNumbers;
   return {
     code1c: row.code1c,
+    ...(key.previousCode1c ? { previousCode1c: key.previousCode1c } : {}),
     priceUzs: row.priceUzs,
     quantity: row.quantity,
     unit: row.unit,
@@ -143,8 +279,7 @@ export function buildWrite(
       title: row.name,
       gmNumbers: row.gmNumber ? [row.gmNumber] : [],
       sourcePartNumber: row.sourcePartNumber,
-      oemNumbers: row.oemNumbers,
-      ...categories,
+      oemNumbers,
       isUniversal: row.vehicle.kind === 'universal',
     },
     models:
@@ -173,15 +308,12 @@ export function diffPosition(w: PositionWrite, e: ExistingPosition): string[] {
   if (w.unit !== e.unit) changes.push('unit');
   if (w.product.title !== e.title) changes.push('name');
   if (listDiffers(w.product.gmNumbers, e.gmNumbers)) changes.push('gm_number');
+  // Only after a match by the 8-digit key: the position takes the new code.
+  if (w.code1c !== e.sourceCode) changes.push('source_code');
   if (w.product.sourcePartNumber !== e.sourcePartNumber)
     changes.push('part_number');
   if (listDiffers(w.product.oemNumbers, e.oemNumbers))
     changes.push('oem_numbers');
-  if (
-    w.product.categoryId !== e.categoryId ||
-    w.product.vehicleCategoryId !== e.vehicleCategoryId
-  )
-    changes.push('category');
   const models = w.models.map((m) => `${m.make}|${m.model}`).sort();
   const makes = w.make ? [w.make] : [];
   if (
@@ -191,6 +323,30 @@ export function diffPosition(w: PositionWrite, e: ExistingPosition): string[] {
   )
     changes.push('vehicles');
   return changes;
+}
+
+/**
+ * Whether a position still waits for manual classification: no category at
+ * all, or the projection's fallback bucket every new position lands in.
+ */
+export function isUnclassified(categoryId: string | null): boolean {
+  return (
+    !categoryId || categoryId === CatalogProjectionService.UNCATEGORIZED_ID
+  );
+}
+
+/**
+ * A price change of PRICE_JUMP_REVIEW_RATIO× or more in either direction — a
+ * price read in the wrong scale changes by exactly ×1000. Flagged, never
+ * blocked: the very first scaled import of a position stored unscaled is
+ * such a jump, and it is the correction.
+ */
+export function isPriceJump(stored: string, planned: string): boolean {
+  const a = new Prisma.Decimal(stored);
+  const b = new Prisma.Decimal(planned);
+  if (a.lte(0) || b.lte(0)) return !a.eq(b);
+  const [low, high] = a.lt(b) ? [a, b] : [b, a];
+  return high.div(low).gte(PRICE_JUMP_REVIEW_RATIO);
 }
 
 export interface FitNotInReference {
@@ -267,13 +423,7 @@ export function findLookAlikes(
 ): { key: string; codes: string[] }[] {
   const groups = new Map<string, string[]>();
   for (const r of rows) {
-    const vehicle =
-      r.vehicle.kind === 'universal'
-        ? '*'
-        : r.vehicle.kind === 'make'
-          ? `${r.vehicle.make}|*`
-          : `${r.vehicle.make}|${[...r.vehicle.models].sort().join(',')}`;
-    const key = `${r.name.toLowerCase()} :: ${vehicle} :: ${[...r.oemNumbers].sort().join(' ')}`;
+    const key = `${r.name.toLowerCase()} :: ${vehicleKey(r.vehicle)} :: ${[...r.oemNumbers].sort().join(' ')}`;
     groups.set(key, [...(groups.get(key) ?? []), r.code1c]);
   }
   return [...groups]

@@ -3,16 +3,45 @@
  * problem rows. The report never contains connection strings, credentials or
  * environment variables — only file metadata, counts and per-row outcomes.
  */
-import type { ImportIssue, VehicleMapping } from './drivers-village.types';
+import type { NumberFormat } from './drivers-village-price';
+import type {
+  CodeKeyConflict,
+  CodeKeyMatch,
+  CodeKeyShared,
+  DuplicateCode,
+  ImportIssue,
+  VehicleMapping,
+} from './drivers-village.types';
+import type { DelimiterName } from './tsv-reader';
 
 export type RowOutcome =
   | 'create'
   | 'update'
   | 'unchanged'
-  /** Valid source data, but this database lacks required reference data. */
-  | 'blocked'
-  /** The source row itself is invalid. */
+  /**
+   * Another row of the file has the same code_1c and supplies the position
+   * (the highest valid price); nothing of this row is written.
+   */
+  | 'merged'
+  /**
+   * A valid row whose code_1c has no stored position of its own and whose
+   * 8-digit key is ambiguous (see `keyConflicts`); nothing of it is written.
+   */
+  | 'conflict'
+  /** The source row itself is invalid; nothing of it is written. */
   | 'rejected';
+
+/** Where a planned price comes from: the cell, the rule, the stored value. */
+export interface PriceTrace {
+  /** The price cell as the file holds it. */
+  source: string;
+  /** True when the source was below 1000 (thousands) and was ×1000. */
+  scaled: boolean;
+  /** The stored price; null for a new position. */
+  from: string | null;
+  /** The normalized price the import writes. */
+  to: string;
+}
 
 export interface RowReport {
   line: number;
@@ -20,9 +49,11 @@ export interface RowReport {
   outcome: RowOutcome;
   /** Import-owned fields that change (update only). */
   changes: string[];
-  price?: { from: string | null; to: string };
+  price?: PriceTrace;
   /** `to: null` = not in the file (create → schema default 1; update → kept). */
   quantity?: { from: number | null; to: number | null };
+  /** The part number written (code_1c) and the stored one (null when new). */
+  partNumber?: { from: string | null; to: string };
   /** Real run only: what was actually done. */
   written?: 'created' | 'updated' | 'skipped_unchanged' | 'not_written';
   projected?: boolean;
@@ -41,6 +72,10 @@ export interface ImportReport {
     bytes: number;
     encoding: string;
     encodingDetected: boolean;
+    /** Detected from the header row; null when the file was not read. */
+    delimiter: DelimiterName | null;
+    /** How the export writes numbers — follows from the delimiter. */
+    numberFormat: NumberFormat | null;
     catalogSellerId: string;
     sourceSystem: string;
     currency: 'UZS';
@@ -55,6 +90,11 @@ export interface ImportReport {
     columns: string[];
     mapped: Partial<Record<string, string>>;
     ignored: string[];
+    /**
+     * Known columns the import never reads: category_id, subcategory_id,
+     * manufacturer_part_number, oem_numbers.
+     */
+    notImported: string[];
   };
   environment: {
     catalogSeller: { id: string; name: string } | null;
@@ -62,9 +102,6 @@ export interface ImportReport {
     linkedSellerStatus: string | null;
     /** TELEGRAM | BUSINESS — Driver's Village must be BUSINESS. */
     linkedSellerType: string | null;
-    categoriesInDatabase: number;
-    /** Category ids the file uses that this database does not have. */
-    missingCategoryIds: string[];
     /** File-level environment problems (not source-data errors). */
     issues: ImportIssue[];
   };
@@ -72,11 +109,35 @@ export interface ImportReport {
     totalRows: number;
     validRows: number;
     rejectedRows: number;
-    blockedRows: number;
     rowsToCreate: number;
     rowsToUpdate: number;
     rowsUnchanged: number;
+    /** Planned updates whose price changes. */
+    rowsWithPriceChange: number;
+    /** Valid rows whose source price was in thousands (×1000). */
+    rowsWithScaledPrice: number;
+    /** New positions — all created without a category. */
+    newWithoutCategory: number;
+    /** Positions in the file that exist but are still unclassified. */
+    existingWithoutCategory: number;
+    /** Planned updates whose stored part number is replaced by code_1c. */
+    rowsWithPartNumberChange: number;
+    /** code_1c values on more than one row (each is ONE position). */
     duplicateSourceCodes: number;
+    /** …of which a highest valid price was chosen (see `duplicates`). */
+    duplicateCodesMaxPrice: number;
+    /** Rows folded into another row of the same code_1c (outcome 'merged'). */
+    rowsMerged: number;
+    /** code_1c values with no valid price on any row: nothing written. */
+    codesWithoutValidPrice: number;
+    /** Rows that update a position stored under another code (8-digit key). */
+    rowsMatchedByKey: number;
+    /** 8-digit keys the import could not resolve (see `keyConflicts`). */
+    keyConflicts: number;
+    /** Valid rows not written because of such a key (outcome 'conflict'). */
+    rowsInKeyConflict: number;
+    /** New positions created although another code shares their key. */
+    rowsToCreateWithSharedKey: number;
     dataErrors: number;
     dataWarnings: number;
     referenceErrors: number;
@@ -108,7 +169,17 @@ export interface ImportReport {
      */
     notInBuyerReference: { make: string; model: string | null; rows: number }[];
   };
+  /** Sample of the price rule at work: scaled and unscaled rows of the file. */
+  prices: { examples: (PriceTrace & { line: number; code1c: string })[] };
   units: Record<string, number>;
+  /** Every code_1c on more than one row: its rows and the price chosen. */
+  duplicates: DuplicateCode[];
+  /** Positions found by the 8-digit key: stored code → the file's code_1c. */
+  keyMatches: CodeKeyMatch[];
+  /** 8-digit keys left unresolved: their codes are not written. */
+  keyConflicts: CodeKeyConflict[];
+  /** New positions sharing an 8-digit key (warning code_key_shared). */
+  keyShared: CodeKeyShared[];
   lookAlikes: { key: string; codes: string[] }[];
   positionsNotInFile: string[];
   projectionFailures: { code1c: string; stockId: number; error: string }[];

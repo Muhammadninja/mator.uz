@@ -17,6 +17,7 @@ import { DraftCoordinator } from './draft-coordinator';
 import { DraftEvent } from './draft-events';
 import { DriversVillagePhotoService } from './drivers-village-photo.service';
 import { makeFakeLock } from './draft-lock.test-util';
+import { MediaGroupBuffer } from './media-group-buffer';
 import type { ProductDraftService } from './product-draft.service';
 import { WizardSessionStore, WizardStep } from './product-wizard';
 import { TelegramService } from './telegram.service';
@@ -63,7 +64,6 @@ function setup() {
     livePrompt: new Map(),
     liveNotice: new Map(),
     staleNoticeSentAt: new Map(),
-    groupCtx: new Map(),
     mediaBuffer: {
       add: (...args: unknown[]) => mediaAdds.push(args),
       clear: jest.fn(),
@@ -138,28 +138,51 @@ function setup() {
     await photoHandlers[0]({ ...ctxFor({ from: { id: from } }), message: msg });
   }
 
-  /** An album: every photo through the handler, then the buffer's flush. */
-  async function sendAlbum(fileIds: string[], caption: string) {
+  /** One album photo through the real handler, into the installed buffer. */
+  async function sendAlbumPhoto(
+    groupId: string,
+    fileId: string,
+    caption?: string,
+  ) {
+    const msg: Record<string, unknown> = {
+      message_id: ++nextId,
+      media_group_id: groupId,
+      photo: [{ file_id: fileId }],
+      from: { id: USER },
+      chat: { id: USER },
+    };
+    if (caption !== undefined) msg.caption = caption;
+    await photoHandlers[0]({ ...ctxFor(), message: msg });
+  }
+
+  /**
+   * An album: every photo through the handler, then the buffer's flush. The
+   * caption rides on ONE album photo, the second by default.
+   */
+  async function sendAlbum(fileIds: string[], caption: string, captionAt = 1) {
     mediaAdds.length = 0;
-    for (const [i, fileId] of fileIds.entries()) {
-      const msg: Record<string, unknown> = {
-        message_id: ++nextId,
-        media_group_id: 'g1',
-        photo: [{ file_id: fileId }],
-        from: { id: USER },
-        chat: { id: USER },
-      };
-      if (i === 1) msg.caption = caption; // the caption rides on ONE album photo
-      await photoHandlers[0]({ ...ctxFor(), message: msg });
-    }
-    // Exactly what MediaGroupBuffer's flush hands over (first non-empty caption).
-    const flushedCaption = (mediaAdds.find((a) => a[2]) ?? [])[2] ?? null;
-    await svc.routePhotos(
-      ctxFor(),
-      USER,
-      mediaAdds.map((a) => a[1]),
-      flushedCaption,
+    for (const [i, fileId] of fileIds.entries())
+      await sendAlbumPhoto('g1', fileId, i === captionAt ? caption : undefined);
+    // Exactly what MediaGroupBuffer's flush hands over: the first non-empty
+    // caption and the context of the album's latest photo.
+    await svc.flushAlbum({
+      tgUserId: USER,
+      fileIds: mediaAdds.map((a) => a[1]),
+      caption: (mediaAdds.find((a) => a[2]) ?? [])[2] ?? null,
+      ctx: mediaAdds.at(-1)![4],
+    });
+  }
+
+  /**
+   * Swap the recording buffer for the REAL one (run under fake timers); the
+   * returned `settle` awaits every album it has flushed so far.
+   */
+  function useRealAlbumBuffer() {
+    const flushes: Promise<void>[] = [];
+    svc.mediaBuffer = new MediaGroupBuffer(1500, 10, (group) =>
+      flushes.push(svc.flushAlbum(group)),
     );
+    return { settle: () => Promise.all(flushes.splice(0)) };
   }
 
   /** The image worker finished every photo of the latest draft. */
@@ -203,8 +226,11 @@ function setup() {
     svc,
     telegram,
     replies,
+    ctxFor,
     sendPhoto,
     sendAlbum,
+    sendAlbumPhoto,
+    useRealAlbumBuffer,
     finishImages,
     tap,
     previewButtons,
@@ -222,6 +248,23 @@ const dvNonPhotoState = (w: FakePrisma) => {
   void _ignored;
   return { product, stock: w.state.stocks.find((s) => s.id === 500) };
 };
+
+/** setup() plus Driver's Village position #501 / product #101 with `code`. */
+const withPosition = (code: string) => {
+  const t = setup();
+  t.world.addDvPosition({
+    stockId: 501,
+    productId: 101,
+    code,
+    title: 'Фильтр масляный',
+  });
+  return t;
+};
+/** The [targetStockId, file ids] of every draft created, by stock id. */
+const draftsCreated = (t: ReturnType<typeof setup>) =>
+  t.drafts.createWithImages.mock.calls
+    .map(([p]) => [p.targetStockId, p.images.map((i) => i.tgFileId)] as const)
+    .sort((a, b) => (a[0] ?? 0) - (b[0] ?? 0));
 
 describe("Driver's Village photo update over Telegram", () => {
   it('1. existing code_1c + one photo → the same preview: processed photo, caption, Confirm/Cancel', async () => {
@@ -349,6 +392,10 @@ describe("Driver's Village photo update over Telegram", () => {
     // The shared number as a caption is NOT a code_1c → the ordinary wizard.
     await t.sendPhoto('x1', '96611630');
     expect(t.drafts.createWithImages).not.toHaveBeenCalled();
+    // With the marker it is looked up among Driver's Village codes only.
+    await t.sendPhoto('x2', '1C 96611630');
+    expect(t.replies.at(-1)).toContain('с кодом 96611630 не найдена');
+    expect(t.drafts.createWithImages).not.toHaveBeenCalled();
 
     await t.sendPhoto('f1', DV_CODE);
     const draftId = await t.finishImages();
@@ -383,8 +430,9 @@ describe("Driver's Village photo update over Telegram", () => {
     ]);
   });
 
-  it('10. photos without a code caption keep the ordinary listing flow unchanged', async () => {
-    for (const caption of [undefined, 'Колодки передние, новые']) {
+  it('10. photos without a 1C caption keep the ordinary listing flow unchanged', async () => {
+    // An article alone (no `1C` marker) is not a photo update either.
+    for (const caption of [undefined, 'Колодки передние, новые', '87654321']) {
       const t = setup();
       t.svc.wizard.start(USER, 'ru');
       await t.sendPhoto('p1', caption);
@@ -396,6 +444,104 @@ describe("Driver's Village photo update over Telegram", () => {
       expect(t.svc.wizard.get(USER).step).toBe(WizardStep.BRAND);
       expect(t.world.writes).toEqual([]);
     }
+  });
+
+  describe('the `1C <code_1c>` caption', () => {
+    it.each([
+      ['96273708', '1C 96273708'],
+      ['02E-409-359', '1С 02E-409-359'], // Cyrillic С
+      ['96273708 GMB', '1C: 96273708 GMB'],
+      ['12605566pmc', '1c 12605566pmc'],
+    ])(
+      'real code %p via %p → photos attached to THAT position, no listing draft',
+      async (code, caption) => {
+        const t = withPosition(code);
+        t.svc.wizard.start(USER, 'ru'); // even right after /start
+        await t.sendAlbum(['a1', 'a2'], caption);
+
+        expect(draftsCreated(t)).toEqual([[501, ['a1', 'a2']]]);
+        expect(t.drafts.createWithImages.mock.calls[0][0]).toMatchObject({
+          sellerId: 7,
+          formStep: WizardStep.QUESTIONNAIRE_DONE,
+        });
+        expect(t.svc.wizard.get(USER).step).toBe(WizardStep.PHOTOS_FIRST);
+        expect(t.replies.at(-1)).toContain(`для позиции ${code}`);
+
+        await t.tap(`dvph:ok:${await t.finishImages()}`);
+        expect(
+          t.world.state.productImages
+            .filter((i) => i.productId === 101)
+            .map((i) => i.url),
+        ).toEqual(['https://cdn/proc/a1.jpg', 'https://cdn/proc/a2.jpg']);
+        expect(t.world.state.products).toHaveLength(3);
+        expect(t.world.state.stocks).toHaveLength(3);
+      },
+    );
+
+    it('the caption counts on the first or on the last photo of the album', async () => {
+      for (const captionAt of [0, 2]) {
+        const t = withPosition('96273708');
+        await t.sendAlbum(['a1', 'a2', 'a3'], '1C 96273708', captionAt);
+        expect(draftsCreated(t)).toEqual([[501, ['a1', 'a2', 'a3']]]);
+      }
+    });
+
+    it('an unknown code → "не найдена": no draft, no job, the wizard untouched', async () => {
+      const t = setup();
+      t.svc.wizard.start(USER, 'ru');
+      await t.sendAlbum(['a1', 'a2'], '1C 11112222');
+
+      expect(t.replies.at(-1)).toContain('с кодом 11112222 не найдена');
+      expect(t.drafts.createWithImages).not.toHaveBeenCalled();
+      expect(t.svc.queue.enqueueImage).not.toHaveBeenCalled();
+      expect(t.svc.wizard.get(USER).step).toBe(WizardStep.PHOTOS_FIRST);
+      expect(t.world.writes).toEqual([]);
+    });
+
+    it.each(['1C', '1C БП 010', '1C 1'])(
+      '%p (the marker without a valid code) is refused, never the wizard',
+      async (caption) => {
+        const t = setup();
+        t.svc.wizard.start(USER, 'ru');
+        await t.sendPhoto('p1', caption);
+
+        expect(t.replies).toEqual([
+          expect.stringContaining('Не удалось распознать код 1С'),
+        ]);
+        expect(t.drafts.createWithImages).not.toHaveBeenCalled();
+        expect(t.svc.wizard.get(USER).step).toBe(WizardStep.PHOTOS_FIRST);
+      },
+    );
+
+    it('the bare article finds the position stored with a marker; receipt and preview name it', async () => {
+      const t = withPosition('96273708 GMB');
+      await t.sendPhoto('f1', '1C 96273708');
+      expect(t.replies.at(-1)).toContain('для позиции 96273708 GMB');
+
+      await t.finishImages();
+      const [, , opts] = t.telegram.sendPhoto.mock.calls[0] as any[];
+      expect(opts.caption).toContain('96273708 GMB');
+      expect(opts.caption).toContain('Фильтр масляный');
+    });
+
+    it('a key shared by several positions stops with their list; nothing is written', async () => {
+      const t = withPosition('96273708 GMB');
+      t.world.addDvPosition({
+        stockId: 502,
+        productId: 102,
+        code: '96273708 OEM',
+        title: 'Фильтр OEM',
+      });
+      await t.sendPhoto('f1', '1C 96273708');
+
+      expect(t.replies).toEqual([
+        expect.stringContaining('подходит к нескольким позициям'),
+      ]);
+      expect(t.replies[0]).toContain('• 96273708 GMB — Фильтр масляный');
+      expect(t.replies[0]).toContain('• 96273708 OEM — Фильтр OEM');
+      expect(t.drafts.createWithImages).not.toHaveBeenCalled();
+      expect(t.world.writes).toEqual([]);
+    });
   });
 
   describe('guards', () => {
@@ -510,6 +656,70 @@ describe("Driver's Village photo update over Telegram", () => {
       ]);
       // Left COMMITTING for the TTL sweep, exactly like a listing commit.
       expect(t.drafts.drafts.get(draftId)!.status).toBe('COMMITTING');
+    });
+
+    it('a failed lookup tells the sender, writes nothing and never reaches the wizard', async () => {
+      const t = setup();
+      t.svc.wizard.start(USER, 'ru');
+      jest
+        .spyOn(t.svc.dvPhotos, 'resolvePosition')
+        .mockRejectedValueOnce(new Error('Timed out fetching a connection'));
+      await t.sendAlbum(['a1', 'a2'], '1C 96273708');
+
+      expect(t.replies).toEqual([
+        expect.stringContaining('Не удалось принять фото'),
+      ]);
+      expect(t.replies.join('\n')).not.toContain('Timed out');
+      expect(t.drafts.createWithImages).not.toHaveBeenCalled();
+      expect(t.svc.wizard.get(USER).step).toBe(WizardStep.PHOTOS_FIRST);
+    });
+
+    it('an album whose handling throws is contained: logged, the sender told', async () => {
+      const t = setup();
+      t.svc.wizard.start(USER, 'ru');
+      // The listing path's seller re-check meets a database that is down.
+      t.svc.sellers.findByTgId.mockRejectedValueOnce(new Error('db down'));
+      const logged = jest.spyOn(t.svc.logger, 'error');
+
+      // Settles instead of rejecting: from the buffer's timer a rejection
+      // would be unhandled and exit the process.
+      await expect(t.sendAlbum(['a1', 'a2'], 'Колодки')).resolves.toBe(
+        undefined,
+      );
+      expect(logged).toHaveBeenCalledWith(
+        expect.stringContaining('db down'),
+        expect.anything(),
+      );
+      expect(t.replies.at(-1)).toContain('Не удалось принять фото');
+      expect(t.drafts.createWithImages).not.toHaveBeenCalled();
+    });
+
+    it('two albums of one user, back to back, are both processed', async () => {
+      jest.useFakeTimers();
+      try {
+        const t = withPosition('96273708');
+        t.world.addDvPosition({
+          stockId: 502,
+          productId: 102,
+          code: '02E-409-359',
+          title: 'Шланг',
+        });
+        const buffer = t.useRealAlbumBuffer();
+        await t.sendAlbumPhoto('g1', 'a1', '1C 96273708');
+        await t.sendAlbumPhoto('g1', 'a2');
+        await t.sendAlbumPhoto('g2', 'b1', '1C 02E-409-359');
+        await t.sendAlbumPhoto('g2', 'b2');
+        jest.advanceTimersByTime(1500);
+        await buffer.settle();
+
+        expect(draftsCreated(t)).toEqual([
+          [501, ['a1', 'a2']],
+          [502, ['b1', 'b2']],
+        ]);
+        expect(t.replies.filter((r) => r.startsWith('📸'))).toHaveLength(2);
+      } finally {
+        jest.useRealTimers();
+      }
     });
   });
 });

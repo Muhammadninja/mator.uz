@@ -104,7 +104,7 @@ describe('DriversVillageImportService', () => {
       totalRows: 5,
       rowsToCreate: 5,
       rejectedRows: 0,
-      blockedRows: 0,
+      newWithoutCategory: 5,
     });
     expect(report.summary.written).toMatchObject({
       created: 5,
@@ -131,16 +131,20 @@ describe('DriversVillageImportService', () => {
       quantity: 8,
       unit: 'PCS',
     });
-    // code_1c is the stock identity — never the product's GM key.
+    // code_1c is the stock identity and the part number — never the product's
+    // GM key.
     expect(productOf(db, '00-00001431')).toMatchObject({
       gmNumber: null,
       gmNumbers: [],
-      oemNumbers: ['96611630'],
+      sourcePartNumber: '00-00001431',
+      // The normalized code, then its 8-digit key (unique to this position).
+      oemNumbers: ['0000001431', '00001431'],
       partNumberType: 'OEM',
       isOem: true,
       isGm: false,
-      categoryId: 'shock-absorbers',
-      vehicleCategoryId: 'suspension-and-steering',
+      // New positions start unclassified; an operator files them in Mator.
+      categoryId: null,
+      vehicleCategoryId: null,
       isUniversal: false,
       kind: 'SPARE_PART',
     });
@@ -150,18 +154,24 @@ describe('DriversVillageImportService', () => {
     });
   });
 
-  it('carries category/subcategory through as approved ids (subcategory → categoryId, root → vehicleCategoryId)', async () => {
+  it('never imports the file’s category columns: new positions are created unclassified', async () => {
     const { db, service } = setup();
-    await service.run(file(...BASE), 'dv.txt', { dryRun: false });
-    expect(productOf(db, '00-00021040')).toMatchObject({
-      categoryId: 'synthetic-motor-oil',
-      vehicleCategoryId: 'motor-oil',
+    const report = await service.run(file(...BASE), 'dv.txt', {
+      dryRun: false,
     });
-    expect(productOf(db, 'БП-01074051')).toMatchObject({
-      categoryId: 'front-brake-pads',
-      vehicleCategoryId: 'brake-system',
-      vehicleCategory: 'BRAKE_SYSTEM',
-    });
+    expect(report.headers.notImported).toEqual([
+      'manufacturer_part_number',
+      'category_id',
+      'subcategory_id',
+    ]);
+    expect(report.summary.newWithoutCategory).toBe(5);
+    for (const code of ['00-00021040', 'БП-01074051'])
+      expect(productOf(db, code)).toMatchObject({
+        categoryId: null,
+        vehicleCategoryId: null,
+        mainCategory: null,
+        vehicleCategory: null,
+      });
   });
 
   it('writes the three vehicle states: specific models (split on , and ;), make-wide, universal', async () => {
@@ -188,16 +198,22 @@ describe('DriversVillageImportService', () => {
     expect(modelsOf('00-00021040')).toEqual([]);
   });
 
-  it('normalizes and de-duplicates OEM values', async () => {
+  it('writes code_1c as the part number; the manufacturer_part_number cell is ignored', async () => {
     const { db, service } = setup();
     await service.run(file(...BASE), 'dv.txt', { dryRun: false });
-    expect(productOf(db, 'БП-01068224').oemNumbers).toEqual([
-      '96273708',
-      'S4510017',
-    ]);
+    // The cell held '96273708 s4510017  S4510017 96273708'.
+    expect(productOf(db, 'БП-01068224')).toMatchObject({
+      sourcePartNumber: 'БП-01068224',
+      // Cyrillic: the code itself is not indexed, only its 8-digit key.
+      oemNumbers: ['01068224'],
+    });
+    expect(productOf(db, '00-00001431')).toMatchObject({
+      sourcePartNumber: '00-00001431',
+      oemNumbers: ['0000001431', '00001431'],
+    });
   });
 
-  it('stores the part number cell verbatim; Cyrillic, spaces and symbols never reject a row', async () => {
+  it('whatever the part-number cell holds, it never rejects a row or reaches the database', async () => {
     const { db, service } = setup();
     const cells = [
       '13502180А',
@@ -211,14 +227,13 @@ describe('DriversVillageImportService', () => {
       { dryRun: false },
     );
     expect(report.summary).toMatchObject({ rejectedRows: 0, rowsToCreate: 4 });
-    cells.forEach((oem, i) =>
-      expect(productOf(db, `PN-${i}`).sourcePartNumber).toBe(oem),
+    cells.forEach((_, i) =>
+      expect(productOf(db, `PN-${i}`)).toMatchObject({
+        sourcePartNumber: `PN-${i}`,
+        oemNumbers: [`PN${i}`],
+      }),
     );
-    expect(productOf(db, 'PN-0').oemNumbers).toEqual([]);
-    expect(productOf(db, 'PN-1').oemNumbers).toEqual(['SOLITE', '57412']);
-    expect(
-      report.rows.find((r) => r.code1c === 'PN-0')!.issues.map((i) => i.code),
-    ).toEqual(['oem_not_indexed']);
+    expect(report.rows.every((r) => r.issues.length === 0)).toBe(true);
   });
 
   it('one row with comma-listed models is ONE product with one fit link per model', async () => {
@@ -247,8 +262,8 @@ describe('DriversVillageImportService', () => {
         'utf-8',
       );
     const lines = [
-      'Амортизатор\t42792442\tшт.\t490000,00\tCHEVROLET\tDAMAS-2, LABO\tsuspension-and-steering\tshock-absorbers\t1',
-      'Масло\t\tл\t95000,00\t\t\tmotor-oil\tsynthetic-motor-oil\t2',
+      'Амортизатор\t42792442\tшт.\t490000,00\tCHEVROLET\tDAMAS-2, LABO\tsuspension-and-steering\tshock-absorbers\t96273708',
+      'Масло\t\tл\t95000,00\t\t\tmotor-oil\tsynthetic-motor-oil\t96449577',
     ];
 
     const first = await service.run(noQty(...lines), 'dv.txt', {
@@ -264,20 +279,20 @@ describe('DriversVillageImportService', () => {
     expect(db.state.stocks.map((s) => s.quantity)).toEqual([1, 1]);
 
     // A count set since (e.g. by a file that had one) is never reset to 1.
-    stockOf(db, '1').quantity = 12;
+    stockOf(db, '96273708').quantity = 12;
     const again = await service.run(noQty(...lines), 'dv.txt', {
       dryRun: false,
     });
     expect(again.summary).toMatchObject({ rowsUnchanged: 2, rowsToUpdate: 0 });
-    expect(stockOf(db, '1').quantity).toBe(12);
+    expect(stockOf(db, '96273708').quantity).toBe(12);
   });
 
   it('reports fits the buyer vehicle reference does not name, without blocking them', async () => {
     const { db, service } = setup();
     const report = await service.run(
       file(
-        row({ code: 'R-1', model: 'COBALT, EQUINOX' }),
-        row({ code: 'R-2', model: '', make: 'LADA' }),
+        row({ code: 'R-101', model: 'COBALT, EQUINOX' }),
+        row({ code: 'R-102', model: '', make: 'LADA' }),
       ),
       'dv.txt',
       { dryRun: false },
@@ -286,14 +301,14 @@ describe('DriversVillageImportService', () => {
       { make: 'Chevrolet', model: 'Equinox', rows: 1 },
       { make: 'Lada', model: null, rows: 1 },
     ]);
-    expect(report.rows.find((r) => r.code1c === 'R-1')!.issues).toEqual([
+    expect(report.rows.find((r) => r.code1c === 'R-101')!.issues).toEqual([
       expect.objectContaining({
         kind: 'reference',
         severity: 'warning',
         code: 'vehicle_not_in_reference',
       }),
     ]);
-    expect(report.summary).toMatchObject({ rowsToCreate: 2, blockedRows: 0 });
+    expect(report.summary).toMatchObject({ rowsToCreate: 2, rejectedRows: 0 });
     expect(db.state.stocks).toHaveLength(2);
   });
 
@@ -329,7 +344,12 @@ describe('DriversVillageImportService', () => {
       changes: ['price', 'quantity'],
       written: 'updated',
     });
-    expect(r.price).toEqual({ from: '490000', to: '510000.00' });
+    expect(r.price).toEqual({
+      source: '510 000,00',
+      scaled: false,
+      from: '490000',
+      to: '510000.00',
+    });
     expect(stockOf(db, '00-00001431')).toMatchObject({
       id: before.stock,
       productId: before.product,
@@ -414,7 +434,7 @@ describe('DriversVillageImportService', () => {
     expect(JSON.stringify(db.state)).toBe(before);
   });
 
-  it('rejects every occurrence of a duplicate code_1c', async () => {
+  it('a repeated code_1c is ONE position at its highest valid price, not a rejection', async () => {
     const { db, service } = setup();
     const report = await service.run(
       file(BASE[0], row({ code: '00-00001431', price: '1,00' }), BASE[1]),
@@ -423,14 +443,28 @@ describe('DriversVillageImportService', () => {
     );
     expect(report.summary).toMatchObject({
       duplicateSourceCodes: 1,
-      rejectedRows: 2,
+      duplicateCodesMaxPrice: 1,
+      rowsMerged: 1,
+      rejectedRows: 0,
+      rowsToCreate: 2,
     });
+    expect(report.rows.map((r) => r.outcome)).toEqual([
+      'create',
+      'merged',
+      'create',
+    ]);
     expect(
       report.rows.filter((r) =>
-        r.issues.some((i) => i.code === 'duplicate_code_1c'),
+        r.issues.some(
+          (i) => i.code === 'duplicate_code_1c' && i.severity === 'warning',
+        ),
       ),
     ).toHaveLength(2);
-    expect(db.state.stocks.map((s) => s.sourceCode)).toEqual(['БП-01071006']);
+    expect(stockOf(db, '00-00001431').priceUzs).toBe('490000');
+    expect(db.state.stocks.map((s) => s.sourceCode)).toEqual([
+      '00-00001431',
+      'БП-01071006',
+    ]);
   });
 
   it('always targets the drivers-village dealer and reports a missing link as ENVIRONMENT, not data', async () => {
@@ -456,28 +490,26 @@ describe('DriversVillageImportService', () => {
     expect(db.state.sellers).toHaveLength(0);
   });
 
-  it('a category missing from this database blocks only that row, as a reference issue', async () => {
+  it('a category id this database does not have no longer blocks a row (categories are not imported)', async () => {
     const { db, service } = setup();
     const report = await service.run(
-      file(BASE[0], row({ code: 'X-1', sub: 'remote-keys' })),
+      file(BASE[0], row({ code: 'X-101', cat: 'nope', sub: 'remote-keys' })),
       'dv.txt',
       { dryRun: false },
     );
-    const blocked = report.rows.find((r) => r.code1c === 'X-1')!;
-    expect(blocked.outcome).toBe('blocked');
-    expect(blocked.issues).toEqual([
-      expect.objectContaining({
-        kind: 'reference',
-        code: 'subcategory_not_in_database',
-      }),
-    ]);
-    expect(report.environment.missingCategoryIds).toEqual(['remote-keys']);
+    expect(report.rows.find((r) => r.code1c === 'X-101')).toMatchObject({
+      outcome: 'create',
+      issues: [],
+    });
     expect(report.summary).toMatchObject({
       dataErrors: 0,
-      referenceErrors: 1,
-      blockedRows: 1,
+      referenceErrors: 0,
+      rowsToCreate: 2,
     });
-    expect(db.state.stocks.map((s) => s.sourceCode)).toEqual(['00-00001431']);
+    expect(db.state.stocks.map((s) => s.sourceCode)).toEqual([
+      '00-00001431',
+      'X-101',
+    ]);
   });
 
   it('reports an unmigrated database as an environment issue instead of failing', async () => {
@@ -526,7 +558,7 @@ describe('DriversVillageImportService', () => {
       skippedUnchanged: 1,
       projected: 1,
     });
-    expect(db.state.catalogParts).toEqual([
+    expect(db.state.catalogParts.map((c) => c.id)).toEqual([
       `part_stock_${stockOf(db, '00-00001431').id}`,
     ]);
   });

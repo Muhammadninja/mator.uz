@@ -12,3 +12,10 @@ keys/
 .mcp.json
 logs/
 imports/
+# The rule above is for exported data; the importer source code is tracked.
+!src/imports/
+# Telegram session of the Driver's Village ingest (TDLib database). It lives in
+# DV_TELEGRAM_STATE_DIR outside the repository; these only catch mistakes.
+_td_database/
+_td_files/
+td.binlog

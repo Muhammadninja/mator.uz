@@ -146,18 +146,62 @@ export function worldFixture(): WorldState {
   };
 }
 
-/** Stateful Prisma slice + a log of every write it received. */
+/** Stateful Prisma slice + a log of every write (and row lock) it received. */
 export class FakePrisma {
   writes: string[] = [];
   reads: { model: string; where: unknown }[] = [];
 
   constructor(public state: WorldState = worldFixture()) {}
 
+  /** Another Driver's Village position (seller #7), with no photos yet. */
+  addDvPosition(p: {
+    stockId: number;
+    productId: number;
+    code: string;
+    title: string;
+  }): void {
+    this.state.products.push({
+      id: p.productId,
+      title: p.title,
+      description: null,
+      gmNumber: null,
+      gmNumbers: [],
+      oemNumbers: [],
+      categoryId: null,
+      vehicleCategoryId: null,
+      isUniversal: false,
+      imageUrl: null,
+    });
+    this.state.stocks.push({
+      id: p.stockId,
+      sellerId: 7,
+      productId: p.productId,
+      sourceSystem: 'DRIVERS_VILLAGE_1C',
+      sourceCode: p.code,
+      priceUzs: '100000',
+      quantity: 1,
+      unit: 'PCS',
+    });
+  }
+
   private client() {
     const s = () => this.state;
     const write = (w: string) => this.writes.push(w);
     const read = (model: string, where: unknown) =>
       this.reads.push({ model, where });
+    const withProduct = (st: WStock) => {
+      const p = s().products.find((x) => x.id === st.productId)!;
+      return {
+        ...st,
+        product: {
+          title: p.title,
+          _count: {
+            images: s().productImages.filter((i) => i.productId === p.id)
+              .length,
+          },
+        },
+      };
+    };
     return {
       seller: {
         findUnique: async ({
@@ -196,18 +240,29 @@ export class FakePrisma {
                   x.sourceCode === k.sourceCode,
               )
             : s().stocks.find((x) => x.id === where.id);
-          if (!st) return null;
-          const p = s().products.find((x) => x.id === st.productId)!;
-          return {
-            ...st,
-            product: {
-              title: p.title,
-              _count: {
-                images: s().productImages.filter((i) => i.productId === p.id)
-                  .length,
-              },
-            },
+          return st ? withProduct(st) : null;
+        },
+        findMany: async ({
+          where,
+          orderBy,
+        }: {
+          where: {
+            sellerId: number;
+            sourceSystem: string;
+            sourceCode: { contains: string };
           };
+          orderBy?: { sourceCode: 'asc' };
+        }) => {
+          read('stock', where);
+          const rows = s().stocks.filter(
+            (x) =>
+              x.sellerId === where.sellerId &&
+              x.sourceSystem === where.sourceSystem &&
+              (x.sourceCode ?? '').includes(where.sourceCode.contains),
+          );
+          if (orderBy)
+            rows.sort((a, b) => (a.sourceCode! < b.sourceCode! ? -1 : 1));
+          return rows.map(withProduct);
         },
       },
       productImage: {
@@ -243,16 +298,49 @@ export class FakePrisma {
     };
   }
 
+  /** Row locks held by open transactions: `table:id` → released when freed. */
+  private readonly rowLocks = new Map<string, Promise<void>>();
+
+  /**
+   * `SELECT … FOR UPDATE` in a transaction — the only raw query expected (see
+   * replaceGallery). Like a real row lock it waits while another open
+   * transaction holds the row, then holds it until its own transaction ends.
+   */
+  private async lockRow(
+    sql: TemplateStringsArray,
+    values: unknown[],
+    held: (() => void)[],
+  ): Promise<unknown[]> {
+    const text = sql.join('?');
+    if (text !== 'SELECT id FROM products WHERE id = ? FOR UPDATE')
+      throw new Error(`unexpected raw query: ${text}`);
+    const row = `products:${String(values[0])}`;
+    while (this.rowLocks.has(row)) await this.rowLocks.get(row);
+    let release!: () => void;
+    this.rowLocks.set(row, new Promise<void>((r) => (release = r)));
+    held.push(() => {
+      this.rowLocks.delete(row);
+      release();
+    });
+    this.writes.push(`product.lock:${String(values[0])}`);
+    return [{ id: values[0] }];
+  }
+
   /** The PrismaService stand-in, with an atomic $transaction. */
   get prisma(): PrismaService {
     const c = this.client();
     const tx = async <T>(fn: (t: unknown) => Promise<T>): Promise<T> => {
       const snapshot = structuredClone(this.state);
+      const held: (() => void)[] = [];
+      const $queryRaw = (sql: TemplateStringsArray, ...values: unknown[]) =>
+        this.lockRow(sql, values, held);
       try {
-        return await fn(c);
+        return await fn({ ...c, $queryRaw });
       } catch (e) {
         this.state = snapshot;
         throw e;
+      } finally {
+        for (const release of held) release();
       }
     };
     return { ...c, $transaction: tx } as unknown as PrismaService;
