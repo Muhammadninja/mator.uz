@@ -1,8 +1,17 @@
 /**
- * Driver's Village 1C catalog import — CLI.
+ * Driver's Village 1C price/stock synchronization — CLI (also what the
+ * Telegram ingest timer runs).
  *
  *   npm run import:drivers-village -- <file.txt> --dry-run     # plan + report, no writes
  *   npm run import:drivers-village -- <file.txt>               # real import
+ *
+ * A stored position (found by its exact code_1c) only gets its stock price
+ * and — when the file has a quantity column — its quantity; its name,
+ * numbers, vehicles, category, photos and catalog settings are never changed.
+ * A code without a position is created (initial creation, no category).
+ * Categories and manual fitment come from the separate, explicitly run
+ * classification import: npm run drivers-village:classify (never run by the
+ * timer).
  *
  * Options:
  *   --dry-run               Parse, match and validate everything; write nothing.
@@ -20,14 +29,14 @@
  * supply-side seller linked to it (sellers.catalog_seller_id). The CLI never
  * creates either. Prices below 1000 are in thousands and are ×1000 (see
  * drivers-village-price.ts); categories are never imported. code_1c is the
- * part number (the file's manufacturer_part_number / oem_numbers are never
- * read), and a code_1c on several rows is one position at the highest valid
- * price of those rows. A real import holds the host-wide import lock
- * (src/imports/drivers-village/import-lock.ts, DV_IMPORT_LOCK_FILE), so it
- * never overlaps another one — manual or started by the Telegram ingest.
+ * part number of a new position (the file's manufacturer_part_number /
+ * oem_numbers are never read), and a code_1c on several rows is one position
+ * at the highest valid price of those rows. A real import holds the host-wide
+ * import lock (src/imports/drivers-village/import-lock.ts,
+ * DV_IMPORT_LOCK_FILE), so it never overlaps another one — manual, started by
+ * the Telegram ingest, or the classification import.
  * Exit codes:
- * 0 = clean, 2 = finished with rejected rows, 8-digit key conflicts or
- * projection failures,
+ * 0 = clean, 2 = finished with rejected rows or projection failures,
  * 1 = aborted (nothing or only earlier batches written — see the report),
  * 3 = another import is running; nothing was done.
  */
@@ -111,22 +120,26 @@ function printSummary(report: ImportReport, files: string[]): void {
     'Total rows': s.totalRows,
     'Valid rows (source data)': s.validRows,
     'Rejected (data errors; stored values untouched)': s.rejectedRows,
-    'Rows to create': s.rowsToCreate,
-    'Rows to update': s.rowsToUpdate,
+    'Rows to create (new positions)': s.rowsToCreate,
+    'Rows to sync (price / quantity of a stored position)': s.rowsToUpdate,
     'Rows unchanged': s.rowsUnchanged,
-    'Updates with a price change': s.rowsWithPriceChange,
+    'Syncs with a price change': s.rowsWithPriceChange,
+    'Syncs with a quantity change': s.rowsWithQuantityChange,
+    'Stored cards differing from the file (NOT changed)':
+      s.rowsWithCardDifferences,
     'Prices in thousands (×1000)': s.rowsWithScaledPrice,
-    'New without category (classify in admin)': s.newWithoutCategory,
+    'New without category (classify in admin or classification import)':
+      s.newWithoutCategory,
     'Existing still without category': s.existingWithoutCategory,
-    'Part numbers corrected from code_1c': s.rowsWithPartNumberChange,
     'Duplicate code_1c values (one position each)': s.duplicateSourceCodes,
     'Duplicates at their highest valid price': s.duplicateCodesMaxPrice,
     'Rows merged into another row of the same code_1c': s.rowsMerged,
     'Codes without a valid price (nothing written)': s.codesWithoutValidPrice,
-    'Matched by the 8-digit key (code_1c changed)': s.rowsMatchedByKey,
-    'Rows in an 8-digit key conflict (nothing written)': s.rowsInKeyConflict,
+    'Duplicates with differing quantities (quantity not written)':
+      s.codesWithAmbiguousQuantity,
     'New positions sharing an 8-digit key (separate, not merged)':
       s.rowsToCreateWithSharedKey,
+    '…possibly a stored code renamed in 1C (review)': s.rowsWithPossibleRename,
     'Data errors / warnings': `${s.dataErrors} / ${s.dataWarnings}`,
     'Reference errors / warnings': `${s.referenceErrors} / ${s.referenceWarnings}`,
     'Look-alike product groups (not merged)': s.lookAlikeGroups,
@@ -135,7 +148,7 @@ function printSummary(report: ImportReport, files: string[]): void {
   });
   const v = report.vehicles;
   console.log(
-    `Vehicles: ${v.specificModelRows} specific-model rows (${v.multiModelRows} multi-model, ${v.modelLinks} links), ${v.makeWideRows} make-wide, ${v.universalRows} universal. Units: ${JSON.stringify(report.units)}`,
+    `Vehicles (written for new positions only): ${v.specificModelRows} with models (${v.multiModelRows} multi-model, ${v.modelLinks} links), ${v.makeWideRows} make-wide, ${v.rowsWithoutVehicles} without vehicles (no link; never universal). Units: ${JSON.stringify(report.units)}`,
   );
   if (v.notInBuyerReference.length) {
     console.log(
@@ -154,18 +167,16 @@ function printSummary(report: ImportReport, files: string[]): void {
         `  line ${e.line} ${e.code1c}: "${e.source}" → ${e.to}${e.scaled ? ' (×1000)' : ''}${e.from === null ? ' (new)' : ` (stored ${e.from})`}`,
       );
   }
-  const corrected = report.rows.filter(
-    (r) => r.outcome === 'update' && r.changes.includes('part_number'),
-  );
-  if (corrected.length) {
-    console.log('\nPart number replaced by code_1c (stored → new):');
-    for (const r of corrected.slice(0, SHOWN))
+  const differing = report.rows.filter((r) => r.notApplied?.length);
+  if (differing.length) {
+    console.log(
+      '\nStored positions whose card differs from the file — NOT changed by the sync (Mator owns the card):',
+    );
+    for (const r of differing.slice(0, SHOWN))
+      console.log(`  line ${r.line} ${r.code1c}: ${r.notApplied!.join(', ')}`);
+    if (differing.length > SHOWN)
       console.log(
-        `  line ${r.line}: "${r.partNumber?.from ?? ''}" → "${r.partNumber?.to}"`,
-      );
-    if (corrected.length > SHOWN)
-      console.log(
-        `  … and ${corrected.length - SHOWN} more in the JSON report`,
+        `  … and ${differing.length - SHOWN} more in the JSON report (rows[].notApplied)`,
       );
   }
   const priced = report.duplicates.filter((d) => d.priceUzs !== null);
@@ -182,37 +193,13 @@ function printSummary(report: ImportReport, files: string[]): void {
         `  … and ${priced.length - SHOWN} more in the JSON report (duplicates)`,
       );
   }
-  if (report.keyMatches.length) {
-    console.log(
-      '\nFound by the 8-digit key — the stored position takes the new code_1c:',
-    );
-    for (const m of report.keyMatches.slice(0, SHOWN))
-      console.log(`  line ${m.line}: "${m.storedCode}" → "${m.code1c}"`);
-    if (report.keyMatches.length > SHOWN)
-      console.log(
-        `  … and ${report.keyMatches.length - SHOWN} more in the JSON report (keyMatches)`,
-      );
-  }
-  if (report.keyConflicts.length) {
-    console.log(
-      '\n8-digit key conflicts — these codes are not written, stored positions stay:',
-    );
-    for (const c of report.keyConflicts.slice(0, SHOWN))
-      console.log(
-        `  ${c.key}: file ${c.codes.join(', ')} (lines ${c.lines.join(', ')}); stored ${c.storedCodes.join(', ')}`,
-      );
-    if (report.keyConflicts.length > SHOWN)
-      console.log(
-        `  … and ${report.keyConflicts.length - SHOWN} more in the JSON report (keyConflicts)`,
-      );
-  }
   if (report.keyShared.length) {
     console.log(
-      `\nShared 8-digit key — ${report.summary.rowsToCreateWithSharedKey} new position(s) of their own, nothing merged (code_key_shared):`,
+      `\nShared 8-digit key — ${report.summary.rowsToCreateWithSharedKey} new position(s) of their own, nothing merged or renamed (code_key_shared):`,
     );
     for (const k of report.keyShared.slice(0, SHOWN))
       console.log(
-        `  line ${k.line}: "${k.code1c}" shares ${k.key} with ${[...k.fileCodes, ...k.storedCodes.map((c) => `${c} (stored)`)].join(', ')}`,
+        `  line ${k.line}: "${k.code1c}" shares ${k.key} with ${[...k.fileCodes, ...k.storedCodes.map((c) => `${c} (stored)`)].join(', ')}${k.possibleRenameOf.length ? ` — possibly a 1C rename of ${k.possibleRenameOf.join(', ')}` : ''}`,
       );
     if (report.keyShared.length > SHOWN)
       console.log(
@@ -221,7 +208,7 @@ function printSummary(report: ImportReport, files: string[]): void {
   }
   if (report.headers.notImported.length) {
     console.log(
-      `\nNot imported (categories are assigned in Mator; the part number is code_1c): ${report.headers.notImported.join(', ')}`,
+      `\nNot imported (categories: Mator or the classification import; the part number is code_1c): ${report.headers.notImported.join(', ')}`,
     );
   }
   if (report.environment.issues.length) {
@@ -313,11 +300,7 @@ async function main(): Promise<number> {
 
     if (report.meta.aborted) return 1;
     const s = report.summary;
-    return s.rejectedRows ||
-      s.rowsInKeyConflict ||
-      s.written?.projectionFailures
-      ? 2
-      : 0;
+    return s.rejectedRows || s.written?.projectionFailures ? 2 : 0;
   } finally {
     await prisma.$disconnect();
     lock?.release();

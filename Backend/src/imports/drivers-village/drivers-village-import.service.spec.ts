@@ -174,7 +174,7 @@ describe('DriversVillageImportService', () => {
       });
   });
 
-  it('writes the three vehicle states: specific models (split on , and ;), make-wide, universal', async () => {
+  it('writes the vehicles of a new position: specific models (split on , and ;), make-wide; empty cells link nothing and never make it universal', async () => {
     const { db, service } = setup();
     await service.run(file(...BASE), 'dv.txt', { dryRun: false });
     const st = db.state;
@@ -193,8 +193,9 @@ describe('DriversVillageImportService', () => {
       st.partMakes.filter((m) => m.partId === productOf(db, 'БП-01074051').id),
     ).toHaveLength(1);
     expect(productOf(db, 'БП-01074051').isUniversal).toBe(false);
-    // Global universal: nothing linked, isUniversal.
-    expect(productOf(db, '00-00021040').isUniversal).toBe(true);
+    // Empty make and model: nothing linked, and NOT universal — a blank cell
+    // says nothing about fitment.
+    expect(productOf(db, '00-00021040').isUniversal).toBe(false);
     expect(modelsOf('00-00021040')).toEqual([]);
   });
 
@@ -383,7 +384,7 @@ describe('DriversVillageImportService', () => {
     expect(JSON.stringify(db.state)).toBe(snapshot);
   });
 
-  it('re-import never deletes or changes product photos', async () => {
+  it('a re-import syncs the price only: photos, the name and the vehicles of a stored position stay', async () => {
     const { db, service } = setup();
     await service.run(file(...BASE), 'dv.txt', { dryRun: false });
     const p = productOf(db, '00-00001431');
@@ -411,10 +412,22 @@ describe('DriversVillageImportService', () => {
     expect(
       db.state.productImages.filter((i) => i.productId === p.id),
     ).toHaveLength(2);
+    // Mator owns the card of a stored position: the file's new name and
+    // vehicles are reported, never written.
     expect(productOf(db, '00-00001431')).toMatchObject({
-      title: 'Амортизатор RH',
+      title: 'Амортизатор передний',
       imageUrl: 'https://img/1.jpg',
     });
+    const linked = db.state.partModels
+      .filter((pm) => pm.partId === p.id)
+      .map((pm) => db.state.carModels.find((m) => m.id === pm.modelId)!.name);
+    expect(linked).toEqual(['Damas']);
+    expect(report.rows.find((r) => r.code1c === '00-00001431')).toMatchObject({
+      outcome: 'update',
+      changes: ['price'],
+      notApplied: ['name', 'vehicles'],
+    });
+    expect(stockOf(db, '00-00001431').priceUzs).toBe('1000');
   });
 
   it('dry-run performs every check but zero writes', async () => {

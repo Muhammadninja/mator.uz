@@ -23,6 +23,7 @@
     "grafana:check": "npm run grafana:build && npm run grafana:test",
     "backfill:catalog": "ts-node --compiler-options '{\"module\":\"commonjs\"}' prisma/backfill-catalog.ts",
     "import:drivers-village": "ts-node --compiler-options '{\"module\":\"commonjs\"}' scripts/import-drivers-village.ts",
+    "drivers-village:classify": "ts-node --compiler-options '{\"module\":\"commonjs\"}' scripts/apply-drivers-village-classification.ts",
     "drivers-village:telegram-login": "ts-node --compiler-options '{\"module\":\"commonjs\"}' scripts/drivers-village-telegram-login.ts",
     "drivers-village:telegram-sync": "ts-node --compiler-options '{\"module\":\"commonjs\"}' scripts/drivers-village-telegram-sync.ts",
     "backfill:root-buckets": "ts-node --compiler-options '{\"module\":\"commonjs\"}' prisma/backfill-root-buckets.ts",

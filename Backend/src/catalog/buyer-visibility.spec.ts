@@ -7,7 +7,7 @@ import { NotFoundException } from '@nestjs/common';
 import { PartsService } from './parts/parts.service';
 import { CategoriesService } from './categories/categories.service';
 import { SearchService } from './search/search.service';
-import { BUYER_VISIBLE_PART } from './buyer-visibility';
+import { BUYER_LISTED_PART } from './buyer-visibility';
 import { selectIds } from './compatibility/where-eval.test-util';
 import * as fx from './compatibility/fitment-fixtures.test-util';
 import { createPrismaMock, PrismaMock } from '../../test/utils/harness';
@@ -72,7 +72,7 @@ describe('buyer visibility — suspended dealers', () => {
     );
     expect(prisma.catalogPart.findFirst).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: 'suspended_dealer_part', ...BUYER_VISIBLE_PART },
+        where: { id: 'suspended_dealer_part', ...BUYER_LISTED_PART },
       }),
     );
   });
@@ -111,15 +111,15 @@ describe('buyer visibility — suspended dealers', () => {
 
     await svc.search({ query: 'pads' });
     const searchWhere = prisma.catalogPart.count.mock.calls[0][0].where;
-    expect(searchWhere.AND).toContainEqual(BUYER_VISIBLE_PART);
+    expect(searchWhere.AND).toContainEqual(BUYER_LISTED_PART);
 
     await svc.typeahead('pads');
     const typeaheadWhere =
       prisma.catalogPart.findMany.mock.calls.at(-1)[0].where;
-    expect(typeaheadWhere).toMatchObject(BUYER_VISIBLE_PART);
+    expect(typeaheadWhere).toMatchObject(BUYER_LISTED_PART);
 
     await svc.quickFilters();
     const quickWhere = prisma.catalogPart.groupBy.mock.calls.at(-1)[0].where;
-    expect(quickWhere).toMatchObject(BUYER_VISIBLE_PART);
+    expect(quickWhere).toMatchObject(BUYER_LISTED_PART);
   });
 });

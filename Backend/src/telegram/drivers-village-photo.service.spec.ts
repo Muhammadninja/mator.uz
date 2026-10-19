@@ -46,6 +46,11 @@ describe('parseDvCaption', () => {
     ['1C 12605566pmc', '12605566pmc'], // as typed: code_1c is stored verbatim
     ['1C 1C0919275', '1C0919275'],
     ['1C бп-01068170', 'БП-01068170'], // a legacy code is uppercased, as before
+    // Articles of letters, digits, single spaces and hyphens (code1cIssue).
+    ['1C SCT SB 061-0868', 'SCT SB 061-0868'],
+    ['1C SCT  SB 061-0868', 'SCT SB 061-0868'], // a typed double space
+    ['1C БП 010', 'БП 010'],
+    ['1C 94583379S&T', '94583379S&T'],
   ])('%p → photo update of %p', (caption, code1c) => {
     expect(parseDvCaption(caption)).toEqual({ kind: 'code', code1c });
   });
@@ -76,7 +81,7 @@ describe('parseDvCaption', () => {
     '1C',
     '1C:',
     '1С ',
-    '1C БП 010', // a space without an 8-digit article
+    '1C Фильтр масляный', // a product name, no article
     '1C 1', // a placeholder, never imported
     '1C 3333',
     '1C ???',

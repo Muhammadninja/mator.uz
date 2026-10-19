@@ -9,7 +9,7 @@
 import { CategoriesService } from './categories.service';
 import { createPrismaMock, PrismaMock } from '../../../test/utils/harness';
 import { vehicleFitWhere } from '../compatibility/vehicle-fitment';
-import { buyerVisible } from '../buyer-visibility';
+import { buyerListed } from '../buyer-visibility';
 import { selectIds } from '../compatibility/where-eval.test-util';
 import * as fx from '../compatibility/fitment-fixtures.test-util';
 
@@ -205,7 +205,7 @@ describe('CategoriesService — garage-scoped counts', () => {
   });
 
   it("another user's vehicle_id does not scope the counts (treated as unknown)", async () => {
-    const unscoped = selectIds(PARTS, buyerVisible(undefined)).length;
+    const unscoped = selectIds(PARTS, buyerListed(undefined)).length;
     expect(await brakesCountFor('cobalt', 'usr_other')).toBe(unscoped);
     expect(await brakesCountFor('cobalt', null)).toBe(unscoped);
     expect(unscoped).toBeGreaterThan(await brakesCountFor('cobalt'));

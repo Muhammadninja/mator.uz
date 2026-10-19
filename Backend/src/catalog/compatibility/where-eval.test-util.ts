@@ -6,8 +6,9 @@
  * evaluator runs the predicate over fixture rows so a test can assert the
  * RESULT ("Cobalt sees X, Spark does not"). It implements only the subset the
  * catalog filters use — AND / OR / NOT, to-many `some` / `none`, to-one
- * nested filters, `equals` / `contains` (+ `mode: 'insensitive'`), `in`, `has`,
- * `not`, and plain equality — and throws on anything else, so an unsupported
+ * nested filters (bare or `is` / `isNot`), `equals` / `contains` (+ `mode:
+ * 'insensitive'`), `in`, `has`, `isEmpty`, `not`, numeric `lt` / `lte` / `gt`
+ * / `gte`, and plain equality — and throws on anything else, so an unsupported
  * operator fails loudly instead of silently matching.
  *
  * It is NOT a substitute for PostgreSQL: it proves the predicate's logic, not
@@ -56,6 +57,28 @@ function matchScalar(actual: unknown, filter: unknown): boolean {
       case 'has':
         if (!Array.isArray(actual) || !actual.includes(expected)) return false;
         break;
+      case 'isEmpty':
+        // Prisma emits `= '{}'` / `<> '{}'`: a NULL list matches neither.
+        if (!Array.isArray(actual) || (actual.length === 0) !== expected)
+          return false;
+        break;
+      case 'lt':
+      case 'lte':
+      case 'gt':
+      case 'gte': {
+        if (typeof actual !== 'number' || typeof expected !== 'number')
+          return false;
+        const holds =
+          op === 'lt'
+            ? actual < expected
+            : op === 'lte'
+              ? actual <= expected
+              : op === 'gt'
+                ? actual > expected
+                : actual >= expected;
+        if (!holds) return false;
+        break;
+      }
       default:
         throw new Error(`where-eval: unsupported scalar operator "${op}"`);
     }
@@ -101,6 +124,16 @@ export function matchesWhere(record: Rec, where: unknown): boolean {
         !rows.every((r) => matchesWhere(r, filter.every))
       )
         return false;
+      continue;
+    }
+    if (isPlainObject(filter) && ('is' in filter || 'isNot' in filter)) {
+      // To-one relation, explicit form; an absent relation matches only null.
+      const related = (w: unknown) =>
+        w === null
+          ? value == null
+          : isPlainObject(value) && matchesWhere(value, w);
+      if ('is' in filter && !related(filter.is)) return false;
+      if ('isNot' in filter && related(filter.isNot)) return false;
       continue;
     }
     if (isPlainObject(value) && isPlainObject(filter)) {

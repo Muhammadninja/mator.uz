@@ -13,6 +13,10 @@ import {
   FakeDrafts,
   FakePrisma,
 } from '../../test/utils/dv-photo-world';
+import { createPrismaMock } from '../../test/utils/harness';
+import { matchesWhere } from '../catalog/compatibility/where-eval.test-util';
+import { PartsService } from '../catalog/parts/parts.service';
+import { CatalogProjectionService } from '../catalog/projection/catalog-projection.service';
 import { DraftCoordinator } from './draft-coordinator';
 import { DraftEvent } from './draft-events';
 import { DriversVillagePhotoService } from './drivers-village-photo.service';
@@ -498,7 +502,7 @@ describe("Driver's Village photo update over Telegram", () => {
       expect(t.world.writes).toEqual([]);
     });
 
-    it.each(['1C', '1C БП 010', '1C 1'])(
+    it.each(['1C', '1C Фильтр масляный', '1C 1'])(
       '%p (the marker without a valid code) is refused, never the wizard',
       async (caption) => {
         const t = setup();
@@ -721,5 +725,112 @@ describe("Driver's Village photo update over Telegram", () => {
         jest.useRealTimers();
       }
     });
+  });
+});
+
+/**
+ * catalog_parts.images of `stockId` as the REAL projection writes it from the
+ * world's current product photos (the flow itself mocks projectStock).
+ */
+function projectedImages(w: FakePrisma, stockId: number): string[] {
+  const stock = w.state.stocks.find((s) => s.id === stockId)!;
+  const prisma = createPrismaMock();
+  // Only the ops' arguments are read; the mocked ops are never run.
+  void new CatalogProjectionService(prisma).buildProjectionOps({
+    ...stock,
+    seller: w.state.sellers.find((s) => s.id === stock.sellerId),
+    product: {
+      ...w.state.products.find((p) => p.id === stock.productId),
+      // The projection's include orders the gallery by sortOrder.
+      images: w.state.productImages
+        .filter((i) => i.productId === stock.productId)
+        .sort((a, b) => a.sortOrder - b.sortOrder),
+      partModels: [],
+      partMakes: [],
+    },
+  } as never);
+  return prisma.catalogPart.upsert.mock.calls[0][0].create.images;
+}
+
+/** Whether GET /v1/catalog/parts lists the part of `stockId` (its real `where`). */
+async function catalogLists(w: FakePrisma, stockId: number): Promise<boolean> {
+  const prisma = createPrismaMock();
+  prisma.catalogPart.aggregate.mockResolvedValue({ _min: {}, _max: {} });
+  await new PartsService(prisma, {} as never).list({});
+  const { where } = prisma.catalogPart.findMany.mock.calls[0][0];
+  const row = {
+    images: projectedImages(w, stockId),
+    seller: { status: 'ACTIVE' },
+  };
+  return matchesWhere(row, where);
+}
+
+describe("Driver's Village photo update → buyer catalog: only READY photos list a part", () => {
+  const CODE = '96273708';
+
+  it('a position imported without photos stays unlisted while its photos are queued or processing', async () => {
+    const t = withPosition(CODE);
+    expect(projectedImages(t.world, 501)).toEqual([]);
+    expect(await catalogLists(t.world, 501)).toBe(false);
+
+    await t.sendAlbum(['p1', 'p2'], `1C ${CODE}`);
+    // Enqueued in BullMQ, not processed yet: nothing reaches the product.
+    expect(t.svc.queue.enqueueImage).toHaveBeenCalledTimes(2);
+    const [draft] = [...t.drafts.drafts.values()];
+    expect(draft.images.map((i) => i.status)).toEqual([
+      'PROCESSING',
+      'PROCESSING',
+    ]);
+    expect(t.world.writes).toEqual([]);
+    expect(await catalogLists(t.world, 501)).toBe(false);
+  });
+
+  it('failed processing keeps it unlisted: it has no other ready photo', async () => {
+    const t = withPosition(CODE);
+    await t.sendAlbum(['p1', 'p2'], `1C ${CODE}`);
+    await t.finishImages('FAILED');
+    expect(t.world.writes).toEqual([]);
+    expect(await catalogLists(t.world, 501)).toBe(false);
+  });
+
+  it('once processing succeeds and the update is confirmed it is listed — no status is written', async () => {
+    const t = withPosition(CODE);
+    const stocksBefore = structuredClone(t.world.state.stocks);
+    await t.sendAlbum(['p1', 'p2'], `1C ${CODE}`);
+    const draftId = await t.finishImages('READY');
+    // READY photos wait in the draft for the preview's Confirm.
+    expect(await catalogLists(t.world, 501)).toBe(false);
+
+    await t.tap(`dvph:ok:${draftId}`);
+
+    expect(t.svc.catalogProjection.projectStock).toHaveBeenCalledWith(501);
+    expect(projectedImages(t.world, 501)).toEqual([
+      'https://cdn/proc/p1.jpg',
+      'https://cdn/proc/p2.jpg',
+    ]);
+    expect(await catalogLists(t.world, 501)).toBe(true);
+    // Only the gallery and its imageUrl mirror were written: no flag, no status.
+    expect(t.world.writes).toEqual([
+      'product.lock:101',
+      'productImage.deleteMany:101',
+      'productImage.createMany:101',
+      'product.update:101:imageUrl',
+    ]);
+    expect(t.world.state.stocks).toEqual(stocksBefore);
+  });
+
+  it('a ready gallery stays listed while a new photo is processing, and after it fails', async () => {
+    const t = setup(); // position #500 already has two ready photos
+    expect(await catalogLists(t.world, 500)).toBe(true);
+
+    await t.sendPhoto('n1', DV_CODE);
+    expect(await catalogLists(t.world, 500)).toBe(true);
+
+    await t.finishImages('FAILED');
+    expect(projectedImages(t.world, 500)).toEqual([
+      'https://old/dv-0.jpg',
+      'https://old/dv-1.jpg',
+    ]);
+    expect(await catalogLists(t.world, 500)).toBe(true);
   });
 });

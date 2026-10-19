@@ -6,6 +6,7 @@
  * database.
  */
 import { selectIds } from '../../catalog/compatibility/where-eval.test-util';
+import { READY_PHOTO } from '../../catalog/compatibility/fitment-fixtures.test-util';
 import { PartsService } from '../../catalog/parts/parts.service';
 import { importHarness } from '../../../test/utils/drivers-village-import-harness';
 
@@ -39,9 +40,14 @@ async function search(
     }),
   };
   await new PartsService(prisma as never, discounts as never).list({ q });
-  // The dealer is not suspended (the buyer-visibility rule of every listing).
+  // The dealer is not suspended and the position has a ready photo — the
+  // buyer-listing rule of every listing (an import alone brings no photo).
   return selectIds(
-    parts.map((p) => ({ ...p, seller: { status: 'ACTIVE' } })),
+    parts.map((p) => ({
+      ...p,
+      seller: { status: 'ACTIVE' },
+      images: [READY_PHOTO],
+    })),
     where,
   );
 }
@@ -60,17 +66,20 @@ function sharedValues(rows: Record<string, unknown>[]): string[] {
 }
 
 describe('Driver’s Village — the 8-digit key in the OEM search index', () => {
-  it('after `96273708` became `96273708 GMB`, the part is found by 96273708 and by its full code', async () => {
-    const { db, run, partOf } = importHarness();
+  it('`96273708 GMB` next to a stored `96273708` is a new position: the bare article finds the stored part, the full code the new one', async () => {
+    const { db, run, productOf, partOf } = importHarness();
     await run([{ code: '96273708' }]);
     const parts = db.state.catalogParts;
     expect(await search(parts, '96273708')).toEqual([partOf('96273708')!.id]);
 
     await run([{ code: '96273708 GMB', price: '165000' }]);
 
-    const id = partOf('96273708 GMB')!.id;
-    for (const q of ['96273708', '96273708 GMB', '96273708-gmb'])
-      expect(await search(parts, q)).toEqual([id]);
+    // The key is the stored part's number: never indexed on the new one.
+    expect(productOf('96273708 GMB')!.oemNumbers).toEqual(['96273708GMB']);
+    expect(sharedValues(db.state.catalogParts)).toEqual([]);
+    expect(await search(parts, '96273708')).toEqual([partOf('96273708')!.id]);
+    for (const q of ['96273708 GMB', '96273708-gmb'])
+      expect(await search(parts, q)).toEqual([partOf('96273708 GMB')!.id]);
     expect(await search(parts, '96273709')).toEqual([]);
   });
 
@@ -104,14 +113,8 @@ describe('Driver’s Village — the 8-digit key in the OEM search index', () =>
       expect(again.summary).toMatchObject({ rowsUnchanged: 1 });
     }
 
-    expect(productOf('96273708 GMB')!.oemNumbers).toEqual([
-      '96273708GMB',
-      '96273708',
-    ]);
-    expect(partOf('96273708 GMB')!.oemNumbers).toEqual([
-      '96273708GMB',
-      '96273708',
-    ]);
+    expect(productOf('96273708 GMB')!.oemNumbers).toEqual(['96273708GMB']);
+    expect(partOf('96273708 GMB')!.oemNumbers).toEqual(['96273708GMB']);
     expect(store.applyBatchCalls).toBe(batches);
     expect(JSON.stringify(db.state)).toBe(snapshot);
   });
@@ -131,20 +134,28 @@ describe('Driver’s Village — the 8-digit key in the OEM search index', () =>
     ]);
   });
 
-  it('a key that becomes shared leaves the index of the position that had it alone', async () => {
+  it('a stored index is never changed by the sync: a number that becomes shared is reported (oem_index_shared)', async () => {
     const { db, run, productOf } = importHarness();
     await run([{ code: '96273708 GMB' }]);
-    expect(productOf('96273708 GMB')!.oemNumbers).toContain('96273708');
+    expect(productOf('96273708 GMB')!.oemNumbers).toEqual([
+      '96273708GMB',
+      '96273708',
+    ]);
 
     const report = await run([{ code: '96273708 GMB' }, { code: '96273708' }]);
 
-    expect(report.rows[0]).toMatchObject({
-      outcome: 'update',
-      changes: ['oem_numbers'],
-    });
-    expect(productOf('96273708 GMB')!.oemNumbers).toEqual(['96273708GMB']);
+    expect(report.rows[0]).toMatchObject({ outcome: 'unchanged', changes: [] });
+    expect(productOf('96273708 GMB')!.oemNumbers).toEqual([
+      '96273708GMB',
+      '96273708',
+    ]);
+    // The bare article's own number is its search number; that the stored
+    // position carries it as a key is reported for an operator.
     expect(productOf('96273708')!.oemNumbers).toEqual(['96273708']);
-    expect(sharedValues(db.state.products)).toEqual([]);
+    expect(
+      report.rows[1].issues.find((i) => i.code === 'oem_index_shared')!.message,
+    ).toMatch(/"96273708 GMB".*sync-inventory/);
+    expect(sharedValues(db.state.products)).toEqual(['96273708']);
   });
 
   it('an unproven change (GMB → OEM) indexes the new position by its own code only; the stored one keeps its index', async () => {

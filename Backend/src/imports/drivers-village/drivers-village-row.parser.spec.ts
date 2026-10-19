@@ -315,13 +315,13 @@ describe('parseRow', () => {
     ).toEqual({ kind: 'models', make: 'Chevrolet', models: ['Tracker'] });
   });
 
-  it('vehicles: make-wide and global universal are valid states', () => {
+  it('vehicles: make-wide is a valid state; empty cells say nothing — never "universal"', () => {
     expect(
       parse({ vehicle_model: '', vehicle_make: 'SKODA' }).row?.vehicle,
     ).toEqual({ kind: 'make', make: 'Skoda' });
-    const universal = parse({ vehicle_model: '', vehicle_make: '' });
-    expect(universal.issues).toEqual([]);
-    expect(universal.row?.vehicle).toEqual({ kind: 'universal' });
+    const empty = parse({ vehicle_model: '', vehicle_make: '' });
+    expect(empty.issues).toEqual([]);
+    expect(empty.row?.vehicle).toEqual({ kind: 'none' });
   });
 
   it('vehicles: model without make and unknown make/model are errors — one unknown model rejects the row', () => {
@@ -354,17 +354,22 @@ describe('parseRow', () => {
 
   it('code_1c and name: required, trimmed, whitespace-normalized', () => {
     expect(codes({ code_1c: '  ' })).toEqual(['empty_code_1c']);
-    // Rejected, never altered into a different number. A space is accepted
-    // only as one plain space next to an 8-digit article (see below).
+    // Rejected, never altered into a different number: irregular whitespace
+    // (two spaces, a no-break space) is never collapsed into another code.
+    for (const code_1c of ['95015324  OEM', '95015324\u00a0OEM'])
+      expect(codes({ code_1c })).toEqual(['invalid_code_1c']);
+    // Articles of letters, digits, single spaces and hyphens are accepted,
+    // verbatim — not only numbers.
     for (const code_1c of [
       'БП 010',
       '96810038S&T',
-      '95015324  OEM',
-      '95015324 OEM',
       '123456789 OEM',
-      '95015324 96273708',
+      'SCT SB 061-0868',
     ])
-      expect(codes({ code_1c })).toEqual(['invalid_code_1c']);
+      expect(parse({ code_1c }).row).toMatchObject({
+        code1c: code_1c,
+        sourcePartNumber: code_1c,
+      });
     // An 8-digit article with a marker: kept verbatim, space included, as the
     // part number. The OEM index takes it normalized, like the buyer search's
     // query (the 8-digit key is added in planning).

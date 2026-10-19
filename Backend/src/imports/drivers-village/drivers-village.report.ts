@@ -5,8 +5,6 @@
  */
 import type { NumberFormat } from './drivers-village-price';
 import type {
-  CodeKeyConflict,
-  CodeKeyMatch,
   CodeKeyShared,
   DuplicateCode,
   ImportIssue,
@@ -15,7 +13,9 @@ import type {
 import type { DelimiterName } from './tsv-reader';
 
 export type RowOutcome =
+  /** A new position: created from the row (initial creation). */
   | 'create'
+  /** A stored position whose price and/or stated quantity changes. */
   | 'update'
   | 'unchanged'
   /**
@@ -23,11 +23,6 @@ export type RowOutcome =
    * (the highest valid price); nothing of this row is written.
    */
   | 'merged'
-  /**
-   * A valid row whose code_1c has no stored position of its own and whose
-   * 8-digit key is ambiguous (see `keyConflicts`); nothing of it is written.
-   */
-  | 'conflict'
   /** The source row itself is invalid; nothing of it is written. */
   | 'rejected';
 
@@ -47,12 +42,21 @@ export interface RowReport {
   line: number;
   code1c: string | null;
   outcome: RowOutcome;
-  /** Import-owned fields that change (update only). */
+  /** What the sync writes to a stored position: 'price' / 'quantity'. */
   changes: string[];
+  /**
+   * Card fields of a stored position in which the file differs ('name',
+   * 'unit', 'gm_number', 'part_number', 'vehicles') — reported, NOT written:
+   * the sync never changes an existing card.
+   */
+  notApplied?: string[];
   price?: PriceTrace;
-  /** `to: null` = not in the file (create → schema default 1; update → kept). */
+  /**
+   * `to: null` = no confirmed quantity (no column, an empty cell, or rows of
+   * the code that differ): create → schema default 1; update → kept.
+   */
   quantity?: { from: number | null; to: number | null };
-  /** The part number written (code_1c) and the stored one (null when new). */
+  /** New positions only: the part number written (code_1c). */
   partNumber?: { from: string | null; to: string };
   /** Real run only: what was actually done. */
   written?: 'created' | 'updated' | 'skipped_unchanged' | 'not_written';
@@ -91,8 +95,9 @@ export interface ImportReport {
     mapped: Partial<Record<string, string>>;
     ignored: string[];
     /**
-     * Known columns the import never reads: category_id, subcategory_id,
-     * manufacturer_part_number, oem_numbers.
+     * Known columns the sync never reads: category_id, subcategory_id (the
+     * classification import applies them), manufacturer_part_number,
+     * oem_numbers.
      */
     notImported: string[];
   };
@@ -114,14 +119,16 @@ export interface ImportReport {
     rowsUnchanged: number;
     /** Planned updates whose price changes. */
     rowsWithPriceChange: number;
+    /** Planned updates whose (stated) quantity changes. */
+    rowsWithQuantityChange: number;
+    /** Stored positions whose card differs from the file (not applied). */
+    rowsWithCardDifferences: number;
     /** Valid rows whose source price was in thousands (×1000). */
     rowsWithScaledPrice: number;
     /** New positions — all created without a category. */
     newWithoutCategory: number;
     /** Positions in the file that exist but are still unclassified. */
     existingWithoutCategory: number;
-    /** Planned updates whose stored part number is replaced by code_1c. */
-    rowsWithPartNumberChange: number;
     /** code_1c values on more than one row (each is ONE position). */
     duplicateSourceCodes: number;
     /** …of which a highest valid price was chosen (see `duplicates`). */
@@ -130,14 +137,12 @@ export interface ImportReport {
     rowsMerged: number;
     /** code_1c values with no valid price on any row: nothing written. */
     codesWithoutValidPrice: number;
-    /** Rows that update a position stored under another code (8-digit key). */
-    rowsMatchedByKey: number;
-    /** 8-digit keys the import could not resolve (see `keyConflicts`). */
-    keyConflicts: number;
-    /** Valid rows not written because of such a key (outcome 'conflict'). */
-    rowsInKeyConflict: number;
+    /** Repeated codes whose rows state different quantities: none written. */
+    codesWithAmbiguousQuantity: number;
     /** New positions created although another code shares their key. */
     rowsToCreateWithSharedKey: number;
+    /** …of which possibly a stored code renamed in 1C (see `keyShared`). */
+    rowsWithPossibleRename: number;
     dataErrors: number;
     dataWarnings: number;
     referenceErrors: number;
@@ -155,8 +160,10 @@ export interface ImportReport {
       projectionFailures: number;
     } | null;
   };
+  /** Per position, its vehicles merged over the rows of its code. */
   vehicles: {
-    universalRows: number;
+    /** No vehicle cells: no link is written (never "universal"). */
+    rowsWithoutVehicles: number;
     makeWideRows: number;
     specificModelRows: number;
     multiModelRows: number;
@@ -174,11 +181,10 @@ export interface ImportReport {
   units: Record<string, number>;
   /** Every code_1c on more than one row: its rows and the price chosen. */
   duplicates: DuplicateCode[];
-  /** Positions found by the 8-digit key: stored code → the file's code_1c. */
-  keyMatches: CodeKeyMatch[];
-  /** 8-digit keys left unresolved: their codes are not written. */
-  keyConflicts: CodeKeyConflict[];
-  /** New positions sharing an 8-digit key (warning code_key_shared). */
+  /**
+   * New positions sharing an 8-digit key (warning code_key_shared), with the
+   * stored codes they may be a 1C rename of — for an operator; never merged.
+   */
   keyShared: CodeKeyShared[];
   lookAlikes: { key: string; codes: string[] }[];
   positionsNotInFile: string[];
@@ -197,10 +203,16 @@ const CSV_COLUMNS = [
   'message',
 ];
 
-/** One CSV line per issue, for every row that has at least one issue. */
-export function issuesToCsv(report: ImportReport): string {
+/**
+ * One CSV line per issue, for every row that has at least one issue. Shared by
+ * the sync and the classification report (any `rows` with an outcome).
+ */
+export function issuesToCsv(report: {
+  environment: { issues: ImportIssue[] };
+  rows: { outcome: string; issues: ImportIssue[] }[];
+}): string {
   const lines = [CSV_COLUMNS.join(',')];
-  const push = (row: RowReport | null, i: ImportIssue) =>
+  const push = (row: { outcome: string } | null, i: ImportIssue) =>
     lines.push(
       [
         i.line ?? '',

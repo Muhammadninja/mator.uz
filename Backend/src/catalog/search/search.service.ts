@@ -9,7 +9,7 @@ import {
 } from '../../common/app-lang.util';
 import { formatUzs } from '../parts/part.presenter';
 import { SearchDto } from './dto/search.dto';
-import { BUYER_VISIBLE_PART } from '../buyer-visibility';
+import { BUYER_LISTED_PART } from '../buyer-visibility';
 
 const MAX_SEARCH_LIMIT = 50;
 const MAX_TYPEAHEAD_LIMIT = 20;
@@ -32,9 +32,10 @@ export class SearchService {
     const limit = clampLimit(dto.limit, 20, MAX_SEARCH_LIMIT);
     const categories = (dto.filters?.categories as string[] | undefined) ?? [];
 
-    // Never a suspended dealer's parts (buyer-visibility.ts). Kept under AND so
-    // the `seller` rating filter below can still be spread in beside it.
-    const where: Prisma.CatalogPartWhereInput = { AND: [BUYER_VISIBLE_PART] };
+    // Only buyer-listed parts: no suspended dealer, a ready photo
+    // (buyer-visibility.ts). Kept under AND so the `seller` rating filter below
+    // can still be spread in beside it.
+    const where: Prisma.CatalogPartWhereInput = { AND: [BUYER_LISTED_PART] };
     if (q) where.title = { contains: q, mode: 'insensitive' };
     if (categories.length) where.categoryId = { in: categories };
 
@@ -155,7 +156,7 @@ export class SearchService {
       const products = await this.prisma.catalogPart.findMany({
         where: {
           title: { contains: term, mode: 'insensitive' },
-          ...BUYER_VISIBLE_PART,
+          ...BUYER_LISTED_PART,
         },
         select: { id: true, title: true },
         take: Math.max(0, safeLimit - 1),
@@ -176,7 +177,7 @@ export class SearchService {
     const safeLimit = clampLimit(limit, 8, MAX_QUICK_FILTERS);
     const grouped = await this.prisma.catalogPart.groupBy({
       by: ['brandId'],
-      where: { inStock: true, brandId: { not: null }, ...BUYER_VISIBLE_PART },
+      where: { inStock: true, brandId: { not: null }, ...BUYER_LISTED_PART },
       _count: { _all: true },
       orderBy: { _count: { brandId: 'desc' } },
       take: safeLimit,

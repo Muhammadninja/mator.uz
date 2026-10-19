@@ -28,12 +28,15 @@ export interface FakeCatalogPrisma {
   /** catalog_part_fits / catalog_part_make_fits rows written so far. */
   fits: Row[];
   makeFits: Row[];
+  /** Every fit deletion, in order — a sync or classification makes none. */
+  calls: string[];
 }
 
 export function fakeCatalogPrisma(db: FakeDb): FakeCatalogPrisma {
   const st = () => db.state;
   const fits: Row[] = [];
   const makeFits: Row[] = [];
+  const calls: string[] = [];
   const noop = () => lazy(() => ({}));
 
   const prisma = {
@@ -82,11 +85,44 @@ export function fakeCatalogPrisma(db: FakeDb): FakeCatalogPrisma {
         st().catalogSellers.find((c) => c.id === where.id) ?? null,
       upsert: noop,
     },
-    // The category tree only feeds main-category derivation for the home grid,
-    // which these specs do not exercise.
-    partCategory: { findMany: async () => [], upsert: noop },
+    // The category tree feeds the main-category derivation for the home grid.
+    partCategory: {
+      findMany: async () =>
+        st().partCategories.map(({ id, parentId }) => ({ id, parentId })),
+      upsert: noop,
+    },
     partBrand: { upsert: noop },
     catalogPart: {
+      findUnique: async ({ where }: { where: { id: string } }) => {
+        const row = st().catalogParts.find((c) => c.id === where.id);
+        return row ? { ...row } : null;
+      },
+      // Like an UPDATE: only the columns named change.
+      update: ({ where, data }: { where: { id: string }; data: Row }) =>
+        lazy(() => {
+          const row = st().catalogParts.find((c) => c.id === where.id);
+          if (!row) throw new Error(`catalog part ${where.id} not found`);
+          Object.assign(row, data);
+          return {};
+        }),
+      // The compare-and-set the classification projection uses.
+      updateMany: ({
+        where,
+        data,
+      }: {
+        where: { id: string; categoryId?: string };
+        data: Row;
+      }) =>
+        lazy(() => {
+          const rows = st().catalogParts.filter(
+            (c) =>
+              c.id === where.id &&
+              (where.categoryId === undefined ||
+                c.categoryId === where.categoryId),
+          );
+          for (const row of rows) Object.assign(row, data);
+          return { count: rows.length };
+        }),
       upsert: ({
         where,
         update,
@@ -107,21 +143,40 @@ export function fakeCatalogPrisma(db: FakeDb): FakeCatalogPrisma {
     },
     catalogPartFit: {
       deleteMany: ({ where }: { where: { partId: string } }) =>
-        lazy(() => remove(fits, where.partId)),
-      createMany: ({ data }: { data: Row[] }) => lazy(() => fits.push(...data)),
+        lazy(() => {
+          calls.push('catalogPartFit.deleteMany');
+          remove(fits, where.partId);
+        }),
+      createMany: ({ data }: { data: Row[] }) =>
+        lazy(() => insert(fits, data, 'modelSlug')),
     },
     catalogPartMakeFit: {
       deleteMany: ({ where }: { where: { partId: string } }) =>
-        lazy(() => remove(makeFits, where.partId)),
+        lazy(() => {
+          calls.push('catalogPartMakeFit.deleteMany');
+          remove(makeFits, where.partId);
+        }),
       createMany: ({ data }: { data: Row[] }) =>
-        lazy(() => makeFits.push(...data)),
+        lazy(() => insert(makeFits, data, 'makeSlug')),
     },
     $transaction: async (ops: PromiseLike<unknown>[]) => Promise.all(ops),
   };
-  return { prisma: prisma as unknown as PrismaService, fits, makeFits };
+  return {
+    prisma: prisma as unknown as PrismaService,
+    fits,
+    makeFits,
+    calls,
+  };
 }
 
 function remove(rows: Row[], partId: string): void {
   for (let i = rows.length - 1; i >= 0; i -= 1)
     if (rows[i].partId === partId) rows.splice(i, 1);
+}
+
+/** createMany: the primary key is (partId, slug), so a duplicate is skipped. */
+function insert(rows: Row[], data: Row[], slug: string): void {
+  for (const row of data)
+    if (!rows.some((r) => r.partId === row.partId && r[slug] === row[slug]))
+      rows.push(row);
 }

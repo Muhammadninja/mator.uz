@@ -61,9 +61,11 @@ const REQUIRED: Field[] = [
 /**
  * Columns an export may carry that the import deliberately never reads.
  * Reported separately from unknown columns so nobody expects them to apply.
- *   • category_id, subcategory_id — classification belongs to Mator, not to
- *     1C: a new position is created without a category and an operator files
- *     it in the admin console; an existing one keeps whatever category it has.
+ *   • category_id, subcategory_id — the price/stock sync never classifies: a
+ *     new position is created without a category, an existing one keeps
+ *     whatever category it has. A prepared classification file is applied by
+ *     the separate, explicitly run classification import
+ *     (drivers-village-classification.service.ts).
  *   • manufacturer_part_number, oem_numbers — the manufacturer part number is
  *     code_1c (business rule, 2026-10-18). These cells hold unreliable values
  *     (brand and model names among them), so they never reach the database.
@@ -307,7 +309,11 @@ export function parseRow(
   };
 }
 
-type Report = (code: string, field: Field | null, message: string) => void;
+export type Report = (
+  code: string,
+  field: Field | null,
+  message: string,
+) => void;
 
 /** gm_number: one all-digit number or empty. GM numbers never carry letters. */
 function parseGm(raw: string, err: Report): string | null {
@@ -372,8 +378,12 @@ function indexOem(code: string, warn: Report): string[] {
   return [normalized];
 }
 
-/** The three valid vehicle states, with every model resolved to canonical. */
-function parseVehicle(
+/**
+ * The vehicle cells of one row, with every model resolved to canonical. Both
+ * cells empty → 'none': the row says nothing about fitment (it never makes a
+ * part universal). Null when the cells are invalid; `err` names the problem.
+ */
+export function parseVehicle(
   rawMake: string,
   rawModel: string,
   err: Report,
@@ -381,8 +391,7 @@ function parseVehicle(
   const makeCode = normalizeVehicleCode(rawMake);
   const modelField = rawModel.trim();
 
-  if (!makeCode && !modelField)
-    return { spec: { kind: 'universal' }, mappings: [] };
+  if (!makeCode && !modelField) return { spec: { kind: 'none' }, mappings: [] };
   if (!makeCode) {
     err(
       'invalid_vehicle_combination',

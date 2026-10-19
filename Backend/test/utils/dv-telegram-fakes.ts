@@ -195,7 +195,6 @@ export function reportStub(
       rowsToUpdate: 0,
       rowsUnchanged: 0,
       rowsMerged: 0,
-      rowsWithPartNumberChange: 0,
       written: {
         created: 3,
         updated: 0,
