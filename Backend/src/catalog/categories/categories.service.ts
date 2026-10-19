@@ -13,7 +13,7 @@ import {
   vehicleFitWhere,
 } from '../compatibility/vehicle-fitment';
 import { VEHICLE_CATEGORIES } from './part-categories.catalog';
-import { buyerVisible } from '../buyer-visibility';
+import { buyerListed } from '../buyer-visibility';
 
 /**
  * Serves the two-level part category hierarchy with LIVE per-category inventory
@@ -37,9 +37,10 @@ export class CategoriesService {
     userId: string | null = null,
   ) {
     const scope = query.scope ?? 'main';
-    // Counts cover exactly what the listing can show: buyer-visible parts
-    // (no suspended dealer), scoped to the garage vehicle when one is given.
-    const vehicleWhere = buyerVisible(
+    // Counts cover exactly what the listing can show: buyer-listed parts (no
+    // suspended dealer, a ready photo), scoped to the garage vehicle when one
+    // is given.
+    const vehicleWhere = buyerListed(
       await this.vehicleScopeWhere(query.vehicle_id, userId),
     );
 

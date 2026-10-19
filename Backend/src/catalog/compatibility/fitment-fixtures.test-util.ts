@@ -70,12 +70,18 @@ interface PartSpec {
   compat?: { trimId: string | null; engineId: string | null; status: string }[];
   /** The dealer storefront's DealerStatus (default PENDING, like projections). */
   sellerStatus?: string;
+  /** catalog_parts.images (default: one ready photo, so the catalog lists it). */
+  images?: string[] | null;
 }
+
+/** A finished (processed) photo, as the projection copies it into `images`. */
+export const READY_PHOTO = 'https://res.cloudinary.com/mator/proc/ready.png';
 
 export function part(spec: PartSpec) {
   return {
     id: spec.id,
     isUniversal: spec.isUniversal ?? false,
+    images: spec.images === undefined ? [READY_PHOTO] : spec.images,
     fitmentBindings: (spec.curated ?? []).map((m) => ({
       vehicleModelId: m,
       vehicleModel: MODELS[m],
