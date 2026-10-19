@@ -385,13 +385,22 @@ or the linked seller — typical on a dev DB, not a source-data problem).
 
 Any Telegram user who knows a position's `code_1c` can replace its photos:
 
-1. Send 1–10 photos (one photo or an album) with the caption = the exact
-   `code_1c`, e.g. `00-00001431` or `БП-01068170`. Case, surrounding spaces and a
-   phone's dash look-alikes are normalized; otherwise the match is exact.
+1. Send 1–10 photos (one photo or an album) with the caption `1C <code_1c>`,
+   e.g. `1C 87654321` or `1C 96273708 GMB` (`1С` with a Cyrillic С, any case,
+   and `1C: …` work too). A legacy code such as `00-00001431` or `БП-01068170`
+   still works alone, without `1C`. The code must pass the importer's own
+   code_1c rule (`code1cIssue`). Spaces, NFKC forms and a phone's dash
+   look-alikes are normalized; otherwise the code is matched exactly as
+   stored, case included (only a legacy code is uppercased).
 2. The bot finds the position **only** by
    `(stocks.seller_id = Driver's Village BUSINESS seller, source_system =
-   DRIVERS_VILLAGE_1C, source_code = code_1c)` — never by GM/OEM number. An
-   unknown code is answered with a clear message and nothing is written.
+   DRIVERS_VILLAGE_1C, source_code = code_1c)` — never by GM/OEM number. The
+   exact code wins; otherwise the importer's 8-digit key rule applies, so the
+   bare article and the article with a marker find each other (`96273708` ↔
+   `96273708 GMB`). An unknown code, a code whose key links several positions
+   (they are listed) and a `1C` caption without a valid code are each answered
+   with a clear message: nothing is written and the photos never go to the
+   listing wizard.
 3. The photos go through the same pipeline as a new listing (photo-update
    draft → BullMQ worker → FLUX → Cloudinary) and the same preview media, with
    ✅ Confirm / ❌ Cancel.
@@ -403,8 +412,8 @@ Any Telegram user who knows a position's `code_1c` can replace its photos:
 5. **Cancel** changes nothing in the database; only the preview's temporary
    uploads are deleted.
 
-A caption that is not code-shaped (or no caption) keeps the ordinary listing
-wizard exactly as before. Imports never touch photos, so a re-import keeps them.
+A caption without `1C` that is not a legacy code (or no caption) keeps the
+ordinary listing wizard exactly as before. Imports never touch photos, so a re-import keeps them.
 A later confirm replaces the gallery again; old Cloudinary assets of a replaced
 gallery are not deleted (the same as an ordinary re-listing).
 

@@ -3,7 +3,48 @@
  * against the stored ones — pure functions. End to end through the importer:
  * drivers-village-code-key-import.spec.ts.
  */
-import { eightDigitKey, resolveCodeKeys } from './drivers-village-code-key';
+import {
+  code1cIssue,
+  eightDigitKey,
+  keyProvesSamePart,
+  resolveCodeKeys,
+} from './drivers-village-code-key';
+
+describe('code1cIssue — the one code_1c rule (importer and Telegram captions)', () => {
+  it('accepts every code shape the export carries', () => {
+    for (const code of [
+      '96273708',
+      '96273708 GMB',
+      'GMB 96273708',
+      '02E-409-359',
+      '00-00001431',
+      '12605566pmc',
+      'A-1',
+    ])
+      expect(code1cIssue(code)).toBeNull();
+  });
+
+  it('names why a code is refused', () => {
+    expect(code1cIssue(null)?.code).toBe('empty_code_1c');
+    expect(code1cIssue('')?.code).toBe('empty_code_1c');
+    expect(code1cIssue('БП 010')?.code).toBe('invalid_code_1c'); // no article
+    expect(code1cIssue('96273708  GMB')?.code).toBe('invalid_code_1c');
+    expect(code1cIssue('A&B')?.code).toBe('invalid_code_1c');
+    expect(code1cIssue('9'.repeat(65))?.code).toBe('invalid_code_1c');
+    expect(code1cIssue('3333')?.code).toBe('placeholder_code_1c');
+  });
+});
+
+describe('keyProvesSamePart', () => {
+  it('holds only between the bare article and the article with a marker', () => {
+    expect(keyProvesSamePart('96273708', '96273708 GMB')).toBe(true);
+    expect(keyProvesSamePart('GMB 96273708', '96273708')).toBe(true);
+    expect(keyProvesSamePart('96273708 OEM', '96273708 GMB')).toBe(false);
+    expect(keyProvesSamePart('БП-00001431', '00-00001431')).toBe(false);
+    expect(keyProvesSamePart('96273708', '96273709 GMB')).toBe(false);
+    expect(keyProvesSamePart('123456789', '123456789 GMB')).toBe(false);
+  });
+});
 
 describe('eightDigitKey', () => {
   it('is the one run of exactly 8 digits, before or after a marker', () => {

@@ -9,8 +9,12 @@
  * from the stored codes on every run — nothing extra is stored. Only stored
  * code_1c values are compared; a stored part number or OEM list (which may
  * still hold an old, wrong value) and the name never are. Pure: no I/O.
+ *
+ * Also home of the one validity rule of a code_1c (code1cIssue) and of the key
+ * evidence rule (keyProvesSamePart), both shared with the Telegram photo flow.
  */
 import { normalizeOem } from '../../common/normalize-oem.util';
+import { FIELD_LIMITS } from './drivers-village.constants';
 import type {
   CodeKeyConflict,
   ImportIssue,
@@ -31,6 +35,66 @@ export function eightDigitKey(code: string): string | null {
     (run) => [...run].length === KEY_DIGITS,
   );
   return runs.length === 1 && /^[0-9]+$/.test(runs[0]) ? runs[0] : null;
+}
+
+/**
+ * Whether the 8-digit key proves two codes are one part: they share the key
+ * and one of them IS the bare article — `96273708` ↔ `96273708 GMB`, either
+ * way. One marker replaced by another (`96273708 GMB` ↔ `96273708 OEM`) or
+ * another 1C series (`00-00001431` ↔ `БП-00001431`) proves nothing.
+ */
+export function keyProvesSamePart(a: string, b: string): boolean {
+  const key = eightDigitKey(a);
+  return key !== null && key === eightDigitKey(b) && (a === key || b === key);
+}
+
+/** Why a code_1c cannot identify a position (see code1cIssue). */
+export interface Code1cIssue {
+  code: 'empty_code_1c' | 'invalid_code_1c' | 'placeholder_code_1c';
+  message: string;
+}
+
+/**
+ * The one validity rule of a code_1c, or null when the code is valid: one
+ * token of letters, digits and `._/-`, or an 8-digit article and a marker
+ * split by single spaces; at most 64 characters; never one character repeated.
+ * The importer checks a row's code with it and the Telegram photo flow a
+ * caption's code, so a caption can name exactly the codes an import stores.
+ */
+export function code1cIssue(code1c: string | null): Code1cIssue | null {
+  if (!code1c) return { code: 'empty_code_1c', message: 'code_1c is empty' };
+  if (code1c.length > FIELD_LIMITS.code1c)
+    return {
+      code: 'invalid_code_1c',
+      message: `code_1c longer than ${FIELD_LIMITS.code1c} characters`,
+    };
+  if (!/^[\p{L}\p{N}._/-]+$/u.test(code1c) && !isSpacedArticle(code1c))
+    return {
+      code: 'invalid_code_1c',
+      message: `code_1c "${code1c}" contains whitespace or unsupported characters (a single space is accepted only next to an 8-digit article, as in "96273708 GMB")`,
+    };
+  // "1", "B", "3333", "222222": in the dv_parts exports such codes are shared
+  // by unrelated goods (code "1": 22 rows, 22 different names), so they are
+  // placeholders — importing them would merge different parts into one.
+  if (/^(.)\1*$/u.test(code1c))
+    return {
+      code: 'placeholder_code_1c',
+      message: `code_1c "${code1c}" is one character repeated — a placeholder, not a part number`,
+    };
+  return null;
+}
+
+/**
+ * An 8-digit article and a marker split by single spaces: "96273708 GMB",
+ * "GMB 96273708". Accepted as is (the space kept), because its 8-digit key
+ * finds the position stored under the bare article. Any other whitespace in a
+ * code_1c is still rejected.
+ */
+function isSpacedArticle(code: string): boolean {
+  return (
+    /^[\p{L}\p{N}._/-]+(?: [\p{L}\p{N}._/-]+)+$/u.test(code) &&
+    eightDigitKey(code) !== null
+  );
 }
 
 /** The previous code_1c a file code takes over, found by the key. */
@@ -118,7 +182,7 @@ export function resolveCodeKeys(
     if (unmatched.length === 0) continue;
     const free = g.stored.filter((c) => !inFile.has(c));
     const provable = unmatched.some((u) =>
-      free.some((s) => u === key || s === key),
+      free.some((s) => keyProvesSamePart(u, s)),
     );
     if (!provable) {
       if (g.file.length > 1 || free.length > 0)

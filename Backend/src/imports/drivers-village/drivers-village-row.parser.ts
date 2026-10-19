@@ -8,7 +8,7 @@
  */
 import { Prisma } from '@prisma/client';
 import { normalizeOem } from '../../common/normalize-oem.util';
-import { eightDigitKey } from './drivers-village-code-key';
+import { code1cIssue } from './drivers-village-code-key';
 import {
   FIELD_LIMITS,
   MAX_QUANTITY,
@@ -184,29 +184,10 @@ export function parseRow(
     });
 
   // code_1c — the position's identity in 1C and its manufacturer part number,
-  // stored verbatim (trimmed) as both.
-  if (!code1c) err('empty_code_1c', 'code1c', 'code_1c is empty');
-  else if (code1c.length > FIELD_LIMITS.code1c)
-    err(
-      'invalid_code_1c',
-      'code1c',
-      `code_1c longer than ${FIELD_LIMITS.code1c} characters`,
-    );
-  else if (!/^[\p{L}\p{N}._/-]+$/u.test(code1c) && !isSpacedArticle(code1c))
-    err(
-      'invalid_code_1c',
-      'code1c',
-      `code_1c "${code1c}" contains whitespace or unsupported characters (a single space is accepted only next to an 8-digit article, as in "96273708 GMB")`,
-    );
-  else if (/^(.)\1*$/u.test(code1c))
-    // "1", "B", "3333", "222222": in the dv_parts exports such codes are shared
-    // by unrelated goods (code "1": 22 rows, 22 different names), so they are
-    // placeholders — importing them would merge different parts into one.
-    err(
-      'placeholder_code_1c',
-      'code1c',
-      `code_1c "${code1c}" is one character repeated — a placeholder, not a part number`,
-    );
+  // stored verbatim (trimmed) as both. The rule is shared with the Telegram
+  // photo flow, so a caption can name exactly the codes stored here.
+  const codeIssue = code1cIssue(code1c);
+  if (codeIssue) err(codeIssue.code, 'code1c', codeIssue.message);
   // These are the row's first checks, so any issue so far is about code_1c.
   const codeValid = issues.length === 0;
 
@@ -327,19 +308,6 @@ export function parseRow(
 }
 
 type Report = (code: string, field: Field | null, message: string) => void;
-
-/**
- * An 8-digit article and a marker split by single spaces: "96273708 GMB",
- * "GMB 96273708". Accepted as is (the space kept), because its 8-digit key
- * finds the position stored under the bare article (drivers-village-code-
- * key.ts). Any other whitespace in a code_1c is still rejected.
- */
-function isSpacedArticle(code: string): boolean {
-  return (
-    /^[\p{L}\p{N}._/-]+(?: [\p{L}\p{N}._/-]+)+$/u.test(code) &&
-    eightDigitKey(code) !== null
-  );
-}
 
 /** gm_number: one all-digit number or empty. GM numbers never carry letters. */
 function parseGm(raw: string, err: Report): string | null {

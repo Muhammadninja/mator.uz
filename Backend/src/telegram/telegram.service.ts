@@ -37,7 +37,7 @@ import { CatalogProjectionService } from '../catalog/projection/catalog-projecti
 import { QueueService } from '../queue/queue.service';
 import { DraftLock } from '../redis/draft-lock.service';
 import { RedisKeys } from '../redis/redis.keys';
-import { MediaGroupBuffer } from './media-group-buffer';
+import { MediaGroupBuffer, type FlushedGroup } from './media-group-buffer';
 import { TelegramOfferService } from './telegram-offer.service';
 import { persistVehicleLinks } from './vehicle-links';
 import {
@@ -49,8 +49,10 @@ import {
 } from './product-draft.service';
 import {
   DriversVillagePhotoService,
-  code1cFromCaption,
   escapeMarkdown,
+  listPositions,
+  parseDvCaption,
+  type DvLookup,
   type DvPosition,
 } from './drivers-village-photo.service';
 import { DraftCoordinator } from './draft-coordinator';
@@ -461,11 +463,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   // Step-by-step product-creation wizard sessions, one per Telegram user.
   private readonly wizard = new WizardSessionStore();
 
-  // Buffer for in-flight album uploads. `ctx` for the flush is captured per
-  // group via the closure below (the latest ctx of the album is sufficient —
-  // all updates in an album come from the same chat).
-  private mediaBuffer!: MediaGroupBuffer;
-  private readonly groupCtx = new Map<string, Context>();
+  // Buffer for in-flight album uploads. Each photo's `ctx` is kept ON its
+  // album's group (the latest one is sufficient — all updates in an album come
+  // from the same chat), so two albums of one user never share or lose it.
+  private mediaBuffer!: MediaGroupBuffer<Context>;
 
   // One pending confirmation per Telegram user, keyed by tgUserId. Caches the
   // sent preview's data until the seller presses "Добавить товар" (the backing
@@ -522,8 +523,8 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     private readonly categories: PartCategoryService,
     // The "У меня есть" → DM offer-capture flow (isolated session state).
     private readonly offerFlow: TelegramOfferService,
-    // Driver's Village photo updates (album + caption = code_1c): position
-    // lookup and gallery replacement. Only reached for a code-shaped caption.
+    // Driver's Village photo updates (album + caption `1C <code_1c>`): position
+    // lookup and gallery replacement. Only reached for such a caption.
     private readonly dvPhotos: DriversVillagePhotoService,
   ) {
     this.draftTtlMs = resolveDraftTtlMs(
@@ -536,20 +537,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     const token = this.config.get<string>('TELEGRAM_BOT_TOKEN');
     if (!token) throw new Error('TELEGRAM_BOT_TOKEN is not set');
 
-    this.mediaBuffer = new MediaGroupBuffer(
+    this.mediaBuffer = new MediaGroupBuffer<Context>(
       MEDIA_GROUP_DEBOUNCE_MS,
       MAX_IMAGES_PER_LISTING,
-      (group) => {
-        const ctx = this.groupCtx.get(String(group.tgUserId));
-        this.groupCtx.delete(String(group.tgUserId));
-        if (ctx)
-          void this.routePhotos(
-            ctx,
-            group.tgUserId,
-            group.fileIds,
-            group.caption,
-          );
-      },
+      (group) => void this.flushAlbum(group),
     );
 
     this.bot = new Telegraf(token);
@@ -592,7 +583,6 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
   onModuleDestroy() {
     this.mediaBuffer?.clear();
-    this.groupCtx.clear();
     this.offerFlow.clear();
     this.wizard.clear();
     this.staleNoticeSentAt.clear();
@@ -1033,7 +1023,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       const groupId = 'media_group_id' in msg ? msg.media_group_id : undefined;
       // Only one photo of an album carries the caption; the buffer keeps the
       // first non-empty one. It is read ONLY to recognize a Driver's Village
-      // code_1c — the ordinary wizard still ignores captions.
+      // photo update (`1C <code_1c>`) — the ordinary wizard ignores captions.
       const caption =
         'caption' in msg && typeof msg.caption === 'string'
           ? msg.caption
@@ -1042,8 +1032,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       if (groupId) {
         // Buffer ALL albums (even out-of-step ones) so the flush validates the
         // wizard state exactly once per album instead of once per photo.
-        this.groupCtx.set(String(from.id), ctx);
-        this.mediaBuffer.add(groupId, bestPhoto.file_id, caption, from.id);
+        this.mediaBuffer.add(groupId, bestPhoto.file_id, caption, from.id, ctx);
         return;
       }
 
@@ -2820,7 +2809,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     await this.handlePhotos(ctx, tgUserId, session, fileIds);
   }
 
-  // ── Driver's Village photo updates (photos + caption = code_1c) ─────────────
+  // ── Driver's Village photo updates (photos + caption `1C <code_1c>`) ────────
   // Any Telegram user who knows a position's code_1c may replace its photos. The
   // photos travel the SAME pipeline as a new listing — draft → BullMQ worker
   // (FLUX + Cloudinary) → coordinator rendezvous → preview media — and on
@@ -2829,9 +2818,35 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   // session and single `pending` slot are never touched.
 
   /**
-   * Route incoming photos (one photo, or a flushed album). A caption that is a
-   * Driver's Village code_1c starts a photo update of that position; no caption
-   * or any other caption goes to the ordinary listing wizard exactly as before.
+   * Hand a buffered album to {@link routePhotos}. This runs from the buffer's
+   * timer, where nothing above would catch, and an unhandled rejection exits
+   * the whole process (main.ts) — so every failure ends here: logged, and the
+   * sender told the photos were not accepted. Never handed to another flow.
+   */
+  private async flushAlbum(group: FlushedGroup<Context>): Promise<void> {
+    const { ctx, tgUserId } = group;
+    if (!ctx) return;
+    try {
+      await this.routePhotos(ctx, tgUserId, group.fileIds, group.caption);
+    } catch (err) {
+      this.logger.error(
+        `Album from ${tgUserId} failed: ${err instanceof Error ? err.message : String(err)}`,
+        err instanceof Error ? err.stack : undefined,
+      );
+      try {
+        await ctx.reply(t(await this.langOf(tgUserId), 'photos.notAccepted'));
+      } catch {
+        // Telegram itself may be what failed; the log above is the record.
+      }
+    }
+  }
+
+  /**
+   * Route incoming photos (one photo, or a flushed album). The caption
+   * `1C <code_1c>` (or a legacy 1C code alone) starts a photo update of that
+   * position and never falls back to the listing wizard: a `1C` caption
+   * without a valid code is refused. No caption or any other caption goes to
+   * the ordinary listing wizard exactly as before.
    */
   private async routePhotos(
     ctx: Context,
@@ -2839,9 +2854,13 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     fileIds: string[],
     caption: string | null,
   ): Promise<void> {
-    const code1c = code1cFromCaption(caption);
-    if (code1c) {
-      await this.handleDvPhotos(ctx, tgUserId, fileIds, code1c);
+    const dv = parseDvCaption(caption);
+    if (dv.kind === 'code') {
+      await this.handleDvPhotos(ctx, tgUserId, fileIds, dv.code1c);
+      return;
+    }
+    if (dv.kind === 'invalid') {
+      await ctx.reply(t(await this.langOf(tgUserId), 'dv.invalidCode'));
       return;
     }
     await this.handleWizardPhotos(ctx, tgUserId, fileIds);
@@ -2850,8 +2869,9 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   /**
    * Start a photo update: resolve the position by its Stock source fields, then
    * create a PHOTO-UPDATE draft and queue its images exactly like
-   * {@link handlePhotos} does. An unknown code is answered and NOTHING is
-   * written — no draft, no job, no upload.
+   * {@link handlePhotos} does. An unknown or ambiguous code, or a failed
+   * lookup, is answered and NOTHING is written — no draft, no job, no upload —
+   * and the photos never reach the listing wizard.
    */
   private async handleDvPhotos(
     ctx: Context,
@@ -2863,11 +2883,31 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     const images = fileIds.slice(0, MAX_IMAGES_PER_LISTING);
     if (images.length === 0) return;
 
-    const position = await this.dvPhotos.resolvePosition(code1c);
-    if (!position) {
+    let lookup: DvLookup;
+    try {
+      lookup = await this.dvPhotos.resolvePosition(code1c);
+    } catch (err) {
+      // The sender may be any Telegram user: the error is logged, never echoed.
+      this.logger.error(
+        `Driver's Village lookup failed for ${code1c} (tg ${tgUserId}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      await ctx.reply(t(lang, 'photos.notAccepted'));
+      return;
+    }
+    if (lookup.kind === 'notFound') {
       await ctx.reply(t(lang, 'dv.notFound', { code: code1c }));
       return;
     }
+    if (lookup.kind === 'ambiguous') {
+      await ctx.reply(
+        t(lang, 'dv.ambiguous', {
+          code: code1c,
+          positions: listPositions(lookup.positions),
+        }),
+      );
+      return;
+    }
+    const { position } = lookup;
 
     let draft: DraftWithImages;
     try {
@@ -2907,8 +2947,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
+    // The position's own code: when the 8-digit key found it, it differs from
+    // the caption's (`96273708` → `96273708 GMB`).
     const receipt = t(lang, 'dv.photosReceived', {
-      code: code1c,
+      code: position.code1c,
       count: images.length,
     });
     if (this.dvMayUseLivePrompt(tgUserId)) {

@@ -200,6 +200,10 @@ export const EN: BotStrings = {
 
   'dv.notFound':
     "❌ No Driver's Village position has the code {code}. Check the 1C code in the photo caption.",
+  'dv.invalidCode':
+    '❌ Could not read the 1C code in the caption. Send the photos with a caption like: 1C 87654321',
+  'dv.ambiguous':
+    "⚠️ The code {code} matches several Driver's Village positions:\n{positions}\nSend the photos again with the exact code in the caption: 1C <code>",
   'dv.photosReceived':
     '📸 Photos received ({count}) for position {code}. Processing — a preview will follow.',
   'dv.previewHeader': "🖼 *New photos for a Driver's Village position*",

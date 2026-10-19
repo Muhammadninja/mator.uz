@@ -148,6 +148,12 @@ export interface BotStrings {
   // ── Driver's Village photo update (photos + caption = code_1c) ────────────
   /** No Driver's Village position has this code_1c. Nothing was written. */
   'dv.notFound': string;
+  /** The caption has the `1C` marker but no valid code. Nothing was written,
+   *  and the photos did not go to the listing wizard. */
+  'dv.invalidCode': string;
+  /** `{code}` links by its 8-digit key to several positions (`{positions}`,
+   *  one per line). Nothing was written. */
+  'dv.ambiguous': string;
   /** Photos accepted for a position; processing started. */
   'dv.photosReceived': string;
   /** Preview caption lines (legacy Markdown). */

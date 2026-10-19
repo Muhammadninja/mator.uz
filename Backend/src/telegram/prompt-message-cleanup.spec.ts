@@ -94,7 +94,6 @@ function makeBotService(deleteBehaviour: 'ok' | 'throws' = 'ok'): {
     // Album buffering: the real buffer would flush on a debounce timer, which
     // these tests do not exercise — they assert what the ARRIVING updates
     // recorded, which is what a later flush would go on to delete.
-    groupCtx: new Map<string, unknown>(),
     mediaBuffer: { add: jest.fn(), clear: jest.fn() },
     offerFlow: {
       registerActions: jest.fn(),

@@ -41,6 +41,48 @@ describe('MediaGroupBuffer', () => {
     expect(flushed[0].caption).toBe('the description');
   });
 
+  it('takes the caption from whichever photo carries it, the last one included', () => {
+    const { buf, flushed } = makeBuffer();
+    buf.add('g1', 'a', null, 1);
+    buf.add('g1', 'b', null, 1);
+    buf.add('g1', 'c', '1C 87654321', 1);
+    jest.advanceTimersByTime(DEBOUNCE);
+
+    expect(flushed[0]).toMatchObject({
+      fileIds: ['a', 'b', 'c'],
+      caption: '1C 87654321',
+    });
+  });
+
+  it("keeps each group's latest context: two albums of one user never swap or lose it", () => {
+    const flushed: FlushedGroup<string>[] = [];
+    const buf = new MediaGroupBuffer<string>(DEBOUNCE, MAX, (g) =>
+      flushed.push(g),
+    );
+    buf.add('g1', 'a', 'cap', 1, 'ctx-a');
+    buf.add('g1', 'b', null, 1, 'ctx-b');
+    buf.add('g2', 'x', 'cap2', 1, 'ctx-x');
+    jest.advanceTimersByTime(DEBOUNCE);
+
+    expect(flushed.map((g) => [g.fileIds, g.ctx])).toEqual([
+      [['a', 'b'], 'ctx-b'],
+      [['x'], 'ctx-x'],
+    ]);
+  });
+
+  it('KNOWN LIMIT: a photo arriving after the quiet window is flushed apart, without a later caption', () => {
+    const { buf, flushed } = makeBuffer();
+    buf.add('g1', 'a', null, 1);
+    jest.advanceTimersByTime(DEBOUNCE); // the window closes on 'a' alone
+    buf.add('g1', 'b', '1C 87654321', 1);
+    jest.advanceTimersByTime(DEBOUNCE);
+
+    expect(flushed.map((g) => [g.fileIds, g.caption])).toEqual([
+      [['a'], null],
+      [['b'], '1C 87654321'],
+    ]);
+  });
+
   it('treats a whitespace-only caption as empty', () => {
     const { buf, flushed } = makeBuffer();
     buf.add('g1', 'a', '   ', 1);

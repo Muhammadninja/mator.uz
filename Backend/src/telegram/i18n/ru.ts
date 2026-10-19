@@ -201,6 +201,10 @@ export const RU: BotStrings = {
 
   'dv.notFound':
     "❌ Позиция Driver's Village с кодом {code} не найдена. Проверьте код 1С в подписи к фото.",
+  'dv.invalidCode':
+    '❌ Не удалось распознать код 1С в подписи. Отправьте фото с подписью в формате: 1C 87654321',
+  'dv.ambiguous':
+    "⚠️ Код {code} подходит к нескольким позициям Driver's Village:\n{positions}\nОтправьте фото ещё раз с точным кодом в подписи: 1C <код>",
   'dv.photosReceived':
     '📸 Фото получены ({count}) для позиции {code}. Обрабатываем — пришлём предпросмотр.',
   'dv.previewHeader': "🖼 *Новые фото для позиции Driver's Village*",
