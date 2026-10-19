@@ -294,15 +294,13 @@ export function describeReport(report: ImportReport): string {
     `unchanged ${s.rowsUnchanged}`,
     `rejected ${s.rejectedRows}`,
     `merged duplicates ${s.rowsMerged}`,
-    `part numbers corrected ${s.rowsWithPartNumberChange}`,
   ];
-  if (s.rowsMatchedByKey)
-    parts.push(`matched by 8-digit key ${s.rowsMatchedByKey}`);
-  if (s.rowsInKeyConflict)
-    parts.push(`8-digit key conflicts ${s.rowsInKeyConflict} (not written)`);
   if (s.rowsToCreateWithSharedKey)
     parts.push(
-      `new positions sharing an 8-digit key ${s.rowsToCreateWithSharedKey}`,
+      `new positions sharing an 8-digit key ${s.rowsToCreateWithSharedKey}` +
+        (s.rowsWithPossibleRename
+          ? ` (${s.rowsWithPossibleRename} possibly renamed in 1C — review)`
+          : ''),
     );
   if (s.written)
     parts.push(

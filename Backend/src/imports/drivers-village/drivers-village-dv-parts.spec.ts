@@ -6,7 +6,7 @@
  * byte layout of the real dv_parts_2026_10_18.txt (UTF-8 BOM, CRLF, ";", its
  * 20 columns in its order, a stray BOM as the last line) and synthetic rows
  * reproducing its problem cases: prices "1,100,000", quantities "2,268" /
- * "12.5" / "-3", a code with "&", an 8-digit article with a marker
+ * "12.5" / "-3", an article with "&", an 8-digit article with a marker
  * ("96273708 GMB", next to "96273708"), placeholder codes "1" / "3333"
  * shared by unrelated goods, repeated codes at several prices, units "штук" /
  * "1" / "комп.". Names, codes and prices are invented.
@@ -125,9 +125,9 @@ describe('Driver’s Village — the 1C ";" export (anonymized dv_parts_2026_10_
     );
     expect(report.summary).toMatchObject({
       totalRows: 31,
-      rowsToCreate: 14,
+      rowsToCreate: 15,
       rowsMerged: 4,
-      rejectedRows: 13,
+      rejectedRows: 12,
     });
     expect(written()).toEqual({
       '96273708': ['123456', 12],
@@ -138,8 +138,11 @@ describe('Driver’s Village — the 1C ";" export (anonymized dv_parts_2026_10_
       '_БП-01068170': ['210000', 3],
       '5Q0-615-301-F': ['890000', 6],
       '96535102': ['140000', 100],
-      '96350526': ['520000', 7],
-      '96407822': ['310000', 3],
+      '96810038S&T': ['80000', 7],
+      // Repeated codes whose rows state different quantities: no confirmed
+      // count, so the new stock gets the column default.
+      '96350526': ['520000', 1],
+      '96407822': ['310000', 1],
       '96328210': ['60000', 4],
       '96182221': ['98000', 24],
       '96328215': ['2500', 1234],
@@ -159,7 +162,7 @@ describe('Driver’s Village — the 1C ";" export (anonymized dv_parts_2026_10_
     expect(errors(8)).toEqual(['invalid_quantity']); // 12.5 л
     expect(errors(9)).toEqual(['invalid_quantity']); // -3
     expect(errors(10)).toEqual(['invalid_price']); // 0
-    expect(errors(13)).toEqual(['invalid_code_1c']); // "96810038S&T"
+    expect(errors(13)).toEqual([]); // "96810038S&T" is an article: accepted
     for (const line of [14, 15, 16, 17, 18])
       expect(errors(line)).toContain('placeholder_code_1c'); // "1", "3333"
     expect(errors(26)).toEqual(['unknown_unit']); // unit "1"
@@ -181,8 +184,8 @@ describe('Driver’s Village — the 1C ";" export (anonymized dv_parts_2026_10_
       expect(row(line).issues.map((i) => i.code)).toContain('code_key_shared');
     }
     expect(report.summary).toMatchObject({
-      rowsMatchedByKey: 0,
-      rowsInKeyConflict: 0,
+      rowsToCreateWithSharedKey: 2,
+      rowsWithPossibleRename: 0, // nothing stored yet
     });
     expect(productOf('96273708 GMB')).toMatchObject({
       title: 'Фильтр масляный оригинал',
@@ -190,7 +193,7 @@ describe('Driver’s Village — the 1C ";" export (anonymized dv_parts_2026_10_
     });
   });
 
-  it('a repeated code_1c: price and quantity from ONE row — the first at the highest valid price — with review warnings', async () => {
+  it('a repeated code_1c: the price of the first row at the highest valid price; differing quantities give none — with review warnings', async () => {
     const { run } = setup();
     const report = await run(FIXTURE);
     const row = (line: number) => report.rows.find((r) => r.line === line)!;
@@ -219,7 +222,8 @@ describe('Driver’s Village — the 1C ";" export (anonymized dv_parts_2026_10_
     expect(
       row(20).issues.find((i) => i.code === 'duplicate_quantities_differ')!
         .message,
-    ).toMatch(/quantity \(7\) is imported.*never added up/);
+    ).toMatch(/no quantity is confirmed and none is imported.*never added up/);
+    expect(row(20).quantity).toEqual({ from: null, to: null });
     expect(row(24).issues.map((i) => i.code)).toEqual(
       expect.arrayContaining([
         'duplicate_code_1c',
@@ -255,7 +259,7 @@ describe('Driver’s Village — the 1C ";" export (anonymized dv_parts_2026_10_
     expect(again.summary).toMatchObject({
       rowsToCreate: 0,
       rowsToUpdate: 0,
-      rowsUnchanged: 14,
+      rowsUnchanged: 15,
     });
     expect(again.summary.written).toMatchObject({ created: 0, updated: 0 });
     expect(JSON.stringify(db.state)).toBe(before);
@@ -280,14 +284,14 @@ describe('Driver’s Village — a repeated code_1c, in both source formats', ()
         );
 
   it.each<Format>(['semicolon', 'tab'])(
-    '%s: in every order of the rows, price and quantity come from the first row at the highest valid price',
+    '%s: in every order of the rows, the price comes from the first row at the highest valid price; the differing quantities give none',
     async (format) => {
       expect(permutations(GROUP)).toHaveLength(120);
       for (const order of permutations(GROUP)) {
         const { run, written } = setup();
         const report = await run(exportFile(order, format));
         const first = order.find((l) => l.price === '900000')!;
-        expect(written()).toEqual({ 'D-200': ['900000', Number(first.qty)] });
+        expect(written()).toEqual({ 'D-200': ['900000', 1] });
         expect(report.duplicates[0].chosenLine).toBe(order.indexOf(first) + 2);
         expect(report.summary.rowsMerged).toBe(4);
       }
@@ -306,7 +310,7 @@ describe('Driver’s Village — a repeated code_1c, in both source formats', ()
     await semicolon.run(exportFile(lines, 'semicolon'));
     await tab.run(exportFile(lines, 'tab'));
     expect(semicolon.written()).toEqual({
-      'D-200': ['900000', 7],
+      'D-200': ['900000', 1],
       '95015324': ['1100000', 2268],
       '96535102': ['140000', 100],
     });
@@ -357,10 +361,12 @@ describe('Driver’s Village — a repeated code_1c, in both source formats', ()
         'semicolon',
       ),
     );
+    // The price follows the export; its rows still state different
+    // quantities, so the stored count is kept.
     expect(stockOf('D-200')).toMatchObject({
       id: ids.d,
       priceUzs: '950000',
-      quantity: 2,
+      quantity: 1,
     });
     expect(JSON.stringify(stockOf('E-300'))).toBe(keptE);
     expect(stockOf('E-300')!.id).toBe(ids.e);

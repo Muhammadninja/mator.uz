@@ -324,10 +324,14 @@ describe('Driver’s Village sync — categories stay Mator’s', () => {
       productId: product.id,
       url: 'https://img/1.jpg',
     });
+    // On the catalog part: the photo and rating as the photo flow / a rating
+    // edit projected them, and the admin-owned columns.
     Object.assign(partOf('A-1'), {
       categoryId: 'shock-absorbers',
       purchasePriceUzs: '500000',
       cashbackPct: '5',
+      images: ['https://img/1.jpg'],
+      ratingAvg: '4.5',
     });
 
     // Blank category and quantity cells, then the final export's layout with

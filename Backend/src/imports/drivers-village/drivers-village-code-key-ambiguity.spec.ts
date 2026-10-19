@@ -1,14 +1,12 @@
 /**
- * Eight equal digits are no proof of one part. End to end (the real importer
- * and projection over the in-memory fakes, synthetic rows, no database): a
- * takeover only between the bare article and the article with a marker; a
- * changed marker or 1C series is a position of its own; a provable takeover
- * with rivals is a conflict. In no case is a stored position changed through
- * an unproven or ambiguous key.
+ * Codes that share an 8-digit key — several in one file, several stored — end
+ * to end (the real importer and projection over the in-memory fakes,
+ * synthetic rows, no database). Each code is a position of its own; the key
+ * never makes one code write another code's position. It is only reported.
  */
 import { importHarness } from '../../../test/utils/drivers-village-import-harness';
 
-describe('Driver’s Village — what the 8-digit key cannot prove', () => {
+describe('Driver’s Village — codes sharing an 8-digit key are separate positions', () => {
   it.each([
     ['a replaced marker', '96273708 GMB', '96273708 OEM', '96273708'],
     ['another 1C series', '00-00001431', 'БП-00001431', '00001431'],
@@ -24,9 +22,8 @@ describe('Driver’s Village — what the 8-digit key cannot prove', () => {
       expect(report.summary).toMatchObject({
         rowsToCreate: 1,
         rowsToUpdate: 0,
-        rowsMatchedByKey: 0,
-        keyConflicts: 0,
         rowsToCreateWithSharedKey: 1,
+        rowsWithPossibleRename: 0,
         positionsNotInFile: 1,
       });
       expect(report.keyShared).toEqual([
@@ -36,16 +33,13 @@ describe('Driver’s Village — what the 8-digit key cannot prove', () => {
           code1c: newCode,
           fileCodes: [],
           storedCodes: [storedCode],
+          possibleRenameOf: [],
         },
       ]);
       expect(report.rows[0]).toMatchObject({
         outcome: 'create',
         written: 'created',
       });
-      expect(
-        report.rows[0].issues.find((i) => i.code === 'code_key_shared')!
-          .message,
-      ).toMatch(/cannot be proven/);
       expect(position(storedCode)).toBe(stored);
       expect(stockOf(newCode)).toMatchObject({
         priceUzs: '170000',
@@ -56,28 +50,7 @@ describe('Driver’s Village — what the 8-digit key cannot prove', () => {
     },
   );
 
-  it('several stored positions with the key and none provable: a position of its own, none of them changes', async () => {
-    const { db, run, position } = importHarness();
-    await run([{ code: '96273708 GMB' }, { code: '96273708-HN' }]);
-    const before = [position('96273708 GMB'), position('96273708-HN')];
-
-    const report = await run([{ code: '96273708 OEM' }]);
-
-    expect(report.keyShared[0]).toMatchObject({
-      code1c: '96273708 OEM',
-      storedCodes: ['96273708 GMB', '96273708-HN'],
-    });
-    expect(report.summary).toMatchObject({
-      rowsToCreateWithSharedKey: 1,
-      keyConflicts: 0,
-    });
-    expect([position('96273708 GMB'), position('96273708-HN')]).toEqual(before);
-    expect(db.state.stocks).toHaveLength(3);
-  });
-});
-
-describe('Driver’s Village — an ambiguous 8-digit key is a conflict', () => {
-  it('several stored positions with the key: nothing written for the row, none of them changes in any row', async () => {
+  it('several stored positions with the key: a position of its own, none of them changes', async () => {
     const { db, run, stockOf, position } = importHarness();
     await run([
       { code: '96273708' },
@@ -94,30 +67,37 @@ describe('Driver’s Village — an ambiguous 8-digit key is a conflict', () => 
       { code: '96350526', name: 'Амортизатор', price: '520000' },
     ]);
 
-    expect(report.rows[0].outcome).toBe('conflict');
-    expect(report.rows[0].written).toBeUndefined();
-    expect(
-      report.rows[0].issues
-        .filter((i) => i.severity === 'error')
-        .map((i) => i.code),
-    ).toEqual(['code_key_conflict']);
-    expect(report.keyConflicts).toEqual([
-      {
-        key: '96273708',
-        codes: ['96273708 OEM'],
-        lines: [2],
-        storedCodes: ['96273708', '96273708-HN'],
-      },
-    ]);
+    expect(report.keyShared[0]).toMatchObject({
+      code1c: '96273708 OEM',
+      storedCodes: ['96273708', '96273708-HN'],
+      possibleRenameOf: ['96273708'],
+    });
     expect(report.summary).toMatchObject({
-      keyConflicts: 1,
-      rowsInKeyConflict: 1,
-      rowsMatchedByKey: 0,
-      rowsToCreate: 1, // the unrelated row is imported as usual
+      rowsToCreate: 2,
+      rowsToCreateWithSharedKey: 1,
     });
     // Stock, product, catalog part, fitment links and photos: untouched.
     expect([position('96273708'), position('96273708-HN')]).toEqual(before);
-    expect(stockOf('96273708 OEM')).toBeUndefined();
+    expect(stockOf('96273708 OEM')!.priceUzs).toBe('170000');
+    expect(db.state.stocks).toHaveLength(4);
+  });
+
+  it('two codes of one file with the key of one stored position: two new positions, nothing merged', async () => {
+    const { db, run, position } = importHarness();
+    await run([{ code: '96273708', qty: '8' }]);
+    const before = position('96273708');
+
+    const report = await run([
+      { code: '96273708 GMB', price: '165000', qty: '5' },
+      { code: '96273708 OEM', price: '190000', qty: '2' },
+    ]);
+
+    expect(report.rows.map((r) => r.outcome)).toEqual(['create', 'create']);
+    expect(report.keyShared.map((k) => [k.code1c, k.fileCodes])).toEqual([
+      ['96273708 GMB', ['96273708 OEM']],
+      ['96273708 OEM', ['96273708 GMB']],
+    ]);
+    expect(position('96273708')).toBe(before);
     expect(db.state.stocks).toHaveLength(3);
   });
 
@@ -132,43 +112,11 @@ describe('Driver’s Village — an ambiguous 8-digit key is a conflict', () => 
       outcome: 'update',
       changes: ['price'],
     });
-    expect(report.summary).toMatchObject({ keyConflicts: 0 });
     expect(stockOf('96273708')!.priceUzs).toBe('155000');
     expect(position('96273708-HN')).toBe(other);
   });
 
-  it('two codes of one file with the key of one stored position: neither is written, nothing is merged', async () => {
-    const { db, run, position } = importHarness();
-    await run([{ code: '96273708', qty: '8' }]);
-    const before = position('96273708');
-
-    const report = await run([
-      { code: '96273708 GMB', price: '165000', qty: '5' },
-      { code: '96273708 OEM', price: '190000', qty: '2' },
-    ]);
-
-    expect(report.rows.map((r) => r.outcome)).toEqual(['conflict', 'conflict']);
-    expect(report.keyConflicts).toEqual([
-      {
-        key: '96273708',
-        codes: ['96273708 GMB', '96273708 OEM'],
-        lines: [2, 3],
-        storedCodes: ['96273708'],
-      },
-    ]);
-    expect(report.summary).toMatchObject({
-      rowsInKeyConflict: 2,
-      rowsToCreate: 0,
-      rowsToUpdate: 0,
-      written: { created: 0, updated: 0 },
-    });
-    expect(position('96273708')).toBe(before);
-    expect(db.state.stocks).toHaveLength(1);
-  });
-});
-
-describe('Driver’s Village — codes sharing a key with nothing to take over', () => {
-  it('are separate positions: reported as code_key_shared, counted, never merged', async () => {
+  it('codes of one file sharing a key: reported, counted, never merged — later each updates its own', async () => {
     const { db, run, stockOf } = importHarness();
     const report = await run([
       { code: '96273708', price: '150000', qty: '8' },
@@ -180,8 +128,6 @@ describe('Driver’s Village — codes sharing a key with nothing to take over',
       rowsToCreate: 3,
       rowsToCreateWithSharedKey: 2,
       rowsMerged: 0,
-      rowsInKeyConflict: 0,
-      rowsMatchedByKey: 0,
     });
     expect(report.keyShared.map((k) => [k.code1c, k.fileCodes])).toEqual([
       ['96273708', ['96273708 GMB']],
@@ -197,15 +143,12 @@ describe('Driver’s Village — codes sharing a key with nothing to take over',
     });
     expect(db.state.products).toHaveLength(3);
 
-    // From now on each code updates its own position.
     const next = await run([
       { code: '96273708', price: '151000', qty: '8' },
       { code: '96273708 GMB', price: '166000', qty: '5' },
     ]);
     expect(next.summary).toMatchObject({
       rowsToUpdate: 2,
-      rowsMatchedByKey: 0,
-      rowsInKeyConflict: 0,
       rowsToCreateWithSharedKey: 0,
     });
     expect(next.keyShared).toEqual([]);
@@ -229,8 +172,8 @@ describe('Driver’s Village — codes sharing a key with nothing to take over',
   });
 });
 
-describe('Driver’s Village — the dry run shows every key decision and writes nothing', () => {
-  it('matches, conflicts and shared keys are in the report', async () => {
+describe('Driver’s Village — the dry run shows every key relation and writes nothing', () => {
+  it('shared keys and possible renames are in the report', async () => {
     const { db, store, run, stockOf } = importHarness();
     await run([
       { code: '96273708' },
@@ -244,31 +187,31 @@ describe('Driver’s Village — the dry run shows every key decision and writes
 
     const report = await run(
       [
-        { code: '96273708 GMB', price: '165000' }, // takes over 96273708
-        { code: '96350526 OEM' }, // two stored with the key: a conflict
-        { code: 'БП-00001431' }, // another 1C series: its own position
+        { code: '96273708 GMB', price: '165000' },
+        { code: '96350526 OEM' },
+        { code: 'БП-00001431' },
       ],
       { dryRun: true },
     );
 
     expect(report.meta.mode).toBe('dry-run');
     expect(report.summary).toMatchObject({
-      rowsToUpdate: 1,
-      rowsToCreate: 1,
-      rowsMatchedByKey: 1,
-      keyConflicts: 1,
-      rowsInKeyConflict: 1,
-      rowsToCreateWithSharedKey: 1,
+      rowsToUpdate: 0,
+      rowsToCreate: 3,
+      rowsToCreateWithSharedKey: 3,
+      rowsWithPossibleRename: 2,
       written: null,
     });
-    expect(report.keyMatches.map((m) => [m.code1c, m.storedCode])).toEqual([
-      ['96273708 GMB', '96273708'],
-    ]);
-    expect(report.keyConflicts.map((c) => [c.codes, c.storedCodes])).toEqual([
-      [['96350526 OEM'], ['96350526', '96350526-A']],
-    ]);
-    expect(report.keyShared.map((k) => [k.code1c, k.storedCodes])).toEqual([
-      ['БП-00001431', ['00-00001431']],
+    expect(
+      report.keyShared.map((k) => [
+        k.code1c,
+        k.storedCodes,
+        k.possibleRenameOf,
+      ]),
+    ).toEqual([
+      ['96273708 GMB', ['96273708'], ['96273708']],
+      ['96350526 OEM', ['96350526', '96350526-A'], ['96350526']],
+      ['БП-00001431', ['00-00001431'], []],
     ]);
     expect(store.applyBatchCalls).toBe(batches);
     expect(db.calls).toHaveLength(calls);

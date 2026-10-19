@@ -95,7 +95,7 @@ describe('Driver’s Village — code_1c is the part number', () => {
     });
   });
 
-  it('a wrong stored part number is corrected by the next import, in place', async () => {
+  it('a stored part number is never changed by the sync: the difference is reported, not written', async () => {
     const { db, run, stockOf, productOf, partOf } = setup();
     const file = exportFile([{ code: '95015324', mpn: 'SKODA' }]);
     await run(file);
@@ -103,40 +103,32 @@ describe('Driver’s Village — code_1c is the part number', () => {
       stock: stockOf('95015324').id,
       product: productOf('95015324').id,
     };
-    // The state this fix is for: the old import stored the brand as the number.
+    // A stored number that differs from code_1c (an old import stored the
+    // brand): Mator owns the card of a stored position.
     Object.assign(productOf('95015324'), {
       sourcePartNumber: 'SKODA',
       oemNumbers: ['SKODA'],
     });
     partOf('95015324').oemNumbers = ['SKODA'];
+    const snapshot = JSON.stringify(db.state);
 
     const report = await run(file);
 
     expect(report.rows[0]).toMatchObject({
-      outcome: 'update',
-      changes: ['part_number', 'oem_numbers'],
-      partNumber: { from: 'SKODA', to: '95015324' },
-      written: 'updated',
+      outcome: 'unchanged',
+      changes: [],
+      notApplied: ['part_number'],
+      written: 'skipped_unchanged',
     });
-    expect(report.summary.rowsWithPartNumberChange).toBe(1);
+    expect(report.summary.rowsWithCardDifferences).toBe(1);
+    expect(JSON.stringify(db.state)).toBe(snapshot);
     expect(productOf('95015324')).toMatchObject({
       id: ids.product,
-      sourcePartNumber: '95015324',
-      oemNumbers: ['95015324'],
+      sourcePartNumber: 'SKODA',
+      oemNumbers: ['SKODA'],
     });
-    expect(stockOf('95015324')).toMatchObject({
-      id: ids.stock,
-      priceUzs: '130000',
-    });
-    expect(partOf('95015324').oemNumbers).toEqual(['95015324']);
-    expect(db.state.stocks).toHaveLength(1);
-    expect(db.state.products).toHaveLength(1);
-
-    const again = await run(file);
-    expect(again.summary).toMatchObject({
-      rowsUnchanged: 1,
-      rowsWithPartNumberChange: 0,
-    });
+    expect(partOf('95015324').oemNumbers).toEqual(['SKODA']);
+    expect(stockOf('95015324').id).toBe(ids.stock);
   });
 
   it('a stored part number never decides which position a row updates; other sellers’ products are untouched', async () => {
@@ -254,7 +246,7 @@ describe('Driver’s Village — a repeated code_1c is one position at its highe
     },
   );
 
-  it('the other fields come from the chosen row; on a tie the first row wins', async () => {
+  it('name and unit come from the chosen row (a tie: the first); differing quantities give none', async () => {
     const { run, stockOf, productOf } = setup();
     const report = await run(
       exportFile([
@@ -269,8 +261,16 @@ describe('Driver’s Village — a repeated code_1c is one position at its highe
       priceUzs: '900000.00',
       differs: ['name', 'quantity'],
     });
-    expect(stockOf('T-100')).toMatchObject({ priceUzs: '900000', quantity: 5 });
+    // Batches or warehouses? No confirmed count: the stock gets the column
+    // default, never one row's quantity or a sum.
+    expect(stockOf('T-100')).toMatchObject({ priceUzs: '900000', quantity: 1 });
     expect(productOf('T-100').title).toBe('Губка кора');
+    const chosen = report.rows.find((r) => r.line === 3)!;
+    expect(chosen.quantity).toEqual({ from: null, to: null });
+    expect(chosen.issues.map((i) => i.code)).toContain(
+      'duplicate_quantities_differ',
+    );
+    expect(report.summary.codesWithAmbiguousQuantity).toBe(1);
   });
 
   it('an invalid price never wins against a valid one; it is only a warning', async () => {
@@ -385,7 +385,7 @@ describe('Driver’s Village — a repeated code_1c is one position at its highe
     expect(db.state.stocks).toHaveLength(2);
   });
 
-  it('dry-run reports the chosen prices and part-number corrections, and writes nothing', async () => {
+  it('dry-run reports the chosen prices and card differences, and writes nothing', async () => {
     const { db, store, run, productOf } = setup();
     await run(exportFile([{ code: 'Q-100', price: '100' }]));
     productOf('Q-100').sourcePartNumber = 'SKODA';
@@ -408,7 +408,7 @@ describe('Driver’s Village — a repeated code_1c is one position at its highe
       rowsToCreate: 1,
       rowsMerged: 1,
       duplicateCodesMaxPrice: 1,
-      rowsWithPartNumberChange: 1,
+      rowsWithCardDifferences: 1, // the stored part number, never written
       written: null,
     });
     expect(report.duplicates[0]).toMatchObject({

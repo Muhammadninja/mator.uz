@@ -129,6 +129,10 @@ function setup(storedCodes?: string[]) {
         projected.push(id);
         return Promise.reject(new Error('projection is a write'));
       },
+      projectStockLevels: (id: number) => {
+        projected.push(id);
+        return Promise.reject(new Error('projection is a write'));
+      },
     },
   );
   return { ...db, projected, service };
@@ -162,7 +166,7 @@ describe('Driver’s Village — a dry run issues reads only (production store, 
     expect(projected).toEqual([]);
   });
 
-  it('a match by the 8-digit key and a key conflict are planned with reads only', async () => {
+  it('codes sharing an 8-digit key with stored positions are planned as new positions, with reads only — never a takeover', async () => {
     const { service, calls, projected } = setup([
       '96273708',
       '96350526',
@@ -172,8 +176,8 @@ describe('Driver’s Village — a dry run issues reads only (production store, 
       Buffer.from(
         [
           'code_1c;name;quantity;unit;price;vehicle_make;vehicle_model',
-          '96273708 GMB;Фильтр масляный;12;шт.;123,456;CHEVROLET;COBALT', // → stored 96273708
-          '96350526 OEM;Амортизатор;5;шт.;450,000;CHEVROLET;COBALT', // provable, but two stored with the key
+          '96273708 GMB;Фильтр масляный;12;шт.;123,456;CHEVROLET;COBALT',
+          '96350526 OEM;Амортизатор;5;шт.;450,000;CHEVROLET;COBALT',
         ].join('\r\n'),
         'utf-8',
       ),
@@ -182,16 +186,18 @@ describe('Driver’s Village — a dry run issues reads only (production store, 
     );
 
     expect(report.summary).toMatchObject({
-      rowsToUpdate: 1,
-      rowsMatchedByKey: 1,
-      keyConflicts: 1,
-      rowsInKeyConflict: 1,
+      rowsToCreate: 2,
+      rowsToUpdate: 0,
+      rowsToCreateWithSharedKey: 2,
+      rowsWithPossibleRename: 2,
       written: null,
     });
-    expect(report.keyMatches[0]).toMatchObject({
-      storedCode: '96273708',
-      stockId: 11,
-    });
+    expect(report.keyShared.map((k) => [k.code1c, k.possibleRenameOf])).toEqual(
+      [
+        ['96273708 GMB', ['96273708']],
+        ['96350526 OEM', ['96350526']],
+      ],
+    );
     for (const call of calls) {
       const [, op] = call.split('.');
       expect(call === '$queryRaw' || READ_OPERATIONS.has(op)).toBe(true);

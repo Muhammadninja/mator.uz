@@ -1,7 +1,8 @@
 /**
  * Pure planning steps of the Driver's Village import: fold the rows of one
- * code_1c into one position, build the write, diff it against what is already
- * stored, and flag what an operator should review. No I/O.
+ * code_1c into one position, build the initial creation of a new position or
+ * the price/stock synchronization of a stored one, and flag what an operator
+ * should review. No I/O.
  */
 import { Prisma } from '@prisma/client';
 import { CatalogProjectionService } from '../../catalog/projection/catalog-projection.service';
@@ -13,6 +14,8 @@ import type {
   IssueSeverity,
   ParsedRow,
   PositionWrite,
+  StockSync,
+  VehicleLinks,
   VehicleReference,
   VehicleSpec,
 } from './drivers-village.types';
@@ -35,8 +38,14 @@ export interface LinePatch {
 }
 
 export interface CodeResolution {
-  /** The rows to plan: one per code_1c that has an importable row. */
+  /**
+   * The rows to plan: one per code_1c that has an importable row — the row
+   * with the highest valid price. Its quantity is null when the code's rows
+   * state different quantities (see resolveDuplicateCodes).
+   */
   positions: ParsedRow[];
+  /** code_1c → the fitment of every valid row of the code, merged. */
+  vehicles: Map<string, VehicleLinks>;
   /** Every code_1c on more than one row, in order of first appearance. */
   duplicates: DuplicateCode[];
   /** New outcome / issues for the lines of a shared code_1c. */
@@ -62,13 +71,21 @@ const COMPARED_FIELDS: [string, (r: ParsedRow) => string][] = [
  * once per batch, at different prices) is ONE position, written once at the
  * HIGHEST valid price among its rows — an exact Decimal comparison of the
  * normalized prices, no rounding; on a tie the first row wins — together with
- * the other fields of that same row. Only rows that pass every data check
- * compete: an invalid price never wins, and a row rejected for anything else
- * never feeds the database. The other rows are 'merged' (reported, not
+ * the name, unit and numbers of that same row. Only rows that pass every data
+ * check compete: an invalid price never wins, and a row rejected for anything
+ * else never feeds the database. The other rows are 'merged' (reported, not
  * written); a row whose only error is its price is merged too, the error
  * downgraded to a warning. When no row of a code has a valid price, nothing is
  * written for it, so a stored price is never replaced by zero or an invalid
- * value. Pure: no I/O.
+ * value.
+ *
+ * Two things are NOT taken from the chosen row alone:
+ *   • fitment — the models and makes of every valid row are merged
+ *     (`vehicles`), so a model listed on a cheaper row is never lost;
+ *   • quantity — rows stating different quantities (batches? warehouses?)
+ *     give no confirmed count, so the position's quantity is null: not
+ *     written (a new stock gets the default, a stored one keeps its count).
+ * Pure: no I/O.
  */
 export function resolveDuplicateCodes(lines: SourceLine[]): CodeResolution {
   const byCode = new Map<string, SourceLine[]>();
@@ -77,6 +94,7 @@ export function resolveDuplicateCodes(lines: SourceLine[]): CodeResolution {
 
   const out: CodeResolution = {
     positions: [],
+    vehicles: new Map(),
     duplicates: [],
     patches: new Map(),
     codesWithoutValidPrice: [],
@@ -85,9 +103,12 @@ export function resolveDuplicateCodes(lines: SourceLine[]): CodeResolution {
     const valid = group.flatMap((l) => (l.row ? [l.row] : []));
     const chosen = highestPrice(valid);
     const priced = group.some((l) => l.row || !l.issues.some(isPriceError));
-    if (chosen) out.positions.push(chosen);
+    if (chosen) out.vehicles.set(code1c, vehicleLinks(valid));
     if (!priced) out.codesWithoutValidPrice.push(code1c);
-    if (group.length === 1) continue;
+    if (group.length === 1) {
+      if (chosen) out.positions.push(chosen);
+      continue;
+    }
 
     const where = `code_1c "${code1c}" is on lines ${group.map((l) => l.line).join(', ')}`;
     const issue = (
@@ -108,9 +129,13 @@ export function resolveDuplicateCodes(lines: SourceLine[]): CodeResolution {
     const differs = COMPARED_FIELDS.filter(
       ([, value]) => new Set(valid.map(value)).size > 1,
     ).map(([name]) => name);
+    if (chosen)
+      out.positions.push(
+        differs.includes('quantity') ? { ...chosen, quantity: null } : chosen,
+      );
     // Differences that may mean different goods, batches or warehouses are
     // reported on the chosen row on their own, so they can be filtered for
-    // review. The behaviour stays the rule: every field from the chosen row.
+    // review.
     const chosenLine = group.find((l) => chosen && l.row === chosen);
     const quantities = [
       ...new Set(
@@ -126,7 +151,7 @@ export function resolveDuplicateCodes(lines: SourceLine[]): CodeResolution {
                     chosenLine,
                     'warning',
                     'duplicate_quantities_differ',
-                    `${where} with different quantities (${quantities.join(', ')}) — possibly different batches or warehouses. Line ${chosen.line} has the highest valid price, so its quantity (${chosen.quantity ?? 'none'}) is imported with that price; quantities are never added up.`,
+                    `${where} with different quantities (${quantities.join(', ')}) — possibly different batches or warehouses, so no quantity is confirmed and none is imported: a new position starts at the default (1), a stored one keeps its count. Quantities are never added up or taken from one row.`,
                     'quantity',
                   ),
                 ]
@@ -175,11 +200,18 @@ export function resolveDuplicateCodes(lines: SourceLine[]): CodeResolution {
         });
         continue;
       }
+      const fromChosen = differs.filter(
+        (f) => f !== 'vehicles' && f !== 'quantity',
+      );
       const note =
         `${where} — one position at the highest valid price, ${chosen.priceUzs} UZS from line ${chosen.line}` +
-        (differs.length
-          ? `, with that line's ${differs.join(', ')} (the rows differ)`
+        (fromChosen.length
+          ? `, with that line's ${fromChosen.join(', ')} (the rows differ)`
           : '') +
+        (differs.includes('vehicles')
+          ? '; the vehicles of all its rows are merged'
+          : '') +
+        (differs.includes('quantity') ? '; no quantity is imported' : '') +
         (l.row === chosen ? '' : '; this row is not imported separately');
       const priceOnly =
         !l.row &&
@@ -249,29 +281,46 @@ function highestPrice(rows: ParsedRow[]): ParsedRow | null {
 
 /** A vehicle spec as one comparable string; model order does not matter. */
 function vehicleKey(v: VehicleSpec): string {
-  if (v.kind === 'universal') return '*';
+  if (v.kind === 'none') return '-';
   if (v.kind === 'make') return `${v.make}|*`;
   return `${v.make}|${[...v.models].sort().join(',')}`;
 }
 
 /**
- * The write for one row: import-owned fields only. No category — a new
- * position is created unclassified and an existing one keeps its own.
- * From the 8-digit key (drivers-village-code-key.ts): `previousCode1c` — the
- * stored code_1c of the position a key match updates; `searchKey` — the key,
- * added to the OEM index after the code's own entry (never twice).
+ * The fitment of several rows of one code, merged in file order. A row
+ * without vehicles adds nothing (and never makes the part universal).
  */
-export function buildWrite(
+export function vehicleLinks(rows: { vehicle: VehicleSpec }[]): VehicleLinks {
+  const models = new Map<string, { make: string; model: string }>();
+  const makes = new Set<string>();
+  for (const { vehicle: v } of rows) {
+    if (v.kind === 'make') makes.add(v.make);
+    else if (v.kind === 'models')
+      for (const model of v.models)
+        models.set(`${v.make}|${model}`, { make: v.make, model });
+  }
+  return { models: [...models.values()], makes: [...makes] };
+}
+
+/**
+ * The initial creation of a position the database does not have: the row's
+ * name, unit and numbers, its price and quantity, and the code's merged
+ * fitment. No category — a new position starts unclassified. `searchKey` —
+ * the code's 8-digit key, added to the OEM index after the code's own entry
+ * (never twice) when no other position carries it (drivers-village-code-key).
+ */
+export function buildCreate(
   row: ParsedRow,
-  key: { previousCode1c?: string; searchKey?: string } = {},
+  vehicles: VehicleLinks,
+  searchKey?: string,
 ): PositionWrite {
   const oemNumbers =
-    key.searchKey && !row.oemNumbers.includes(key.searchKey)
-      ? [...row.oemNumbers, key.searchKey]
+    searchKey && !row.oemNumbers.includes(searchKey)
+      ? [...row.oemNumbers, searchKey]
       : row.oemNumbers;
   return {
+    kind: 'create',
     code1c: row.code1c,
-    ...(key.previousCode1c ? { previousCode1c: key.previousCode1c } : {}),
     priceUzs: row.priceUzs,
     quantity: row.quantity,
     unit: row.unit,
@@ -280,49 +329,67 @@ export function buildWrite(
       gmNumbers: row.gmNumber ? [row.gmNumber] : [],
       sourcePartNumber: row.sourcePartNumber,
       oemNumbers,
-      isUniversal: row.vehicle.kind === 'universal',
     },
-    models:
-      row.vehicle.kind === 'models'
-        ? row.vehicle.models.map((model) => ({
-            make: (row.vehicle as { make: string }).make,
-            model,
-          }))
-        : [],
-    make: row.vehicle.kind === 'make' ? row.vehicle.make : null,
+    models: vehicles.models,
+    makes: vehicles.makes,
   };
 }
 
-/** Import-owned fields whose stored value differs from the planned write. */
-export function diffPosition(w: PositionWrite, e: ExistingPosition): string[] {
-  const changes: string[] = [];
-  const decimalDiffers = (a: string, b: string) =>
-    !new Prisma.Decimal(a).eq(new Prisma.Decimal(b));
-  const listDiffers = (a: string[], b: string[]) =>
-    a.length !== b.length || a.some((v, i) => v !== b[i]);
-
-  if (decimalDiffers(w.priceUzs, e.priceUzs)) changes.push('price');
+/** A stored position's sync: its price, and its quantity when stated. */
+export function planStockSync(
+  row: ParsedRow,
+  e: ExistingPosition,
+): { changes: string[]; write: StockSync | null } {
+  const price = !new Prisma.Decimal(row.priceUzs).eq(
+    new Prisma.Decimal(e.priceUzs),
+  );
   // No quantity in the file leaves the stored count alone — never a change.
-  if (w.quantity !== null && w.quantity !== e.quantity)
-    changes.push('quantity');
-  if (w.unit !== e.unit) changes.push('unit');
-  if (w.product.title !== e.title) changes.push('name');
-  if (listDiffers(w.product.gmNumbers, e.gmNumbers)) changes.push('gm_number');
-  // Only after a match by the 8-digit key: the position takes the new code.
-  if (w.code1c !== e.sourceCode) changes.push('source_code');
-  if (w.product.sourcePartNumber !== e.sourcePartNumber)
-    changes.push('part_number');
-  if (listDiffers(w.product.oemNumbers, e.oemNumbers))
-    changes.push('oem_numbers');
-  const models = w.models.map((m) => `${m.make}|${m.model}`).sort();
-  const makes = w.make ? [w.make] : [];
+  const quantity = row.quantity !== null && row.quantity !== e.quantity;
+  const changes = [
+    ...(price ? ['price'] : []),
+    ...(quantity ? ['quantity'] : []),
+  ];
+  return {
+    changes,
+    write: changes.length
+      ? {
+          kind: 'sync',
+          code1c: row.code1c,
+          stockId: e.stockId,
+          priceUzs: price ? row.priceUzs : null,
+          quantity: quantity ? row.quantity : null,
+        }
+      : null,
+  };
+}
+
+const listDiffers = (a: string[], b: string[]) =>
+  a.length !== b.length || a.some((v, i) => v !== b[i]);
+
+/**
+ * Card fields in which the file differs from a stored position — reported,
+ * never written. A file without vehicles says nothing, so is no difference.
+ */
+export function cardDifferences(
+  row: ParsedRow,
+  vehicles: VehicleLinks,
+  e: ExistingPosition,
+): string[] {
+  const out: string[] = [];
+  if (row.name !== e.title) out.push('name');
+  if (row.unit !== e.unit) out.push('unit');
+  if (listDiffers(row.gmNumber ? [row.gmNumber] : [], e.gmNumbers))
+    out.push('gm_number');
+  if (row.sourcePartNumber !== e.sourcePartNumber) out.push('part_number');
+  const models = vehicles.models.map((m) => `${m.make}|${m.model}`).sort();
   if (
-    w.product.isUniversal !== e.isUniversal ||
-    listDiffers(models, e.models) ||
-    listDiffers(makes, e.makes)
+    (models.length > 0 || vehicles.makes.length > 0) &&
+    (e.isUniversal ||
+      listDiffers(models, e.models) ||
+      listDiffers([...vehicles.makes].sort(), e.makes))
   )
-    changes.push('vehicles');
-  return changes;
+    out.push('vehicles');
+  return out;
 }
 
 /**
@@ -362,23 +429,21 @@ export interface FitNotInReference {
  * make and model NAME (case-insensitive), so such a fit is stored but matches
  * no garage vehicle until vehicle_makes / vehicle_models carry that name. A
  * reference warning, never a block: the mapping is right, the reference lags.
+ * Checked for the positions whose fitment is written (new ones).
  */
 export function findFitsNotInReference(
-  rows: ParsedRow[],
+  positions: { row: ParsedRow; links: VehicleLinks }[],
   reference: VehicleReference,
 ): { missing: FitNotInReference[]; issues: ImportIssue[] } {
   const makes = new Set(reference.makes.map((m) => m.toLowerCase()));
   const models = new Set(reference.models.map((m) => m.toLowerCase()));
   const missing = new Map<string, FitNotInReference>();
   const issues: ImportIssue[] = [];
-  for (const row of rows) {
-    const v = row.vehicle;
-    const fits =
-      v.kind === 'models'
-        ? v.models.map((model) => ({ make: v.make, model }))
-        : v.kind === 'make'
-          ? [{ make: v.make, model: null }]
-          : [];
+  for (const { row, links } of positions) {
+    const fits: { make: string; model: string | null }[] = [
+      ...links.models,
+      ...links.makes.map((make) => ({ make, model: null })),
+    ];
     for (const f of fits) {
       const known =
         f.model === null

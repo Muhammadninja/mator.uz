@@ -4,6 +4,7 @@ import {
   PartCondition,
   PartMainCategory,
   PartNumberType,
+  PartVehicleCategory,
 } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import {
@@ -231,6 +232,223 @@ export class CatalogProjectionService {
   }
 
   /**
+   * After a price/stock synchronization of an imported position: copy the
+   * stock's price and/or quantity to its EXISTING catalog part — only the
+   * columns that changed, nothing else. Its title, numbers, images, category,
+   * fits (catalog_part_fits are not deleted or recreated) and the admin-owned
+   * columns (purchase price, cashback, a retail price or stock count an
+   * operator set) stay as they are. A stock never projected yet gets the full
+   * projectStock (its creation).
+   */
+  async projectStockLevels(
+    stockId: number,
+    changed: { price: boolean; quantity: boolean },
+  ): Promise<string | null> {
+    const partId = CatalogProjectionService.catalogPartId(stockId);
+    const [stock, part] = await Promise.all([
+      this.prisma.stock.findUnique({
+        where: { id: stockId },
+        select: { priceUzs: true, quantity: true, sourceSystem: true },
+      }),
+      this.prisma.catalogPart.findUnique({
+        where: { id: partId },
+        select: { id: true },
+      }),
+    ]);
+    if (!stock) {
+      this.logger.warn(
+        `projectStockLevels(${stockId}): stock not found — skipped`,
+      );
+      return null;
+    }
+    if (!part) return this.projectStock(stockId);
+
+    const data: Prisma.CatalogPartUpdateInput = {};
+    if (changed.price) data.priceUzs = stock.priceUzs;
+    if (changed.quantity) {
+      data.inStock = stock.quantity > 0;
+      // As in projectStock: a real count only for an imported position.
+      if (stock.sourceSystem) data.stockQty = stock.quantity;
+    }
+    if (Object.keys(data).length > 0)
+      await this.prisma.catalogPart.update({ where: { id: partId }, data });
+    return partId;
+  }
+
+  /**
+   * After the classification import changed a product: project its
+   * classification and fitment onto its EXISTING catalog part, and nothing
+   * else (price, stock, title, images and the admin-owned columns stay).
+   *   • Fits are ADDED from part_models / part_makes (insert, skip
+   *     duplicates) — never deleted, so no link is lost; is_universal and the
+   *     vehicle-derived part brand follow the product.
+   *   • The category (category_id + main/vehicle mirrors, derived from the
+   *     product exactly as projectStock does) is written only when asked, and
+   *     only while the part still sits in `category.expected` — a
+   *     compare-and-set, so an operator's move made meanwhile always wins.
+   * A stock never projected yet gets the full projectStock, which creates the
+   * part with the product's classification.
+   */
+  async projectClassification(
+    stockId: number,
+    opts: { category?: { expected: string } } = {},
+  ): Promise<{ partId: string | null; categoryWritten: boolean }> {
+    const stock = await this.prisma.stock.findUnique({
+      where: { id: stockId },
+      include: CatalogProjectionService.stockInclude,
+    });
+    if (!stock) {
+      this.logger.warn(
+        `projectClassification(${stockId}): stock not found — skipped`,
+      );
+      return { partId: null, categoryWritten: false };
+    }
+    const partId = CatalogProjectionService.catalogPartId(stock.id);
+    const part = await this.prisma.catalogPart.findUnique({
+      where: { id: partId },
+      select: { id: true },
+    });
+    if (!part) {
+      await this.projectStock(stockId);
+      return { partId, categoryWritten: opts.category !== undefined };
+    }
+
+    const product = stock.product;
+    const brands = this.vehicleBrands(product);
+    const ops: Prisma.PrismaPromise<unknown>[] = [
+      ...this.partBrandOps(brands),
+      this.prisma.catalogPart.update({
+        where: { id: partId },
+        data: {
+          isUniversal: product.isUniversal,
+          brandId: CatalogProjectionService.singleBrandId(brands),
+        },
+      }),
+    ];
+    const categoryOp = opts.category ? ops.length : -1;
+    if (opts.category)
+      ops.push(
+        this.prisma.catalogPart.updateMany({
+          where: { id: partId, categoryId: opts.category.expected },
+          data: CatalogProjectionService.classificationOf(
+            product,
+            await this.categoryRoots(),
+          ),
+        }),
+      );
+    const fitRows = this.buildFitRows(partId, product.partModels);
+    if (fitRows.length > 0)
+      ops.push(
+        this.prisma.catalogPartFit.createMany({
+          data: fitRows,
+          skipDuplicates: true,
+        }),
+      );
+    const makeFitRows = this.buildMakeFitRows(partId, product.partMakes ?? []);
+    if (makeFitRows.length > 0)
+      ops.push(
+        this.prisma.catalogPartMakeFit.createMany({
+          data: makeFitRows,
+          skipDuplicates: true,
+        }),
+      );
+    const results = await this.prisma.$transaction(ops);
+    return {
+      partId,
+      categoryWritten:
+        categoryOp >= 0 &&
+        (results[categoryOp] as { count: number }).count === 1,
+    };
+  }
+
+  /**
+   * The part's classification derived from its supply-side product, in
+   * priority order:
+   *   1. the supply-side `categoryId` the seller actually CHOSE (the dynamic
+   *      tree). This is the authoritative answer and the only one that works
+   *      for a category with no enum equivalent — an admin-created "Другое"
+   *      child (Motorcycle Oil, …) has mainCategory = null, so deriving from
+   *      the enum alone would bury every such listing in the fallback bucket
+   *      and make it unreachable by ?category=<id>;
+   *   2. else the canonical category mirroring its bot-assigned main category
+   *      (BRAKES → 'brakes', …) — the pre-existing path, unchanged, which still
+   *      covers every legacy row and every classifier-only listing;
+   *   3. else the fallback bucket.
+   * The home-grid bucket (mainCategory) is projected verbatim when the
+   * classifier assigned one; otherwise derived from the category's ROOT, so a
+   * listing filed on a real subcategory (e.g. 'synthetic-motor-oil') still
+   * rolls up to its bucket instead of vanishing from the tile. See
+   * ROOT_TO_MAIN_CATEGORY.
+   */
+  static classificationOf(
+    product: {
+      categoryId: string | null;
+      mainCategory: PartMainCategory | null;
+      vehicleCategory: PartVehicleCategory | null;
+    },
+    rootByCategoryId: ReadonlyMap<string, string>,
+  ) {
+    const categoryId =
+      product.categoryId ??
+      (product.mainCategory
+        ? (MAIN_CATEGORY_TO_SLUG[product.mainCategory] ??
+          CatalogProjectionService.UNCATEGORIZED_ID)
+        : CatalogProjectionService.UNCATEGORIZED_ID);
+    return {
+      categoryId,
+      mainCategory: CatalogProjectionService.deriveMainCategory(
+        product.mainCategory,
+        categoryId,
+        rootByCategoryId,
+      ),
+      vehicleCategory: product.vehicleCategory,
+    };
+  }
+
+  /**
+   * Distinct vehicle brands linked to a product (supply Brand.id → name). The
+   * buyer PartBrand slot (part manufacturer) has no supply-side source, so the
+   * *vehicle* brand attached via PartModel → CarModel → Brand is reused;
+   * make-wide links name a vehicle brand just as specific-model links do.
+   */
+  private vehicleBrands(product: {
+    partModels: { model: { brand: { id: number; name: string } } }[];
+    partMakes?: { brand: { id: number; name: string } }[];
+  }): Map<number, string> {
+    const brands = new Map<number, string>();
+    for (const pm of product.partModels)
+      brands.set(pm.model.brand.id, pm.model.brand.name);
+    for (const pmk of product.partMakes ?? [])
+      brands.set(pmk.brand.id, pmk.brand.name);
+    return brands;
+  }
+
+  /** Parent PartBrand rows (optional FK — only if the product has links). */
+  private partBrandOps(
+    brands: Map<number, string>,
+  ): Prisma.PrismaPromise<unknown>[] {
+    return [...brands].map(([bId, bName]) => {
+      const id = CatalogProjectionService.partBrandId(bId);
+      return this.prisma.partBrand.upsert({
+        where: { id },
+        update: { name: bName },
+        create: { id, name: bName },
+      });
+    });
+  }
+
+  /**
+   * The listing's brandId: exactly one linked vehicle brand → that brand;
+   * otherwise null (a multi-brand or brandless listing has no single part
+   * brand).
+   */
+  private static singleBrandId(brands: Map<number, string>): string | null {
+    return brands.size === 1
+      ? CatalogProjectionService.partBrandId([...brands.keys()][0])
+      : null;
+  }
+
+  /**
    * Re-project EVERY Stock row of one Product, so a change to a product-level
    * attribute (today: the curated rating) reaches the buyer catalog immediately
    * instead of waiting for a batch job.
@@ -308,29 +526,10 @@ export class CatalogProjectionService {
       }),
     );
 
-    // Distinct vehicle brands linked to this product. The buyer PartBrand slot
-    // (part manufacturer) has no supply-side source, so we reuse the *vehicle*
-    // brand attached via PartModel → CarModel → Brand.
-    const brandsForProduct = new Map<number, string>(); // supply Brand.id → name
-    for (const pm of product.partModels) {
-      brandsForProduct.set(pm.model.brand.id, pm.model.brand.name);
-    }
-    // Make-wide links name a vehicle brand just as specific-model links do.
-    for (const pmk of product.partMakes ?? []) {
-      brandsForProduct.set(pmk.brand.id, pmk.brand.name);
-    }
-
-    // Parent brands (optional FK — only if the product has vehicle links).
-    for (const [bId, bName] of brandsForProduct) {
-      const id = CatalogProjectionService.partBrandId(bId);
-      ops.push(
-        this.prisma.partBrand.upsert({
-          where: { id },
-          update: { name: bName },
-          create: { id, name: bName },
-        }),
-      );
-    }
+    // Distinct vehicle brands linked to this product, and their parent
+    // PartBrand rows (optional FK — only if the product has vehicle links).
+    const brandsForProduct = this.vehicleBrands(product);
+    ops.push(...this.partBrandOps(brandsForProduct));
 
     // Parent seller (required FK). A seller linked to a curated dealer projects
     // into that dealer's existing row, which is admin-owned presentation (name,
@@ -356,13 +555,7 @@ export class CatalogProjectionService {
       );
     }
 
-    // Pick a brandId for the listing: exactly one linked vehicle brand → use it;
-    // otherwise null (a multi-brand or brandless listing has no single part
-    // brand). Deterministic: smallest supply Brand.id wins for stability.
-    const brandId =
-      brandsForProduct.size === 1
-        ? CatalogProjectionService.partBrandId([...brandsForProduct.keys()][0])
-        : null;
+    const brandId = CatalogProjectionService.singleBrandId(brandsForProduct);
 
     const partId = CatalogProjectionService.catalogPartId(stock.id);
     const images = product.images.map((img) => img.url);
@@ -391,43 +584,13 @@ export class CatalogProjectionService {
       ...(product.oemNumbers ?? []),
     ]);
 
-    // Point the part at its PartCategory, in priority order:
-    //
-    //   1. the supply-side `categoryId` the seller actually CHOSE (the dynamic
-    //      tree). This is the authoritative answer and the only one that works
-    //      for a category with no enum equivalent — an admin-created "Другое"
-    //      child (Motorcycle Oil, …) has mainCategory = null, so deriving from
-    //      the enum alone would bury every such listing in the fallback bucket
-    //      and make it unreachable by ?category=<id>;
-    //   2. else the canonical category mirroring its bot-assigned main category
-    //      (BRAKES → 'brakes', …) — the pre-existing path, unchanged, which still
-    //      covers every legacy row and every classifier-only listing;
-    //   3. else the fallback bucket.
-    const categoryId =
-      product.categoryId ??
-      (product.mainCategory
-        ? (MAIN_CATEGORY_TO_SLUG[product.mainCategory] ??
-          CatalogProjectionService.UNCATEGORIZED_ID)
-        : CatalogProjectionService.UNCATEGORIZED_ID);
-
-    // The part's classification, kept apart from partData because an imported
-    // position writes it on create only (see the upsert below).
-    const classification = {
-      categoryId,
-      // Classified attributes projected verbatim from the supply-side Product
-      // (set by the Telegram classifier) — enables indexed buyer-side filtering.
-      // Bucket for the home grid. Projected verbatim when the classifier
-      // assigned one; otherwise derived from the category's ROOT, so a listing
-      // filed on a real subcategory (e.g. 'synthetic-motor-oil') still rolls up
-      // to its bucket instead of vanishing from the tile. See
-      // ROOT_TO_MAIN_CATEGORY.
-      mainCategory: CatalogProjectionService.deriveMainCategory(
-        product.mainCategory,
-        categoryId,
-        rootByCategoryId,
-      ),
-      vehicleCategory: product.vehicleCategory,
-    };
+    // The part's classification (see classificationOf), kept apart from
+    // partData because an imported position writes it on create only (see the
+    // upsert below).
+    const classification = CatalogProjectionService.classificationOf(
+      product,
+      rootByCategoryId,
+    );
 
     const partData = {
       title: product.title,
@@ -477,14 +640,15 @@ export class CatalogProjectionService {
     };
 
     // An IMPORTED position (Stock.sourceSystem set — Driver's Village 1C) is
-    // classified in Mator, never by its source: the import writes no category,
-    // so the part is created in whatever bucket the product resolves to (the
-    // fallback for a new position) and an operator files it from the admin
-    // console, which writes catalog_parts.category_id directly (bulk-move).
-    // Every later projection of that stock — a re-import, a photo update, a
-    // rating edit — must keep that choice, so its classification is written on
-    // CREATE only. A Telegram listing keeps the previous behaviour: its seller
-    // re-picks the category in the bot, and the update carries it.
+    // classified in Mator, never by its price/stock sync: the part is created
+    // in whatever bucket the product resolves to (the fallback for a new
+    // position) and an operator files it from the admin console, which writes
+    // catalog_parts.category_id directly (bulk-move). Every later projection
+    // of that stock — a photo update, a rating edit — must keep that choice,
+    // so its classification is written on CREATE only here; the explicitly run
+    // classification import writes it through projectClassification, guarded
+    // by a compare-and-set. A Telegram listing keeps the previous behaviour:
+    // its seller re-picks the category in the bot, and the update carries it.
     ops.push(
       this.prisma.catalogPart.upsert({
         where: { id: partId },

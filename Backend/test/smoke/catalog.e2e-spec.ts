@@ -276,7 +276,7 @@ describe('Catalog/Categories smoke', () => {
     const where = prisma.catalogPart.groupBy.mock.calls[0][0].where;
     // [buyer-visible (no suspended dealer), the garage vehicle's fit clause]
     const [visible, vehicleClause] = where.AND;
-    expect(visible).toEqual({ seller: { status: { not: 'SUSPENDED' } } });
+    expect(visible).toEqual({ seller: { status: { not: 'SUSPENDED' } }, images: { isEmpty: false } });
     expect(vehicleClause.OR).toContainEqual({ isUniversal: true });
     expect(JSON.stringify(where)).toContain('Cobalt');
   });

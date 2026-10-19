@@ -12,13 +12,23 @@
  */
 import type { Prisma } from '@prisma/client';
 import type {
+  CategoryNode,
+  ClassificationTarget,
+  ClassificationWrite,
+} from '../../src/imports/drivers-village/drivers-village-classification.rules';
+import {
+  applyClassification,
+  type ClassificationStore,
+  type ClassificationWritten,
+} from '../../src/imports/drivers-village/drivers-village-classification.store';
+import type {
   DriversVillageStore,
   WrittenPosition,
 } from '../../src/imports/drivers-village/drivers-village.store';
 import { writePosition } from '../../src/imports/drivers-village/drivers-village.store';
 import type {
+  BatchWrite,
   ExistingPosition,
-  PositionWrite,
   VehicleReference,
 } from '../../src/imports/drivers-village/drivers-village.types';
 
@@ -76,6 +86,10 @@ export interface FakeState {
   catalogParts: FakeCatalogPart[];
   /** Buyer vehicle reference names (vehicle_makes / vehicle_models). */
   vehicleReference: VehicleReference;
+  /** The part_categories tree (id, parent, active). */
+  partCategories: CategoryNode[];
+  /** Fitment Studio bindings (fitment_bindings) — no import writes them. */
+  fitmentBindings: { partId: string; vehicleModelId: string; nodeId: string }[];
   seq: number;
 }
 
@@ -99,6 +113,8 @@ export class FakeDb {
       productImages: [],
       catalogParts: [],
       vehicleReference: { makes: [], models: [] },
+      partCategories: [],
+      fitmentBindings: [],
       seq: 1000,
       ...seed,
     };
@@ -207,6 +223,7 @@ export class FakeDb {
             vehicleCategoryId: null,
             mainCategory: null,
             vehicleCategory: null,
+            isUniversal: false, // products.is_universal DEFAULT false
             ...data,
             id: this.next(),
           } as FakeProduct;
@@ -274,6 +291,21 @@ export class FakeDb {
         },
       },
       partMake: {
+        upsert: async ({
+          where,
+        }: {
+          where: { partId_brandId: { partId: number; brandId: number } };
+        }) => {
+          log('partMake.upsert');
+          const k = where.partId_brandId;
+          if (
+            !s().partMakes.some(
+              (x) => x.partId === k.partId && x.brandId === k.brandId,
+            )
+          )
+            s().partMakes.push({ ...k });
+          return {};
+        },
         deleteMany: async ({ where }: { where: { partId: number } }) => {
           log('partMake.deleteMany');
           s().partMakes = s().partMakes.filter(
@@ -295,6 +327,13 @@ export class FakeDb {
             throw new Error('duplicate part_makes');
           s().partMakes.push({ ...data });
           return {};
+        },
+      },
+      catalogPart: {
+        findUnique: async ({ where }: { where: { id: string } }) => {
+          log('catalogPart.findUnique');
+          const part = s().catalogParts.find((c) => c.id === where.id);
+          return part ? { categoryId: part.categoryId } : null;
         },
       },
     };
@@ -387,7 +426,7 @@ export class FakeDriversVillageStore implements DriversVillageStore {
   /** Atomic like a real transaction: any failure restores the prior state. */
   async applyBatch(
     sellerId: number,
-    writes: PositionWrite[],
+    writes: BatchWrite[],
   ): Promise<WrittenPosition[]> {
     this.applyBatchCalls += 1;
     const snapshot = structuredClone(this.db.state);
@@ -407,6 +446,94 @@ export class FakeDriversVillageStore implements DriversVillageStore {
 }
 
 /**
+ * The classification store over FakeDb: the REAL applyClassification on the
+ * fake transaction client, atomic per batch like a real transaction.
+ */
+export class FakeClassificationStore implements ClassificationStore {
+  applyCalls = 0;
+  private readonly base: FakeDriversVillageStore;
+
+  constructor(
+    readonly db: FakeDb,
+    private readonly opts: FakeStoreOptions = {},
+  ) {
+    this.base = new FakeDriversVillageStore(db, opts);
+  }
+
+  schemaReady() {
+    return this.base.schemaReady();
+  }
+
+  findCatalogSeller(id: string) {
+    return this.base.findCatalogSeller(id);
+  }
+
+  findLinkedSeller(catalogSellerId: string) {
+    return this.base.findLinkedSeller(catalogSellerId);
+  }
+
+  async loadCategoryTree() {
+    return this.db.state.partCategories.map((c) => ({ ...c }));
+  }
+
+  async loadTargets(sellerId: number, codes: string[]) {
+    const st = this.db.state;
+    const out = new Map<string, ClassificationTarget>();
+    for (const s of st.stocks) {
+      if (
+        s.sellerId !== sellerId ||
+        !s.sourceCode ||
+        !codes.includes(s.sourceCode)
+      )
+        continue;
+      const p = st.products.find((x) => x.id === s.productId)!;
+      const brand = (id: number) => st.brands.find((b) => b.id === id)!.name;
+      const partId = `part_stock_${s.id}`;
+      const part = st.catalogParts.find((c) => c.id === partId);
+      out.set(s.sourceCode, {
+        stockId: s.id,
+        productId: p.id,
+        code1c: s.sourceCode,
+        isUniversal: p.isUniversal,
+        partCategoryId: part?.categoryId ?? null,
+        models: st.partModels
+          .filter((pm) => pm.partId === p.id)
+          .map((pm) => {
+            const m = st.carModels.find((c) => c.id === pm.modelId)!;
+            return `${brand(m.brandId)}|${m.name}`;
+          }),
+        makes: st.partMakes
+          .filter((pm) => pm.partId === p.id)
+          .map((pm) => brand(pm.brandId)),
+        curatedBindings: st.fitmentBindings.filter((b) => b.partId === partId)
+          .length,
+      });
+    }
+    return out;
+  }
+
+  async applyClassificationBatch(
+    sellerId: number,
+    writes: ClassificationWrite[],
+  ): Promise<ClassificationWritten[]> {
+    this.applyCalls += 1;
+    const snapshot = structuredClone(this.db.state);
+    try {
+      const out: ClassificationWritten[] = [];
+      for (const w of writes) {
+        if (w.code1c === this.opts.failOnCode)
+          throw new Error(`injected failure at ${w.code1c}`);
+        out.push(await applyClassification(this.db.tx, sellerId, w));
+      }
+      return out;
+    } catch (error) {
+      this.db.state = snapshot;
+      throw error;
+    }
+  }
+}
+
+/**
  * Projector double: marks the CatalogPart as present (in the product's
  * category, or the fallback bucket), optionally failing. Specs that need the
  * real Stock → CatalogPart mapping use CatalogProjectionService over
@@ -414,10 +541,20 @@ export class FakeDriversVillageStore implements DriversVillageStore {
  */
 export class FakeProjector {
   projected: number[] = [];
+  /** projectStockLevels calls: what a sync asked the catalog part for. */
+  levels: { stockId: number; price: boolean; quantity: boolean }[] = [];
   constructor(
     private readonly db: FakeDb,
     private readonly failFor: Set<number> = new Set(),
   ) {}
+
+  async projectStockLevels(
+    stockId: number,
+    changed: { price: boolean; quantity: boolean },
+  ): Promise<string | null> {
+    this.levels.push({ stockId, ...changed });
+    return this.projectStock(stockId);
+  }
 
   async projectStock(stockId: number): Promise<string | null> {
     if (this.failFor.has(stockId))

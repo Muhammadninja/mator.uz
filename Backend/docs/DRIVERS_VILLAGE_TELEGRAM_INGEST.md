@@ -254,15 +254,18 @@ import*.
      `meta.numberFormat` is `thousands-comma`;
    - `environment.issues` is empty (migrations, catalog seller, BUSINESS seller);
    - `summary.totalRows` matches the export; the rejected rows in the CSV have
-     the expected reasons only (`invalid_code_1c` for codes with spaces or `&`,
+     the expected reasons only (`invalid_code_1c` for irregular spacing or
+     other symbols, `name_as_code_1c` for a product name in the code column,
      `placeholder_code_1c`, `invalid_quantity` for fractional/negative counts,
      `invalid_price` for 0, `unknown_unit` for `1` / `комп.`);
    - `prices.examples`: `1,100,000` → 1100000, a price below 1000 → ×1000;
    - `duplicates` and the `duplicate_quantities_differ` /
-     `duplicate_names_differ` warnings: the chosen line and its price and
-     quantity are the intended ones;
-   - `rowsWithPartNumberChange` and the rows' `partNumber: { from, to }`: the
-     part numbers that `code_1c` will replace;
+     `duplicate_names_differ` warnings: the chosen line and its price are the
+     intended ones (differing quantities write none);
+   - `rowsWithCardDifferences` and the rows' `notApplied`: where the export
+     differs from a stored card — the sync writes only price and quantity;
+   - `keyShared` / `rowsWithPossibleRename`: new codes that may be a 1C
+     rename of a stored one — they become positions of their own;
    - `positionsNotInFile`: listed only, never changed or deleted.
 
    Continue only when this is right. Otherwise correct the 1C export or the

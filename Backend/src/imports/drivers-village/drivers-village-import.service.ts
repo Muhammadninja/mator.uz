@@ -1,5 +1,6 @@
 /**
- * Driver's Village 1C import — orchestration.
+ * Driver's Village 1C import — the price/stock synchronization (run by hand or
+ * by the Telegram ingest timer).
  *
  *   1C text export ──► read + decode ──► parse rows ──► plan against the DB
  *        ──► (dry run: report) / (import: batched writes ──► projection)
@@ -10,22 +11,28 @@
  * writes the buyer catalog itself.
  *
  * Guarantees:
+ *   • A position is found by its exact (seller, DRIVERS_VILLAGE_1C, code_1c)
+ *     only. A code without a position of its own is a NEW position — never a
+ *     takeover of another code's position, whatever their 8-digit keys say;
+ *     a shared key is reported (drivers-village-code-key.ts).
+ *   • A stored position is SYNCHRONIZED, not re-imported: only its stock price
+ *     and — when the file states one — its quantity are written, and only the
+ *     catalog columns those feed (projectStockLevels). Its name, numbers,
+ *     unit, vehicle links (part_models / part_makes / catalog_part_fits),
+ *     category, photos and catalog settings are never touched; where the file
+ *     differs, the report lists it (`notApplied`).
+ *   • A new position is CREATED from the file (initial creation): name, unit,
+ *     code_1c as its part number, price, quantity, and the vehicles of every
+ *     row of its code. No category — it starts unclassified. Empty vehicle
+ *     cells add no link and never make a part universal.
  *   • Dry run: every read, parse, match and validation step runs; no write
  *     method of the store is ever called.
- *   • Idempotent: a position is keyed by (seller, DRIVERS_VILLAGE_1C, code_1c);
- *     a re-import updates it in place, and an unchanged row is not rewritten.
- *     A code_1c without a position of its own may take over the position of a
- *     changed code through its 8-digit key (`96273708` → `96273708 GMB`) —
- *     only when that is unambiguous; otherwise the row is a 'conflict' and
- *     nothing is written for it (drivers-village-code-key.ts).
- *   • code_1c is the part number: it is written to products.source_part_number
- *     (and the oem_numbers index) on create and update, so a wrong stored
- *     number is corrected by the next import. The export's
- *     manufacturer_part_number / oem_numbers cells are never read, and a
- *     stored part number never decides which position a row updates.
+ *   • Idempotent: a re-import of the same file plans every row as unchanged
+ *     and writes nothing; no position is ever created twice.
  *   • One position per code_1c: a code on several rows is written once, at the
  *     highest valid price among them (resolveDuplicateCodes); a code with no
- *     valid price writes nothing, so its stored price stays.
+ *     valid price writes nothing, so its stored price stays. Rows stating
+ *     different quantities give no confirmed count: none is written.
  *   • Batched: each batch is one transaction — all of its positions or none.
  *     A failed batch stops the run; committed batches stand, and re-running the
  *     same file resumes (committed rows plan as unchanged, missing
@@ -39,9 +46,6 @@
  *     the result is written to Stock.priceUzs and projected to
  *     CatalogPart.priceUzs — no markup, no rounding. A stored price is never
  *     an input, so re-importing a file cannot scale a price twice.
- *   • Mator owns classification: the import writes no category. A new
- *     position is created unclassified; an existing one keeps its category
- *     (the projection does not overwrite an imported position's category).
  *   • Absence is not deletion: positions missing from a file are listed, never
  *     changed, zeroed or deleted.
  */
@@ -54,20 +58,20 @@ import {
 } from './drivers-village.constants';
 import { mapHeaders, parseRow } from './drivers-village-row.parser';
 import {
-  keyConflictIssue,
-  keyMatchIssue,
   keySharedIssue,
   resolveCodeKeys,
+  sameSearchNumberIssue,
 } from './drivers-village-code-key';
 import type { NumberFormat } from './drivers-village-price';
 import {
-  buildWrite,
+  buildCreate,
+  cardDifferences,
   detectRowNumberCodes,
-  diffPosition,
   findFitsNotInReference,
   findLookAlikes,
   isPriceJump,
   isUnclassified,
+  planStockSync,
   resolveDuplicateCodes,
   type SourceLine,
 } from './drivers-village.planner';
@@ -76,15 +80,14 @@ import type {
   RowReport,
   VehicleMappingSummary,
 } from './drivers-village.report';
-import {
-  REQUIRED_MIGRATIONS,
-  type DriversVillageStore,
-} from './drivers-village.store';
+import { checkEnvironment } from './drivers-village-environment';
+import type { DriversVillageStore } from './drivers-village.store';
 import type {
+  BatchWrite,
   ExistingPosition,
-  ImportIssue,
   ParsedRow,
   RowPlan,
+  VehicleLinks,
 } from './drivers-village.types';
 import {
   decodeSource,
@@ -107,9 +110,15 @@ export interface ImportOptions {
   batchSize?: number;
 }
 
-/** The one projection capability the importer needs. */
+/** The projection capabilities the importer needs (CatalogProjectionService). */
 export interface StockProjector {
+  /** Full projection — a new position's catalog part. */
   projectStock(stockId: number): Promise<string | null>;
+  /** Only the synced price / quantity of an existing catalog part. */
+  projectStockLevels(
+    stockId: number,
+    changed: { price: boolean; quantity: boolean },
+  ): Promise<string | null>;
 }
 
 export class DriversVillageImportService {
@@ -233,91 +242,24 @@ export class DriversVillageImportService {
       (d) => d.chosenLine !== null,
     ).length;
     report.summary.codesWithoutValidPrice = codes.codesWithoutValidPrice.length;
+    report.summary.codesWithAmbiguousQuantity = codes.duplicates.filter(
+      (d) => d.chosenLine !== null && d.differs.includes('quantity'),
+    ).length;
     const valid = codes.positions;
-    this.summarizeSource(report, valid);
+    this.summarizeSource(report, valid, codes.vehicles);
 
     // ── 3. Environment (reference data in THIS database) ────────────────────
-    const envIssue = (
-      code: string,
-      message: string,
-      severity: 'error' | 'warning' = 'error',
-    ): ImportIssue => ({
-      line: null,
-      code1c: null,
-      kind: 'reference',
-      severity,
-      code,
-      field: null,
-      message,
-    });
-    const schemaReady = await this.store.schemaReady();
-    if (!schemaReady) {
-      report.environment.issues.push(
-        envIssue(
-          'schema_not_migrated',
-          `This database does not have migrations ${REQUIRED_MIGRATIONS.join(' and ')} yet (run \`npx prisma migrate deploy\`). Existing positions cannot be read, so every valid row is planned as a create.`,
-        ),
-      );
-    }
-    const catalogSeller = await this.store.findCatalogSeller(catalogSellerId);
+    const env = await checkEnvironment(this.store, catalogSellerId);
+    const { catalogSeller, linked } = env;
     report.environment.catalogSeller = catalogSeller;
-    if (!catalogSeller) {
-      report.environment.issues.push(
-        envIssue(
-          'catalog_seller_missing',
-          `Catalog seller "${catalogSellerId}" does not exist in this database. The importer never creates it.`,
-        ),
-      );
-    }
-    const linked = schemaReady
-      ? await this.store.findLinkedSeller(catalogSellerId)
-      : null;
     report.environment.linkedSellerId = linked?.id ?? null;
     report.environment.linkedSellerStatus = linked?.status ?? null;
     report.environment.linkedSellerType = linked?.sellerType ?? null;
-    if (!linked && schemaReady) {
-      report.environment.issues.push(
-        envIssue(
-          'linked_seller_missing',
-          `Setup required: no supply-side seller is linked to catalog seller "${catalogSellerId}". ` +
-            `Create the Driver's Village BUSINESS seller (tg_id NULL) with catalog_seller_id = "${catalogSellerId}" ` +
-            `as described in docs/DRIVERS_VILLAGE_IMPORT.md §1. The importer never creates a seller.`,
-        ),
-      );
-    }
-    if (linked && linked.sellerType !== 'BUSINESS') {
-      // Driver's Village is an organization fed by 1C, not a Telegram account.
-      // A TELEGRAM seller linked here is a setup mistake (someone's bot account
-      // would own the dealer's whole inventory), so it blocks the import.
-      report.environment.issues.push(
-        envIssue(
-          'linked_seller_not_business',
-          `Seller #${linked.id} linked to "${catalogSellerId}" is a ${linked.sellerType} seller; ` +
-            `the Driver's Village seller must be a BUSINESS seller (docs/DRIVERS_VILLAGE_IMPORT.md §1).`,
-        ),
-      );
-    }
-    if (linked && linked.status !== 'ACTIVE') {
-      report.environment.issues.push(
-        envIssue(
-          'linked_seller_not_active',
-          `Seller #${linked.id} linked to "${catalogSellerId}" has status ${linked.status} (expected ACTIVE).`,
-          'warning',
-        ),
-      );
-    }
-    const fitCheck = findFitsNotInReference(
-      valid,
-      await this.store.loadVehicleReference(),
-    );
-    report.vehicles.notInBuyerReference = fitCheck.missing;
-    for (const issue of fitCheck.issues)
-      rowReports.get(issue.line!)!.issues.push(issue);
-
+    report.environment.issues.push(...env.issues);
     // ── 4. Plan ──────────────────────────────────────────────────────────────
-    // A code_1c updates the position stored under it; one without a position
-    // of its own may update the position of a changed code through its 8-digit
-    // key, when that is unambiguous (resolveCodeKeys).
+    // A position is found by its exact code_1c only: a stored one is
+    // synchronized (price, a stated quantity), any other is created. Shared
+    // 8-digit keys and search numbers are reported, never acted on.
     const storedCodes = linked
       ? await this.store.loadAllSourceCodes(linked.id)
       : [];
@@ -325,68 +267,58 @@ export class DriversVillageImportService {
       [...rowReports.values()].flatMap((r) => (r.code1c ? [r.code1c] : [])),
       storedCodes,
     );
-    const planned = new Set(valid.map((r) => r.code1c));
     const existing = linked
-      ? await this.store.loadPositions(linked.id, [
-          ...planned,
-          ...[...keys.matches]
-            .filter(([code]) => planned.has(code))
-            .map(([, m]) => m.storedCode),
-        ])
+      ? await this.store.loadPositions(
+          linked.id,
+          valid.map((r) => r.code1c),
+        )
       : new Map<string, ExistingPosition>();
     const plans: RowPlan[] = [];
+    const creates: { row: ParsedRow; links: VehicleLinks }[] = [];
     for (const row of valid) {
       const rr = rowReports.get(row.line)!;
-      const conflict = keys.conflicts.get(row.code1c);
-      if (conflict) {
-        rr.outcome = 'conflict';
-        rr.issues.push(keyConflictIssue(row, conflict));
-        continue;
-      }
-      const shared = keys.shared.get(row.code1c);
-      if (shared) {
-        rr.issues.push(keySharedIssue(row, shared));
-        report.keyShared.push({
-          ...shared,
-          line: row.line,
-          code1c: row.code1c,
-        });
-      }
-      const match = keys.matches.get(row.code1c);
-      const prev = existing.get(match?.storedCode ?? row.code1c) ?? null;
-      const write = buildWrite(row, {
-        previousCode1c: match && prev ? match.storedCode : undefined,
-        searchKey: keys.searchKeys.get(row.code1c),
-      });
-      if (match && prev) {
-        rr.issues.push(keyMatchIssue(row, match, prev.stockId));
-        report.keyMatches.push({
-          ...match,
-          line: row.line,
-          code1c: row.code1c,
-          stockId: prev.stockId,
-        });
-      }
-      const changes = prev ? diffPosition(write, prev) : [];
-      const action = !prev ? 'create' : changes.length ? 'update' : 'unchanged';
-      rr.outcome = action;
-      rr.changes = changes;
+      const links = codes.vehicles.get(row.code1c) ?? { models: [], makes: [] };
+      const prev = existing.get(row.code1c) ?? null;
       rr.price = {
         source: row.sourcePrice,
         scaled: row.priceScaled,
         from: prev?.priceUzs ?? null,
-        to: write.priceUzs,
+        to: row.priceUzs,
       };
-      rr.quantity = { from: prev?.quantity ?? null, to: write.quantity };
-      rr.partNumber = {
-        from: prev?.sourcePartNumber ?? null,
-        to: row.sourcePartNumber,
-      };
-      if (
-        prev &&
-        changes.includes('price') &&
-        isPriceJump(prev.priceUzs, write.priceUzs)
-      )
+      rr.quantity = { from: prev?.quantity ?? null, to: row.quantity };
+
+      if (!prev) {
+        const shared = keys.shared.get(row.code1c);
+        if (shared) {
+          rr.issues.push(keySharedIssue(row, shared));
+          report.keyShared.push({
+            ...shared,
+            line: row.line,
+            code1c: row.code1c,
+          });
+        }
+        const same = keys.sameSearchNumber.get(row.code1c);
+        if (same) rr.issues.push(sameSearchNumberIssue(row, same));
+        rr.outcome = 'create';
+        rr.partNumber = { from: null, to: row.sourcePartNumber };
+        creates.push({ row, links });
+        plans.push({
+          row,
+          action: 'create',
+          write: buildCreate(row, links, keys.searchKeys.get(row.code1c)),
+          changes: [],
+          existing: null,
+        });
+        continue;
+      }
+
+      const { changes, write } = planStockSync(row, prev);
+      const action = write ? 'update' : 'unchanged';
+      rr.outcome = action;
+      rr.changes = changes;
+      const notApplied = cardDifferences(row, links, prev);
+      if (notApplied.length) rr.notApplied = notApplied;
+      if (changes.includes('price') && isPriceJump(prev.priceUzs, row.priceUzs))
         rr.issues.push({
           line: row.line,
           code1c: row.code1c,
@@ -394,31 +326,28 @@ export class DriversVillageImportService {
           severity: 'warning',
           code: 'price_jump',
           field: 'price',
-          message: `price changes from ${prev.priceUzs} to ${write.priceUzs} UZS (source "${row.sourcePrice}") — ${PRICE_JUMP_REVIEW_RATIO}× or more; check the scale of the export and of the stored price`,
+          message: `price changes from ${prev.priceUzs} to ${row.priceUzs} UZS (source "${row.sourcePrice}") — ${PRICE_JUMP_REVIEW_RATIO}× or more; check the scale of the export and of the stored price`,
         });
-      if (prev && isUnclassified(prev.categoryId))
+      if (isUnclassified(prev.categoryId))
         report.summary.existingWithoutCategory += 1;
       plans.push({ row, action, write, changes, existing: prev });
     }
+    // Fitment is written for new positions only: check those against the
+    // buyer vehicle reference.
+    const fitCheck = findFitsNotInReference(
+      creates,
+      await this.store.loadVehicleReference(),
+    );
+    report.vehicles.notInBuyerReference = fitCheck.missing;
+    for (const issue of fitCheck.issues)
+      rowReports.get(issue.line!)!.issues.push(issue);
     report.summary.existingPositionsWithPhotos = [...existing.values()].filter(
       (p) => p.imageCount > 0,
     ).length;
-    const inFile = new Set([
-      ...[...rowReports.values()].map((r) => r.code1c),
-      ...report.keyMatches.map((m) => m.storedCode),
-    ]);
+    const inFile = new Set([...rowReports.values()].map((r) => r.code1c));
     report.positionsNotInFile = storedCodes
       .filter((c) => !inFile.has(c))
       .sort();
-    // Reported when the key keeps a valid row from being written.
-    report.keyConflicts = [...new Set(keys.conflicts.values())]
-      .filter((c) => c.codes.some((code) => planned.has(code)))
-      .map((c) => ({
-        ...c,
-        lines: [...rowReports.values()]
-          .filter((r) => r.code1c !== null && c.codes.includes(r.code1c))
-          .map((r) => r.line),
-      }));
     report.rows = [...rowReports.values()].sort((a, b) => a.line - b.line);
     report.prices.examples = priceExamples(report.rows);
     this.summarizeOutcomes(report);
@@ -459,8 +388,16 @@ export class DriversVillageImportService {
       projectionFailures: 0,
     };
     report.summary.written = written;
-    const toWrite = plans.filter((p) => p.action !== 'unchanged');
-    const toProject = new Map<string, number>(); // code_1c → stockId
+    const toWrite = plans.filter(
+      (p): p is RowPlan & { write: BatchWrite } => p.write !== null,
+    );
+    // code_1c → the stock and what its catalog part needs: `levels` for a
+    // synced stock (only the changed price/quantity), null for a full
+    // projection (a new position, or one whose part is missing).
+    const toProject = new Map<
+      string,
+      { stockId: number; levels: { price: boolean; quantity: boolean } | null }
+    >();
 
     for (const p of plans) {
       if (p.action !== 'unchanged') continue;
@@ -468,7 +405,10 @@ export class DriversVillageImportService {
       written.skippedUnchanged += 1;
       // Resume path: a batch committed but its projection never ran.
       if (p.existing && !p.existing.hasCatalogPart)
-        toProject.set(p.row.code1c, p.existing.stockId);
+        toProject.set(p.row.code1c, {
+          stockId: p.existing.stockId,
+          levels: null,
+        });
     }
     for (const p of toWrite) rows.get(p.row.line)!.written = 'not_written';
 
@@ -484,7 +424,16 @@ export class DriversVillageImportService {
           rows.get(plan.row.line)!.written = w.created ? 'created' : 'updated';
           if (w.created) written.created += 1;
           else written.updated += 1;
-          toProject.set(w.code1c, w.stockId);
+          toProject.set(w.code1c, {
+            stockId: w.stockId,
+            levels:
+              plan.write.kind === 'sync'
+                ? {
+                    price: plan.write.priceUzs !== null,
+                    quantity: plan.write.quantity !== null,
+                  }
+                : null,
+          });
         }
         this.log(
           `batch ${i / batchSize + 1}: wrote ${result.length} position(s) (${i + batch.length}/${toWrite.length})`,
@@ -498,12 +447,14 @@ export class DriversVillageImportService {
     }
 
     // Project every written (or previously unprojected) stock through the one
-    // shared mapping. A failure is recorded, not fatal: supply data is
-    // committed, and re-running the import re-projects anything missing.
+    // shared mapping — a synced one only in the columns it changed. A failure
+    // is recorded, not fatal: supply data is committed, and re-running the
+    // import re-projects anything missing.
     const lineByCode = new Map(plans.map((p) => [p.row.code1c, p.row.line]));
-    for (const [code1c, stockId] of toProject) {
+    for (const [code1c, { stockId, levels }] of toProject) {
       try {
-        await this.projector.projectStock(stockId);
+        if (levels) await this.projector.projectStockLevels(stockId, levels);
+        else await this.projector.projectStock(stockId);
         written.projected += 1;
         rows.get(lineByCode.get(code1c)!)!.projected = true;
       } catch (error) {
@@ -518,20 +469,29 @@ export class DriversVillageImportService {
     }
   }
 
-  /** Source-side statistics (units, vehicle normalization, look-alikes). */
-  private summarizeSource(report: ImportReport, rows: ParsedRow[]): void {
+  /**
+   * Source-side statistics (units, vehicle normalization, look-alikes), per
+   * position — the vehicles merged over the rows of its code.
+   */
+  private summarizeSource(
+    report: ImportReport,
+    rows: ParsedRow[],
+    vehicles: Map<string, VehicleLinks>,
+  ): void {
     const mappings = new Map<string, VehicleMappingSummary>();
     for (const r of rows) {
       report.units[r.unit] = (report.units[r.unit] ?? 0) + 1;
       if (r.quantity === null) report.summary.rowsWithoutQuantity += 1;
       if (r.priceScaled) report.summary.rowsWithScaledPrice += 1;
       const v = report.vehicles;
-      if (r.vehicle.kind === 'universal') v.universalRows += 1;
-      else if (r.vehicle.kind === 'make') v.makeWideRows += 1;
-      else {
+      const links = vehicles.get(r.code1c) ?? { models: [], makes: [] };
+      if (links.models.length === 0 && links.makes.length === 0)
+        v.rowsWithoutVehicles += 1;
+      if (links.makes.length > 0) v.makeWideRows += 1;
+      if (links.models.length > 0) {
         v.specificModelRows += 1;
-        v.modelLinks += r.vehicle.models.length;
-        if (r.vehicle.models.length > 1) v.multiModelRows += 1;
+        v.modelLinks += links.models.length;
+        if (links.models.length > 1) v.multiModelRows += 1;
       }
       for (const m of r.vehicleMappings) {
         const key = `${m.sourceMake}|${m.sourceModel ?? ''}`;
@@ -558,12 +518,12 @@ export class DriversVillageImportService {
           s.rowsToCreateWithSharedKey += 1;
       } else if (r.outcome === 'update') s.rowsToUpdate += 1;
       else if (r.outcome === 'merged') s.rowsMerged += 1;
-      else if (r.outcome === 'conflict') s.rowsInKeyConflict += 1;
       else s.rowsUnchanged += 1;
       if (r.outcome === 'update' && r.changes.includes('price'))
         s.rowsWithPriceChange += 1;
-      if (r.outcome === 'update' && r.changes.includes('part_number'))
-        s.rowsWithPartNumberChange += 1;
+      if (r.outcome === 'update' && r.changes.includes('quantity'))
+        s.rowsWithQuantityChange += 1;
+      if (r.notApplied?.length) s.rowsWithCardDifferences += 1;
       for (const i of r.issues) {
         const isError = i.severity === 'error';
         if (i.kind === 'data') {
@@ -578,8 +538,9 @@ export class DriversVillageImportService {
     s.newWithoutCategory = s.rowsToCreate;
     s.lookAlikeGroups = report.lookAlikes.length;
     s.positionsNotInFile = report.positionsNotInFile.length;
-    s.rowsMatchedByKey = report.keyMatches.length;
-    s.keyConflicts = report.keyConflicts.length;
+    s.rowsWithPossibleRename = report.keyShared.filter(
+      (k) => k.possibleRenameOf.length > 0,
+    ).length;
   }
 }
 
@@ -641,18 +602,18 @@ function emptyReport(
       rowsToUpdate: 0,
       rowsUnchanged: 0,
       rowsWithPriceChange: 0,
+      rowsWithQuantityChange: 0,
+      rowsWithCardDifferences: 0,
       rowsWithScaledPrice: 0,
       newWithoutCategory: 0,
       existingWithoutCategory: 0,
-      rowsWithPartNumberChange: 0,
       duplicateSourceCodes: 0,
       duplicateCodesMaxPrice: 0,
       rowsMerged: 0,
       codesWithoutValidPrice: 0,
-      rowsMatchedByKey: 0,
-      keyConflicts: 0,
-      rowsInKeyConflict: 0,
+      codesWithAmbiguousQuantity: 0,
       rowsToCreateWithSharedKey: 0,
+      rowsWithPossibleRename: 0,
       dataErrors: 0,
       dataWarnings: 0,
       referenceErrors: 0,
@@ -664,7 +625,7 @@ function emptyReport(
       written: null,
     },
     vehicles: {
-      universalRows: 0,
+      rowsWithoutVehicles: 0,
       makeWideRows: 0,
       specificModelRows: 0,
       multiModelRows: 0,
@@ -675,8 +636,6 @@ function emptyReport(
     prices: { examples: [] },
     units: {},
     duplicates: [],
-    keyMatches: [],
-    keyConflicts: [],
     keyShared: [],
     lookAlikes: [],
     positionsNotInFile: [],

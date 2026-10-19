@@ -30,11 +30,26 @@ export interface ImportIssue {
   message: string;
 }
 
-/** The three business states of vehicle compatibility. */
+/**
+ * What one row says about vehicle compatibility. Empty make and model cells
+ * say nothing ('none') — they never mean "fits every vehicle": the export has
+ * no way to state that, and a universal flag is never derived from a blank.
+ */
 export type VehicleSpec =
-  | { kind: 'universal' }
+  | { kind: 'none' }
   | { kind: 'make'; make: string }
   | { kind: 'models'; make: string; models: string[] };
+
+/**
+ * The fitment links of one position, merged over every row of its code_1c
+ * (rows of one code may list different models; none of them is dropped).
+ */
+export interface VehicleLinks {
+  /** Canonical (make, model) pairs — part_models. */
+  models: { make: string; model: string }[];
+  /** Canonical makes fitted make-wide — part_makes. */
+  makes: string[];
+}
 
 /** How one source (make, model) code resolved to a canonical vehicle. */
 export interface VehicleMapping {
@@ -102,22 +117,8 @@ export interface DuplicateCode {
 }
 
 /**
- * A code_1c with no stored position of its own that updates the position
- * stored under another code with the same 8-digit key (drivers-village-code-
- * key.ts). The position takes the file's code_1c.
- */
-export interface CodeKeyMatch {
-  key: string;
-  line: number;
-  code1c: string;
-  /** The code_1c the position was stored under until this import. */
-  storedCode: string;
-  stockId: number;
-}
-
-/**
- * A code_1c that shares its 8-digit key with other codes yet stays a position
- * of its own: no stored position can be proven to be it. Nothing is merged.
+ * A new code_1c that shares its 8-digit key with other codes. It is created
+ * as a position of its own; nothing is merged and no stored position changes.
  */
 export interface CodeKeyShared {
   key: string;
@@ -127,20 +128,8 @@ export interface CodeKeyShared {
   fileCodes: string[];
   /** Positions stored with the key; none of them changes. */
   storedCodes: string[];
-}
-
-/** An 8-digit key the import cannot resolve: none of `codes` is written. */
-export interface CodeKeyConflict {
-  key: string;
-  /** Codes of the file with the key and no stored position of their own. */
-  codes: string[];
-  /** Every line of the file that carries one of `codes`. */
-  lines: number[];
-  /**
-   * Every code_1c stored with the key. One that is also in the file updates
-   * its own position as usual; the others are left as they are.
-   */
-  storedCodes: string[];
+  /** Stored codes this one may be a 1C rename of — for an operator to check. */
+  possibleRenameOf: string[];
 }
 
 /**
@@ -153,7 +142,7 @@ export interface VehicleReference {
   models: string[];
 }
 
-/** The import-owned state of a position already in the database. */
+/** The state of a position already in the database, as the sync reads it. */
 export interface ExistingPosition {
   stockId: number;
   productId: number;
@@ -168,7 +157,7 @@ export interface ExistingPosition {
   /**
    * The category the position is filed under — the catalog part's (where an
    * operator classifies it) once projected, else the product's. Read for the
-   * report only: the import never writes a category.
+   * report only: the sync never writes a category.
    */
   categoryId: string | null;
   isUniversal: boolean;
@@ -181,16 +170,13 @@ export interface ExistingPosition {
 }
 
 /**
- * Everything the store needs to write one position — the import-owned fields
- * only. There is deliberately no category here: classification is Mator's.
+ * Initial creation of a position the database does not have yet: everything
+ * the store writes for it. There is deliberately no category here:
+ * classification is Mator's (or the separate classification import's).
  */
 export interface PositionWrite {
+  kind: 'create';
   code1c: string;
-  /**
-   * Set for a match by the 8-digit key only: the code_1c the position is
-   * stored under. That stock is updated and takes `code1c`.
-   */
-  previousCode1c?: string;
   priceUzs: string;
   /** Null = not in the file: omitted from the write (see ParsedRow.quantity). */
   quantity: number | null;
@@ -200,21 +186,39 @@ export interface PositionWrite {
     gmNumbers: string[];
     sourcePartNumber: string | null;
     oemNumbers: string[];
-    isUniversal: boolean;
   };
-  /** Canonical (make, model) pairs — empty unless vehicle.kind === 'models'. */
+  /** Canonical (make, model) pairs, merged over the code's rows. */
   models: { make: string; model: string }[];
-  /** Canonical make — set only when vehicle.kind === 'make'. */
-  make: string | null;
+  /** Canonical makes fitted make-wide, merged over the code's rows. */
+  makes: string[];
 }
+
+/**
+ * The synchronization of a position that exists: its stock price and, only
+ * when the file states it, its quantity. Nothing else of the position is
+ * written. A null field is left exactly as stored.
+ */
+export interface StockSync {
+  kind: 'sync';
+  code1c: string;
+  /** The stock found by (seller, DRIVERS_VILLAGE_1C, code1c) when planning. */
+  stockId: number;
+  /** The new price; null = unchanged, not written. */
+  priceUzs: string | null;
+  /** The new quantity; null = unchanged or not stated, not written. */
+  quantity: number | null;
+}
+
+export type BatchWrite = PositionWrite | StockSync;
 
 export type PlannedAction = 'create' | 'update' | 'unchanged';
 
 export interface RowPlan {
   row: ParsedRow;
   action: PlannedAction;
-  write: PositionWrite;
-  /** Import-owned fields that differ from the database (update only). */
+  /** Null for 'unchanged'. */
+  write: BatchWrite | null;
+  /** What the sync writes: 'price' / 'quantity' (update only). */
   changes: string[];
   existing: ExistingPosition | null;
 }
