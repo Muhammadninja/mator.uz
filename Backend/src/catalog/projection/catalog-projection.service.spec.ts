@@ -396,7 +396,7 @@ describe('CatalogProjectionService — mapping', () => {
   // root and the keyword classifier assigns no mainCategory, so the part used
   // to project with mainCategory = null — invisible to the home grid's
   // "Масла и жидкости" tile, which both counts and lists by mainCategory.
-  describe('bucket derived from the category ROOT', () => {
+  describe('bucket derived from the category tree', () => {
     /** The oil branch of the real tree, plus an unmapped root for contrast. */
     const TREE = [
       { id: 'motor-oil', parentId: null },
@@ -450,8 +450,8 @@ describe('CatalogProjectionService — mapping', () => {
     });
 
     it('leaves mainCategory null under a root with no unambiguous bucket', async () => {
-      // 'transmission' is deliberately absent from ROOT_TO_MAIN_CATEGORY — no
-      // buyer-grid bucket corresponds to it, so guessing would be wrong.
+      // The transmission branch is listed in CATEGORIES_WITHOUT_MAIN_CATEGORY —
+      // no buyer-grid bucket corresponds to it, so guessing would be wrong.
       const part = await projectWith({
         mainCategory: null,
         categoryId: 'clutch-kits',

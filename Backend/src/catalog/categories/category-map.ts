@@ -235,43 +235,186 @@ export const VEHICLE_CATEGORY_BY_SLUG: ReadonlyMap<
 );
 
 /**
- * ROOT PartCategory id → the buyer-grid bucket its whole subtree belongs to.
+ * PartCategory id → the home-grid bucket for that node and, unless a node below
+ * it decides otherwise, its whole subtree.
  *
- * WHY THIS EXISTS. A part carries two independent classifications: the category
- * the seller CHOSE (`Product.categoryId`, anywhere in the tree) and the bucket
- * the bot's keyword classifier guessed (`Product.mainCategory`). Only the second
- * feeds the home grid — both `GET /v1/categories` counts and the
- * `?category=<bucket>` listing roll up by `mainCategory`. A listing filed on a
- * real subcategory but left unclassified therefore has `mainCategory = null` and
- * is invisible to its own bucket, reachable only by drilling the exact
- * subcategory id.
+ * WHY THIS EXISTS. A part carries two independent classifications: the node it
+ * is FILED on (`categoryId`, anywhere in the tree) and its home-grid bucket
+ * (`mainCategory`). Only the second feeds the home grid — both
+ * `GET /v1/categories` counts and the `?category=<bucket>` listing roll up by
+ * `mainCategory`. A part filed on a subcategory that nothing ever bucketed has
+ * `mainCategory = null` and is invisible to every tile, reachable only by
+ * drilling the exact subcategory id. The Driver's Village classification import
+ * buckets a position only when it is filed on a bucket row itself, so its parts
+ * on real subcategories ('front-brake-pads', 'air-filters', …) all ended up
+ * there and the home grid listed nothing but the oils.
  *
- * That is what hid the motor oils: sellers filed them under
- * 'synthetic-motor-oil' / 'semi-synthetic-motor-oil' (children of the
- * 'motor-oil' root), the classifier assigned no mainCategory, and the
- * "Масла и жидкости" tile kept showing only the 4 legacy rows that happened to
- * carry the enum.
+ * HOW IT IS READ — see mainCategoryForCategory. The NEAREST decision wins,
+ * walking from the node toward its root: a bucket row is its own bucket (via
+ * MAIN_CATEGORY_BY_SLUG, so the 12 rows are not repeated here), then an entry
+ * here, then CATEGORIES_WITHOUT_MAIN_CATEGORY (explicitly none). A root entry is
+ * therefore only a FALLBACK: a more specific entry beneath it always wins.
  *
- * The projection consults this map ONLY when the classifier produced nothing —
- * a bot-assigned mainCategory always wins, so this can never overwrite a real
- * classification.
+ * Consulted only when no bucket was ASSIGNED. A stored mainCategory — the
+ * Telegram classifier's, an operator's — is never overridden by this table.
  *
- * DELIBERATELY PARTIAL. A root earns an entry only when EVERY part beneath it
- * belongs to one bucket. The unmapped roots are genuinely ambiguous and are
- * listed below rather than guessed:
- *
- *   maintenance-and-fluids   spans FILTERS, OIL_AND_FLUIDS and WIPERS
- *   electrical-and-lighting  spans ELECTRICAL_PARTS, LIGHTING and BATTERIES
- *   transmission             no bucket exists for it
- *   heating-and-cooling      no bucket exists for it
- *   tuning-and-accessories   arguably EXTERIOR, but holds interior parts too
- *
- * Adding a root here RE-BUCKETS every unclassified part beneath it on the next
- * projection, which moves the home-grid counts. Add one only after checking
- * what it would absorb.
+ * DELIBERATELY PARTIAL. A node earns an entry only when every part filed on it
+ * (and, for a root, beneath it) belongs to that one bucket; what has no bucket
+ * among the 12 is listed in CATEGORIES_WITHOUT_MAIN_CATEGORY instead of being
+ * guessed. A change here re-buckets unclassified parts on their next
+ * projection; rows already in the database move only through
+ * `npm run backfill:root-buckets`, whose dry-run lists every row it would fill.
  */
-export const ROOT_TO_MAIN_CATEGORY: Readonly<Record<string, PartMainCategory>> =
-  {
-    // Every descendant is a motor/transmission oil → Oil & Fluids.
-    'motor-oil': PartMainCategory.OIL_AND_FLUIDS,
-  };
+export const CATEGORY_ID_TO_MAIN_CATEGORY: Readonly<
+  Record<string, PartMainCategory>
+> = {
+  // ── Roots whose every node belongs to one bucket (subtree fallback) ────────
+  'brake-system': PartMainCategory.BRAKES,
+  'suspension-and-steering': PartMainCategory.SUSPENSION,
+  // Motor, transmission and every composition oil.
+  [CategoryAnchor.MOTOR_OIL]: PartMainCategory.OIL_AND_FLUIDS,
+
+  // ── maintenance-and-fluids spans FILTERS and OIL_AND_FLUIDS, so it has no
+  //    root entry: each subcategory is decided on its own ─────────────────────
+  'oil-filters': PartMainCategory.FILTERS,
+  'air-filters': PartMainCategory.FILTERS,
+  'cabin-filters': PartMainCategory.FILTERS,
+  'fuel-filters': PartMainCategory.FILTERS,
+  [CategoryAnchor.ANTIFREEZE]: PartMainCategory.OIL_AND_FLUIDS,
+  'technical-fluids': PartMainCategory.OIL_AND_FLUIDS,
+
+  // ── electrical-and-lighting spans IGNITION, ELECTRICAL_PARTS and LIGHTING ──
+  'spark-plugs': PartMainCategory.IGNITION,
+  'ignition-coils-wires': PartMainCategory.IGNITION,
+  alternators: PartMainCategory.ELECTRICAL_PARTS,
+  starters: PartMainCategory.ELECTRICAL_PARTS,
+  'engine-sensors': PartMainCategory.ELECTRICAL_PARTS,
+  // Admin-created in production, hence absent from the subcategory seed.
+  'tire-pressure-sensors': PartMainCategory.ELECTRICAL_PARTS,
+  'headlights-and-bulbs': PartMainCategory.LIGHTING,
+
+  // ── engine-system spans ENGINE and BELTS_AND_HOSES. No root entry either: a
+  //    node an admin adds under it is then reported by the backfill instead of
+  //    landing in ENGINE unreviewed. The belts are decided first, the engine
+  //    internals after them. ───────────────────────────────────────────────────
+  'timing-belt-kits': PartMainCategory.BELTS_AND_HOSES,
+  'accessory-drive-belts': PartMainCategory.BELTS_AND_HOSES,
+  'gaskets-and-seals': PartMainCategory.ENGINE,
+  'piston-group': PartMainCategory.ENGINE,
+  'valves-and-cylinder-head': PartMainCategory.ENGINE,
+  'engine-mounts': PartMainCategory.ENGINE,
+
+  // ── tuning-and-accessories also holds interior goods, so only its exterior
+  //    body accessories — the root the EXTERIOR bucket row itself hangs under ─
+  'skid-plates': PartMainCategory.EXTERIOR,
+  'wind-deflectors-mudflaps': PartMainCategory.EXTERIOR,
+
+  // Matched by id wherever it hangs: the seed files it under
+  // 'cat_uncategorized', production under 'other'.
+  'wiper-blades': PartMainCategory.WIPERS,
+};
+
+/**
+ * Tree nodes with NO home-grid bucket among the 12, kept unbucketed on purpose
+ * rather than forced into the nearest-sounding one: a part filed on one keeps
+ * `mainCategory = null` and stays reachable through the subcategory drill and
+ * search. Being listed is itself a decision, so it also ends the walk up the
+ * tree — a root fallback added later cannot capture these.
+ *
+ * Moving a node out of here is a product decision: either an existing bucket it
+ * genuinely belongs to, or a new home tile (a new PartMainCategory value).
+ */
+export const CATEGORIES_WITHOUT_MAIN_CATEGORY: ReadonlySet<string> = new Set([
+  // Transmission — no transmission bucket among the 12.
+  'transmission',
+  'clutch-kits',
+  'cv-joints-driveshafts',
+  'cv-joint-boots',
+  'flywheels',
+  'gear-linkages-cables',
+  // Heating & cooling — no cooling or climate bucket among the 12.
+  'heating-and-cooling',
+  'cooling-radiators',
+  'heater-cores',
+  'water-pumps',
+  'thermostats',
+  'coolant-hoses-tanks',
+  'cooling-fans',
+  // Interior accessories — EXTERIOR is the only bucket under their root.
+  'floor-mats',
+  'seat-covers',
+  // "Другое": non-vehicle oils and goods, pending a decision.
+  CategoryAnchor.OTHER,
+  'industrial-oil',
+  'motorcycle-oil',
+  'agricultural-machinery',
+  'other-lubricants',
+  'fasteners-and-clips',
+  // Roots spanning several buckets: a part filed on the root itself has none.
+  'maintenance-and-fluids',
+  'electrical-and-lighting',
+  'engine-system',
+  'tuning-and-accessories',
+  // The projection's fallback for a product nothing classified.
+  'cat_uncategorized',
+]);
+
+/** The two tables mainCategoryForCategory reads; injectable for tests. */
+export interface MainCategoryRules {
+  byCategoryId: Readonly<Record<string, PartMainCategory>>;
+  withoutMainCategory: ReadonlySet<string>;
+}
+
+export const MAIN_CATEGORY_RULES: MainCategoryRules = {
+  byCategoryId: CATEGORY_ID_TO_MAIN_CATEGORY,
+  withoutMainCategory: CATEGORIES_WITHOUT_MAIN_CATEGORY,
+};
+
+/** `categoryId → parentId` for the tree rows mainCategoryForCategory walks. */
+export function categoryParentMap(
+  rows: readonly { id: string; parentId: string | null }[],
+): Map<string, string | null> {
+  return new Map(rows.map((r) => [r.id, r.parentId]));
+}
+
+/**
+ * What one node itself decides: a bucket, `null` (explicitly none) or
+ * `undefined` (no decision — ask its parent). Own-property lookups only, so an
+ * id such as 'constructor' cannot inherit a value off Object.prototype.
+ */
+function ownMainCategory(
+  categoryId: string,
+  rules: MainCategoryRules,
+): PartMainCategory | null | undefined {
+  const bucketRow = MAIN_CATEGORY_BY_SLUG.get(categoryId);
+  if (bucketRow) return bucketRow;
+  if (Object.prototype.hasOwnProperty.call(rules.byCategoryId, categoryId)) {
+    return rules.byCategoryId[categoryId];
+  }
+  if (rules.withoutMainCategory.has(categoryId)) return null;
+  return undefined;
+}
+
+/**
+ * The home-grid bucket a part filed on `categoryId` rolls up to, or null when
+ * the tree gives it none. Walks from the node toward its root and returns the
+ * FIRST decision (see CATEGORY_ID_TO_MAIN_CATEGORY); a node `parentOf` does not
+ * know ends the walk. The single rule shared by the projection and the
+ * backfill, so the two can never disagree.
+ *
+ * Bounded by the size of `parentOf`, so a malformed cycle (which the schema
+ * permits but the admin UI does not create) terminates instead of spinning.
+ */
+export function mainCategoryForCategory(
+  categoryId: string,
+  parentOf: ReadonlyMap<string, string | null>,
+  rules: MainCategoryRules = MAIN_CATEGORY_RULES,
+): PartMainCategory | null {
+  let cursor: string | null | undefined = categoryId;
+  for (let hops = 0; cursor && hops <= parentOf.size; hops += 1) {
+    const decision = ownMainCategory(cursor, rules);
+    if (decision !== undefined) return decision;
+    cursor = parentOf.get(cursor);
+  }
+  return null;
+}
