@@ -82,7 +82,11 @@ CatalogPart.categoryId =
    1. product.categoryId                     // the subcategory the seller picked     ← primary
    2. else MAIN_CATEGORY_TO_SLUG[mainCategory]   // bucket fallback (auto-classified)
    3. else 'cat_uncategorized'               // synthetic fallback (categoryId is NOT NULL)
-CatalogPart.mainCategory = product.mainCategory   // always kept — powers the bucket rollup
+CatalogPart.mainCategory =                        // powers the bucket rollup
+   1. product.mainCategory                   // assigned (classifier, operator) — always wins
+   2. else mainCategoryForCategory(categoryId)   // tree rule: the node's own entry, else its
+                                             //   nearest ancestor's (category-map.ts)
+   3. else null                              // no home bucket: listed or unreviewed node
 ```
 
 **Key facts**
@@ -92,6 +96,11 @@ CatalogPart.mainCategory = product.mainCategory   // always kept — powers the 
   its bucket on the home grid.
 - `product.categoryId` is priority #1, so once the bot captures a subcategory id the
   part lands there with no other change.
+- Driver's Village (1C) positions get no classifier guess: the classification import
+  sets `mainCategory` only for a bucket row, so their bucket comes from the tree rule
+  (`CATEGORY_ID_TO_MAIN_CATEGORY`; nodes with no bucket among the 12 are listed in
+  `CATEGORIES_WITHOUT_MAIN_CATEGORY`). An imported part's classification is written on
+  create only, so rows that already exist are filled by `npm run backfill:root-buckets`.
 
 ---
 
@@ -159,7 +168,7 @@ lives in `src/common/app-lang.util.ts` (`AppLang`, `toAppLang`/`toBotLanguage`,
 ## 7. Invariants
 
 1. `mainCategory` = bucket (coarse, home grid). `categoryId` = precise node (fine, browse).
-2. Every part has a `mainCategory`; `categoryId` is a subcategory when known, else a bucket, else `cat_uncategorized`.
+2. A part has a `mainCategory` unless its category has no home bucket (`CATEGORIES_WITHOUT_MAIN_CATEGORY`, or a node no rule covers yet) — then it is on no tile but still reachable by drill and search; `categoryId` is a subcategory when known, else a bucket, else `cat_uncategorized`.
 3. `level` is always derived from the parent — never accepted from a client.
 4. `id === slug`; both unique. A bucket id ∈ `MAIN_CATEGORY_BY_SLUG` keys.
 5. Buckets are hidden from BOTH drills (app + bot); they surface only on the home grid.
@@ -177,6 +186,8 @@ lives in `src/common/app-lang.util.ts` (`AppLang`, `toAppLang`/`toBotLanguage`,
 | `npm run restore:buyer-buckets` | reactivate/recreate the 12 home-grid buckets, ordered by importance |
 | `npm run reclassify:subcategories` | **dry-run** — re-file existing parts onto subcategories |
 | `npm run reclassify:subcategories -- --apply` | persist the reclassification |
+| `npm run backfill:root-buckets` | **dry-run** — fill NULL `main_category` from the tree rule; lists every row, per-bucket counts, tile counts before/after, what stays unbucketed |
+| `npm run backfill:root-buckets -- --apply` | persist it (NULLs only; re-runs are no-ops) |
 
 After any of these that change the tree: `redis-cli DEL cache:reference:categories`.
 
