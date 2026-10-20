@@ -102,7 +102,7 @@
     "@nestjs/testing": "^11.0.1",
     "@prometheus-io/lezer-promql": "^0.313.1",
     "@types/express": "^5.0.0",
-    "@types/jest": "^29.5.14",
+    "@types/jest": "^30.0.0",
     "@types/node": "^24.12.4",
     "@types/passport-jwt": "^4.0.1",
     "@types/supertest": "^7.0.0",
