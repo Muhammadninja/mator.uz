@@ -3,7 +3,10 @@
 // leaf → bucket decision, the precedence between a node and its ancestors, and
 // that every seeded leaf has been decided one way or the other.
 
-import { PartMainCategory as B } from '@prisma/client';
+import {
+  PartMainCategory as B,
+  PartVehicleCategory as V,
+} from '@prisma/client';
 import { TAXONOMY } from '../../prisma/seed-data/subcategory-taxonomy.seed';
 import {
   CATEGORIES_WITHOUT_MAIN_CATEGORY,
@@ -12,6 +15,7 @@ import {
   MainCategoryRules,
   categoryParentMap,
   mainCategoryForCategory,
+  vehicleCategoryForCategory,
 } from './category-map';
 import {
   LIVE_PARENTS,
@@ -247,5 +251,51 @@ describe('taxonomy coverage — every leaf is decided', () => {
     expect(
       [...CATEGORIES_WITHOUT_MAIN_CATEGORY].filter((id) => !seeded.has(id)),
     ).toEqual([]);
+  });
+});
+
+describe('vehicleCategoryForCategory — the system a node belongs to', () => {
+  it.each([
+    ['front-brake-pads', V.BRAKE_SYSTEM],
+    ['brakes', V.BRAKE_SYSTEM],
+    ['brake-system', V.BRAKE_SYSTEM],
+    ['air-filters', V.MAINTENANCE_AND_FLUIDS],
+    ['timing-belt-kits', V.ENGINE],
+    ['clutch-kits', V.TRANSMISSION],
+    ['tire-pressure-sensors', V.ELECTRICAL_AND_LIGHTING],
+  ])('%s → %s (its root)', (id, system) => {
+    expect(vehicleCategoryForCategory(id, LIVE_PARENTS)).toBe(system);
+  });
+
+  it('is null under a root that mirrors no system', () => {
+    expect(
+      vehicleCategoryForCategory('synthetic-motor-oil', LIVE_PARENTS),
+    ).toBeNull();
+    expect(vehicleCategoryForCategory('wiper-blades', LIVE_PARENTS)).toBeNull();
+    expect(
+      vehicleCategoryForCategory('cat_uncategorized', LIVE_PARENTS),
+    ).toBeNull();
+  });
+
+  it('follows the stored parent links, so a re-parented node changes system', () => {
+    const tree = categoryParentMap([
+      { id: 'brake-system', parentId: null },
+      { id: 'suspension-and-steering', parentId: null },
+      { id: 'front-brake-pads', parentId: 'suspension-and-steering' },
+    ]);
+    expect(vehicleCategoryForCategory('front-brake-pads', tree)).toBe(
+      V.SUSPENSION_AND_STEERING,
+    );
+  });
+
+  it('is null for an unknown node, a broken chain or a cycle', () => {
+    expect(vehicleCategoryForCategory('nowhere', LIVE_PARENTS)).toBeNull();
+    const broken = categoryParentMap([{ id: 'orphan', parentId: 'gone' }]);
+    expect(vehicleCategoryForCategory('orphan', broken)).toBeNull();
+    const cycle = categoryParentMap([
+      { id: 'a', parentId: 'b' },
+      { id: 'b', parentId: 'a' },
+    ]);
+    expect(vehicleCategoryForCategory('a', cycle)).toBeNull();
   });
 });

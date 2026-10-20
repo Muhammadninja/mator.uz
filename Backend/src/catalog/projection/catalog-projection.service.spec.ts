@@ -655,4 +655,31 @@ describe('CatalogProjectionService — imported dealer positions (Driver\'s Vill
       vehicleCategory: 'ENGINE',
     });
   });
+
+  it('keepClassification leaves a Telegram part where an operator moved it, and still classifies a new one', () => {
+    svc.buildProjectionOps(buildStock(), new Map(), {
+      keepClassification: true,
+    });
+    const part = upsertArg(prisma, 'catalogPart');
+    for (const key of ['categoryId', 'mainCategory', 'vehicleCategory']) {
+      expect(part.update).not.toHaveProperty(key);
+    }
+    expect(part.update).toMatchObject({
+      title: 'Timing belt',
+      priceUzs: 185000,
+    });
+    expect(part.create).toMatchObject({
+      categoryId: 'belts-and-hoses',
+      mainCategory: 'BELTS_AND_HOSES',
+    });
+  });
+
+  it('projectProduct hands keepClassification to every stock it re-projects', async () => {
+    prisma.stock.findMany.mockResolvedValue([{ id: 500 }]);
+    prisma.stock.findUnique.mockResolvedValue(buildStock());
+    await svc.projectProduct(100, { keepClassification: true });
+    expect(upsertArg(prisma, 'catalogPart').update).not.toHaveProperty(
+      'categoryId',
+    );
+  });
 });

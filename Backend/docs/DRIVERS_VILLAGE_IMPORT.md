@@ -500,8 +500,9 @@ Rules (`drivers-village-classification.rules.ts`):
 - **Positions are found by their exact `code_1c` and never created**
   (`position_not_found`); rows of one code are merged.
 - **Who classified a position is not recorded.** The admin console writes
-  only `catalog_parts.category_id` (bulk-move, a category delete with
-  reassignment) without an audit row, and maintenance scripts write the same
+  `catalog_parts.category_id` and the `main_category` / `vehicle_category`
+  derived from it (bulk-move, a category delete with reassignment) without an
+  audit row, and maintenance scripts write the same
   column, so an operator's choice cannot be told from another one. Every
   category already on a catalog part is therefore kept as if an operator set
   it, whatever the file says (`manual_category_preserved`, with the ignored

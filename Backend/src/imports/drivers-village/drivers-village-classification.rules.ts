@@ -6,8 +6,9 @@
  *
  * ── Who owns a category ──
  * An operator classifies a position in the admin console, which writes
- * catalog_parts.category_id only (bulk-move, or a category delete with
- * reassignment). No column or audit row records who set a category, and
+ * catalog_parts.category_id plus the two buckets derived from it (bulk-move,
+ * or a category delete with reassignment). No column or audit row records who
+ * set a category, and
  * maintenance scripts write the same column, so a manual classification cannot
  * be told from another one. The rule therefore never tries: EVERY category
  * already on a catalog part is kept as if an operator set it

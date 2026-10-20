@@ -4,7 +4,12 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { PartMainCategory, PartVehicleCategory, Prisma } from '@prisma/client';
+import {
+  categoryParentMap,
+  mainCategoryForCategory,
+  vehicleCategoryForCategory,
+} from '../../catalog/categories/category-map';
 import { PartCategoryService } from '../../catalog/categories/part-category.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { isCategoryFiscallyConfigured } from '../../common/fiscal.util';
@@ -366,10 +371,13 @@ export class AdminCategoriesService {
       if (!target)
         throw new NotFoundException('Reassign target category not found');
 
+      // A reassignment is a product move, so it writes the same filing as
+      // bulk-move: the parts leave this category's tile as well as its id.
+      const filing = await this.filingOn(reassignTo);
       await this.prisma.$transaction([
         this.prisma.catalogPart.updateMany({
           where: { categoryId: id },
-          data: { categoryId: reassignTo },
+          data: filing,
         }),
         this.prisma.partCategory.delete({ where: { id } }),
       ]);
@@ -384,7 +392,8 @@ export class AdminCategoriesService {
 
   /**
    * Reassign many parts to one target category in a single transaction.
-   * Validates the target exists; returns the number of rows moved.
+   * Validates the target exists; returns the number of rows moved and the
+   * filing they now carry (`mainCategory: null` = on no home tile).
    */
   async bulkMoveProducts(dto: BulkMoveProductsDto) {
     const target = await this.prisma.partCategory.findUnique({
@@ -393,20 +402,50 @@ export class AdminCategoriesService {
     });
     if (!target) throw new NotFoundException('Target category not found');
 
+    const filing = await this.filingOn(dto.targetCategoryId);
     // updateMany over the id set within one transaction: either the whole batch
     // moves or none does. categoryId is a Restrict FK, so a bad target would
     // surface as a Prisma error — but we've already checked it exists.
     const [result] = await this.prisma.$transaction([
       this.prisma.catalogPart.updateMany({
         where: { id: { in: dto.productIds } },
-        data: { categoryId: dto.targetCategoryId },
+        data: filing,
       }),
     ]);
 
-    return { success: true, data: { moved: result.count } };
+    return { success: true, data: { moved: result.count, ...filing } };
   }
 
   // ── helpers ────────────────────────────────────────────────────────────────
+
+  /**
+   * The classification columns an operator's move writes onto a catalog part
+   * filed on `categoryId` — and ONLY these, so price, stock, photos, fitment
+   * and the fiscal data are never touched by a move.
+   *
+   * The home grid counts and lists by `mainCategory`, not by `categoryId`, so
+   * moving the id alone left a part on its OLD tile. Both enums are re-derived
+   * here from the live tree by id (category-map.ts — the rule the projection and
+   * the backfill share), never kept from the old filing: a bucket assigned for
+   * the previous category says nothing about the new one, and a target with no
+   * home bucket (CATEGORIES_WITHOUT_MAIN_CATEGORY) correctly leaves every tile.
+   */
+  private async filingOn(categoryId: string): Promise<{
+    categoryId: string;
+    mainCategory: PartMainCategory | null;
+    vehicleCategory: PartVehicleCategory | null;
+  }> {
+    const parentOf = categoryParentMap(
+      await this.prisma.partCategory.findMany({
+        select: { id: true, parentId: true },
+      }),
+    );
+    return {
+      categoryId,
+      mainCategory: mainCategoryForCategory(categoryId, parentOf),
+      vehicleCategory: vehicleCategoryForCategory(categoryId, parentOf),
+    };
+  }
 
   /**
    * Resolve the fiscal columns a create/update must write, and REJECT any patch
