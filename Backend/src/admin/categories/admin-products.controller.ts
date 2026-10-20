@@ -56,9 +56,17 @@ export class AdminProductsController {
     summary: 'Reassign many products to one category (transactional)',
     description:
       'Moves every listed part (CatalogPart) into targetCategoryId in a single ' +
-      'transaction. Validates the target category exists. Returns the moved count.',
+      'transaction. Validates the target category exists. The home-grid bucket ' +
+      '(mainCategory) and vehicle system (vehicleCategory) are re-derived from ' +
+      'the target’s place in the category tree, so a moved part shows on the ' +
+      'tile of its new category. Nothing else of the part is changed.',
   })
-  @ApiOkResponse({ description: 'The number of products moved.' })
+  @ApiOkResponse({
+    description:
+      '{ moved, categoryId, mainCategory, vehicleCategory } — the number of ' +
+      'products moved and the filing they now carry (mainCategory null = on ' +
+      'no home tile).',
+  })
   @ApiBadRequestResponse({ description: 'Invalid body.' })
   @ApiNotFoundResponse({ description: 'No such target category.' })
   bulkMove(@Body() dto: BulkMoveProductsDto) {

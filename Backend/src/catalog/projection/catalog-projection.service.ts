@@ -18,6 +18,17 @@ import { localizedNamesFor } from '../../prisma/seed-data/category-names.seed';
  *  part number — such values must never be projected as searchable numbers. */
 const SYNTHETIC_KEY_PREFIX = 'tg_';
 
+/** How a re-projection treats what the catalog part already holds. */
+export interface ProjectionOptions {
+  /**
+   * Leave an EXISTING part's classification (category_id, main_category,
+   * vehicle_category) as it is — for a re-projection caused by an edit that is
+   * not a classification (a rating), so it cannot undo an operator's move. A
+   * part created by the projection is still classified from its product.
+   */
+  keepClassification?: boolean;
+}
+
 /**
  * CatalogProjectionService — the SINGLE, authoritative mapping from the
  * supply-side seller domain (Product / Stock / ProductImage / PartModel /
@@ -176,7 +187,10 @@ export class CatalogProjectionService {
    *
    * @returns the CatalogPart id written, or null if the stock was gone.
    */
-  async projectStock(stockId: number): Promise<string | null> {
+  async projectStock(
+    stockId: number,
+    opts: ProjectionOptions = {},
+  ): Promise<string | null> {
     const stock = await this.prisma.stock.findUnique({
       where: { id: stockId },
       include: CatalogProjectionService.stockInclude,
@@ -204,7 +218,11 @@ export class CatalogProjectionService {
       }
     }
 
-    const ops = this.buildProjectionOps(stock, await this.categoryParents());
+    const ops = this.buildProjectionOps(
+      stock,
+      await this.categoryParents(),
+      opts,
+    );
     await this.prisma.$transaction(ops);
     return CatalogProjectionService.catalogPartId(stock.id);
   }
@@ -444,7 +462,10 @@ export class CatalogProjectionService {
    *
    * @returns the CatalogPart ids written.
    */
-  async projectProduct(productId: number): Promise<string[]> {
+  async projectProduct(
+    productId: number,
+    opts: ProjectionOptions = {},
+  ): Promise<string[]> {
     const stocks = await this.prisma.stock.findMany({
       where: { productId },
       select: { id: true },
@@ -452,7 +473,7 @@ export class CatalogProjectionService {
 
     const ids: string[] = [];
     for (const { id } of stocks) {
-      const partId = await this.projectStock(id);
+      const partId = await this.projectStock(id, opts);
       if (partId) ids.push(partId);
     }
     return ids;
@@ -485,6 +506,7 @@ export class CatalogProjectionService {
      *  derivation — with an empty map only a category's OWN rule applies (no
      *  ancestor is known), and an assigned mainCategory still always wins. */
     parentByCategoryId: ReadonlyMap<string, string | null> = new Map(),
+    opts: ProjectionOptions = {},
   ): Prisma.PrismaPromise<unknown>[] {
     const ops: Prisma.PrismaPromise<unknown>[] = [];
     const product = stock.product;
@@ -631,13 +653,16 @@ export class CatalogProjectionService {
     // so its classification is written on CREATE only here; the explicitly run
     // classification import writes it through projectClassification, guarded
     // by a compare-and-set. A Telegram listing keeps the previous behaviour:
-    // its seller re-picks the category in the bot, and the update carries it.
+    // its seller re-picks the category in the bot, and the update carries it —
+    // unless the caller re-projects for an edit that is not a classification
+    // (`keepClassification`), which must not undo an operator's bulk-move.
     ops.push(
       this.prisma.catalogPart.upsert({
         where: { id: partId },
-        update: stock.sourceSystem
-          ? partData
-          : { ...partData, ...classification },
+        update:
+          stock.sourceSystem || opts.keepClassification
+            ? partData
+            : { ...partData, ...classification },
         create: { id: partId, ...partData, ...classification },
       }),
     );

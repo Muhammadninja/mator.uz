@@ -101,6 +101,14 @@ CatalogPart.mainCategory =                        // powers the bucket rollup
   (`CATEGORY_ID_TO_MAIN_CATEGORY`; nodes with no bucket among the 12 are listed in
   `CATEGORIES_WITHOUT_MAIN_CATEGORY`). An imported part's classification is written on
   create only, so rows that already exist are filled by `npm run backfill:root-buckets`.
+- **Operator move** (`PATCH /v1/admin/products/bulk-move`, `DELETE
+  /v1/admin/categories/:id?reassignTo=`) writes `CatalogPart.categoryId` together with
+  `mainCategory = mainCategoryForCategory(target)` and `vehicleCategory =` the enum of the
+  target's root (`vehicleCategoryForCategory`), read from the live tree by id. The old
+  bucket is never kept — it belonged to the old filing — so a moved part shows on the
+  tile of its new category, or on none when the target has no bucket. Nothing else of
+  the part is written. A rating edit re-projects with `keepClassification`, so it cannot
+  undo a move; a Telegram seller re-listing the same part still re-files it.
 
 ---
 

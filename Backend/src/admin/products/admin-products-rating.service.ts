@@ -88,7 +88,11 @@ export class AdminProductsRatingService {
     // projection of the same stock reconciles — so it is logged rather than
     // failing a write that already committed.
     try {
-      await this.projection.projectProduct(product.id);
+      // A rating is no classification: an operator's bulk-move of these parts
+      // must survive it, so the re-projection keeps their category columns.
+      await this.projection.projectProduct(product.id, {
+        keepClassification: true,
+      });
     } catch (err) {
       this.logger.error(
         `Rating saved for product ${product.id} but re-projection failed: ` +

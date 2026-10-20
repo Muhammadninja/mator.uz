@@ -418,3 +418,24 @@ export function mainCategoryForCategory(
   }
   return null;
 }
+
+/**
+ * The vehicle system a part filed on `categoryId` belongs to: the enum its ROOT
+ * mirrors (VEHICLE_CATEGORY_BY_SLUG), the same pairing the seller bot and the
+ * classification import write. Null when the root mirrors none ('other',
+ * 'cat_uncategorized', an admin-created root), when `parentOf` does not know a
+ * node on the way, or on a malformed cycle.
+ */
+export function vehicleCategoryForCategory(
+  categoryId: string,
+  parentOf: ReadonlyMap<string, string | null>,
+): PartVehicleCategory | null {
+  let cursor = categoryId;
+  for (let hops = 0; hops <= parentOf.size; hops += 1) {
+    const parent = parentOf.get(cursor);
+    if (parent === undefined) return null;
+    if (parent === null) return VEHICLE_CATEGORY_BY_SLUG.get(cursor) ?? null;
+    cursor = parent;
+  }
+  return null;
+}
