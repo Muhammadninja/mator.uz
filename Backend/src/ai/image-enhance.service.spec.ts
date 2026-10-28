@@ -1,5 +1,5 @@
 // Tests for the ImageEnhanceService (FLUX.2 Pro): submit the base64 image with
-// the preservation prompt, width=height=1000, and output_format=png; poll the
+// the catalog-photo prompt, width=height=1000, and output_format=png; poll the
 // returned polling_url until Ready; then download the signed result URL and
 // return that PNG buffer (a 1000×1000 product photo on a white background).
 // Failures carry a `retryable` flag (the image worker turns it into "retry" or
@@ -144,37 +144,121 @@ describe('ImageEnhanceService.removeBackground', () => {
     expect(gets[4][1]?.responseType).toBe('arraybuffer');
   });
 
-  it('sends the preservation prompt for the exact 1000×1000 canvas', async () => {
-    mockedAxios.post.mockResolvedValueOnce(submitted());
-    mockedAxios.get
-      .mockResolvedValueOnce(ready())
-      .mockResolvedValueOnce({ data: Buffer.from('png') });
-    await enhance();
+  // What FLUX may change is decided by the prompt alone. These tests pin its
+  // key requirements rather than its wording; they cannot judge a generated
+  // image — only a real FLUX run on control photos can.
+  describe('the catalog-photo prompt', () => {
+    /** Run one successful edit and return the prompt it submitted. */
+    async function sentPrompt(): Promise<string> {
+      mockedAxios.post.mockResolvedValueOnce(submitted());
+      mockedAxios.get
+        .mockResolvedValueOnce(ready())
+        .mockResolvedValueOnce({ data: Buffer.from('png') });
+      await enhance();
+      return submittedBody().prompt as string;
+    }
 
-    const prompt = submittedBody().prompt as string;
-    expect(prompt).toContain('pure white (#FFFFFF) background');
-    // Text/logo protection is the point of this prompt — assert its guardrails.
-    expect(prompt).toContain('KEEP IT BLURRY');
-    expect(prompt).toContain('Never reconstruct letters');
-    expect(prompt).toContain('Treat the input image as the ground truth');
-    expect(prompt).toContain('TEXT IS EVIDENCE');
-    expect(prompt).toContain('Incorrect text is worse than blurry text');
-    expect(prompt).toContain('documentary photograph of the original object');
-    expect(prompt).toContain('Accuracy has absolute priority over aesthetics');
-    // Object is immutable — only background pixels may change.
-    expect(prompt).toContain('OBJECT INTEGRITY');
-    expect(prompt).toContain('Replace only the background');
-    expect(prompt).toContain(
-      'Only pixels that belong to the background may be modified',
+    /** The first sentence of the prompt that matches `pattern`. */
+    function sentence(prompt: string, pattern: RegExp): string {
+      const found = prompt.split(/\.\s+/).find((s) => pattern.test(s));
+      if (found === undefined) {
+        throw new Error(`no sentence matches /${pattern.source}/`);
+      }
+      return found;
+    }
+
+    // Each requirement is one instruction, and it must name every item.
+    it.each<[string, RegExp, string[]]>([
+      [
+        'cleaning',
+        /^Remove\b/,
+        [
+          'dirt',
+          'dust',
+          'grease',
+          'oil stains',
+          'light surface rust',
+          'minor cosmetic scratches',
+        ],
+      ],
+      [
+        'real damage',
+        /^Keep\b.*\bdamage\b/,
+        ['cracks', 'chips', 'deformations', 'deep corrosion', 'broken mounts'],
+      ],
+      [
+        'identity',
+        /^Keep\b.*\bshape\b/,
+        [
+          'shape',
+          'geometry',
+          'proportions',
+          'all pieces of a set',
+          'holes',
+          'threads',
+          'connectors',
+          'mounting points',
+        ],
+      ],
+      [
+        'markings',
+        /^Keep\b.*\blogos\b/,
+        ['logos', 'OEM', 'part numbers', 'text', 'stickers'],
+      ],
+      ['materials', /^Keep\b.*\bcolors\b/, ['colors', 'materials', 'coatings']],
+      [
+        'canvas',
+        /^Output\b/,
+        [
+          'exactly 1000×1000 pixels',
+          'centered',
+          'pure white (#FFFFFF) background',
+          '85–90%',
+          'proportions unchanged',
+        ],
+      ],
+    ])(
+      '%s: one instruction names every required item',
+      async (_requirement, pattern, items) => {
+        const instruction = sentence(await sentPrompt(), pattern);
+        for (const item of items) {
+          expect(instruction).toContain(item);
+        }
+      },
     );
-    expect(prompt).toContain(
-      'The ideal output is indistinguishable from the original photograph',
-    );
-    // "sharpness" was deliberately removed so the model does not read it as
-    // license to reconstruct local detail — guard against it creeping back.
-    expect(prompt).not.toContain('sharpness');
-    // The same exact canvas the request sets with width/height.
-    expect(prompt).toContain('must be exactly 1000×1000 pixels');
+
+    it('cleans only cosmetic flaws: no real damage in the cleaning instruction', async () => {
+      const cleaning = sentence(await sentPrompt(), /^Remove\b/);
+      expect(cleaning).not.toMatch(/crack|chip|deform|corrosion|broken/i);
+    });
+
+    it('never passes a used part off as new', async () => {
+      expect(await sentPrompt()).toMatch(/\bused part\b[^.]*\bnot new\b/i);
+    });
+
+    it('invents no text and leaves dirt that could change a marking', async () => {
+      const prompt = await sentPrompt();
+      expect(prompt).toMatch(/\bunreadable text\b[^.]*\bstays\b/i);
+      expect(sentence(prompt, /\bdirt\b.*\bmarking\b/i)).toMatch(
+        /\bcharacter\b/,
+      );
+    });
+
+    it('puts accuracy before appearance and keeps the original when unsure', async () => {
+      const prompt = await sentPrompt();
+      expect(prompt).toMatch(/\baccuracy\b[^.]*\bbefore appearance\b/i);
+      expect(prompt).toMatch(
+        /\bdirt\b[^.]*\breal damage\b[^.]*\bkeep the original appearance\b/i,
+      );
+    });
+
+    it('stays within 220 words and has no "sharp…" wording', async () => {
+      const prompt = await sentPrompt();
+      expect(prompt.trim().split(/\s+/).length).toBeLessThanOrEqual(220);
+      // "sharpness" stays out so the model does not read it as license to
+      // reconstruct local detail, text included — no "sharp…" word at all.
+      expect(prompt).not.toMatch(/sharp/i);
+    });
   });
 
   it.each([
