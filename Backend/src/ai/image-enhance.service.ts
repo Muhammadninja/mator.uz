@@ -15,116 +15,38 @@ const FLUX_ENDPOINT = 'https://api.bfl.ai/v1/flux-2-pro';
 const OUTPUT_WIDTH = 1000;
 const OUTPUT_HEIGHT = 1000;
 
-// The single prompt used for every request. It treats the input as ground truth
-// and demands a DOCUMENTARY result (same object, better camera/lighting), not an
-// idealized product render: place the part on a pure white background, centered
-// and scaled to ~85–90% of the 1000×1000 canvas, and improve only *global* image
-// quality — deliberately no "sharpness", so the model does not read it as license
-// to reconstruct detail. Only background pixels may change; the object is
-// immutable (every part pixel stays visually identical apart from global
-// lighting/color). Every text/logo/marking is factual evidence and must
-// stay exactly as-is (blurry stays blurry; incorrect text is worse than blurry).
-// Accuracy has absolute priority over aesthetics: on any conflict, preserve the
-// original. This is not a restoration or generation task. Intentionally strict;
-// do not soften it.
+// The single prompt used for every request: a clean catalog photo of the SAME
+// part, as after a careful cleaning and a studio shoot. It removes dirt, grease,
+// light surface rust and minor cosmetic scratches, and keeps what is evidence
+// about the real item: shape, components, markings (blurry stays blurry; dirt
+// over a marking stays where cleaning could change a character), materials,
+// colors and real damage. A used part must not pass for new; anything unclear
+// is kept. Short and affirmative on purpose: FLUX.2 has no negative prompt, and
+// BFL's prompting guide says it weighs earlier words more and that naming an
+// unwanted feature tends to draw it in. Deliberately no "sharp…" wording: the
+// model reads it as license to reconstruct detail, text included. FLUX.2 [pro]
+// applies prompt upsampling by default, so the model does not see this text
+// exactly as written; this request does not set disable_pup.
 const FLUX_PROMPT =
-  'Create a professional automotive marketplace product photograph from the input image.\n\n' +
-  'The output image must be exactly 1000×1000 pixels with a pure white (#FFFFFF) background.\n\n' +
-  'The automotive part must remain the exact same physical object.\n\n' +
-  'CRITICAL REQUIREMENTS\n\n' +
-  'This is NOT a restoration task.\n' +
-  'This is NOT a reconstruction task.\n' +
-  'This is NOT a generation task.\n\n' +
-  'Treat the input image as the ground truth.\n\n' +
-  'Preserve exactly:\n\n' +
-  '- object geometry\n' +
-  '- proportions\n' +
-  '- dimensions\n' +
-  '- orientation\n' +
-  '- perspective\n' +
-  '- position\n' +
-  '- surface texture\n' +
-  '- scratches\n' +
-  '- wear marks\n' +
-  '- dirt\n' +
-  '- manufacturing defects\n' +
-  '- edges\n' +
-  '- holes\n' +
-  '- connectors\n' +
-  '- mounting points\n' +
-  '- reflections\n\n' +
-  'TEXT AND LOGOS\n\n' +
-  'Any visible text, logo, engraving, serial number, barcode, QR code, OEM number, GM number, ' +
-  'label, sticker, embossing, stamping or printed marking MUST remain EXACTLY as it appears in ' +
-  'the original image.\n\n' +
-  'If any text or marking is blurry, partially visible, damaged or unreadable, KEEP IT BLURRY.\n\n' +
-  'Never sharpen unreadable text into readable text.\n\n' +
-  'Never reconstruct letters.\n\n' +
-  'Never guess missing characters.\n\n' +
-  'Never invent logos.\n\n' +
-  'Never redraw engravings.\n\n' +
-  'Never redraw labels.\n\n' +
-  'Never redraw stickers.\n\n' +
-  'Never replace text with cleaner text.\n\n' +
-  'Never increase text resolution by hallucinating characters.\n\n' +
-  'If a marking cannot be recovered from the original pixels, leave it unchanged.\n\n' +
-  'TEXT IS EVIDENCE\n\n' +
-  'Treat every visible character, number, logo, engraving, label, sticker, barcode, QR code, ' +
-  'embossing and OEM marking as factual evidence from the original photograph.\n\n' +
-  'Never improve, restore, redraw, reconstruct, infer, estimate or complete any textual ' +
-  'information.\n\n' +
-  'If any character is not fully visible, leave it exactly as it appears.\n\n' +
-  'Incorrect text is worse than blurry text.\n\n' +
-  'IMAGE QUALITY\n\n' +
-  'Improve only perceived global image quality without generating or reconstructing local ' +
-  'details.\n\n' +
-  'Improve only:\n\n' +
-  '- global lighting\n' +
-  '- exposure\n' +
-  '- white balance\n' +
-  '- color accuracy\n' +
-  '- global contrast\n' +
-  '- image noise\n\n' +
-  'Do not increase local detail by generating new pixels.\n\n' +
-  'Do not reconstruct missing high-frequency details.\n\n' +
-  'Do not perform local reconstruction.\n\n' +
-  'Do not synthesize details.\n\n' +
-  'Do not hallucinate textures.\n\n' +
-  'Do not generate missing pixels.\n\n' +
-  'OBJECT INTEGRITY\n\n' +
-  'The automotive part is immutable.\n\n' +
-  'Treat it as a photographed physical object, not a generated object.\n\n' +
-  'Do not reinterpret its appearance.\n\n' +
-  'Do not redesign any feature.\n\n' +
-  'Do not replace low-quality regions with newly generated content.\n\n' +
-  'Preserve every visible physical feature exactly as photographed.\n\n' +
-  'BACKGROUND\n\n' +
-  'Replace only the background.\n\n' +
-  'The object itself is immutable.\n\n' +
-  'Only pixels that belong to the background may be modified.\n\n' +
-  'Every pixel belonging to the automotive part must remain visually identical unless changed ' +
-  'solely by global lighting or global color correction.\n\n' +
-  'Make the new background a pure white (#FFFFFF) studio background.\n\n' +
-  'Center the object.\n\n' +
-  'Scale it to occupy approximately 85–90% of the canvas while preserving its original aspect ratio.\n\n' +
-  'OUTPUT STYLE\n\n' +
-  'The result must remain a documentary photograph of the original object.\n\n' +
-  'It must not become an idealized or reconstructed product image.\n\n' +
-  'The image should look like the original photograph taken with a better camera under better ' +
+  'Create a realistic, clean, professional catalog photograph of the exact automotive spare ' +
+  'part in the input image, as it would look after a careful cleaning and a studio photo ' +
+  'shoot.\n\n' +
+  'Output exactly 1000×1000 pixels: the part centered on a pure white (#FFFFFF) background, ' +
+  'filling about 85–90% of the canvas with its proportions unchanged. Use soft, even studio ' +
   'lighting.\n\n' +
-  'WHEN UNCERTAIN\n\n' +
-  'When uncertain, copy the original appearance instead of improving it.\n\n' +
-  'If preserving the original pixels and improving the image are in conflict, ALWAYS choose ' +
-  'preserving the original.\n\n' +
-  'Accuracy has absolute priority over aesthetics. If any requested enhancement conflicts with ' +
-  'preserving the original object exactly, preserve the original. Never sacrifice factual ' +
-  'accuracy for visual quality.\n\n' +
-  'The ideal output is indistinguishable from the original photograph except for:\n\n' +
-  '- cleaner background\n' +
-  '- better global lighting\n' +
-  '- lower image noise\n' +
-  '- better global color balance\n\n' +
-  'Nothing else should appear changed.';
+  'Remove dirt, dust, grease, oil stains, light surface rust on intact metal, and minor ' +
+  'cosmetic scratches and scuffs.\n\n' +
+  'Keep all real damage exactly as photographed, including cracks, chips, gouges, dents, ' +
+  'deformations, deep corrosion, broken mounts and missing pieces. A used part keeps its real ' +
+  'condition and looks cleaned, not new.\n\n' +
+  'Keep the original shape, geometry, proportions, all pieces of a set, holes, threads, ' +
+  'connectors, mounting points and viewing angle. Keep the original colors, materials and ' +
+  'coatings. Show only what the input image shows.\n\n' +
+  'Keep logos, OEM and GM numbers, part numbers, text, labels and stickers exactly as ' +
+  'photographed. Blurry or unreadable text stays as it is. Leave dirt on a marking wherever ' +
+  'cleaning it could change a character.\n\n' +
+  'Accuracy to the original part comes before appearance. When dirt or surface rust cannot be ' +
+  'confidently told apart from real damage, keep the original appearance.';
 
 // Output container. The result is an opaque image on a white background (no alpha
 // is requested or relied on). PNG keeps the white background lossless; the caller
@@ -230,7 +152,7 @@ export class ImageEnhanceError extends Error {
  *
  * Pipeline (nothing else — no local resize, compositing, or post-processing):
  *   1. receive the uploaded image buffer,
- *   2. submit it to FLUX.2 Pro (base64) with the preservation prompt,
+ *   2. submit it to FLUX.2 Pro (base64) with the catalog-photo prompt,
  *      output_format=png, and width=height=1000, asking for the part centered
  *      on a pure white background,
  *   3. poll until the job is Ready, download the produced 1000×1000 PNG,
