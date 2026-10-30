@@ -71,7 +71,9 @@ export class ListPartsQueryDto {
 
   @ApiPropertyOptional({
     description:
-      'Main category enum value (e.g. BRAKES) or a category id/slug.',
+      'Main category enum value (e.g. BRAKES) or a category id/slug. A category ' +
+      'id lists the parts filed on it or anywhere beneath it: a root ' +
+      '(brake-system) lists its whole system, a leaf only itself.',
   })
   @IsOptional()
   @IsString()

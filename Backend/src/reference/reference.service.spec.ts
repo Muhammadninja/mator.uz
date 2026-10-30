@@ -46,6 +46,7 @@ function makeCategoriesMock() {
   return {
     getOrFail: jest.fn().mockResolvedValue({ id: 'brakes' }),
     findChildren: jest.fn().mockResolvedValue([]),
+    findCatalogRootCategories: jest.fn().mockResolvedValue([]),
     findRootCategories: jest.fn().mockResolvedValue([]),
   };
 }
@@ -275,10 +276,12 @@ describe('ReferenceService', () => {
       sortOrder: 0,
     };
 
-    it('returns the ROOT categories when no parentId is given', async () => {
-      categories.findRootCategories.mockResolvedValue([brakes]);
+    it('returns the CATALOG roots when no parentId is given — not the bot step', async () => {
+      categories.findCatalogRootCategories.mockResolvedValue([brakes]);
       const res = await service.listCategories();
-      expect(categories.findRootCategories).toHaveBeenCalled();
+      expect(categories.findCatalogRootCategories).toHaveBeenCalled();
+      // The bot's roots leave "Другое" out; the public tree must not.
+      expect(categories.findRootCategories).not.toHaveBeenCalled();
       expect(res).toEqual({ items: [brakes], total: 1 });
     });
 
@@ -311,9 +314,9 @@ describe('ReferenceService', () => {
     });
 
     it('never returns inactive categories (the service filters them out)', async () => {
-      // findChildren/findRootCategories are active-only by construction; this
-      // pins the contract that ReferenceService adds no inactive rows of its own.
-      categories.findRootCategories.mockResolvedValue([brakes]);
+      // findChildren/findCatalogRootCategories are active-only by construction;
+      // this pins the contract that ReferenceService adds no inactive rows.
+      categories.findCatalogRootCategories.mockResolvedValue([brakes]);
       const res = await service.listCategories();
       expect(res.items.every((i) => !('isActive' in i))).toBe(true);
     });
