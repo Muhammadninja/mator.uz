@@ -116,7 +116,7 @@ CatalogPart.mainCategory =                        // powers the bucket rollup
 
 | Surface | Endpoint | Backend | What it returns |
 |---|---|---|---|
-| Home **"Shop by category"** | `GET /v1/categories` | `categories.service.ts` | the 12 buckets (`isActive AND mainCategory ≠ null`), `sortOrder`; **count grouped by `mainCategory`** so sub-filed parts roll up |
+| Home **"Shop by category"** | `GET /v1/reference/categories` | `reference.service.ts` → `part-category.service.ts` | the 10 roots, localized, each with **`productsCount`**: the buyer-listed parts filed on the root or anywhere beneath it through active nodes, each part once (`catalogRootProductCounts`: one GROUP BY `category_id` + one tree read) |
 | After brand → **systems** | `GET /v1/reference/categories` | `reference.service.ts` → `part-category.service.ts` | the 10 roots, localized; app strips buckets |
 | System → **subcategories** | `GET /v1/reference/categories?parentId=<root>` | same | the 52 subs; app strips buckets |
 | Subcategory → **parts** | `GET /v1/catalog/parts?category=<subId>` | catalog parts | parts with that exact `categoryId` |
@@ -129,12 +129,16 @@ CatalogPart.mainCategory =                        // powers the bucket rollup
   language, falling back down the chain rather than rendering an empty label.
 - `hooks/use-system-categories.ts` — the after-brand systems list (roots), localized,
   hides `cat_uncategorized`.
-- Home grid stays on `GET /v1/categories` (`hooks/use-categories.ts`) — the buckets.
+- Home grid: the roots of `GET /v1/reference/categories` with their `productsCount`
+  (`hooks/use-categories.ts`); the systems list ignores the count.
 
 > **Reference cache:** `GET /v1/reference/categories` returns `slug ?? id` and is
 > Redis-cached (`PartCategoryService.CACHE_TTL_SECONDS = 300`). It **masks** null/duplicate
 > slugs. The admin panel (`admin-categories.presenter.ts`) reads the raw column — trust
 > it, not the API, for slug truth. Bust early with `redis-cli DEL cache:reference:categories`.
+> The roots' `productsCount` is cached apart (`cache:reference:categories:counts`, 60 s)
+> and merged per request, so the roots payload the bot shares never holds a count; every
+> admin category write drops both keys.
 
 ---
 

@@ -6,6 +6,7 @@ import {
 import { PrismaService } from '../../prisma/prisma.service';
 import { CacheService } from '../../redis/cache.service';
 import { RedisKeys } from '../../redis/redis.keys';
+import { BUYER_LISTED_PART } from '../buyer-visibility';
 import { CategoryAnchor } from './category-map';
 
 /**
@@ -27,6 +28,8 @@ import { CategoryAnchor } from './category-map';
 export class PartCategoryService {
   /** Categories change rarely and are read on every wizard step. */
   private static readonly CACHE_TTL_SECONDS = 300;
+  /** Part counts move with every listing, so they live shorter than the tree. */
+  private static readonly COUNTS_CACHE_TTL_SECONDS = 60;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -59,6 +62,37 @@ export class PartCategoryService {
   async findRootCategories(): Promise<CategoryNode[]> {
     const roots = await this.findCatalogRootCategories();
     return roots.filter((root) => root.id !== CategoryAnchor.OTHER);
+  }
+
+  /**
+   * Buyer-listed parts per catalog root — the number the home grid shows under
+   * each tile (see {@link catalogRootProductCounts} for what counts). Two reads
+   * whatever the number of roots: the tree's nodes and one GROUP BY category
+   * over the listed parts. No part row is loaded.
+   *
+   * Cached apart from the roots: a count is not part of the tree the bot reads.
+   */
+  async findCatalogRootProductCounts(): Promise<Record<string, number>> {
+    return this.cache.remember(
+      RedisKeys.cacheReferenceCategoryCounts(),
+      PartCategoryService.COUNTS_CACHE_TTL_SECONDS,
+      async () => {
+        const [nodes, filed] = await Promise.all([
+          this.prisma.partCategory.findMany({
+            select: { id: true, parentId: true, level: true, isActive: true },
+          }),
+          this.prisma.catalogPart.groupBy({
+            by: ['categoryId'],
+            where: BUYER_LISTED_PART,
+            _count: { _all: true },
+          }),
+        ]);
+        return catalogRootProductCounts(
+          nodes,
+          filed.map((g) => [g.categoryId, g._count._all] as const),
+        );
+      },
+    );
   }
 
   /**
@@ -200,6 +234,8 @@ export class PartCategoryService {
    */
   async invalidate(...parentIds: (string | null | undefined)[]): Promise<void> {
     await this.cache.delete(RedisKeys.cacheReferenceCategories());
+    // A move or a deactivation re-roots whole subtrees of parts.
+    await this.cache.delete(RedisKeys.cacheReferenceCategoryCounts());
     const unique = new Set(parentIds.filter((p): p is string => !!p));
     await Promise.all(
       [...unique].map((p) =>
@@ -369,4 +405,63 @@ export function buildTree(rows: CategoryRow[]): TreeNode[] {
     nodes.get(row.parentId)?.children.push(node);
   }
   return roots;
+}
+
+/** What the root counting reads of a category. */
+export interface CountedNode {
+  id: string;
+  parentId: string | null;
+  level: number;
+  isActive: boolean;
+}
+
+/** A root {@link PartCategoryService.findCatalogRootCategories} serves. */
+function isCatalogRoot(node: CountedNode): boolean {
+  return node.isActive && node.parentId === null && node.level === 0;
+}
+
+/**
+ * The served root `categoryId` sits under, or null: up at most MAX_DEPTH
+ * parents — the reach of GET /v1/catalog/parts?category=<root> — and only
+ * through active nodes. Bounded, so a malformed cycle ends.
+ */
+function catalogRootOf(
+  categoryId: string,
+  byId: ReadonlyMap<string, CountedNode>,
+): string | null {
+  let node = byId.get(categoryId);
+  for (let depth = 0; node && depth <= MAX_DEPTH; depth += 1) {
+    if (!node.isActive) return null;
+    if (node.parentId === null) return isCatalogRoot(node) ? node.id : null;
+    node = byId.get(node.parentId);
+  }
+  return null;
+}
+
+/**
+ * Parts per served root, from the tree's `nodes` and the listed parts grouped
+ * by category (`[categoryId, count]`). Every served root is present, with 0
+ * when nothing is filed beneath it.
+ *
+ * A part counts toward the root its category hangs under — the root itself,
+ * an intermediate node such as wheel-hubs-bearings, or a node below that — as
+ * long as every node on the way is active: a deactivated node ('rul') is out
+ * of the public tree together with what is filed on and beneath it. A part has
+ * one category and a category at most one root, so no part counts twice; a
+ * part with no served root above it ('cat_uncategorized') counts nowhere.
+ */
+export function catalogRootProductCounts(
+  nodes: readonly CountedNode[],
+  filed: Iterable<readonly [categoryId: string, count: number]>,
+): Record<string, number> {
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const counts = new Map<string, number>();
+  for (const node of nodes) {
+    if (isCatalogRoot(node)) counts.set(node.id, 0);
+  }
+  for (const [categoryId, count] of filed) {
+    const root = catalogRootOf(categoryId, byId);
+    if (root !== null) counts.set(root, (counts.get(root) ?? 0) + count);
+  }
+  return Object.fromEntries(counts);
 }

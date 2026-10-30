@@ -675,7 +675,20 @@ export class PartsService {
     };
   }
 
+  /**
+   * Every order ends on the unique `id`. Pages are cut with OFFSET, and rows
+   * that tie on the sort key — one price, or one `created_at` shared by a
+   * whole import batch — have no fixed order of their own, so two page
+   * queries could each place a tied row differently: the same part on two
+   * pages, another on none. The tiebreaker reorders nothing but ties.
+   */
   private buildOrderBy(
+    sort?: string,
+  ): Prisma.CatalogPartOrderByWithRelationInput[] {
+    return [...this.sortKeys(sort), { id: 'asc' }];
+  }
+
+  private sortKeys(
     sort?: string,
   ): Prisma.CatalogPartOrderByWithRelationInput[] {
     if (sort === 'price_asc') return [{ priceUzs: 'asc' }];

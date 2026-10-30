@@ -293,11 +293,14 @@ describe('validateCategorySelection (the server-side backstop)', () => {
 });
 
 describe('cache invalidation', () => {
-  it('drops the roots key and every touched parent key', async () => {
+  it('drops the roots key, the root counts and every touched parent key', async () => {
     const { service, cache } = makeService();
     await service.invalidate('brake-system', 'brakes');
     expect(cache.delete).toHaveBeenCalledWith(
       RedisKeys.cacheReferenceCategories(),
+    );
+    expect(cache.delete).toHaveBeenCalledWith(
+      RedisKeys.cacheReferenceCategoryCounts(),
     );
     expect(cache.delete).toHaveBeenCalledWith(
       RedisKeys.cacheReferenceCategoryChildren('brake-system'),
@@ -310,7 +313,8 @@ describe('cache invalidation', () => {
   it('ignores null/undefined parents (a root write has none)', async () => {
     const { service, cache } = makeService();
     await service.invalidate(null, undefined);
-    expect(cache.delete).toHaveBeenCalledTimes(1); // the roots key only
+    // The roots key and the root counts only.
+    expect(cache.delete).toHaveBeenCalledTimes(2);
   });
 });
 

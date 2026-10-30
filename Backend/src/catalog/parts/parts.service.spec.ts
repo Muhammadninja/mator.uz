@@ -191,13 +191,14 @@ describe('PartsService — search and sort survive ProductKind', () => {
     await svc.list({ sort: 'price_asc' });
     expect((prisma.calls.findMany as { orderBy: unknown }).orderBy).toEqual([
       { priceUzs: 'asc' },
+      { id: 'asc' },
     ]);
 
     const desc = makeService();
     await desc.svc.list({ sort: 'price_desc' });
     expect(
       (desc.prisma.calls.findMany as { orderBy: unknown }).orderBy,
-    ).toEqual([{ priceUzs: 'desc' }]);
+    ).toEqual([{ priceUzs: 'desc' }, { id: 'asc' }]);
   });
 
   it('the default sort is still newest-first', async () => {
@@ -205,6 +206,7 @@ describe('PartsService — search and sort survive ProductKind', () => {
     await svc.list({});
     expect((prisma.calls.findMany as { orderBy: unknown }).orderBy).toEqual([
       { createdAt: 'desc' },
+      { id: 'asc' },
     ]);
   });
 
@@ -215,7 +217,7 @@ describe('PartsService — search and sort survive ProductKind', () => {
       sort: 'price_asc',
     });
     const args = prisma.calls.findMany as { orderBy: unknown; where: unknown };
-    expect(args.orderBy).toEqual([{ priceUzs: 'asc' }]);
+    expect(args.orderBy).toEqual([{ priceUzs: 'asc' }, { id: 'asc' }]);
     expect(JSON.stringify(args.where)).toContain('MOTOR_OIL');
   });
 
@@ -237,7 +239,7 @@ describe('PartsService — search and sort survive ProductKind', () => {
     await svc.list({ mainCategory: 'brakes', sort: 'price_asc' });
     const args = prisma.calls.findMany as { orderBy: any[]; where: unknown };
     expect(JSON.stringify(args.where)).toContain('"mainCategory":"BRAKES"');
-    expect(args.orderBy).toEqual([{ priceUzs: 'asc' }]);
+    expect(args.orderBy).toEqual([{ priceUzs: 'asc' }, { id: 'asc' }]);
   });
 
   it('a multi-word main-category SLUG rolls up the whole system (not an exact categoryId)', async () => {
@@ -275,6 +277,7 @@ describe('PartsService — search and sort survive ProductKind', () => {
     expect((res as { subcategories: unknown }).subcategories).toBeNull();
     expect((prisma.calls.findMany as { orderBy: unknown }).orderBy).toEqual([
       { createdAt: 'desc' },
+      { id: 'asc' },
     ]);
   });
 

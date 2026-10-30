@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { PartCategoryService } from '../catalog/categories/part-category.service';
@@ -31,6 +32,8 @@ export const REFERENCE_CACHE_TTL = 24 * 60 * 60; // 24h, in seconds
  */
 @Injectable()
 export class ReferenceService {
+  private readonly logger = new Logger(ReferenceService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly cache: CacheService,
@@ -195,6 +198,11 @@ export class ReferenceService {
    * A supplied-but-unknown parentId is a 404 (matching the makeId/modelId
    * behaviour); an EMPTY child list is a 200 with `items: []`, because "this
    * category is a leaf" is a legitimate, meaningful answer the bot acts on.
+   *
+   * Each root also carries `productsCount`, its listed parts (see
+   * PartCategoryService.findCatalogRootProductCounts) — merged here, after the
+   * cached tree is read, so the payload the bot shares never holds a count. The
+   * count is extra: if it can't be read, the roots are served without it.
    */
   async listCategories(parentId?: string) {
     if (parentId !== undefined) {
@@ -205,7 +213,23 @@ export class ReferenceService {
       return { items, total: items.length };
     }
 
-    const items = await this.categories.findCatalogRootCategories();
+    const [roots, counts] = await Promise.all([
+      this.categories.findCatalogRootCategories(),
+      this.categories.findCatalogRootProductCounts().catch((err: unknown) => {
+        this.logger.warn(
+          `Root part counts unavailable: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return null;
+      }),
+    ]);
+    const items = counts
+      ? roots.map((root) => ({
+          ...root,
+          // A root newer than the cached counts has none listed yet.
+          productsCount:
+            typeof counts[root.id] === 'number' ? counts[root.id] : 0,
+        }))
+      : roots;
     return { items, total: items.length };
   }
 }

@@ -251,7 +251,7 @@ describe('paging, sort, search and the model filter on a root listing', () => {
     expect(page).toMatchObject({
       skip: 3,
       take: 3,
-      orderBy: [{ priceUzs: 'asc' }],
+      orderBy: [{ priceUzs: 'asc' }, { id: 'asc' }],
     });
     expect(page.where).toEqual(count?.where);
     expect(res).toMatchObject({
@@ -278,4 +278,59 @@ describe('paging, sort, search and the model filter on a root listing', () => {
     });
     expect(ids).toEqual(['s_ball']);
   });
+});
+
+/** Rows in `orderBy` order, as far as the keys decide it: a stable sort, so
+ *  rows the keys tie on keep the order they arrived in — the order a database
+ *  promises nothing about. Nulls sort last. */
+function ordered<T extends Record<string, unknown>>(
+  rows: T[],
+  orderBy: Record<string, unknown>[],
+): T[] {
+  return [...rows].sort((a, b) => {
+    for (const key of orderBy) {
+      const [field, spec] = Object.entries(key)[0];
+      const dir =
+        typeof spec === 'string' ? spec : (spec as { sort: string }).sort;
+      const x = a[field] as string | number | null | undefined;
+      const y = b[field] as string | number | null | undefined;
+      if (x === y) continue;
+      if (x == null) return 1;
+      if (y == null) return -1;
+      return (x < y ? -1 : 1) * (dir === 'desc' ? -1 : 1);
+    }
+    return 0;
+  });
+}
+
+describe('paging a root listing repeats and drops nothing', () => {
+  // Every brake part has the same price and none carries a sales signal or a
+  // creation time, so each sort ties on all of its own keys.
+  it.each(['relevance', 'price_asc', 'price_desc', 'bestseller'])(
+    '%s: the pages partition the listing',
+    async (sort) => {
+      const shown: string[] = [];
+      for (let page = 1; page <= 3; page += 1) {
+        const { page: query } = await listing({
+          category: 'brake-system',
+          sort,
+          page,
+          page_size: 3,
+        });
+        expect(query.orderBy).toContainEqual({ id: 'asc' });
+        // Each page query gets the tied rows in a different order.
+        const rows = PARTS.filter((p) => matchesWhere(p, query.where));
+        const arrival = page % 2 ? rows : [...rows].reverse();
+        shown.push(
+          ...ordered(arrival, query.orderBy as Record<string, unknown>[])
+            .slice(query.skip, query.skip + query.take)
+            .map((p) => p.id),
+        );
+      }
+      expect(shown).toHaveLength(8);
+      expect(new Set(shown)).toEqual(
+        new Set((await listing({ category: 'brake-system' })).ids),
+      );
+    },
+  );
 });
