@@ -145,8 +145,10 @@ describe('ImageEnhanceService.removeBackground', () => {
   });
 
   // What FLUX may change is decided by the prompt alone. These tests pin its
-  // key requirements rather than its wording; they cannot judge a generated
-  // image — only a real FLUX run on control photos can.
+  // key requirements rather than its wording: only the background changes, the
+  // part is asked to stay exactly as photographed, and nothing asks to clean,
+  // enhance, restore or modify it. They cannot judge a generated image — only a
+  // real FLUX run on control photos can.
   describe('the catalog-photo prompt', () => {
     /** Run one successful edit and return the prompt it submitted. */
     async function sentPrompt(): Promise<string> {
@@ -158,9 +160,14 @@ describe('ImageEnhanceService.removeBackground', () => {
       return submittedBody().prompt as string;
     }
 
+    /** The prompt's sentences. */
+    function sentences(prompt: string): string[] {
+      return prompt.split(/\.\s+/);
+    }
+
     /** The first sentence of the prompt that matches `pattern`. */
     function sentence(prompt: string, pattern: RegExp): string {
-      const found = prompt.split(/\.\s+/).find((s) => pattern.test(s));
+      const found = sentences(prompt).find((s) => pattern.test(s));
       if (found === undefined) {
         throw new Error(`no sentence matches /${pattern.source}/`);
       }
@@ -170,23 +177,76 @@ describe('ImageEnhanceService.removeBackground', () => {
     // Each behavior is one instruction in the prompt, and it must name every item.
     it.each<[string, RegExp, string[]]>([
       [
-        'improves the quality of the photo',
-        /^Create\b/,
+        'isolates the part and places it on a flat pure white background',
+        /^Isolate\b/,
         [
-          'catalog photograph',
-          'exact spare part',
+          'automotive spare part',
           'input image',
-          'exposure',
-          'lighting',
-          'white balance',
-          'color accuracy',
-          'reduce noise',
+          'flat pure white (#FFFFFF) background',
         ],
       ],
       [
-        'replaces the background and surroundings with pure white',
-        /^Create\b/,
-        ['replace the background and surroundings with pure white (#FFFFFF)'],
+        'only the original background, hands and surroundings are replaced',
+        /^Only the original background\b/,
+        ['original background', 'hands', 'surroundings', 'replaced'],
+      ],
+      [
+        'geometry, shape, proportions, materials, colors and texture stay as photographed',
+        /^The part stays\b/,
+        [
+          'exactly as photographed',
+          'geometry',
+          'shape',
+          'proportions',
+          'materials',
+          'colors',
+          'texture',
+        ],
+      ],
+      [
+        'components, holes, threads, connectors, mounting points and fasteners stay',
+        /^The part stays\b/,
+        [
+          'number of components',
+          'holes',
+          'threads',
+          'connectors',
+          'mounting points',
+          'fasteners',
+        ],
+      ],
+      [
+        'rust, dirt, dust, grease, scratches, scuffs, cracks and damage stay',
+        /^The part stays\b/,
+        [
+          'every surface detail',
+          'rust',
+          'dirt',
+          'dust',
+          'grease',
+          'scratches',
+          'scuffs',
+          'cracks',
+          'damage',
+          'all unchanged',
+        ],
+      ],
+      [
+        'logos, OEM / GM numbers, labels and markings keep their exact characters',
+        /^Every logo\b/,
+        [
+          'logo',
+          'OEM and GM number',
+          'label',
+          'marking',
+          'exact characters',
+          'blurry or unreadable text included',
+        ],
+      ],
+      [
+        'no detail is invented',
+        /^Show only\b/,
+        ['details visible in the input image'],
       ],
       [
         'the part sits centered on a 1000×1000 canvas at its own proportions',
@@ -198,67 +258,6 @@ describe('ImageEnhanceService.removeBackground', () => {
           'proportions unchanged',
         ],
       ],
-      [
-        'cosmetic cleaning is the most the part may change',
-        /^Cosmetic cleaning\b/,
-        ['maximum change allowed to the part'],
-      ],
-      [
-        'a rusty metal part loses rust and corrosion',
-        /^Cosmetic cleaning\b/,
-        ['rust', 'corrosion'],
-      ],
-      [
-        'a dirty part loses dirt, dust, grease and oil stains',
-        /^Cosmetic cleaning\b/,
-        ['dirt', 'dust', 'grease', 'oil stains'],
-      ],
-      [
-        'only minor superficial scratches and scuffs are cleaned',
-        /^Cosmetic cleaning\b/,
-        ['minor superficial scratches and scuffs'],
-      ],
-      [
-        'an already clean surface stays unchanged',
-        /already clean/,
-        ['An already clean surface stays unchanged'],
-      ],
-      [
-        'geometry, completeness and materials of the part stay as photographed',
-        /^Keep the part\b/,
-        [
-          'exactly as photographed',
-          'geometry',
-          'shape',
-          'proportions',
-          'materials',
-          'colors',
-          'texture',
-          'components',
-          'holes',
-          'threads',
-          'connectors',
-          'mounting points',
-        ],
-      ],
-      [
-        'cracks, bends, deformations and structural damage stay',
-        /^Keep the part\b/,
-        ['cracks', 'bends', 'deformations', 'structural damage'],
-      ],
-      [
-        'logos, numbers, text and markings are shown, nothing added or removed',
-        /^Show every visible\b/,
-        [
-          'logo',
-          'number',
-          'text',
-          'marking',
-          'fastener',
-          'detail',
-          'nothing added, removed or invented',
-        ],
-      ],
     ])('%s', async (_behavior, pattern, items) => {
       const instruction = sentence(await sentPrompt(), pattern);
       for (const item of items) {
@@ -266,43 +265,35 @@ describe('ImageEnhanceService.removeBackground', () => {
       }
     });
 
-    it('limits removal to the cosmetic cleaning sentence', async () => {
-      const prompt = await sentPrompt();
-      // The one instruction to remove anything is the cosmetic cleaning list,
-      // and it names none of the structural features that must stay.
-      expect(prompt.match(/\bremove\b/gi)).toHaveLength(1);
-      expect(sentence(prompt, /\bremove\b/i)).toMatch(/^Cosmetic cleaning\b/);
-      expect(sentence(prompt, /^Cosmetic cleaning\b/)).not.toMatch(
-        /crack|bend|bent|deform|damage|dent|chip|broken|missing/i,
+    it('names rust, dirt, scratches and damage only as things that stay', async () => {
+      const mentions = sentences(await sentPrompt()).filter((s) =>
+        /\b(rust|dirt|dust|grease|scratch\w*|scuff\w*|crack\w*|damage)\b/i.test(
+          s,
+        ),
+      );
+      expect(mentions).toHaveLength(1);
+      expect(mentions[0]).toMatch(
+        /^The part stays exactly as photographed\b[\s\S]*\ball unchanged$/,
       );
     });
 
-    it('cleans the surface without asking to restore, rebuild or redesign the part', async () => {
-      // "restored to a clean, well-maintained appearance" invited FLUX to
-      // reconstruct the surface instead of cleaning it.
+    it('asks for no cleaning, enhancement, restoration or retouching of the part', async () => {
+      // Not even named: FLUX.2 has no negative prompt, and naming a thing tends
+      // to draw the model toward it. The rule is stated as "unchanged" instead.
       expect(await sentPrompt()).not.toMatch(
-        /\b(restor\w*|reconstruct\w*|rebuil\w*|repair\w*|renew\w*|refurbish\w*|recreat\w*|regenerat\w*|redesign\w*|redraw\w*|repaint\w*)\b/i,
+        /\b(clean\w*|enhanc\w*|improv\w*|restor\w*|repair\w*|retouch\w*|reconstruct\w*|rebuil\w*|refurbish\w*|renew\w*|polish\w*|beautif\w*|denois\w*|brighten\w*|correct\w*|recolor\w*|upscal\w*|fix\w*)\b/i,
       );
     });
 
-    it('does not ask for a polished, like-new or better-than-photographed part', async () => {
+    it('asks for no removal, addition or modification of anything on the part', async () => {
       expect(await sentPrompt()).not.toMatch(
-        /\b(like new|brand new|new look|polish\w*|shin\w+|spotless|pristine|flawless|attractive|beautiful|perfect\w*)\b/i,
+        /\b(remov\w*|eras\w*|delet\w*|eliminat\w*|add\w*|insert\w*|modif\w*|alter\w*|chang\w*|adjust\w*|edit\w*|redesign\w*|redraw\w*|regenerat\w*|recreat\w*|invent\w*)\b/i,
       );
     });
 
-    it('asks for no new dirt, rust, scratches or wear on a clean part', async () => {
-      // Nothing asks for rust, dirt, scratches or wear to be added or aged in.
+    it('gives no lighting, exposure, color or noise instruction that would alter the part', async () => {
       expect(await sentPrompt()).not.toMatch(
-        /\b(add|adds|apply|introduce|simulate|age|weather|distress)\b[^.]*\b(rust|corrosion|dirt|dust|grease|scratch\w*|scuff\w*|wear|patina|grunge)\b/i,
-      );
-    });
-
-    it('does not ask to keep cosmetic flaws (they may be cleaned) or a used look', async () => {
-      // The structural features that stay are named in the "Keep the part"
-      // sentence above; rust, dirt, scratches and wear are not among them.
-      expect(await sentPrompt()).not.toMatch(
-        /\b(keep|keeps|preserve|retain|leave|document)\b[^.]*\b(rust|corrosion|scratch\w*|scuff\w*|wear|dirt|condition|used)\b/i,
+        /\b(exposure|lighting|white balance|noise|contrast|brightness|saturation|color (accuracy|balance|grading|correction))\b/i,
       );
     });
 
