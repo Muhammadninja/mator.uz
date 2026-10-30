@@ -112,14 +112,27 @@ const ROWS: CategoryRow[] = [
   row({ id: 'other-lubricants', parentId: 'other', sortOrder: 3 }),
 ];
 
-/** Prisma double for the two partCategory reads the tree makes. */
+/** Listed parts per category, as the root counts' GROUP BY returns them. */
+const LISTED: Record<string, number> = {
+  'brake-system': 2,
+  'shock-absorbers': 3,
+  'ball-bearings': 1,
+  rul: 4,
+  cat_uncategorized: 5,
+  'motorcycle-oil': 2,
+};
+
+/** Prisma double for the partCategory reads the tree makes and the group-by
+ *  the root counts make. */
 function categoryDb() {
   return {
     partCategory: {
       findUnique: jest.fn(({ where }: { where: { id: string } }) =>
         Promise.resolve(ROWS.find((r) => r.id === where.id) ?? null),
       ),
-      findMany: jest.fn(({ where }: { where: Partial<CategoryRow> }) => {
+      findMany: jest.fn(({ where }: { where?: Partial<CategoryRow> }) => {
+        // The root counts read the whole tree.
+        if (!where) return Promise.resolve(ROWS);
         const out = ROWS.filter(
           (r) =>
             r.parentId === where.parentId &&
@@ -131,6 +144,16 @@ function categoryDb() {
         );
         return Promise.resolve(out);
       }),
+    },
+    catalogPart: {
+      groupBy: jest.fn(() =>
+        Promise.resolve(
+          Object.entries(LISTED).map(([categoryId, n]) => ({
+            categoryId,
+            _count: { _all: n },
+          })),
+        ),
+      ),
     },
   };
 }
@@ -168,7 +191,7 @@ describe('GET /v1/reference/categories — the public tree', () => {
     expect(total).toBe(10);
   });
 
-  it('serves "Другое" once, as a root with its own id, slug and names', async () => {
+  it('serves "Другое" once, as a root with its own id, slug, names and count', async () => {
     const { items } = await makeApi().api.categories();
     expect(items.filter((i) => i.id === 'other')).toEqual([
       {
@@ -181,6 +204,7 @@ describe('GET /v1/reference/categories — the public tree', () => {
         parentId: null,
         level: 0,
         sortOrder: 99,
+        productsCount: 2,
       },
     ]);
   });
@@ -237,9 +261,60 @@ describe('the seller bot keeps its own "Другое" button', () => {
     await api.categories();
     await tree.findRootCategories();
     const keys = cache.remember.mock.calls.map(([key]) => key);
+    // The counts ride beside the roots, under a key of their own.
     expect(keys).toEqual([
       RedisKeys.cacheReferenceCategories(),
+      RedisKeys.cacheReferenceCategoryCounts(),
       RedisKeys.cacheReferenceCategories(),
     ]);
+  });
+
+  it('gets roots that carry no count', async () => {
+    const roots = await makeApi().tree.findRootCategories();
+    expect(roots.some((r) => 'productsCount' in r)).toBe(false);
+  });
+});
+
+describe('productsCount on the roots', () => {
+  const countsOf = async () =>
+    Object.fromEntries(
+      (await makeApi().api.categories()).items.map((i) => [
+        i.id,
+        'productsCount' in i ? i.productsCount : undefined,
+      ]),
+    );
+
+  it('is served on every root, 0 where nothing is listed', async () => {
+    expect(await countsOf()).toEqual({
+      'brake-system': 2,
+      'maintenance-and-fluids': 0,
+      // shock absorbers + a ball bearing two levels down; rul's parts are out
+      'suspension-and-steering': 4,
+      'electrical-and-lighting': 0,
+      'engine-system': 0,
+      transmission: 0,
+      'heating-and-cooling': 0,
+      'tuning-and-accessories': 0,
+      'motor-oil': 0,
+      other: 2,
+    });
+  });
+
+  it('is never served on a child', async () => {
+    const { api } = makeApi();
+    for (const parentId of ['suspension-and-steering', 'other']) {
+      const { items } = await api.categories(parentId);
+      expect(items.some((i) => 'productsCount' in i)).toBe(false);
+    }
+  });
+
+  it('is left off, and the roots still served, when it cannot be counted', async () => {
+    const { api, tree } = makeApi();
+    jest
+      .spyOn(tree, 'findCatalogRootProductCounts')
+      .mockRejectedValue(new Error('statement timeout'));
+    const { items, total } = await api.categories();
+    expect(total).toBe(10);
+    expect(items.some((i) => 'productsCount' in i)).toBe(false);
   });
 });

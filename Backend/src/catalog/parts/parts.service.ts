@@ -127,6 +127,12 @@ export class PartsService {
   ) {
     const vehicle = await this.loadGarageVehicle(userId, query.vehicle_id);
     const where = this.buildWhere(query, vehicle);
+    // The brand facet counts every brand the OTHER filters leave, so a picked
+    // brand keeps the rest on offer — to swap it, or to add a second. Without
+    // a brand filter that is `where` itself.
+    const brandFacetWhere = query.brand
+      ? this.buildWhere({ ...query, brand: undefined }, vehicle)
+      : where;
     const rollup = this.rollupMainCategory(query);
     // A macro-category rollup defaults to bestseller-first; an explicit sort wins.
     const effectiveSort = query.sort ?? (rollup ? 'bestseller' : undefined);
@@ -148,7 +154,7 @@ export class PartsService {
       }),
       this.prisma.catalogPart.groupBy({
         by: ['brandId'],
-        where,
+        where: brandFacetWhere,
         _count: { _all: true },
       }),
       this.prisma.catalogPart.aggregate({
@@ -675,7 +681,20 @@ export class PartsService {
     };
   }
 
+  /**
+   * Every order ends on the unique `id`. Pages are cut with OFFSET, and rows
+   * that tie on the sort key — one price, or one `created_at` shared by a
+   * whole import batch — have no fixed order of their own, so two page
+   * queries could each place a tied row differently: the same part on two
+   * pages, another on none. The tiebreaker reorders nothing but ties.
+   */
   private buildOrderBy(
+    sort?: string,
+  ): Prisma.CatalogPartOrderByWithRelationInput[] {
+    return [...this.sortKeys(sort), { id: 'asc' }];
+  }
+
+  private sortKeys(
     sort?: string,
   ): Prisma.CatalogPartOrderByWithRelationInput[] {
     if (sort === 'price_asc') return [{ priceUzs: 'asc' }];

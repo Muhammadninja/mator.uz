@@ -36,6 +36,7 @@ export class PartsController {
     description:
       'Server-side filtering by category (main or vehicle-specific), make, model, part brand, region of origin, GM-only, OEM-only, in-stock, and garage vehicle compatibility. Make/model filters are independent of the garage filter. Unknown query params are rejected with 400.\n\n' +
       "Garage filter: `vehicle_id` applies only to the authenticated caller's own (not deleted) garage vehicle; any other id — or no token — is treated like an unknown vehicle (no vehicle filter).\n\n" +
+      'Part brand: `brand` takes part-brand ids (`facets.brands[].id`, e.g. brand_gates), comma-separated for several. It narrows the listing before it is counted and paged, so `total` and `next_page` cover every part of the brand; `facets.brands` counts every brand the other filters leave — `brand` itself ignored — so a client can offer the other brands beside a picked one.\n\n' +
       'Listing kind: `kind=spare_part|motor_oil` (repeatable). Omitting it returns EVERY kind, which is the pre-ProductKind behaviour.\n\n' +
       'Motor oils additionally filter by `viscosity` (SAE grade, exact match, repeatable), `oil_type` (synthetic|semi_synthetic|mineral, repeatable) and volume — either exact values via `volume_ml` (repeatable, MILLILITRES: 4 л = 4000) or a range via `volume_ml_min`/`volume_ml_max`. Any of these implies `kind=motor_oil`. When the query concerns oils, `facets.motor_oil` returns the available viscosity/type/volume values with counts.',
   })

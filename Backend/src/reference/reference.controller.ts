@@ -131,6 +131,8 @@ export class ReferenceController {
    * ONLY active categories are ever returned, at any level: a category the admin
    * deactivates disappears on the next read. An empty `items` is a normal answer
    * and is exactly what tells a client to skip the selection step.
+   *
+   * A root carries `productsCount`; a child does not.
    */
   @Get('categories')
   @ApiOperation({
@@ -140,7 +142,13 @@ export class ReferenceController {
       'Without parentId: the active root categories, "Другое" (other) included. With parentId: ' +
       "that category's active children. Inactive categories are never returned. " +
       'An empty items array means the category is a leaf — the caller should not ' +
-      'render a further selection step.',
+      'render a further selection step.\n\n' +
+      'Each root carries `productsCount`: the buyer-listed parts filed on the root ' +
+      'or anywhere beneath it, each part once — the visibility and reach of ' +
+      'GET /v1/catalog/parts?category=<root>, whatever the page, except that a ' +
+      'deactivated category and what is filed beneath it are not counted. Not ' +
+      'scoped to a vehicle; cached for up to 60 s. Absent when the count could ' +
+      'not be read; children never carry it.',
   })
   @ApiQuery({ name: 'parentId', required: false, example: 'brake-system' })
   @ApiOkResponse({
@@ -149,12 +157,16 @@ export class ReferenceController {
       example: {
         items: [
           {
-            id: 'brake-pads',
-            name: 'Brake Pads',
-            slug: 'brake-pads',
-            parentId: 'brakes',
-            level: 2,
-            sortOrder: 1,
+            id: 'brake-system',
+            name: 'Brake System',
+            nameRu: 'Тормозная система',
+            nameUz: 'Tormoz tizimi',
+            nameEn: 'Brake System',
+            slug: 'brake-system',
+            parentId: null,
+            level: 0,
+            sortOrder: 0,
+            productsCount: 125,
           },
         ],
         total: 1,
