@@ -170,104 +170,93 @@ describe('ImageEnhanceService.removeBackground', () => {
     // Each behavior is one instruction in the prompt, and it must name every item.
     it.each<[string, RegExp, string[]]>([
       [
-        'asks for a catalog photo of the exact part',
+        'improves the quality of the photo',
         /^Create\b/,
-        ['catalog photograph', 'exact automotive spare part', 'input image'],
-      ],
-      [
-        'removal is limited to cosmetic surface flaws',
-        /^Remove\b/,
-        ['only cosmetic surface flaws'],
-      ],
-      [
-        'a rusty metal part is cleaned of rust and corrosion',
-        /^Remove\b/,
-        ['rust', 'corrosion'],
-      ],
-      [
-        'a dirty plastic part is cleaned of dirt, dust, grease and oil',
-        /^Remove\b/,
-        ['dirt', 'dust', 'grease', 'oil stains'],
-      ],
-      [
-        'a scratched, worn part loses scratches, scuffs and wear',
-        /^Remove\b/,
-        ['scratches', 'scuffs', 'wear'],
-      ],
-      [
-        'metal, plastic and rubber surfaces come out clean and attractive',
-        /^Show clean\b/,
         [
-          'attractive',
-          'metal',
-          'plastic',
-          'rubber',
-          'original finish and texture',
+          'catalog photograph',
+          'exact spare part',
+          'input image',
+          'exposure',
+          'lighting',
+          'white balance',
+          'color accuracy',
+          'reduce noise',
         ],
       ],
       [
-        'cracks, broken or bent mounts and deformed functional elements are kept',
-        /^Keep the construction\b/,
-        [
-          'exactly as shown',
-          'cracks',
-          'broken or bent mounting points',
-          'deformed functional elements',
-        ],
+        'replaces the background and surroundings with pure white',
+        /^Create\b/,
+        ['replace the background and surroundings with pure white (#FFFFFF)'],
       ],
       [
-        'geometry, completeness and materials of the part are kept',
-        /^Keep the construction\b/,
-        [
-          'type',
-          'model',
-          'geometry',
-          'shape',
-          'proportions',
-          'number of pieces',
-          'holes',
-          'threads',
-          'connectors',
-          'original materials',
-          'natural colors',
-        ],
-      ],
-      [
-        'logos, OEM / GM numbers and markings are kept character for character',
-        /^Keep logos\b/,
-        [
-          'OEM',
-          'GM numbers',
-          'part numbers',
-          'markings',
-          'exactly as shown',
-          'every character unchanged',
-        ],
-      ],
-      [
-        'no component is invented',
-        /^Show only\b/,
-        ['components visible in the input image'],
-      ],
-      [
-        'the part sits centered on a pure white 1000×1000 canvas',
+        'the part sits centered on a 1000×1000 canvas at its own proportions',
         /^Output\b/,
         [
           'exactly 1000×1000 pixels',
           'centered',
-          'pure white (#FFFFFF) background',
           '85–90%',
           'proportions unchanged',
         ],
       ],
       [
-        'lighting and color are improved',
-        /^Use soft\b/,
+        'cosmetic cleaning is the most the part may change',
+        /^Cosmetic cleaning\b/,
+        ['maximum change allowed to the part'],
+      ],
+      [
+        'a rusty metal part loses rust and corrosion',
+        /^Cosmetic cleaning\b/,
+        ['rust', 'corrosion'],
+      ],
+      [
+        'a dirty part loses dirt, dust, grease and oil stains',
+        /^Cosmetic cleaning\b/,
+        ['dirt', 'dust', 'grease', 'oil stains'],
+      ],
+      [
+        'only minor superficial scratches and scuffs are cleaned',
+        /^Cosmetic cleaning\b/,
+        ['minor superficial scratches and scuffs'],
+      ],
+      [
+        'an already clean surface stays unchanged',
+        /already clean/,
+        ['An already clean surface stays unchanged'],
+      ],
+      [
+        'geometry, completeness and materials of the part stay as photographed',
+        /^Keep the part\b/,
         [
-          'soft, even studio lighting',
-          'accurate exposure',
-          'natural color',
-          'low noise',
+          'exactly as photographed',
+          'geometry',
+          'shape',
+          'proportions',
+          'materials',
+          'colors',
+          'texture',
+          'components',
+          'holes',
+          'threads',
+          'connectors',
+          'mounting points',
+        ],
+      ],
+      [
+        'cracks, bends, deformations and structural damage stay',
+        /^Keep the part\b/,
+        ['cracks', 'bends', 'deformations', 'structural damage'],
+      ],
+      [
+        'logos, numbers, text and markings are shown, nothing added or removed',
+        /^Show every visible\b/,
+        [
+          'logo',
+          'number',
+          'text',
+          'marking',
+          'fastener',
+          'detail',
+          'nothing added, removed or invented',
         ],
       ],
     ])('%s', async (_behavior, pattern, items) => {
@@ -277,46 +266,49 @@ describe('ImageEnhanceService.removeBackground', () => {
       }
     });
 
-    it('keeps cracks and broken mounts out of the cosmetic cleaning', async () => {
-      const cleaning = sentence(await sentPrompt(), /^Remove\b/);
-      expect(cleaning).not.toMatch(
-        /crack|chip|dent|deform|broken|bent|missing/i,
+    it('limits removal to the cosmetic cleaning sentence', async () => {
+      const prompt = await sentPrompt();
+      // The one instruction to remove anything is the cosmetic cleaning list,
+      // and it names none of the structural features that must stay.
+      expect(prompt.match(/\bremove\b/gi)).toHaveLength(1);
+      expect(sentence(prompt, /\bremove\b/i)).toMatch(/^Cosmetic cleaning\b/);
+      expect(sentence(prompt, /^Cosmetic cleaning\b/)).not.toMatch(
+        /crack|bend|bent|deform|damage|dent|chip|broken|missing/i,
       );
     });
 
-    it('cleans the surface without asking to restore or rebuild the part', async () => {
+    it('cleans the surface without asking to restore, rebuild or redesign the part', async () => {
       // "restored to a clean, well-maintained appearance" invited FLUX to
       // reconstruct the surface instead of cleaning it.
       expect(await sentPrompt()).not.toMatch(
-        /\b(restor\w*|reconstruct\w*|rebuil\w*|repair\w*|renew\w*|refurbish\w*|recreat\w*|regenerat\w*)\b/i,
+        /\b(restor\w*|reconstruct\w*|rebuil\w*|repair\w*|renew\w*|refurbish\w*|recreat\w*|regenerat\w*|redesign\w*|redraw\w*|repaint\w*)\b/i,
       );
     });
 
-    it('keeps an already clean part clean and asks for no new dirt or defects', async () => {
-      const prompt = await sentPrompt();
-      expect(sentence(prompt, /already clean/)).toContain(
-        'keeps its flawless surfaces unchanged',
+    it('does not ask for a polished, like-new or better-than-photographed part', async () => {
+      expect(await sentPrompt()).not.toMatch(
+        /\b(like new|brand new|new look|polish\w*|shin\w+|spotless|pristine|flawless|attractive|beautiful|perfect\w*)\b/i,
       );
+    });
+
+    it('asks for no new dirt, rust, scratches or wear on a clean part', async () => {
       // Nothing asks for rust, dirt, scratches or wear to be added or aged in.
-      expect(prompt).not.toMatch(
+      expect(await sentPrompt()).not.toMatch(
         /\b(add|adds|apply|introduce|simulate|age|weather|distress)\b[^.]*\b(rust|corrosion|dirt|dust|grease|scratch\w*|scuff\w*|wear|patina|grunge)\b/i,
       );
     });
 
-    it('no longer asks to keep cosmetic flaws or a used look', async () => {
-      const prompt = await sentPrompt();
-      // Earlier prompts ordered rust, scratches and wear kept and a used part
-      // not to look new; that is reversed on purpose. Structural features are
-      // still kept — see the construction test above.
-      expect(prompt).not.toMatch(
+    it('does not ask to keep cosmetic flaws (they may be cleaned) or a used look', async () => {
+      // The structural features that stay are named in the "Keep the part"
+      // sentence above; rust, dirt, scratches and wear are not among them.
+      expect(await sentPrompt()).not.toMatch(
         /\b(keep|keeps|preserve|retain|leave|document)\b[^.]*\b(rust|corrosion|scratch\w*|scuff\w*|wear|dirt|condition|used)\b/i,
       );
-      expect(prompt).not.toMatch(/\bnot new\b|\bas photographed\b/i);
     });
 
-    it('stays within 150 words and has no "sharp…" wording', async () => {
+    it('stays within 120 words and has no "sharp…" wording', async () => {
       const prompt = await sentPrompt();
-      expect(prompt.trim().split(/\s+/).length).toBeLessThanOrEqual(150);
+      expect(prompt.trim().split(/\s+/).length).toBeLessThanOrEqual(120);
       // "sharpness" stays out so the model does not read it as license to
       // reconstruct local detail, text included — no "sharp…" word at all.
       expect(prompt).not.toMatch(/sharp/i);

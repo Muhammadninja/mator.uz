@@ -15,37 +15,35 @@ const FLUX_ENDPOINT = 'https://api.bfl.ai/v1/flux-2-pro';
 const OUTPUT_WIDTH = 1000;
 const OUTPUT_HEIGHT = 1000;
 
-// The single prompt used for every request: a clean, attractive catalog photo of
-// the SAME part. The goal is the part's presentation, not a record of its
-// condition: FLUX removes cosmetic surface flaws (rust and corrosion, dirt,
-// grease, scratches, wear) and shows clean metal, plastic and rubber in their
-// original finish; a part that is already clean stays as it is. Only the surface
-// changes — the construction never does: geometry, piece count, holes, threads,
-// connectors, cracks, broken or bent mounts, deformed functional elements,
-// materials, natural colors and every logo / OEM / GM number / marking (no
-// character rewritten or invented); no component is added. No "restore…" wording:
-// it invites FLUX to rebuild a surface instead of cleaning it. Affirmative on
-// purpose: FLUX.2 has no negative prompt, and BFL's prompting guide says it
-// weighs earlier words more and that naming an unwanted feature tends to draw it
-// in, so defects are named only where they are to be removed or kept. Deliberately
-// no "sharp…" wording: the model reads it as license to reconstruct detail, text
-// included. FLUX.2 [pro] applies prompt upsampling by default, so the model does
-// not see this text exactly as written; this request does not set disable_pup.
+// The single prompt used for every request: a better PHOTO of the same part on a
+// pure white 1000×1000 canvas. FLUX improves exposure, lighting, white balance,
+// color accuracy and noise and replaces the background and surroundings. The only
+// change allowed to the part itself is cosmetic cleaning (rust, corrosion, dirt,
+// dust, grease, oil stains, minor superficial scratches and scuffs); an already
+// clean surface stays unchanged. Everything else is the original object as
+// photographed: geometry, shape, proportions, materials, colors, texture,
+// components, holes, threads, connectors, mounting points, cracks, bends,
+// deformations and other structural damage, plus every visible logo, number, text
+// and marking; nothing is added, removed or invented. Cleaning is stated as the
+// ceiling instead of listing "do not repair / restore / rebuild" verbs: FLUX.2 has
+// no negative prompt, BFL's prompting guide says it weighs earlier words more and
+// that naming an unwanted feature tends to draw it in, and "restore…" wording
+// already invited FLUX to rebuild surfaces. Deliberately no "sharp…" wording: the
+// model reads it as license to reconstruct detail, text included. FLUX.2 [pro]
+// applies prompt upsampling by default, so the model does not see this text
+// exactly as written; this request does not set disable_pup.
 const FLUX_PROMPT =
-  'Create a realistic, professional catalog photograph of the exact automotive spare part in ' +
-  'the input image.\n\n' +
-  'Remove only cosmetic surface flaws: rust, corrosion, dirt, dust, grease, oil stains, ' +
-  'scratches, scuffs and wear. Show clean, attractive metal, plastic and rubber in their ' +
-  'original finish and texture. An already clean part keeps its flawless surfaces ' +
-  'unchanged.\n\n' +
-  'Keep the construction exactly as shown: type, model, geometry, shape, proportions, number ' +
-  'of pieces, holes, threads and connectors, including cracks, broken or bent mounting points ' +
-  'and deformed functional elements, with its original materials and natural colors. Keep ' +
-  'logos, OEM and GM numbers, part numbers and markings exactly as shown, every character ' +
-  'unchanged. Show only components visible in the input image.\n\n' +
-  'Output exactly 1000×1000 pixels: the part centered on a pure white (#FFFFFF) background, ' +
-  'filling about 85–90% of the canvas with its proportions unchanged. Use soft, even studio ' +
-  'lighting, accurate exposure, natural color and low noise.';
+  'Create a catalog photograph of the exact spare part in the input image: improve ' +
+  'exposure, lighting, white balance and color accuracy, reduce noise, and replace the ' +
+  'background and surroundings with pure white (#FFFFFF). Output exactly 1000×1000 pixels, ' +
+  'the part centered, filling about 85–90% of the canvas, proportions unchanged.\n\n' +
+  'Cosmetic cleaning is the maximum change allowed to the part: remove rust, corrosion, dirt, ' +
+  'dust, grease, oil stains and minor superficial scratches and scuffs. An already clean ' +
+  'surface stays unchanged.\n\n' +
+  'Keep the part exactly as photographed: geometry, shape, proportions, materials, colors, ' +
+  'texture, components, holes, threads, connectors and mounting points, including cracks, ' +
+  'bends, deformations and structural damage. Show every visible logo, number, text, marking, ' +
+  'fastener and detail, with nothing added, removed or invented.';
 
 // Output container. The result is an opaque image on a white background (no alpha
 // is requested or relied on). PNG keeps the white background lossless; the caller
