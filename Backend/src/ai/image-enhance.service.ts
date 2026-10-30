@@ -15,38 +15,37 @@ const FLUX_ENDPOINT = 'https://api.bfl.ai/v1/flux-2-pro';
 const OUTPUT_WIDTH = 1000;
 const OUTPUT_HEIGHT = 1000;
 
-// The single prompt used for every request: a clean catalog photo of the SAME
-// part, as after a careful cleaning and a studio shoot. It removes dirt, grease,
-// light surface rust and minor cosmetic scratches, and keeps what is evidence
-// about the real item: shape, components, markings (blurry stays blurry; dirt
-// over a marking stays where cleaning could change a character), materials,
-// colors and real damage. A used part must not pass for new; anything unclear
-// is kept. Short and affirmative on purpose: FLUX.2 has no negative prompt, and
-// BFL's prompting guide says it weighs earlier words more and that naming an
-// unwanted feature tends to draw it in. Deliberately no "sharp…" wording: the
-// model reads it as license to reconstruct detail, text included. FLUX.2 [pro]
-// applies prompt upsampling by default, so the model does not see this text
-// exactly as written; this request does not set disable_pup.
+// The single prompt used for every request: a clean, attractive catalog photo of
+// the SAME part. The goal is the part's presentation, not a record of its
+// condition: FLUX removes cosmetic surface flaws (rust and corrosion, dirt,
+// grease, scratches, wear) and shows clean metal, plastic and rubber in their
+// original finish; a part that is already clean stays as it is. Only the surface
+// changes — the construction never does: geometry, piece count, holes, threads,
+// connectors, cracks, broken or bent mounts, deformed functional elements,
+// materials, natural colors and every logo / OEM / GM number / marking (no
+// character rewritten or invented); no component is added. No "restore…" wording:
+// it invites FLUX to rebuild a surface instead of cleaning it. Affirmative on
+// purpose: FLUX.2 has no negative prompt, and BFL's prompting guide says it
+// weighs earlier words more and that naming an unwanted feature tends to draw it
+// in, so defects are named only where they are to be removed or kept. Deliberately
+// no "sharp…" wording: the model reads it as license to reconstruct detail, text
+// included. FLUX.2 [pro] applies prompt upsampling by default, so the model does
+// not see this text exactly as written; this request does not set disable_pup.
 const FLUX_PROMPT =
-  'Create a realistic, clean, professional catalog photograph of the exact automotive spare ' +
-  'part in the input image, as it would look after a careful cleaning and a studio photo ' +
-  'shoot.\n\n' +
+  'Create a realistic, professional catalog photograph of the exact automotive spare part in ' +
+  'the input image.\n\n' +
+  'Remove only cosmetic surface flaws: rust, corrosion, dirt, dust, grease, oil stains, ' +
+  'scratches, scuffs and wear. Show clean, attractive metal, plastic and rubber in their ' +
+  'original finish and texture. An already clean part keeps its flawless surfaces ' +
+  'unchanged.\n\n' +
+  'Keep the construction exactly as shown: type, model, geometry, shape, proportions, number ' +
+  'of pieces, holes, threads and connectors, including cracks, broken or bent mounting points ' +
+  'and deformed functional elements, with its original materials and natural colors. Keep ' +
+  'logos, OEM and GM numbers, part numbers and markings exactly as shown, every character ' +
+  'unchanged. Show only components visible in the input image.\n\n' +
   'Output exactly 1000×1000 pixels: the part centered on a pure white (#FFFFFF) background, ' +
   'filling about 85–90% of the canvas with its proportions unchanged. Use soft, even studio ' +
-  'lighting.\n\n' +
-  'Remove dirt, dust, grease, oil stains, light surface rust on intact metal, and minor ' +
-  'cosmetic scratches and scuffs.\n\n' +
-  'Keep all real damage exactly as photographed, including cracks, chips, gouges, dents, ' +
-  'deformations, deep corrosion, broken mounts and missing pieces. A used part keeps its real ' +
-  'condition and looks cleaned, not new.\n\n' +
-  'Keep the original shape, geometry, proportions, all pieces of a set, holes, threads, ' +
-  'connectors, mounting points and viewing angle. Keep the original colors, materials and ' +
-  'coatings. Show only what the input image shows.\n\n' +
-  'Keep logos, OEM and GM numbers, part numbers, text, labels and stickers exactly as ' +
-  'photographed. Blurry or unreadable text stays as it is. Leave dirt on a marking wherever ' +
-  'cleaning it could change a character.\n\n' +
-  'Accuracy to the original part comes before appearance. When dirt or surface rust cannot be ' +
-  'confidently told apart from real damage, keep the original appearance.';
+  'lighting, accurate exposure, natural color and low noise.';
 
 // Output container. The result is an opaque image on a white background (no alpha
 // is requested or relied on). PNG keeps the white background lossless; the caller
