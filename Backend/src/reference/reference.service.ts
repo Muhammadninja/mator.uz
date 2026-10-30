@@ -183,9 +183,10 @@ export class ReferenceService {
   }
 
   /**
-   * Active part categories: the roots when `parentId` is omitted, otherwise that
-   * category's active children. The Telegram seller bot's only source of
-   * categories.
+   * Active part categories — the public category tree: every root ("Другое"
+   * included) when `parentId` is omitted, otherwise that category's active
+   * children. The seller bot does not read this endpoint; it asks
+   * {@link PartCategoryService} directly for the roots its own steps offer.
    *
    * Unlike the vehicle lists above, this data is admin-editable at runtime, so
    * the caching is NOT TTL-only — {@link PartCategoryService} owns both the
@@ -204,7 +205,7 @@ export class ReferenceService {
       return { items, total: items.length };
     }
 
-    const items = await this.categories.findRootCategories();
+    const items = await this.categories.findCatalogRootCategories();
     return { items, total: items.length };
   }
 }

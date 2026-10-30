@@ -124,20 +124,20 @@ export class ReferenceController {
   }
 
   /**
-   * The dynamic part-category tree, one level at a time — the endpoint the
-   * Telegram seller bot walks. Omit `parentId` for the root (vehicle) categories;
-   * pass one to get that category's children.
+   * The dynamic part-category tree, one level at a time — what the buyer app
+   * browses. Omit `parentId` for the root categories ("Другое" included); pass
+   * one to get that category's children.
    *
    * ONLY active categories are ever returned, at any level: a category the admin
-   * deactivates disappears from the bot on the next read. An empty `items` is a
-   * normal answer and is exactly what tells the bot to skip the selection step.
+   * deactivates disappears on the next read. An empty `items` is a normal answer
+   * and is exactly what tells a client to skip the selection step.
    */
   @Get('categories')
   @ApiOperation({
     summary:
       'List active part categories (roots, or the children of parentId).',
     description:
-      'Without parentId: the active root (vehicle) categories. With parentId: ' +
+      'Without parentId: the active root categories, "Другое" (other) included. With parentId: ' +
       "that category's active children. Inactive categories are never returned. " +
       'An empty items array means the category is a leaf — the caller should not ' +
       'render a further selection step.',

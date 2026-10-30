@@ -10,6 +10,7 @@ import {
 import { OIL_TYPE_LABELS, formatVolume } from '../../common/motor-oil.util';
 import { normalizeOem } from '../../common/normalize-oem.util';
 import { MAIN_CATEGORY_TO_SLUG } from '../categories/category-map';
+import { MAX_DEPTH } from '../categories/part-category.service';
 import {
   AppLang,
   DEFAULT_APP_LANG,
@@ -65,6 +66,27 @@ const SLUG_TO_MAIN_CATEGORY = new Map<string, PartMainCategory>(
     ([main, slug]) => [slug, main],
   ),
 );
+
+/**
+ * Parts filed on `categoryId` or anywhere beneath it in the category tree: the
+ * node itself, its children, their children… down to the tree's depth cap. A
+ * system root therefore lists every part of every subcategory at any depth —
+ * the parts filed on its intermediate nodes included — while a leaf, with
+ * nothing beneath it, still matches exactly itself. One predicate over the
+ * `parent` chain: no extra round-trip, and a part (one categoryId) can only
+ * match once.
+ */
+function categorySubtreeWhere(
+  categoryId: string,
+): Prisma.CatalogPartWhereInput {
+  const beneath: Prisma.PartCategoryWhereInput[] = [];
+  let descendant: Prisma.PartCategoryWhereInput = { parentId: categoryId };
+  for (let depth = 1; depth <= MAX_DEPTH; depth += 1) {
+    beneath.push(descendant);
+    descendant = { parent: { is: descendant } };
+  }
+  return { OR: [{ categoryId }, { category: { is: { OR: beneath } } }] };
+}
 
 /** Only the curated model ids — what a compatibility decision reads. */
 const CURATED_IDS_SELECT = {
@@ -376,7 +398,9 @@ export class PartsService {
     //      this path is untouched.
     //   2. Value is a PartVehicleCategory enum (BRAKE_SYSTEM, …) → filter
     //      vehicleCategory.
-    //   3. Anything else → treat as a PartCategory id/slug on the categoryId FK.
+    //   3. Anything else → treat as a PartCategory id/slug on the categoryId FK,
+    //      widened to the node's subtree: a system root ('brake-system') lists
+    //      its whole system, a leaf matches exactly itself.
     // The canonical category ids ARE the main-category slugs, so the new app can
     // send either form and both resolve to the same parts: 'brakes' upshifts to
     // enum BRAKES (path 1), while a non-enum slug like 'oil-and-fluids' falls to
@@ -395,8 +419,9 @@ export class PartsService {
         // categoryId path below would match only the bucket row itself and drop
         // every part filed on a subcategory (the "count 2, list empty" bug).
       } else {
-        // A real subcategory / custom category id → exact FK match.
-        and.push({ categoryId: q.category });
+        // A tree node — system root, intermediate node or leaf → the parts
+        // filed on it or anywhere beneath it.
+        and.push(categorySubtreeWhere(q.category));
       }
     }
     // Macro-category ROLLUP: filter every part in the system regardless of which

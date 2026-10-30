@@ -251,9 +251,21 @@ describe('PartsService — search and sort survive ProductKind', () => {
     expect(hasCond(and, { categoryId: 'belts-and-hoses' })).toBe(false);
   });
 
-  it('a real subcategory id still matches exactly on categoryId', async () => {
-    const { and } = await whereFor({ category: 'v-belts' });
-    expect(hasCond(and, { categoryId: 'v-belts' })).toBe(true);
+  it('a real subcategory id still lists exactly that leaf', async () => {
+    // A leaf has nothing beneath it, so its subtree is itself: never a sibling,
+    // never the bucket it sits under.
+    const filed = (id: string, categoryId: string, parentId: string) => ({
+      ...fx.part({ id }),
+      categoryId,
+      category: { id: categoryId, parentId, parent: null },
+    });
+    const rows = [
+      filed('on_v_belts', 'v-belts', 'belts-and-hoses'),
+      filed('on_sibling', 'timing-belts', 'belts-and-hoses'),
+      filed('on_bucket', 'belts-and-hoses', 'engine-system'),
+    ];
+    const { and, where } = await whereFor({ category: 'v-belts' });
+    expect(selectIds(rows, where)).toEqual(['on_v_belts']);
     expect(hasCond(and, { mainCategory: 'BELTS_AND_HOSES' })).toBe(false);
   });
 

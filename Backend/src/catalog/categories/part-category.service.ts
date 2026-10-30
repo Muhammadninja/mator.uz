@@ -34,27 +34,31 @@ export class PartCategoryService {
   ) {}
 
   /**
-   * Active root categories in display order — the bot's first category step.
+   * Every active root category in display order, the "Другое" root included —
+   * the public category tree (GET /v1/reference/categories) the buyer app
+   * browses.
    *
    * Filtered on level 0 AND parentId null, not on parentId alone: the internal
-   * 'cat_uncategorized' fallback bucket is parentless but is not a taxonomy a
-   * seller may choose, so it is parked at level 1 and excluded here.
+   * 'cat_uncategorized' fallback bucket is parentless but is not part of the
+   * taxonomy, so it is parked at level 1 and excluded here.
    */
-  async findRootCategories(): Promise<CategoryNode[]> {
+  async findCatalogRootCategories(): Promise<CategoryNode[]> {
     return this.cache.remember(
       RedisKeys.cacheReferenceCategories(),
       PartCategoryService.CACHE_TTL_SECONDS,
-      () =>
-        this.loadActive({
-          parentId: null,
-          level: 0,
-          // The "Другое" root is reached by its own button, not from the
-          // vehicle-category grid, so it is excluded here. It is otherwise an
-          // ordinary category — findChildren('other') serves its admin-managed
-          // children to the bot.
-          excludeIds: [CategoryAnchor.OTHER],
-        }),
+      () => this.loadActive({ parentId: null, level: 0 }),
     );
+  }
+
+  /**
+   * The roots the bot offers at its vehicle-category step: every catalog root
+   * except "Другое", which the bot reaches through its own button rather than
+   * from this grid. It is otherwise an ordinary category — findChildren('other')
+   * serves its admin-managed children to the bot.
+   */
+  async findRootCategories(): Promise<CategoryNode[]> {
+    const roots = await this.findCatalogRootCategories();
+    return roots.filter((root) => root.id !== CategoryAnchor.OTHER);
   }
 
   /**
@@ -252,15 +256,9 @@ export class PartCategoryService {
   private async loadActive(where: {
     parentId: string | null;
     level?: number;
-    excludeIds?: string[];
   }): Promise<CategoryNode[]> {
-    const { excludeIds, ...scope } = where;
     const rows = await this.prisma.partCategory.findMany({
-      where: {
-        ...scope,
-        isActive: true,
-        ...(excludeIds?.length ? { id: { notIn: excludeIds } } : {}),
-      },
+      where: { ...where, isActive: true },
       orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
       select: CATEGORY_SELECT,
     });
