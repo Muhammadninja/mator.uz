@@ -136,4 +136,37 @@ describe('CacheService', () => {
       await expect(cache.get(KEY)).resolves.toBeNull();
     });
   });
+
+  // The shared client WAITS through an outage instead of failing (see
+  // withRedisTimeout); a cache that waited with it would stall every request —
+  // and bot handler — that reads through it.
+  describe('fail-open when Redis does not answer at all', () => {
+    afterEach(() => jest.useRealTimers());
+
+    it('remember() treats a silent Redis as a miss and still answers from the source', async () => {
+      jest.useFakeTimers();
+      const { redis, cache } = build();
+      redis.get.mockReturnValue(new Promise<never>(() => undefined));
+      redis.setEx.mockReturnValue(new Promise<never>(() => undefined));
+      const loader = jest.fn().mockResolvedValue('payload');
+
+      const result = cache.remember(KEY, TTL, loader);
+      // One bound for the read, one for the write-back.
+      await jest.advanceTimersByTimeAsync(CacheService.REDIS_TIMEOUT_MS * 2);
+
+      await expect(result).resolves.toBe('payload');
+      expect(loader).toHaveBeenCalledTimes(1);
+    });
+
+    it('delete() returns instead of hanging', async () => {
+      jest.useFakeTimers();
+      const { redis, cache } = build();
+      redis.del.mockReturnValue(new Promise<never>(() => undefined));
+
+      const deleting = cache.delete(KEY);
+      await jest.advanceTimersByTimeAsync(CacheService.REDIS_TIMEOUT_MS);
+
+      await expect(deleting).resolves.toBeUndefined();
+    });
+  });
 });

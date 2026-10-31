@@ -227,4 +227,62 @@ describe('DraftLock', () => {
       expect(body).toHaveBeenCalledTimes(1);
     });
   });
+
+  // The shared client WAITS through an outage (maxRetriesPerRequest: null plus
+  // the offline queue): a command neither succeeds nor fails until Redis is
+  // back. Failing open must hold for that silence too, or the caller — a bot
+  // handler holding up every seller's updates — waits with it.
+  describe('fail-open when Redis does not answer at all', () => {
+    afterEach(() => jest.useRealTimers());
+
+    it('acquire gives up after REDIS_TIMEOUT_MS and lets the caller proceed', async () => {
+      jest.useFakeTimers();
+      const { redis, client } = makeRedis();
+      client.set.mockReturnValue(new Promise<never>(() => undefined));
+      const lock = makeLock(redis);
+
+      const acquiring = lock.acquire('lock:a');
+      await jest.advanceTimersByTimeAsync(DraftLock.REDIS_TIMEOUT_MS);
+
+      await expect(acquiring).resolves.not.toBeNull();
+    });
+
+    it('releases a SET that lands after the timeout, so it cannot shadow a retry', async () => {
+      jest.useFakeTimers();
+      const { redis, client, store } = makeRedis();
+      let land: () => void = () => undefined;
+      client.set.mockImplementationOnce(
+        (key: string, val: string) =>
+          new Promise<'OK' | null>((resolve) => {
+            land = () => {
+              store.set(key, val);
+              resolve('OK');
+            };
+          }),
+      );
+      const lock = makeLock(redis);
+
+      const acquiring = lock.acquire('lock:a');
+      await jest.advanceTimersByTimeAsync(DraftLock.REDIS_TIMEOUT_MS);
+      await acquiring; // went ahead unguarded
+      land(); // Redis is back: the queued SET finally takes the lock…
+      await jest.advanceTimersByTimeAsync(1);
+
+      expect(store.has('lock:a')).toBe(false); // …and it is released at once
+      expect(await lock.acquire('lock:a')).not.toBeNull();
+    });
+
+    it('a release that gets no answer does not hang the caller', async () => {
+      jest.useFakeTimers();
+      const { redis, client } = makeRedis();
+      const lock = makeLock(redis);
+      const handle = await lock.acquire('lock:a');
+      client.eval.mockReturnValue(new Promise<never>(() => undefined));
+
+      const releasing = handle!.release();
+      await jest.advanceTimersByTimeAsync(DraftLock.REDIS_TIMEOUT_MS);
+
+      await expect(releasing).resolves.toBeUndefined();
+    });
+  });
 });

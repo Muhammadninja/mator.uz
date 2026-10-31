@@ -8,6 +8,37 @@ import {
 import Redis from 'ioredis';
 import { REDIS_CLIENT, REDIS_STARTUP_TIMEOUT_MS } from './redis.constants';
 
+/**
+ * Bound ONE Redis command for a caller that must not wait out an outage.
+ *
+ * The shared client deliberately waits through a disconnect
+ * (`maxRetriesPerRequest: null` plus the offline queue, see redis.provider.ts):
+ * a command issued while Redis is down settles only once Redis is back. That is
+ * right for callers whose command must land, and wrong for the fail-open helpers
+ * (DraftLock, CacheService), whose contract is that an unavailable Redis behaves
+ * like a miss — and whose callers include bot handlers that block every seller's
+ * updates while they wait. This turns "no reply within `ms`" into an ordinary
+ * rejection those helpers already treat as Redis being unavailable.
+ *
+ * It does NOT cancel the command: ioredis keeps it queued and runs it once the
+ * connection returns (exactly as its own `commandTimeout` would). Bound only
+ * commands that are safe to complete late.
+ */
+export function withRedisTimeout<T>(
+  command: Promise<T>,
+  ms: number,
+  what: string,
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`Redis ${what} timed out after ${ms}ms`)),
+      ms,
+    );
+  });
+  return Promise.race([command, timeout]).finally(() => clearTimeout(timer));
+}
+
 @Injectable()
 export class RedisService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(RedisService.name);

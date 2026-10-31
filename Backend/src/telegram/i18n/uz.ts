@@ -112,7 +112,9 @@ export const UZ: BotStrings = {
   'confirm.success':
     '✅ Mahsulot muvaffaqiyatli qo‘shildi.\nKeyingi mahsulotni qo‘shish uchun /start ni bosing.\n' +
     'Tilni o‘zgartirish — /language',
-  'confirm.failed': '⚠️ Mahsulot qo‘shishda xatolik yuz berdi.\n`{error}`',
+  'confirm.failed':
+    '⚠️ Mahsulot qo‘shishda xatolik yuz berdi. Boshidan boshlash uchun /start ni bosing.\n' +
+    'Tilni o‘zgartirish — /language',
 
   'btn.back': '⬅️ Orqaga',
   'btn.skip': '⏭ O‘tkazib yuborish',
