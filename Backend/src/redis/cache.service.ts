@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { RedisService } from './redis.service';
+import { RedisService, withRedisTimeout } from './redis.service';
 
 /**
  * The single, generic place for Redis-backed read-through caching. Every future
@@ -17,6 +17,15 @@ import { RedisService } from './redis.service';
  */
 @Injectable()
 export class CacheService {
+  /**
+   * Longest a cache command may take before it counts as a miss (read) or a
+   * dropped write — the fail-open contract above, kept also for a Redis that
+   * does not answer at all: the shared client otherwise waits out a reconnect
+   * (see withRedisTimeout), stalling the request, or the bot handler, that
+   * asked. Far above a healthy round-trip.
+   */
+  static readonly REDIS_TIMEOUT_MS = 2_000;
+
   private readonly logger = new Logger(CacheService.name);
 
   constructor(private readonly redis: RedisService) {}
@@ -28,7 +37,11 @@ export class CacheService {
    */
   async get<T>(key: string): Promise<T | null> {
     try {
-      return await this.redis.get<T>(key);
+      return await withRedisTimeout(
+        this.redis.get<T>(key),
+        CacheService.REDIS_TIMEOUT_MS,
+        `GET ${key}`,
+      );
     } catch (err) {
       this.logger.warn(`Cache read failed for "${key}": ${this.msg(err)}`);
       return null;
@@ -42,7 +55,11 @@ export class CacheService {
    */
   async set<T>(key: string, value: T, ttlSeconds: number): Promise<void> {
     try {
-      await this.redis.setEx(key, ttlSeconds, value);
+      await withRedisTimeout(
+        this.redis.setEx(key, ttlSeconds, value),
+        CacheService.REDIS_TIMEOUT_MS,
+        `SETEX ${key}`,
+      );
     } catch (err) {
       this.logger.warn(`Cache write failed for "${key}": ${this.msg(err)}`);
     }
@@ -54,7 +71,11 @@ export class CacheService {
    */
   async delete(key: string): Promise<void> {
     try {
-      await this.redis.del(key);
+      await withRedisTimeout(
+        this.redis.del(key),
+        CacheService.REDIS_TIMEOUT_MS,
+        `DEL ${key}`,
+      );
     } catch (err) {
       this.logger.warn(`Cache delete failed for "${key}": ${this.msg(err)}`);
     }

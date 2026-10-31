@@ -7,6 +7,7 @@ import {
   DriversVillagePhotoService,
   escapeMarkdown,
   listPositions,
+  markdownToPlainText,
   parseDvCaption,
   type DvLookup,
   type DvPosition,
@@ -94,6 +95,15 @@ describe('parseDvCaption', () => {
     expect(escapeMarkdown('Фильтр *мас_ла* [x] `y`')).toBe(
       'Фильтр \\*мас\\_ла\\* \\[x] \\`y\\`',
     );
+  });
+
+  it('turns a Markdown message back into plain text: markers dropped, escapes undone', () => {
+    const value = 'Фильтр *мас_ла* [x] `y`';
+    expect(
+      markdownToPlainText(
+        `📋 *Проверьте:*\n🔩 *Название:* ${escapeMarkdown(value)}`,
+      ),
+    ).toBe(`📋 Проверьте:\n🔩 Название: ${value}`);
   });
 
   it('lists the positions of an ambiguous code one per line, capped at 10', () => {

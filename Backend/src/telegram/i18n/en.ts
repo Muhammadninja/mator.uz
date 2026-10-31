@@ -108,7 +108,8 @@ export const EN: BotStrings = {
     '✅ Product added successfully.\nPress /start to add the next product.\n' +
     'To change the language — /language',
   'confirm.failed':
-    '⚠️ Something went wrong while adding the product.\n`{error}`',
+    '⚠️ Something went wrong while adding the product. Press /start to begin again.\n' +
+    'To change the language — /language',
 
   'btn.back': '⬅️ Back',
   'btn.skip': '⏭ Skip',

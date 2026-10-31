@@ -17,6 +17,7 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { Decimal } from '@prisma/client/runtime/library';
+import { RedisKeys } from '../redis/redis.keys';
 import { TelegramService } from './telegram.service';
 import {
   makeFakeLock,
@@ -611,6 +612,112 @@ describe('TelegramService — draft flow (photos-first)', () => {
       // Fresh wizard opened as usual.
       expect(svc.wizard.get(7)).toBeDefined();
       expect(svc.wizard.get(7).step).toBe(WizardStep.PHOTOS_FIRST);
+    });
+  });
+
+  describe('/start when the preview was ALREADY sent', () => {
+    // The send-once claim guards the FIRST delivery. A seller who sent /start
+    // while their preview was unanswered — or after its send failed — got NO
+    // reply at all: the claim was spent, so presentDraftPreview bailed, nothing
+    // else answered, and every text they sent was told to press /start.
+    const sentDraft = (over: Record<string, unknown> = {}) =>
+      readyDraft({ previewSentAt: new Date('2026-10-30T10:00:00Z'), ...over });
+
+    function draftsFor(draft: unknown) {
+      return {
+        findAwaitingPreview: jest.fn().mockResolvedValue(draft),
+        findWithImages: jest.fn().mockResolvedValue(draft),
+        claimPreviewSend: jest.fn().mockResolvedValue(false), // already spent
+        findImagesInFlight: jest.fn().mockResolvedValue(null),
+        findResumable: jest.fn().mockResolvedValue(null),
+      };
+    }
+
+    it('sends the preview again instead of answering nothing', async () => {
+      const drafts = draftsFor(sentDraft());
+      const svc = makeService({ drafts });
+
+      await svc.startProductCreation(makeCtx(), 7, 1, 'ru');
+
+      expect(drafts.claimPreviewSend).not.toHaveBeenCalled(); // past its claim
+      expect(svc.bot.telegram.sendMediaGroup).toHaveBeenCalledTimes(1);
+      const [chatId, caption] = svc.bot.telegram.sendMessage.mock.calls[0];
+      expect(chatId).toBe(7);
+      expect(caption).toContain('Фара левая');
+      // The preview's buttons act on this record — at the row's CURRENT
+      // version, which the first delivery's claim already bumped.
+      expect(svc.pending.get(7)).toMatchObject({
+        draftId: 'draft_1',
+        draftVersion: 3,
+        publicIds: ['proc_0', 'proc_1'],
+      });
+      expect(drafts.findResumable).not.toHaveBeenCalled(); // answered: no fall-through
+    });
+
+    it("never deletes the draft's photos, even with its own record still cached", async () => {
+      const draft = sentDraft();
+      const svc = makeService({ drafts: draftsFor(draft) });
+      // The record the first delivery stored, still cached (its 10-minute
+      // expiry has not run): storePending's REPLACE path would delete its
+      // photos — the very ones about to be shown again.
+      svc.storePending(
+        svc.buildPendingFromDraft(draft, 7, {
+          processedUrls: ['https://cdn/p0.jpg', 'https://cdn/p1.jpg'],
+          publicIds: ['proc_0', 'proc_1'],
+          draftVersion: 3,
+        }),
+      );
+
+      await svc.startProductCreation(makeCtx(), 7, 1, 'ru');
+
+      expect(svc.cloudinary.deleteAssets).not.toHaveBeenCalled();
+      expect(svc.bot.telegram.sendMediaGroup).toHaveBeenCalledTimes(1);
+      expect(svc.pending.get(7)).toMatchObject({
+        draftId: 'draft_1',
+        publicIds: ['proc_0', 'proc_1'],
+      });
+    });
+
+    it('a double /start sends ONE preview: the second finds the delivery in progress', async () => {
+      const drafts = draftsFor(sentDraft());
+      const svc = makeService({ drafts });
+      svc.locks.hold(RedisKeys.lockDraftPreview('draft_1')); // the first /start, mid-send
+
+      await svc.startProductCreation(makeCtx(), 7, 1, 'ru');
+
+      expect(svc.bot.telegram.sendMediaGroup).not.toHaveBeenCalled();
+      expect(svc.bot.telegram.sendMessage).not.toHaveBeenCalled();
+      expect(drafts.findResumable).not.toHaveBeenCalled(); // the other one answers
+    });
+
+    it('falls through to the ordinary flow when the draft cannot be shown, so /start still answers', async () => {
+      const drafts = draftsFor(sentDraft({ images: [] })); // nothing processed to show
+      const svc = makeService({ drafts });
+      const ctx = makeCtx();
+
+      await svc.startProductCreation(ctx, 7, 1, 'ru');
+
+      expect(svc.bot.telegram.sendMediaGroup).not.toHaveBeenCalled();
+      expect(drafts.findResumable).toHaveBeenCalled();
+      expect(svc.wizard.get(7)?.step).toBe(WizardStep.PHOTOS_FIRST);
+      expect(ctx.reply).toHaveBeenCalledTimes(1); // the first wizard question
+    });
+
+    it('a never-sent preview whose draft moved on also falls through instead of answering nothing', async () => {
+      const drafts = {
+        ...draftsFor(readyDraft()), // previewSentAt not set: the first-delivery path
+        findWithImages: jest
+          .fn()
+          .mockResolvedValue({ status: 'PUBLISHED', images: [] }),
+      };
+      const svc = makeService({ drafts });
+      const ctx = makeCtx();
+
+      await svc.startProductCreation(ctx, 7, 1, 'ru');
+
+      expect(drafts.claimPreviewSend).not.toHaveBeenCalled();
+      expect(svc.wizard.get(7)?.step).toBe(WizardStep.PHOTOS_FIRST);
+      expect(ctx.reply).toHaveBeenCalledTimes(1);
     });
   });
 

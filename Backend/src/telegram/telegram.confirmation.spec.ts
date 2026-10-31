@@ -21,6 +21,7 @@ import {
 } from './telegram.service';
 import { WizardSessionStore, WizardStep } from './product-wizard';
 import { makeFakeLock } from './draft-lock.test-util';
+import { t } from './i18n';
 
 // Surface just the private members we drive in these tests. We build the
 // instance from the prototype and cast through `unknown`, so this stands alone
@@ -407,6 +408,36 @@ describe('TelegramService — confirmation session', () => {
     expect(ctx.replies.some((r) => r.includes('Название'))).toBe(false);
     expect(ctx.replies.some((r) => r.includes('OEM'))).toBe(false);
     expect(ctx.replies.some((r) => r.includes('Product ID'))).toBe(false);
+  });
+
+  it('a failed publish answers in plain text and never shows the seller the error', async () => {
+    const prisma = makePrisma();
+    // Prisma's wording, backticks and underscores included — the reply used to
+    // carry it inside a Markdown code span, which Telegram then refused to
+    // parse, so the failure notice itself threw out of the handler.
+    prisma.product.upsert = () =>
+      Promise.reject(
+        new Error(
+          'Invalid `prisma.product.upsert()` invocation: Unique constraint failed on the fields: (`seller_id`,`gm_number`)',
+        ),
+      );
+    const svc = makeService(prisma, makeCloudinary());
+    const replies: { text: string; extra: unknown }[] = [];
+    const ctx = {
+      from: { id: 1 },
+      reply: async (text: string, extra?: unknown) => {
+        replies.push({ text, extra });
+        return {} as unknown;
+      },
+    };
+    svc.storePending(draft(1));
+
+    await svc.commitPending(ctx, 1);
+
+    expect(replies).toEqual([
+      { text: t('ru', 'confirm.failed'), extra: undefined }, // no parse_mode
+    ]);
+    expect(replies[0].text).not.toMatch(/prisma|constraint|seller_id/i);
   });
 
   describe('publish-time seller gate (status re-checked at publication)', () => {
@@ -1335,6 +1366,41 @@ describe('TelegramService — preview caption', () => {
     expect(caption).not.toContain('OEM');
     expect(caption).not.toContain('GM');
   });
+
+  it('falls back to PLAIN text, buttons kept, when Telegram refuses the formatted preview', async () => {
+    const refused = () =>
+      Promise.reject(new Error("400: Bad Request: can't parse entities"));
+    const plain: { text: string; extra: any }[] = [];
+    const svc = makeService(makePrisma(), makeCloudinary(), makeProjection(), {
+      bot: {
+        telegram: {
+          sendPhoto: refused,
+          sendMediaGroup: async () => ({}) as unknown,
+          sendMessage: async (_chatId: number, text: string, extra?: any) => {
+            if (extra?.parse_mode) return refused();
+            plain.push({ text, extra });
+            return {} as unknown;
+          },
+        },
+      },
+    });
+
+    await svc.sendPreviewToChat(
+      1,
+      draft(1, ['a'], { metadata: { ...metadata, title: 'Фильтр_масляный' } }),
+      ['https://cdn/img0.webp'],
+    );
+
+    expect(plain).toHaveLength(1);
+    expect(plain[0].extra.parse_mode).toBeUndefined();
+    const buttons = plain[0].extra.reply_markup.inline_keyboard
+      .flat()
+      .map((b: { callback_data: string }) => b.callback_data);
+    expect(buttons).toContain('product:add'); // the seller can still publish
+    // The words survive; only the formatting is gone (markers dropped, escapes undone).
+    expect(plain[0].text).toContain('Название: Фильтр_масляный');
+    expect(plain[0].text).not.toMatch(/[*\\]/);
+  });
 });
 
 describe('TelegramService — seller approval notification', () => {
@@ -1468,5 +1534,45 @@ describe('buildPreview — the confirmation caption', () => {
     expect(caption).toContain('96234567');
     expect(caption).not.toContain('Вес');
     expect(caption).not.toContain('Вязкость');
+  });
+
+  // One unpaired `_`, `*`, `` ` `` or `[` in a legacy-Markdown caption makes
+  // Telegram refuse the whole preview — and a part number like 96_565_412 is
+  // ordinary seller input.
+  it('escapes Markdown in everything a person typed, so the caption always parses', () => {
+    const caption = captionFor(
+      draft(1, ['a'], {
+        metadata: {
+          ...metadata,
+          title: 'Фильтр_масляный *оригинал*',
+          description: 'См. [фото], код `A1`',
+          gm_number: '96_565_412',
+        },
+      }),
+    );
+
+    expect(caption).toContain('Фильтр\\_масляный \\*оригинал\\*');
+    expect(caption).toContain('См. \\[фото], код \\`A1\\`');
+    expect(caption).toContain('96\\_565\\_412');
+    // With the escapes set aside, all that remains is the template's own bold
+    // markers — balanced — and nothing that could open another entity.
+    const bare = caption.replace(/\\[_*`[]/g, '');
+    expect(bare).not.toMatch(/[_`[]/);
+    expect((bare.match(/\*/g) ?? []).length % 2).toBe(0);
+  });
+
+  it('escapes a free-text oil viscosity too', () => {
+    const { metadata: oilMetadata } = oilPending(1);
+    const caption = captionFor(
+      draft(1, ['a'], {
+        kind: ProductKind.MOTOR_OIL,
+        vehicleCategory: null,
+        oilViscosity: '5W_30*', // typed through the "Другое" free-text step
+        oilType: OilType.SYNTHETIC,
+        oilVolumeMl: 4_000,
+        metadata: oilMetadata,
+      }),
+    );
+    expect(caption).toContain('5W\\_30\\*');
   });
 });

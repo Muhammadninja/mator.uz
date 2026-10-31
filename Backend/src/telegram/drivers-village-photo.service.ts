@@ -118,6 +118,19 @@ export function escapeMarkdown(value: string): string {
 }
 
 /**
+ * A whole legacy-Markdown message as plain text: the formatting markers
+ * (`*bold*`, `_italic_`, `` `code` ``) are dropped and what
+ * {@link escapeMarkdown} escaped is unescaped. For resending a message Telegram
+ * refused to parse — the words survive, only the emphasis is lost.
+ */
+export function markdownToPlainText(value: string): string {
+  return value.replace(
+    /\\([_*`[])|[_*`]/g,
+    (_marker: string, escaped?: string) => escaped ?? '',
+  );
+}
+
+/**
  * The positions an ambiguous code links to, one plain-text line each
  * (`• code — title`), capped so the answer stays one Telegram message.
  */
