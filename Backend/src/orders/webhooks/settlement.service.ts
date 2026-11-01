@@ -9,6 +9,7 @@ import {
 import { PrismaService } from '../../prisma/prisma.service';
 import { NotificationsService } from '../../notifications/notifications.service';
 import { RealtimeGateway } from '../../realtime/realtime.gateway';
+import { recordProviderRefund } from '../financial-refund.ledger';
 import { OrderStatusService } from '../order-status.service';
 import { PAYABLE_ORDER_STATUSES } from '../order-transitions';
 
@@ -230,6 +231,7 @@ export class SettlementService {
             note: 'Refunded via payment provider',
           },
         );
+        await recordProviderRefund(tx, payment);
       } else {
         // Cancelling an UNPERFORMED transaction must not kill the order: the
         // customer never paid, so the order stays payable and they can retry —

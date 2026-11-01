@@ -9,6 +9,7 @@ import {
   Patch,
   Post,
   Query,
+  Req,
   UseGuards,
 } from '@nestjs/common';
 import {
@@ -25,10 +26,18 @@ import {
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 import { AdminRole } from '@prisma/client';
+import type { Request } from 'express';
+import { AdminAuditContext } from '../auth/admin-auth.service';
+import { AuthenticatedAdmin } from '../auth/strategies/admin-jwt.strategy';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { AdminJwtGuard } from '../auth/guards/admin-jwt.guard';
 import { AdminRoleGuard } from '../auth/guards/admin-role.guard';
 import { AdminCategoriesService } from './admin-categories.service';
+import { AdminCategoryTransferService } from './admin-category-transfer.service';
+import {
+  TransferCategoryDto,
+  TransferPreviewQueryDto,
+} from './dto/transfer-category.dto';
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { ListCategoriesQueryDto } from './dto/list-categories.query.dto';
 import { MoveCategoryDto } from './dto/move-category.dto';
@@ -38,7 +47,8 @@ import { UpdateCategoryDto } from './dto/update-category.dto';
  * Admin/operator Category-tree console. Admin-panel bearer token
  * (AdminJwtGuard, HS256) + role gate — a mobile app-user token cannot reach it.
  * SUPER_ADMIN, MANAGER and OPERATOR all pass, matching the dealers/brands
- * consoles.
+ * consoles, except for what cannot be undone or reaches beyond one row: a physical
+ * delete and a transfer need a manager. An operator can still deactivate.
  *
  * Manages the nesting of the EXISTING PartCategory taxonomy (the relational
  * category linked from CatalogPart.categoryId). Thin: each route validates its
@@ -54,7 +64,21 @@ import { UpdateCategoryDto } from './dto/update-category.dto';
 })
 @ApiForbiddenResponse({ description: 'Insufficient role for this operation.' })
 export class AdminCategoriesController {
-  constructor(private readonly categories: AdminCategoriesService) {}
+  constructor(
+    private readonly categories: AdminCategoriesService,
+    private readonly transfers: AdminCategoryTransferService,
+  ) {}
+
+  /** Actor + provenance for the audit entry of a mutating call. */
+  private auditContext(
+    req: Request & { user: AuthenticatedAdmin },
+  ): AdminAuditContext {
+    return {
+      actor: { id: req.user.id, email: req.user.email, name: req.user.name },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    };
+  }
 
   @Get()
   @HttpCode(HttpStatus.OK)
@@ -87,6 +111,42 @@ export class AdminCategoriesController {
   })
   tree() {
     return this.categories.tree();
+  }
+
+  @Get(':id/transfer/preview')
+  @Roles(AdminRole.SUPER_ADMIN, AdminRole.MANAGER)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Preview moving what is filed on a category into another',
+    description:
+      'Counts what would move and reports blockers and warnings. Writes nothing.',
+  })
+  @ApiNotFoundResponse({ description: 'No such category or target.' })
+  transferPreview(
+    @Param('id') id: string,
+    @Query() query: TransferPreviewQueryDto,
+  ) {
+    return this.transfers.preview(id, query.targetCategoryId);
+  }
+
+  @Post(':id/transfer')
+  @Roles(AdminRole.SUPER_ADMIN, AdminRole.MANAGER)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Move what is filed on a category into another (transactional)',
+    description:
+      'Moves the catalog parts, the seller listings and the live drafts filed on ' +
+      'the category. Prices, stock and fiscal codes are not written. A 409 names ' +
+      'what blocks it, or says the numbers changed since the preview.',
+  })
+  @ApiConflictResponse({ description: 'Blocked, or the preview is stale.' })
+  @ApiNotFoundResponse({ description: 'No such category or target.' })
+  transfer(
+    @Param('id') id: string,
+    @Body() dto: TransferCategoryDto,
+    @Req() req: Request & { user: AuthenticatedAdmin },
+  ) {
+    return this.transfers.transfer(id, dto, this.auditContext(req));
   }
 
   @Get(':id')
@@ -135,13 +195,19 @@ export class AdminCategoriesController {
   }
 
   @Delete(':id')
+  @Roles(AdminRole.SUPER_ADMIN, AdminRole.MANAGER)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Delete a category (reassigning any parts first)',
     description:
-      'If parts reference the category, pass ?reassignTo=<categoryId> to move ' +
-      'them (both run in one transaction); otherwise a 409 reports the count. ' +
-      'The Uncategorized bucket cannot be deleted.',
+      'Physically removes the row. If parts reference the category, pass ' +
+      '?reassignTo=<categoryId> to move them (both run in one transaction). A ' +
+      'refusal is a 409 whose `code` says why: CATEGORY_HAS_PARTS (solved by ' +
+      'reassignTo), CATEGORY_HAS_LISTINGS (listings or live drafts point here), ' +
+      'CATEGORY_HAS_CHILDREN, CATEGORY_HAS_SALES (a live sale targets it), or ' +
+      'CATEGORY_PROTECTED (a home-grid bucket, a ' +
+      'seller-bot anchor or the Uncategorized bucket, which the application ' +
+      'depends on by id). Deactivate is the way to hide any of them.',
   })
   @ApiQuery({
     name: 'reassignTo',
@@ -153,11 +219,15 @@ export class AdminCategoriesController {
   })
   @ApiBadRequestResponse({ description: 'reassignTo equals the deleted id.' })
   @ApiConflictResponse({
-    description: 'Parts still reference it and no reassignTo was given.',
+    description: 'Something still depends on it; `code` says what.',
   })
   @ApiNotFoundResponse({ description: 'No such category or reassign target.' })
-  remove(@Param('id') id: string, @Query('reassignTo') reassignTo?: string) {
-    return this.categories.remove(id, reassignTo);
+  remove(
+    @Param('id') id: string,
+    @Req() req: Request & { user: AuthenticatedAdmin },
+    @Query('reassignTo') reassignTo?: string,
+  ) {
+    return this.categories.remove(id, reassignTo, this.auditContext(req));
   }
 
   @Post(':id/activate')

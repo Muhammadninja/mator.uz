@@ -27,6 +27,13 @@ export interface ProjectionOptions {
    * part created by the projection is still classified from its product.
    */
   keepClassification?: boolean;
+  /**
+   * Leave an EXISTING part's price and stock as they are, for the same kind of
+   * re-projection: the inventory console writes those columns on the part
+   * directly, so copying the stock row's values over them would silently revert
+   * an operator's edit. A part created by the projection still gets them.
+   */
+  keepPriceAndStock?: boolean;
 }
 
 /**
@@ -597,16 +604,8 @@ export class CatalogProjectionService {
       parentByCategoryId,
     );
 
-    const partData = {
-      title: product.title,
-      brandId,
-      sellerId,
-      oemNumbers,
-      gmNumbers,
-      partNumberType: product.partNumberType,
+    const priceAndStock = {
       priceUzs: stock.priceUzs,
-      // currency: schema default "UZS"
-      condition: PartCondition.NEW, // supply side has no condition — schema default
       inStock: stock.quantity > 0,
       // The on-hand count, ONLY for a position imported from an external stock
       // system — the one case where Stock.quantity is a real warehouse count.
@@ -614,6 +613,17 @@ export class CatalogProjectionService {
       // count, so their stockQty is left to its existing owners exactly as
       // before.
       ...(stock.sourceSystem ? { stockQty: stock.quantity } : {}),
+    };
+
+    const partData = {
+      title: product.title,
+      brandId,
+      sellerId,
+      oemNumbers,
+      gmNumbers,
+      partNumberType: product.partNumberType,
+      // currency: schema default "UZS"
+      condition: PartCondition.NEW, // supply side has no condition — schema default
       // deliveryEtaDaysMin/Max: no source → left null (both optional)
       images,
       partBrandName: product.partBrand,
@@ -659,11 +669,19 @@ export class CatalogProjectionService {
     ops.push(
       this.prisma.catalogPart.upsert({
         where: { id: partId },
-        update:
-          stock.sourceSystem || opts.keepClassification
-            ? partData
-            : { ...partData, ...classification },
-        create: { id: partId, ...partData, ...classification },
+        update: {
+          ...partData,
+          ...(opts.keepPriceAndStock ? {} : priceAndStock),
+          ...(stock.sourceSystem || opts.keepClassification
+            ? {}
+            : classification),
+        },
+        create: {
+          id: partId,
+          ...partData,
+          ...priceAndStock,
+          ...classification,
+        },
       }),
     );
 

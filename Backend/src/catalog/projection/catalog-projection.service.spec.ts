@@ -674,6 +674,20 @@ describe('CatalogProjectionService — imported dealer positions (Driver\'s Vill
     });
   });
 
+  it('keepPriceAndStock leaves an operator-edited price and stock on an existing part', () => {
+    svc.buildProjectionOps(buildStock(), new Map(), {
+      keepClassification: true,
+      keepPriceAndStock: true,
+    });
+    const part = upsertArg(prisma, 'catalogPart');
+    for (const key of ['priceUzs', 'inStock', 'stockQty']) {
+      expect(part.update).not.toHaveProperty(key);
+    }
+    expect(part.update).toMatchObject({ title: 'Timing belt' });
+    // A part this projection creates still needs a price to exist at all.
+    expect(part.create).toMatchObject({ priceUzs: 185000, inStock: true });
+  });
+
   it('projectProduct hands keepClassification to every stock it re-projects', async () => {
     prisma.stock.findMany.mockResolvedValue([{ id: 500 }]);
     prisma.stock.findUnique.mockResolvedValue(buildStock());

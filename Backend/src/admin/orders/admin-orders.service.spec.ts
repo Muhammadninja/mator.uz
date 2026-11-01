@@ -124,7 +124,12 @@ describe('AdminOrdersService', () => {
 
   beforeEach(() => {
     prisma = makePrismaMock();
-    service = new AdminOrdersService(prisma as never);
+    service = new AdminOrdersService(
+      prisma as never,
+      {
+        get: () => undefined,
+      } as never,
+    );
   });
 
   describe('list', () => {
@@ -156,7 +161,7 @@ describe('AdminOrdersService', () => {
         expect.objectContaining({
           skip: 0,
           take: 20,
-          orderBy: { createdAt: 'desc' },
+          orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
         }),
       );
       expect(res.meta).toEqual({
@@ -186,7 +191,23 @@ describe('AdminOrdersService', () => {
       await service.list({ sortBy: 'totalAmount', order: 'asc' });
 
       expect(prisma.order.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({ orderBy: { totalUzs: 'asc' } }),
+        expect.objectContaining({
+          orderBy: [{ totalUzs: 'asc' }, { id: 'asc' }],
+        }),
+      );
+    });
+
+    it("filters to one customer's orders, so an older history can be reached", async () => {
+      prisma.order.findMany.mockResolvedValue([]);
+      prisma.order.count.mockResolvedValue(0);
+      const customerId = '00000000-0000-4000-8000-000000000001';
+
+      await service.list({ customerId });
+
+      expect(prisma.order.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ userId: customerId }),
+        }),
       );
     });
 
@@ -295,6 +316,9 @@ describe('AdminOrdersService', () => {
         totalAmount: 150000,
         paymentMethod: 'payme',
         paymentStatus: 'paid',
+        slaOverdue: false,
+        operatorWarning: false,
+        refundDue: false,
         createdAt: '2026-07-20T10:00:00.000Z',
         updatedAt: '2026-07-20T11:00:00.000Z',
         customer: { id: 'usr_1', name: 'Ali Valiyev', phone: '+998903700340' },
@@ -311,9 +335,35 @@ describe('AdminOrdersService', () => {
       expect(res.data[0].paymentMethod).toBeNull();
       expect(res.data[0].paymentStatus).toBeNull();
     });
+
+    it.each(['CASH', 'TERMINAL'])(
+      'shows the method a %s order was placed with: it never gets a payment row',
+      async (paymentType) => {
+        prisma.order.findMany.mockResolvedValue([
+          listRow({ payments: [], paymentType }),
+        ]);
+        prisma.order.count.mockResolvedValue(1);
+
+        const res = await service.list({});
+
+        expect(res.data[0].paymentMethod).toBe(paymentType.toLowerCase());
+        expect(res.data[0].paymentStatus).toBeNull();
+      },
+    );
   });
 
   describe('getOne', () => {
+    it('reports the delivery method the order holds, not one guessed from the address', async () => {
+      prisma.order.findUnique.mockResolvedValue(
+        detailRow({ deliveryMethod: 'COURIER', deliveryAddress: null }),
+      );
+
+      const res = await service.getOne('ord_1');
+
+      expect(res.data.deliveryMethod).toBe('courier');
+      expect(res.data.shippingAddress).toBeNull();
+    });
+
     it('404s on an unknown order', async () => {
       prisma.order.findUnique.mockResolvedValue(null);
       await expect(service.getOne('nope')).rejects.toBeInstanceOf(

@@ -105,10 +105,12 @@ describe('AdminProductsRatingService.updateRating', () => {
     await service.updateRating(7, { ratingAvg: 4.7 });
 
     // Through the EXISTING projection service — no second mapping, and no batch
-    // job between the admin edit and the buyer catalog. The parts' category is
-    // kept: a rating edit must not undo an operator's bulk-move.
+    // job between the admin edit and the buyer catalog. The parts' category,
+    // price and stock are kept: a rating edit must not undo an operator's
+    // bulk-move or inventory edit.
     expect(projection.projectProduct).toHaveBeenCalledWith(7, {
       keepClassification: true,
+      keepPriceAndStock: true,
     });
   });
 

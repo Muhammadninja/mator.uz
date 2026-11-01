@@ -30,10 +30,10 @@ export class SaleDiscountValueConstraint implements ValidatorConstraintInterface
     const body = args.object as DiscountBody;
     if (typeof value !== 'number' || !Number.isFinite(value)) return true; // @IsNumber reports it
     if (body.discountType !== SaleDiscountType.PERCENT) return true;
-    return value <= 100;
+    return value < 100;
   }
 
   defaultMessage(): string {
-    return 'discountValue must not exceed 100 for a PERCENT sale';
+    return 'discountValue must be below 100 for a PERCENT sale';
   }
 }

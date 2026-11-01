@@ -3,6 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CacheService } from '../../redis/cache.service';
 import { RedisKeys } from '../../redis/redis.keys';
@@ -119,8 +120,11 @@ export class PartCategoryService {
   }
 
   /** One category by id, or null. Not cached (used by write-path validation). */
-  async findById(id: string): Promise<CategoryRow | null> {
-    return this.prisma.partCategory.findUnique({
+  async findById(
+    id: string,
+    client: CategoryReader = this.prisma,
+  ): Promise<CategoryRow | null> {
+    return client.partCategory.findUnique({
       where: { id },
       select: CATEGORY_SELECT,
     });
@@ -147,11 +151,15 @@ export class PartCategoryService {
    * The level a category would sit at under `parentId`, validating the parent
    * exists and is usable. Root (`null` parent) is level 0; otherwise
    * parent.level + 1. This is the ONLY way a level is ever produced — no caller
-   * may pass one in.
+   * may pass one in. Pass the transaction `client` when validating inside one,
+   * so the read sees what that transaction sees and needs no second connection.
    */
-  async validateParent(parentId: string | null | undefined): Promise<number> {
+  async validateParent(
+    parentId: string | null | undefined,
+    client: CategoryReader = this.prisma,
+  ): Promise<number> {
     if (parentId == null) return 0;
-    const parent = await this.findById(parentId);
+    const parent = await this.findById(parentId, client);
     if (!parent) throw new NotFoundException('Parent category not found');
     if (parent.level + 1 > MAX_DEPTH) {
       throw new BadRequestException(
@@ -163,19 +171,30 @@ export class PartCategoryService {
 
   /**
    * Guard a re-parent: a category may not become its own parent, nor descend
-   * under one of its own descendants (either would create a cycle). Returns the
-   * new level so the caller writes a derived value.
+   * under one of its own descendants (either would create a cycle), nor take its
+   * subtree past the depth cap — the cap has to hold for the deepest node that
+   * moves, not just the one named in the request. Returns the new level so the
+   * caller writes a derived value.
    */
-  async validateMove(id: string, parentId: string | null): Promise<number> {
+  async validateMove(
+    id: string,
+    parentId: string | null,
+    client: CategoryReader = this.prisma,
+  ): Promise<number> {
     if (parentId === id) {
       throw new BadRequestException('A category cannot be its own parent');
     }
-    const level = await this.validateParent(parentId);
+    const level = await this.validateParent(parentId, client);
     if (parentId != null) {
-      const descendants = await this.descendantIds(id);
+      const { descendants, height } = await this.subtreeOf(id, client);
       if (descendants.has(parentId)) {
         throw new BadRequestException(
           'Cannot move a category under one of its own descendants',
+        );
+      }
+      if (level + height > MAX_DEPTH) {
+        throw new BadRequestException(
+          `Category nesting is limited to ${MAX_DEPTH + 1} levels`,
         );
       }
     }
@@ -249,8 +268,21 @@ export class PartCategoryService {
    * parentId) edge set then a BFS in memory — the taxonomy is small, so this is
    * cheaper than a recursive CTE and easy to reason about.
    */
-  async descendantIds(rootId: string): Promise<Set<string>> {
-    const edges = await this.prisma.partCategory.findMany({
+  async descendantIds(
+    rootId: string,
+    client: CategoryReader = this.prisma,
+  ): Promise<Set<string>> {
+    return (await this.subtreeOf(rootId, client)).descendants;
+  }
+
+  // ── internals ──────────────────────────────────────────────────────────────
+
+  /** Every descendant of `rootId`, and how many levels sit below it (leaf = 0). */
+  private async subtreeOf(
+    rootId: string,
+    client: CategoryReader,
+  ): Promise<{ descendants: Set<string>; height: number }> {
+    const edges = await client.partCategory.findMany({
       select: { id: true, parentId: true },
     });
     const childrenOf = new Map<string, string[]>();
@@ -262,18 +294,17 @@ export class PartCategoryService {
     }
 
     const descendants = new Set<string>();
-    const queue = [...(childrenOf.get(rootId) ?? [])];
-    while (queue.length > 0) {
-      const next = queue.shift()!;
-      if (descendants.has(next)) continue;
-      descendants.add(next);
-      const kids = childrenOf.get(next);
-      if (kids) queue.push(...kids);
+    let height = 0;
+    let frontier = childrenOf.get(rootId) ?? [];
+    while (frontier.length > 0) {
+      const fresh = frontier.filter((id) => !descendants.has(id));
+      if (fresh.length === 0) break;
+      height += 1;
+      for (const id of fresh) descendants.add(id);
+      frontier = fresh.flatMap((id) => childrenOf.get(id) ?? []);
     }
-    return descendants;
+    return { descendants, height };
   }
-
-  // ── internals ──────────────────────────────────────────────────────────────
 
   /** Walk up from `category` looking for `ancestorId`. Depth-bounded (no cycles). */
   private async isDescendantOf(
@@ -308,6 +339,9 @@ export class PartCategoryService {
  * bounds the ancestor walk in {@link PartCategoryService.validateCategorySelection}.
  */
 export const MAX_DEPTH = 4;
+
+/** The Prisma surface tree validation reads through: the client or a transaction. */
+export type CategoryReader = Pick<Prisma.TransactionClient, 'partCategory'>;
 
 const CATEGORY_SELECT = {
   id: true,

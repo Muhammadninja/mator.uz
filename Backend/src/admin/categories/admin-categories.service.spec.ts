@@ -8,7 +8,10 @@ import {
   ConflictException,
   NotFoundException,
 } from '@nestjs/common';
-import { AdminCategoriesService } from './admin-categories.service';
+import {
+  AdminCategoriesService,
+  CategoryDeleteConflict,
+} from './admin-categories.service';
 import { ListCategoriesQueryDto } from './dto/list-categories.query.dto';
 
 const node = (over: Record<string, unknown> = {}) => ({
@@ -26,12 +29,18 @@ const node = (over: Record<string, unknown> = {}) => ({
   mxik: null,
   packageCodeSingle: null,
   packageCodeSet: null,
-  _count: { parts: 0, products: 0, drafts: 0 },
+  _count: {
+    parts: 0,
+    products: 0,
+    productsVehicle: 0,
+    drafts: 0,
+    draftsVehicle: 0,
+  },
   ...over,
 });
 
 function makePrismaMock() {
-  return {
+  const prisma = {
     partCategory: {
       findMany: jest.fn().mockResolvedValue([]),
       findUnique: jest.fn().mockResolvedValue(node()),
@@ -44,12 +53,22 @@ function makePrismaMock() {
     },
     product: { count: jest.fn().mockResolvedValue(0) },
     productDraft: { count: jest.fn().mockResolvedValue(0) },
+    sale: { findMany: jest.fn().mockResolvedValue([]) },
     catalogPart: {
       count: jest.fn().mockResolvedValue(0),
       updateMany: jest.fn(),
     },
-    $transaction: jest.fn().mockResolvedValue([{ count: 0 }]),
+    // The row-lock read in remove(): the row exists, under 'brake-system'.
+    $queryRaw: jest.fn().mockResolvedValue([{ parent_id: 'brake-system' }]),
+    $executeRaw: jest.fn().mockResolvedValue(0),
+    // Both forms, against this same mock: `tx.x.y` === `prisma.x.y`.
+    $transaction: jest.fn((arg: unknown): unknown =>
+      typeof arg === 'function'
+        ? (arg as (tx: unknown) => unknown)(prisma)
+        : Promise.all(arg as unknown[]),
+    ),
   };
+  return prisma;
 }
 
 function makeCategoriesMock() {
@@ -63,11 +82,13 @@ function makeCategoriesMock() {
 function makeService() {
   const prisma = makePrismaMock();
   const categories = makeCategoriesMock();
+  const audit = { record: jest.fn().mockResolvedValue(undefined) };
   const service = new AdminCategoriesService(
     prisma as never,
     categories as never,
+    audit as never,
   );
-  return { service, prisma, categories };
+  return { service, prisma, categories, audit };
 }
 
 describe('GET /v1/admin/categories (list)', () => {
@@ -116,7 +137,10 @@ describe('POST /v1/admin/categories (create)', () => {
       parentId: 'brakes',
     });
 
-    expect(categories.validateParent).toHaveBeenCalledWith('brakes');
+    expect(categories.validateParent).toHaveBeenCalledWith(
+      'brakes',
+      expect.anything(),
+    );
     expect(prisma.partCategory.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({ id: 'brake-pads', level: 2 }),
@@ -179,6 +203,7 @@ describe('PATCH /v1/admin/categories/:id (update)', () => {
     expect(categories.validateMove).toHaveBeenCalledWith(
       'brakes',
       'maintenance-and-fluids',
+      expect.anything(),
     );
     expect(prisma.partCategory.update).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -211,6 +236,54 @@ describe('PATCH /v1/admin/categories/:id (update)', () => {
   });
 });
 
+describe('changing a slug', () => {
+  it.each([
+    ['a load-bearing category', 'brakes', 'brakes'],
+    [
+      'a category Fitment Studio binds by slug',
+      'front-brake-pads',
+      'front-brake-pads',
+    ],
+  ])('refuses for %s', async (_label, id, slug) => {
+    const { service, prisma } = makeService();
+    prisma.partCategory.findUnique.mockResolvedValue(node({ id, slug }));
+
+    await expect(
+      service.update(id, { slug: 'renamed' }),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(prisma.partCategory.update).not.toHaveBeenCalled();
+  });
+
+  it('allows an ordinary category, and checks both columns for a clash', async () => {
+    const { service, prisma } = makeService();
+    prisma.partCategory.findUnique.mockResolvedValue(
+      node({ id: 'custom', slug: 'custom' }),
+    );
+
+    await service.update('custom', { slug: 'renamed' });
+
+    expect(prisma.partCategory.findFirst).toHaveBeenCalledWith({
+      where: {
+        OR: [{ slug: 'renamed' }, { id: 'renamed' }],
+        NOT: { id: 'custom' },
+      },
+      select: { id: true },
+    });
+    expect(prisma.partCategory.update).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-sending the slug it already has is no change at all', async () => {
+    const { service, prisma } = makeService();
+    prisma.partCategory.findUnique.mockResolvedValue(
+      node({ id: 'brakes', slug: 'brakes' }),
+    );
+
+    await service.update('brakes', { slug: 'brakes', nameEn: 'Brakes!' });
+
+    expect(prisma.partCategory.update).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('activate / deactivate', () => {
   it.each([
     ['activate', true],
@@ -239,20 +312,110 @@ describe('activate / deactivate', () => {
 });
 
 describe('DELETE guards (deactivation is the preferred path)', () => {
+  /** The 409's machine code, which is what the console branches on. */
+  const conflictCode = async (run: Promise<unknown>) => {
+    const err = await run.then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(ConflictException);
+    return ((err as ConflictException).getResponse() as { code?: string }).code;
+  };
+
   it('refuses to delete a category referenced by listings', async () => {
     const { service, prisma } = makeService();
     prisma.product.count.mockResolvedValue(3);
-    await expect(service.remove('brakes')).rejects.toBeInstanceOf(
-      ConflictException,
+    expect(await conflictCode(service.remove('old-pads'))).toBe(
+      CategoryDeleteConflict.HAS_LISTINGS,
     );
     expect(prisma.partCategory.delete).not.toHaveBeenCalled();
   });
 
-  it('refuses to delete a category referenced by drafts', async () => {
+  it('refuses to delete a category referenced by live drafts, and counts only those', async () => {
     const { service, prisma } = makeService();
     prisma.productDraft.count.mockResolvedValue(1);
-    await expect(service.remove('brakes')).rejects.toBeInstanceOf(
-      ConflictException,
+    expect(await conflictCode(service.remove('old-pads'))).toBe(
+      CategoryDeleteConflict.HAS_LISTINGS,
+    );
+    expect(prisma.productDraft.count).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        status: { in: ['CREATING', 'READY_FOR_PREVIEW', 'COMMITTING'] },
+      }),
+    });
+  });
+
+  it('refuses while a live sale targets it, naming the sale', async () => {
+    const { service, prisma } = makeService();
+    prisma.sale.findMany.mockResolvedValue([{ title: 'Spring brakes' }]);
+    const run = service.remove('old-pads');
+    await expect(run).rejects.toThrow(/Spring brakes/);
+    expect(prisma.partCategory.delete).not.toHaveBeenCalled();
+  });
+
+  it('records who deleted what, in the same transaction', async () => {
+    const { service, prisma, audit } = makeService();
+    prisma.$queryRaw.mockResolvedValue([{ parent_id: null, name: 'Old pads' }]);
+
+    await service.remove('old-pads', undefined, {
+      actor: { id: 'adm_1', email: 'a@m.uz', name: 'A' },
+    });
+
+    expect(audit.record).toHaveBeenCalledTimes(1);
+    expect(audit.record.mock.calls[0][0]).toMatchObject({
+      action: 'CATEGORY_DELETED',
+      actor: { id: 'adm_1' },
+      target: { entity: 'CATEGORY', id: 'old-pads', name: 'Old pads' },
+    });
+  });
+
+  it('asks for a reassign target only when parts are the one thing in the way', async () => {
+    const { service, prisma } = makeService();
+    prisma.catalogPart.count.mockResolvedValue(2);
+    expect(await conflictCode(service.remove('old-pads'))).toBe(
+      CategoryDeleteConflict.HAS_PARTS,
+    );
+  });
+
+  it.each([
+    'brakes',
+    'motor-oil',
+    'other',
+    'antifreeze',
+    'maintenance-and-fluids',
+  ])('refuses "%s": the application depends on it by id', async (id) => {
+    const { service, prisma } = makeService();
+    expect(await conflictCode(service.remove(id))).toBe(
+      CategoryDeleteConflict.PROTECTED,
+    );
+    expect(prisma.partCategory.delete).not.toHaveBeenCalled();
+  });
+
+  it('takes the tree lock and the row lock before checking anything', async () => {
+    const { service, prisma } = makeService();
+    const order: string[] = [];
+    prisma.$executeRaw.mockImplementation(() => {
+      order.push('tree-lock');
+      return Promise.resolve(0);
+    });
+    prisma.$queryRaw.mockImplementation(() => {
+      order.push('row-lock');
+      return Promise.resolve([{ parent_id: null }]);
+    });
+    prisma.product.count.mockImplementation(() => {
+      order.push('checks');
+      return Promise.resolve(0);
+    });
+
+    await service.remove('old-pads');
+
+    expect(order).toEqual(['tree-lock', 'row-lock', 'checks']);
+  });
+
+  it('answers a delete that lost the race with 404', async () => {
+    const { service, prisma } = makeService();
+    prisma.$queryRaw.mockResolvedValue([]);
+    await expect(service.remove('old-pads')).rejects.toBeInstanceOf(
+      NotFoundException,
     );
   });
 
@@ -271,16 +434,19 @@ describe('DELETE guards (deactivation is the preferred path)', () => {
     );
   });
 
-  it('deletes an unreferenced leaf and busts the cache', async () => {
+  it('deletes an unreferenced leaf and busts the cache, its own key included', async () => {
     const { service, prisma, categories } = makeService();
-    const res = await service.remove('brakes');
+    const res = await service.remove('old-pads');
     expect(prisma.partCategory.delete).toHaveBeenCalledWith({
-      where: { id: 'brakes' },
+      where: { id: 'old-pads' },
     });
-    expect(categories.invalidate).toHaveBeenCalledWith('brake-system');
+    expect(categories.invalidate).toHaveBeenCalledWith(
+      'brake-system',
+      'old-pads',
+    );
     expect(res).toEqual({
       success: true,
-      data: { deleted: 'brakes', reassigned: 0 },
+      data: { deleted: 'old-pads', reassigned: 0 },
     });
   });
 });

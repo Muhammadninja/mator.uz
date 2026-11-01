@@ -1,4 +1,9 @@
-import { OrderActorType, OrderStatus, Prisma } from '@prisma/client';
+import {
+  OrderActorType,
+  OrderStatus,
+  PaymentStatus,
+  Prisma,
+} from '@prisma/client';
 
 /**
  * Prisma `select` for an admin list row — only the columns the row projection
@@ -9,6 +14,8 @@ export const ADMIN_ORDER_LIST_SELECT = {
   id: true,
   status: true,
   totalUzs: true,
+  paymentType: true,
+  refundSettledAt: true,
   createdAt: true,
   updatedAt: true,
   user: {
@@ -37,6 +44,9 @@ export const ADMIN_ORDER_DETAIL_SELECT = {
   status: true,
   totalUzs: true,
   deliveryUzs: true,
+  paymentType: true,
+  refundSettledAt: true,
+  deliveryMethod: true,
   createdAt: true,
   updatedAt: true,
   user: {
@@ -111,26 +121,66 @@ function customerName(u: CustomerFields): string | null {
   );
 }
 
-/** Method/status from the most recent payment (null when the order has none). */
-function paymentSummary(payments: { provider: string; status: string }[]): {
+/**
+ * Method/status from the most recent payment. An order with none falls back to
+ * the method the customer chose at checkout: a cash or terminal order never gets
+ * a payment row, and those are exactly the ones an operator has to act on.
+ */
+function paymentSummary(
+  payments: { provider: string; status: string }[],
+  chosen: string | null | undefined,
+): {
   method: string | null;
   status: string | null;
 } {
   const latest = payments[0];
   return {
-    method: latest ? latest.provider.toLowerCase() : null,
+    method: latest
+      ? latest.provider.toLowerCase()
+      : (chosen?.toLowerCase() ?? null),
     status: latest ? latest.status.toLowerCase() : null,
   };
 }
 
-export function presentAdminOrderRow(o: AdminOrderListRow) {
-  const payment = paymentSummary(o.payments);
+/**
+ * A cancelled order whose payment still reads paid: the money was taken and nothing
+ * has given it back yet. The provider's refund callback moves both to REFUNDED, so
+ * this clears itself the moment a refund really happens. A refund made outside the
+ * provider sends no callback, so the refund registry clears it too, once its entries
+ * account for everything the order took. Row-level twin of {@link REFUND_DUE_WHERE}.
+ */
+function isRefundDue(
+  o: { status: OrderStatus; refundSettledAt?: Date | null },
+  payment: { status: string | null },
+): boolean {
+  return (
+    o.status === OrderStatus.CANCELLED &&
+    payment.status === PaymentStatus.PAID.toLowerCase() &&
+    !o.refundSettledAt
+  );
+}
+
+export const REFUND_DUE_WHERE = {
+  status: OrderStatus.CANCELLED,
+  refundSettledAt: null,
+  payments: { some: { status: PaymentStatus.PAID } },
+} satisfies Prisma.OrderWhereInput;
+
+export function presentAdminOrderRow(
+  o: AdminOrderListRow,
+  slaOverdue = false,
+  operatorWarning = false,
+) {
+  const payment = paymentSummary(o.payments, o.paymentType);
   return {
     id: o.id,
     status: o.status.toLowerCase(),
     totalAmount: Number(o.totalUzs),
     paymentMethod: payment.method,
     paymentStatus: payment.status,
+    slaOverdue,
+    operatorWarning,
+    refundDue: isRefundDue(o, payment),
     createdAt: o.createdAt.toISOString(),
     updatedAt: o.updatedAt.toISOString(),
     customer: {
@@ -176,8 +226,12 @@ function presentHistoryRow(h: AdminOrderDetail['statusHistory'][number]) {
   };
 }
 
-export function presentAdminOrderDetail(o: AdminOrderDetail) {
-  const payment = paymentSummary(o.payments);
+export function presentAdminOrderDetail(
+  o: AdminOrderDetail,
+  slaOverdue = false,
+  operatorWarning = false,
+) {
+  const payment = paymentSummary(o.payments, o.paymentType);
 
   // Every status change now writes a history row (creation included) via the
   // OrderStatusService chokepoint, so the stored rows ARE the authoritative,
@@ -206,8 +260,12 @@ export function presentAdminOrderDetail(o: AdminOrderDetail) {
     status: o.status.toLowerCase(),
     totalAmount: Number(o.totalUzs),
     deliveryFee: Number(o.deliveryUzs),
+    deliveryMethod: o.deliveryMethod?.toLowerCase() ?? null,
     paymentMethod: payment.method,
     paymentStatus: payment.status,
+    slaOverdue,
+    operatorWarning,
+    refundDue: isRefundDue(o, payment),
     createdAt: o.createdAt.toISOString(),
     updatedAt: o.updatedAt.toISOString(),
     customer: {

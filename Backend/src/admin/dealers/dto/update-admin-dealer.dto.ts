@@ -116,7 +116,7 @@ export class UpdateAdminDealerDto {
   @Matches(TIN_PATTERN, {
     message: 'tin must be 9 digits (ИНН) or 14 digits (ПИНФЛ)',
   })
-  tin?: string;
+  tin?: string | null;
 
   @ApiPropertyOptional({
     description:

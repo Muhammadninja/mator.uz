@@ -7,6 +7,7 @@ import { RealtimeModule } from '../realtime/realtime.module';
 import { SalesModule } from '../sales/sales.module';
 import { OrdersService } from './orders.service';
 import { OrderStatusService } from './order-status.service';
+import { OfflineOrderMonitorService } from './offline-order-monitor.service';
 import { OrdersController } from './orders.controller';
 import { PaymentsService } from './payments.service';
 import { PaymentsController } from './payments.controller';
@@ -32,6 +33,7 @@ import { PaymentWebhookController } from './webhooks/payment-webhook.controller'
   providers: [
     OrdersService,
     OrderStatusService,
+    OfflineOrderMonitorService,
     PaymentsService,
     SettlementService,
     PaymeService,

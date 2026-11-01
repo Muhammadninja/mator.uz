@@ -7,6 +7,7 @@ import {
   IsOptional,
   IsString,
   Matches,
+  Max,
   MaxLength,
   Min,
   MinLength,
@@ -130,6 +131,7 @@ export class CreateCategoryDto {
   @Type(() => Number)
   @IsInt()
   @Min(0)
+  @Max(2_147_483_647)
   sortOrder?: number;
 
   @ApiPropertyOptional({

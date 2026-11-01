@@ -467,7 +467,7 @@ describe('admin reads keep the parts without photos', () => {
       inventoryRow('ok'),
     ]);
 
-    const res = await new AdminInventoryService(prisma).list({});
+    const res = await new AdminInventoryService(prisma, {} as never).list({});
 
     expect(res.data.map((r) => r.id)).toEqual(['bare', 'ok']);
     expect(res.meta.totalItems).toBe(2);

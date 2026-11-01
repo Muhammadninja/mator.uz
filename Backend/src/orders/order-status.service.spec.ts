@@ -197,6 +197,25 @@ describe('OrderStatusService', () => {
       expect(prisma.orderStatusHistory.create).not.toHaveBeenCalled();
     });
 
+    it('never expires a cash or terminal order: it has no payment window to miss', async () => {
+      prisma.order.findMany.mockResolvedValue([]);
+
+      await service.expireOverdue(now);
+
+      expect(prisma.order.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            // Null stays in: SQL `NOT IN` alone would stop expiring every order
+            // from a client that sends no payment_type.
+            OR: [
+              { paymentType: null },
+              { paymentType: { notIn: ['CASH', 'TERMINAL'] } },
+            ],
+          }),
+        }),
+      );
+    });
+
     it('excludes orders reserved by an active provider transaction from the scan', async () => {
       // Payme guarantees the customer 12 hours to confirm a created transaction,
       // which outlives our own 30-minute payment window. Such an order must stay

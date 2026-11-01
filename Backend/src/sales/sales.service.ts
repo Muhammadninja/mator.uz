@@ -217,8 +217,14 @@ export class SalesService {
       dto.discountValue ?? existing.discountValue.toNumber();
     const scopeType = dto.scopeType ?? existing.scopeType;
     const startAt = dto.startAt ? new Date(dto.startAt) : existing.startAt;
+    // `new Date(null)` is 1970, not "no end": clearing the date has to stay a
+    // clear rather than surface as "endAt must be after startAt".
     const endAt =
-      dto.endAt === undefined ? existing.endAt : new Date(dto.endAt);
+      dto.endAt === undefined
+        ? existing.endAt
+        : dto.endAt === null
+          ? null
+          : new Date(dto.endAt);
 
     this.assertWindow(startAt, endAt);
     this.assertDiscountValue(discountType, discountValue);
@@ -363,9 +369,9 @@ export class SalesService {
     if (!Number.isFinite(discountValue) || discountValue <= 0) {
       throw new BadRequestException('discountValue must be greater than 0');
     }
-    if (discountType === SaleDiscountType.PERCENT && discountValue > 100) {
+    if (discountType === SaleDiscountType.PERCENT && discountValue >= 100) {
       throw new BadRequestException(
-        'discountValue must not exceed 100 for a PERCENT sale',
+        'discountValue must be below 100 for a PERCENT sale',
       );
     }
   }

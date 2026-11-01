@@ -10,7 +10,9 @@ import { PrismaService } from '../prisma/prisma.service';
  *   • the part still exists;
  *   • `CatalogPart.inStock` is true — the availability flag every writer keeps
  *     (catalog projection, dealer 1C sync, admin inventory);
- *   • its dealer storefront is not SUSPENDED (see catalog/buyer-visibility.ts).
+ *   • its dealer storefront is not SUSPENDED (see catalog/buyer-visibility.ts);
+ *   • it has a price. There is no free-of-charge sale in the business, so a price
+ *     of 0 is a data error rather than an offer, whatever wrote it.
  *
  * Deliberately NOT a quantity check: `stockQty` is a real count only for
  * dealer-synced / admin-managed positions — Telegram listings keep the default
@@ -18,7 +20,8 @@ import { PrismaService } from '../prisma/prisma.service';
  * a quantity rule would either block the Telegram catalogue or promise more
  * than it can keep. Reservation is a separate, schema-level change.
  */
-export type UnavailableReason = 'missing' | 'out_of_stock' | 'dealer_suspended';
+export type UnavailableReason =
+  'missing' | 'out_of_stock' | 'dealer_suspended' | 'no_price';
 
 export interface UnavailableLine {
   partId: string;
@@ -40,7 +43,12 @@ export async function findUnavailableParts(
 
   const parts = await prisma.catalogPart.findMany({
     where: { id: { in: [...new Set(partLines.map((l) => l.partId))] } },
-    select: { id: true, inStock: true, seller: { select: { status: true } } },
+    select: {
+      id: true,
+      inStock: true,
+      priceUzs: true,
+      seller: { select: { status: true } },
+    },
   });
   const byId = new Map(parts.map((p) => [p.id, p]));
 
@@ -53,7 +61,9 @@ export async function findUnavailableParts(
         ? 'dealer_suspended'
         : !part.inStock
           ? 'out_of_stock'
-          : null;
+          : Number(part.priceUzs) <= 0
+            ? 'no_price'
+            : null;
     if (reason) unavailable.push({ ...line, reason });
   }
   return unavailable;

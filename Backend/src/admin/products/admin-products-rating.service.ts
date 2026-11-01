@@ -88,10 +88,12 @@ export class AdminProductsRatingService {
     // projection of the same stock reconciles — so it is logged rather than
     // failing a write that already committed.
     try {
-      // A rating is no classification: an operator's bulk-move of these parts
-      // must survive it, so the re-projection keeps their category columns.
+      // A rating is neither a classification nor a price: an operator's bulk-move
+      // and inventory edits of these parts must survive it, so the re-projection
+      // keeps their category, price and stock columns.
       await this.projection.projectProduct(product.id, {
         keepClassification: true,
+        keepPriceAndStock: true,
       });
     } catch (err) {
       this.logger.error(

@@ -40,6 +40,18 @@ export const ALLOWED_TRANSITIONS: Readonly<
   [OrderStatus.EXPIRED]: [],
 };
 
+/**
+ * Statuses the system alone may set. EXPIRED is the sweeper's verdict, and
+ * REFUNDED records money the provider returned (SettlementService.markCancelled):
+ * an operator setting it by hand would claim a refund that never happened and
+ * leave the payment PAID. They are in the table above for the derived lists, not
+ * as operator actions.
+ */
+export const SYSTEM_ONLY_ORDER_STATUSES: readonly OrderStatus[] = [
+  OrderStatus.EXPIRED,
+  OrderStatus.REFUNDED,
+];
+
 /** May an order move from `from` to `to`? (Staying put is not a transition.) */
 export function canTransition(from: OrderStatus, to: OrderStatus): boolean {
   return from !== to && ALLOWED_TRANSITIONS[from].includes(to);

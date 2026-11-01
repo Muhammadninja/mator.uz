@@ -25,7 +25,11 @@ function makePrismaMock() {
     count: jest.fn().mockResolvedValue(1),
     update: jest.fn().mockResolvedValue({}),
   };
-  return { appAdmin };
+  const prisma = {
+    appAdmin,
+    $transaction: jest.fn((run: (tx: unknown) => unknown) => run(prisma)),
+  };
+  return prisma;
 }
 
 function makeAuthMock() {
@@ -72,8 +76,10 @@ describe('AdminManagementService', () => {
   let auth: ReturnType<typeof makeAuthMock>;
   let tokens: ReturnType<typeof makeTokensMock>;
   let service: AdminManagementService;
+  let audit: { record: jest.Mock };
 
   beforeEach(() => {
+    audit = { record: jest.fn().mockResolvedValue(undefined) };
     prisma = makePrismaMock();
     auth = makeAuthMock();
     tokens = makeTokensMock();
@@ -81,6 +87,7 @@ describe('AdminManagementService', () => {
       prisma as never,
       auth as never,
       tokens as never,
+      audit as never,
     );
   });
 
@@ -325,6 +332,21 @@ describe('AdminManagementService', () => {
       await expect(
         service.update('adm_1', { email: 'target@example.com' }, AUDIT),
       ).resolves.toBeDefined();
+    });
+
+    it('records an email change with the old and new address', async () => {
+      prisma.appAdmin.findUnique
+        .mockResolvedValueOnce(adminRow())
+        .mockResolvedValueOnce(null) // the new address is free
+        .mockResolvedValueOnce(adminRow());
+
+      await service.update('adm_1', { email: 'new@example.com' }, AUDIT);
+
+      expect(audit.record.mock.calls[0][0]).toMatchObject({
+        action: 'ADMIN_PROFILE_UPDATED',
+        previousValues: { email: adminRow().email },
+        newValues: { email: 'new@example.com' },
+      });
     });
 
     it('rejects an empty patch', async () => {

@@ -13,7 +13,10 @@ import { Roles } from '../auth/decorators/roles.decorator';
 import { AdminJwtGuard } from '../auth/guards/admin-jwt.guard';
 import { AdminRoleGuard } from '../auth/guards/admin-role.guard';
 import { AdminOrdersService } from './admin-orders.service';
-import { ListAdminOrdersQueryDto } from './dto/list-admin-orders.query.dto';
+import {
+  AdminOrdersBoardQueryDto,
+  ListAdminOrdersQueryDto,
+} from './dto/list-admin-orders.query.dto';
 
 /**
  * Admin/operator order console (read-only). Admin-panel bearer token
@@ -39,6 +42,27 @@ export class AdminOrdersController {
   })
   list(@Query() query: ListAdminOrdersQueryDto) {
     return this.adminOrders.list(query);
+  }
+
+  // Literal paths before ':id', which would otherwise swallow them.
+  @Get('summary')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Order totals for KPIs, counted over every order, not over one page',
+  })
+  summary() {
+    return this.adminOrders.summary();
+  }
+
+  @Get('board')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'The newest orders per status plus every status total, in one request',
+  })
+  board(@Query() query: AdminOrdersBoardQueryDto) {
+    return this.adminOrders.board(query.perStatus);
   }
 
   @Get(':id')

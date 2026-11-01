@@ -3,6 +3,7 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  IsUUID,
   Max,
   MaxLength,
   Min,
@@ -62,4 +63,34 @@ export class ListAdminOrdersQueryDto {
   @IsString()
   @IsIn(['asc', 'desc'], { message: 'order must be asc or desc' })
   order?: 'asc' | 'desc';
+
+  /** One customer's orders, for their profile page. */
+  @IsOptional()
+  @IsUUID()
+  customerId?: string;
+
+  /** Cash and terminal orders waiting for an operator past the SLA. */
+  @IsOptional()
+  @IsIn(['true', 'false'])
+  slaOverdue?: 'true' | 'false';
+
+  /** Cash and terminal orders waiting so long that the console warns about them. */
+  @IsOptional()
+  @IsIn(['true', 'false'])
+  operatorWarning?: 'true' | 'false';
+
+  /** Cancelled orders whose payment still reads paid: a refund may be owed. */
+  @IsOptional()
+  @IsIn(['true', 'false'])
+  refundDue?: 'true' | 'false';
+}
+
+/** Query params for GET /v1/admin/orders/board. */
+export class AdminOrdersBoardQueryDto {
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(50)
+  perStatus?: number;
 }

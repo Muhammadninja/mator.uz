@@ -92,7 +92,7 @@ export class CreateSaleDto {
   @IsOptional()
   @IsDateString({}, { message: 'endAt must be an ISO 8601 date-time string' })
   @Validate(SaleWindowConstraint)
-  endAt?: string;
+  endAt?: string | null;
 
   @IsOptional()
   @IsBoolean()

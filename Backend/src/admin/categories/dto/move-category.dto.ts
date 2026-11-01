@@ -4,6 +4,7 @@ import {
   IsInt,
   IsOptional,
   IsString,
+  Max,
   MaxLength,
   Min,
   ValidateIf,
@@ -41,5 +42,6 @@ export class MoveCategoryDto {
   @Type(() => Number)
   @IsInt()
   @Min(0)
+  @Max(2_147_483_647)
   sortOrder?: number;
 }

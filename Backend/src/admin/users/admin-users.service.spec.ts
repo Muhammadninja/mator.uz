@@ -166,7 +166,9 @@ describe('AdminUsersService', () => {
       await service.list({ sortBy: 'name', order: 'asc' });
 
       expect(prisma.appUser.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({ orderBy: { displayName: 'asc' } }),
+        expect.objectContaining({
+          orderBy: [{ displayName: 'asc' }, { id: 'asc' }],
+        }),
       );
     });
 
@@ -177,7 +179,9 @@ describe('AdminUsersService', () => {
       await service.list({});
 
       expect(prisma.appUser.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({ orderBy: { createdAt: 'desc' } }),
+        expect.objectContaining({
+          orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
+        }),
       );
     });
 

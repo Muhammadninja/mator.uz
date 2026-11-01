@@ -5,8 +5,9 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { AdminRole, Prisma } from '@prisma/client';
+import { AdminAuditAction, AdminRole, Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { AdminAuditService } from '../auth/admin-audit.service';
 import {
   AdminAuditContext,
   AdminAuthService,
@@ -51,6 +52,7 @@ export class AdminManagementService {
     private readonly prisma: PrismaService,
     private readonly adminAuth: AdminAuthService,
     private readonly tokens: AdminTokenService,
+    private readonly audit: AdminAuditService,
   ) {}
 
   async list(query: ListAdminsQueryDto) {
@@ -135,7 +137,7 @@ export class AdminManagementService {
    * too easy to grant privileges by accident.
    */
   async update(id: string, dto: UpdateAdminDto, audit: AdminAuditContext) {
-    await this.getOne(id);
+    const before = await this.getOne(id);
 
     if (dto.email) {
       const clash = await this.prisma.appAdmin.findUnique({
@@ -152,13 +154,40 @@ export class AdminManagementService {
       throw new BadRequestException('Nothing to update');
     }
 
-    await this.prisma.appAdmin.update({
-      where: { id },
-      data: {
-        ...(dto.name !== undefined ? { name: dto.name } : {}),
-        ...(dto.email !== undefined ? { email: dto.email } : {}),
-      },
-    });
+    // In one transaction with its audit entry, like every other change to an account:
+    // an email is how an account is recovered, so changing one must leave a record.
+    const data = {
+      ...(dto.name !== undefined ? { name: dto.name } : {}),
+      ...(dto.email !== undefined ? { email: dto.email } : {}),
+    };
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        await tx.appAdmin.update({ where: { id }, data });
+        await this.audit.record(
+          {
+            action: AdminAuditAction.ADMIN_PROFILE_UPDATED,
+            ...audit,
+            target: { id, email: before.email, name: before.name },
+            previousValues: {
+              ...(data.name !== undefined ? { name: before.name } : {}),
+              ...(data.email !== undefined ? { email: before.email } : {}),
+            },
+            newValues: data,
+          },
+          tx,
+        );
+      });
+    } catch (err) {
+      if (
+        err instanceof Prisma.PrismaClientKnownRequestError &&
+        err.code === 'P2002'
+      ) {
+        throw new ConflictException(
+          'An administrator with this email already exists',
+        );
+      }
+      throw err;
+    }
     this.logger.log(
       `Admin ${id} profile updated by ${audit.actor?.id ?? 'unknown'}`,
     );

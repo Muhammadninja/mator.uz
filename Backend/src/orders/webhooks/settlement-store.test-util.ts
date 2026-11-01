@@ -37,6 +37,7 @@ export function settlementStore(seed: { payments: Row[]; orders: Row[] }) {
   let payments = new Map(seed.payments.map((p) => [p.id, clone(p)]));
   let orders = new Map(seed.orders.map((o) => [o.id, clone(o)]));
   let history: Row[] = [];
+  let refunds: Row[] = [];
   let txQueue: Promise<unknown> = Promise.resolve();
 
   const findPayment = (where: Row) => {
@@ -66,6 +67,42 @@ export function settlementStore(seed: { payments: Row[]; orders: Row[] }) {
         Object.assign(p, data);
         return { count: 1 };
       },
+      findMany: async ({ where }: Row) => {
+        await tick();
+        return [...payments.values()]
+          .filter(
+            (p) =>
+              p.orderId === where.orderId &&
+              statusMatches(p.status, where.status),
+          )
+          .map(clone);
+      },
+    },
+    financialRefund: {
+      findMany: async ({ where }: Row) => {
+        await tick();
+        return refunds
+          .filter(
+            (r) =>
+              !r.voidedAt &&
+              (where.orderId === undefined || r.orderId === where.orderId) &&
+              (where.paymentId === undefined ||
+                r.paymentId === where.paymentId),
+          )
+          .map((r) => ({ ...r }));
+      },
+      updateMany: async ({ where, data }: Row) => {
+        await tick();
+        const hit = refunds.filter((r) => where.id.in.includes(r.id));
+        hit.forEach((r) => Object.assign(r, data));
+        return { count: hit.length };
+      },
+      create: async ({ data }: Row) => {
+        await tick();
+        // A plain number: structuredClone, used for rollback, cannot copy a Decimal.
+        refunds.push({ ...data, amountUzs: Number(data.amountUzs) });
+        return data;
+      },
     },
     order: {
       findUnique: async ({ where }: Row) => {
@@ -92,6 +129,12 @@ export function settlementStore(seed: { payments: Row[]; orders: Row[] }) {
         history.push(clone(data));
         return data;
       },
+      count: async ({ where }: Row) => {
+        await tick();
+        return history.filter(
+          (h) => h.orderId === where.orderId && h.status === where.status,
+        ).length;
+      },
     },
     $transaction: (fn: (tx: unknown) => Promise<unknown>) => {
       const run = async () => {
@@ -99,6 +142,7 @@ export function settlementStore(seed: { payments: Row[]; orders: Row[] }) {
           payments: clone(payments),
           orders: clone(orders),
           history: clone(history),
+          refunds: refunds.map((r) => ({ ...r })),
         };
         try {
           return await fn(api);
@@ -106,6 +150,7 @@ export function settlementStore(seed: { payments: Row[]; orders: Row[] }) {
           payments = saved.payments;
           orders = saved.orders;
           history = saved.history;
+          refunds = saved.refunds;
           throw err;
         }
       };
@@ -128,6 +173,7 @@ export function settlementStore(seed: { payments: Row[]; orders: Row[] }) {
       return clone(o);
     },
     history: () => clone(history),
+    refunds: () => refunds.map((r) => ({ ...r })),
   };
 }
 

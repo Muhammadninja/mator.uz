@@ -18,13 +18,20 @@
  * next to the Russian subcategories in the drill again. Only run this if you need
  * the mainCategory buckets back for the buyer grid / part classification.
  *
- * Run:  npm run restore:buyer-buckets
- *   (= ts-node --compiler-options '{"module":"commonjs"}' prisma/restore-buyer-buckets.ts)
+ * Reports by default, like the other repair scripts. It resets the order of all 12
+ * and brings back any that were deliberately deactivated, so writing is a decision:
+ *
+ *   npm run restore:buyer-buckets              # dry-run: the state of each bucket
+ *   npm run restore:buyer-buckets -- --apply   # reactivate / recreate them
+ *
+ * (= ts-node --compiler-options '{"module":"commonjs"}' prisma/restore-buyer-buckets.ts)
  */
 import { PrismaClient, PartMainCategory } from '@prisma/client';
 import { localizedNamesFor } from '../src/prisma/seed-data/category-names.seed';
 
 const prisma = new PrismaClient();
+
+const APPLY = process.argv.includes('--apply');
 
 /**
  * The 12 canonical buyer buckets, in HOME-GRID IMPORTANCE ORDER (most-purchased
@@ -96,6 +103,11 @@ async function main(): Promise<void> {
         missing.push(b.id);
         continue;
       }
+      if (!APPLY) {
+        console.log(b.id.padEnd(18), 'NO'.padEnd(7), `would recreate under ${parentId}`.padEnd(32), parts);
+        recreated++;
+        continue;
+      }
       await prisma.partCategory.create({
         data: {
           id: b.id,
@@ -123,6 +135,11 @@ async function main(): Promise<void> {
       parts,
     );
 
+    if (!APPLY) {
+      reactivated++;
+      continue;
+    }
+
     // Restore visibility + any cleared grid fields (never clobber a set value).
     await prisma.partCategory.update({
       where: { id: b.id },
@@ -137,7 +154,11 @@ async function main(): Promise<void> {
     reactivated++;
   }
 
-  console.log(`\nDone. ${reactivated} reactivated, ${recreated} recreated.`);
+  console.log(
+    APPLY
+      ? `\nDone. ${reactivated} reactivated, ${recreated} recreated.`
+      : `\nDRY RUN — nothing written. --apply would reactivate ${reactivated} and recreate ${recreated}.`,
+  );
   if (missing.length) {
     console.log(`⚠ ${missing.length} bucket(s) skipped (parent root absent): ${missing.join(', ')}`);
   }

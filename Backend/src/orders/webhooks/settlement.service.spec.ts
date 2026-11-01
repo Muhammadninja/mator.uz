@@ -209,6 +209,8 @@ describe('SettlementService', () => {
         id: 'pay_1',
         orderId: 'ord_1',
         status: PaymentStatus.PAID,
+        amountUzs: 215000,
+        providerTransactionId: 'pmt-xyz',
       });
 
       await svc.markCancelled('pay_1', 5, true);
@@ -375,6 +377,111 @@ describe('SettlementService.markPaid — concurrency and order state (in-memory 
     await expect(svc.markPaid('pay_1')).resolves.toBe('already_paid');
     expect(paidRows(store)).toHaveLength(1);
     expect(notifications.emit).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('SettlementService.markCancelled — the refund registry (in-memory store)', () => {
+  function build() {
+    const store = settlementStore({
+      payments: [
+        pendingPaymePayment({
+          status: PaymentStatus.PAID,
+          amountUzs: 215000,
+          providerTransactionId: 'pmt-xyz',
+        }),
+      ],
+      orders: [order(OrderStatus.CANCELLED)],
+    });
+    const svc = new SettlementService(
+      store.prisma as any,
+      { emit: jest.fn().mockResolvedValue(undefined) } as any,
+      { emit: jest.fn() } as any,
+      new OrderStatusService(store.prisma as any),
+      fakeConfig({ ORDER_TTL_MIN: '30' }),
+    );
+    return { store, svc };
+  }
+
+  it('a provider refund enters the registry, naming the provider transaction', async () => {
+    const { store, svc } = build();
+
+    await svc.markCancelled('pay_1', 5, true);
+
+    const [entry, ...rest] = store.refunds();
+    expect(rest).toEqual([]);
+    expect(Number(entry.amountUzs)).toBe(215000);
+    expect(entry).toMatchObject({
+      method: 'PROVIDER',
+      source: 'PROVIDER_CALLBACK',
+      reference: 'pmt-xyz',
+      paymentId: 'pay_1',
+      orderId: 'ord_1',
+    });
+    expect(entry.providerConfirmedAt).toBeInstanceOf(Date);
+    expect(entry.createdById).toBeUndefined();
+  });
+
+  it('a repeated or concurrent callback enters it once', async () => {
+    const { store, svc } = build();
+
+    await Promise.all([
+      svc.markCancelled('pay_1', 5, true),
+      svc.markCancelled('pay_1', 5, true),
+    ]);
+    await svc.markCancelled('pay_1', 5, true);
+
+    expect(store.refunds()).toHaveLength(1);
+  });
+
+  it('confirms what a manager already recorded instead of counting it twice', async () => {
+    const { store, svc } = build();
+    await store.prisma.financialRefund.create({
+      data: {
+        id: 'rfd_manual',
+        orderId: 'ord_1',
+        paymentId: 'pay_1',
+        amountUzs: 215000,
+        method: 'PROVIDER',
+      },
+    });
+
+    await svc.markCancelled('pay_1', 5, true);
+
+    const entries = store.refunds();
+    expect(entries.map((e) => e.id)).toEqual(['rfd_manual']);
+    expect(entries[0].providerConfirmedAt).toBeInstanceOf(Date);
+  });
+
+  it('enters only what a partial manual record does not account for', async () => {
+    const { store, svc } = build();
+    await store.prisma.financialRefund.create({
+      data: {
+        id: 'rfd_cash',
+        orderId: 'ord_1',
+        paymentId: 'pay_1',
+        amountUzs: 15000,
+        method: 'CASH',
+      },
+    });
+
+    await svc.markCancelled('pay_1', 5, true);
+
+    const entries = store.refunds();
+    expect(entries).toHaveLength(2);
+    expect(entries[0].providerConfirmedAt).toBeUndefined();
+    expect(Number(entries[1].amountUzs)).toBe(200000);
+  });
+
+  it('cancelling an unperformed transaction writes nothing: no money moved', async () => {
+    const { store, svc } = build();
+    await store.prisma.payment.updateMany({
+      where: { id: 'pay_1' },
+      data: { status: PaymentStatus.PENDING },
+    });
+
+    await svc.markCancelled('pay_1', 4, false);
+
+    expect(store.refunds()).toEqual([]);
   });
 });
 

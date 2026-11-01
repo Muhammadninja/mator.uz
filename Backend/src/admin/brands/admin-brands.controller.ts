@@ -10,6 +10,8 @@ import {
   Post,
   Query,
   UseGuards,
+  ParseIntPipe,
+  Req,
 } from '@nestjs/common';
 import {
   ApiBadRequestResponse,
@@ -23,6 +25,8 @@ import {
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 import { AdminRole } from '@prisma/client';
+import type { Request } from 'express';
+import { AuthenticatedAdmin } from '../auth/strategies/admin-jwt.strategy';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { AdminJwtGuard } from '../auth/guards/admin-jwt.guard';
 import { AdminRoleGuard } from '../auth/guards/admin-role.guard';
@@ -109,18 +113,41 @@ export class AdminBrandsController {
     return this.brands.update(id, dto);
   }
 
+  @Get(':id/delete-preview')
+  @Roles(AdminRole.SUPER_ADMIN, AdminRole.MANAGER)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'What deleting a brand would take with it' })
+  @ApiNotFoundResponse({ description: 'No such brand.' })
+  deletePreview(@Param('id') id: string) {
+    return this.brands.deletePreview(id);
+  }
+
   @Delete(':id')
+  @Roles(AdminRole.SUPER_ADMIN, AdminRole.MANAGER)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Delete a brand (admin/operator)',
+    summary: 'Delete a brand (manager or super admin)',
     description:
-      'Models cascade. Blocked with 409 if a garage vehicle references the brand.',
+      'Models and their fitment bindings cascade, so if any bindings exist their ' +
+      'number must be stated in ?acceptedFitmentLoss=. Blocked with 409 if a garage ' +
+      'vehicle references the brand.',
   })
   @ApiOkResponse({ description: 'The deleted brand id.' })
   @ApiNotFoundResponse({ description: 'No such brand.' })
-  @ApiConflictResponse({ description: 'Vehicles reference this brand.' })
-  remove(@Param('id') id: string) {
-    return this.brands.remove(id);
+  @ApiConflictResponse({
+    description: 'Vehicles reference this brand, or fitment would be lost.',
+  })
+  remove(
+    @Param('id') id: string,
+    @Query('acceptedFitmentLoss', new ParseIntPipe({ optional: true }))
+    acceptedFitmentLoss: number | undefined,
+    @Req() req: Request & { user: AuthenticatedAdmin },
+  ) {
+    return this.brands.remove(id, acceptedFitmentLoss, {
+      actor: { id: req.user.id, email: req.user.email, name: req.user.name },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
   }
 
   @Post(':brandId/models')

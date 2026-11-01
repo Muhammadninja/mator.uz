@@ -6,6 +6,7 @@
 import { plainToInstance } from 'class-transformer';
 import { validateSync } from 'class-validator';
 import { CreateCategoryDto } from './create-category.dto';
+import { MoveCategoryDto } from './move-category.dto';
 import { UpdateCategoryDto } from './update-category.dto';
 
 const validate = <T extends object>(cls: new () => T, payload: unknown) =>
@@ -89,6 +90,25 @@ describe('CreateCategoryDto — localized names', () => {
       ).not.toHaveLength(0);
     },
   );
+});
+
+describe('sortOrder', () => {
+  it.each([
+    ['CreateCategoryDto', CreateCategoryDto, NAMES],
+    ['UpdateCategoryDto', UpdateCategoryDto, {}],
+    ['MoveCategoryDto', MoveCategoryDto, { parentId: null }],
+  ])('%s refuses a value the int column cannot hold', (_name, dto, base) => {
+    expect(
+      failedFields(
+        validate(dto as never, { ...base, sortOrder: 2_147_483_648 }),
+      ),
+    ).toEqual(['sortOrder']);
+    expect(
+      failedFields(
+        validate(dto as never, { ...base, sortOrder: 2_147_483_647 }),
+      ),
+    ).toEqual([]);
+  });
 });
 
 describe('UpdateCategoryDto — localized names', () => {

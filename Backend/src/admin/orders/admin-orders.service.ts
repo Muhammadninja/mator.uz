@@ -3,13 +3,22 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { OrderStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { clampLimit } from '../../common/pagination.util';
 import { ORDER_STATUSES } from '../../orders/dto/list-orders.query.dto';
 import {
+  OfflineOrderPolicy,
+  isOverOfflineSla,
+  isPastOperatorWarning,
+  readOfflineOrderPolicy,
+  waitingOfflineOrders,
+} from '../../orders/offline-order.policy';
+import {
   ADMIN_ORDER_DETAIL_SELECT,
   ADMIN_ORDER_LIST_SELECT,
+  REFUND_DUE_WHERE,
   presentAdminOrderDetail,
   presentAdminOrderRow,
 } from './admin-orders.presenter';
@@ -23,6 +32,14 @@ const MAX_ADMIN_ORDER_LIMIT = 100;
 // Minimum digits before a search term is treated as a (partial) phone number —
 // avoids a stray digit matching essentially every phone in the system.
 const MIN_PHONE_SEARCH_DIGITS = 4;
+const DEFAULT_BOARD_PER_STATUS = 25;
+/** Money actually committed: the same statuses a customer's lifetime spend sums. */
+const REVENUE_STATUSES: OrderStatus[] = [
+  OrderStatus.PAID,
+  OrderStatus.PROCESSING,
+  OrderStatus.SHIPPED,
+  OrderStatus.DELIVERED,
+];
 
 /** Whitelist mapping the accepted sort field onto the real Prisma column. */
 const SORT_COLUMN: Record<
@@ -41,7 +58,16 @@ const SORT_COLUMN: Record<
  */
 @Injectable()
 export class AdminOrdersService {
-  constructor(private readonly prisma: PrismaService) {}
+  private readonly offlinePolicy: OfflineOrderPolicy;
+
+  constructor(
+    private readonly prisma: PrismaService,
+    config: ConfigService,
+  ) {
+    this.offlinePolicy = readOfflineOrderPolicy((key) =>
+      config.get<string>(key),
+    );
+  }
 
   async list(query: ListAdminOrdersQueryDto) {
     const page = query.page ?? 1;
@@ -58,10 +84,28 @@ export class AdminOrdersService {
     if (statuses) where.status = { in: statuses };
     const search = this.buildSearch(query.search);
     if (search) where.OR = search;
+    if (query.customerId) where.userId = query.customerId;
+    // Under AND rather than spread: each carries its own `status`, which must
+    // combine with the filter above, not overwrite it.
+    const now = new Date();
+    const narrowed = [
+      ...(query.slaOverdue === 'true'
+        ? [waitingOfflineOrders(now, this.offlinePolicy.slaHours)]
+        : []),
+      ...(query.operatorWarning === 'true'
+        ? [this.pastOperatorWarning(now)]
+        : []),
+      ...(query.refundDue === 'true' ? [REFUND_DUE_WHERE] : []),
+    ];
+    if (narrowed.length > 0) where.AND = narrowed;
 
-    const orderBy: Prisma.OrderOrderByWithRelationInput = {
-      [SORT_COLUMN[sortField]]: direction,
-    };
+    // The secondary `id` key makes the order total, as on the dealers list: rows
+    // sharing a sort value (every order in one status) could otherwise come back
+    // in a different order per page, so one repeats and another is never shown.
+    const orderBy: Prisma.OrderOrderByWithRelationInput[] = [
+      { [SORT_COLUMN[sortField]]: direction },
+      { id: 'asc' },
+    ];
 
     const [orders, totalItems] = await this.prisma.$transaction([
       this.prisma.order.findMany({
@@ -76,7 +120,13 @@ export class AdminOrdersService {
 
     return {
       success: true,
-      data: orders.map(presentAdminOrderRow),
+      data: orders.map((o) =>
+        presentAdminOrderRow(
+          o,
+          isOverOfflineSla(o, now, this.offlinePolicy),
+          isPastOperatorWarning(o, now, this.offlinePolicy),
+        ),
+      ),
       meta: {
         page,
         limit,
@@ -92,7 +142,107 @@ export class AdminOrdersService {
       select: ADMIN_ORDER_DETAIL_SELECT,
     });
     if (!order) throw new NotFoundException('Order not found');
-    return { success: true, data: presentAdminOrderDetail(order) };
+    return {
+      success: true,
+      data: presentAdminOrderDetail(
+        order,
+        isOverOfflineSla(order, new Date(), this.offlinePolicy),
+        isPastOperatorWarning(order, new Date(), this.offlinePolicy),
+      ),
+    };
+  }
+
+  /**
+   * Totals for the dashboard and the queue header, over every order. Grouped in the
+   * database: a figure summed from one fetched page would quietly stop being true
+   * once there is more than a page of orders.
+   */
+  async summary() {
+    const now = new Date();
+    const [counts, slaOverdue, operatorWarnings, refundsDue] =
+      await Promise.all([
+        this.statusTotals(),
+        this.prisma.order.count({
+          where: waitingOfflineOrders(now, this.offlinePolicy.slaHours),
+        }),
+        this.prisma.order.count({ where: this.pastOperatorWarning(now) }),
+        this.prisma.order.count({ where: REFUND_DUE_WHERE }),
+      ]);
+    return {
+      success: true,
+      data: {
+        ...counts,
+        slaOverdue,
+        operatorWarnings,
+        refundsDue,
+        slaHours: this.offlinePolicy.slaHours,
+        operatorWarningHours: this.offlinePolicy.operatorWarningHours,
+      },
+    };
+  }
+
+  /**
+   * The order timeline in one request: the newest orders of each status plus the
+   * true total behind each column. One read per status, since a page across all
+   * statuses would fill up with whichever is most common.
+   */
+  async board(perStatus: number = DEFAULT_BOARD_PER_STATUS) {
+    const now = new Date();
+    const [totals, columns] = await Promise.all([
+      this.statusTotals(),
+      Promise.all(
+        ORDER_STATUSES.map(async (status) => {
+          const rows = await this.prisma.order.findMany({
+            where: { status: status.toUpperCase() as OrderStatus },
+            select: ADMIN_ORDER_LIST_SELECT,
+            orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
+            take: perStatus,
+          });
+          return [
+            status,
+            rows.map((o) =>
+              presentAdminOrderRow(
+                o,
+                isOverOfflineSla(o, now, this.offlinePolicy),
+                isPastOperatorWarning(o, now, this.offlinePolicy),
+              ),
+            ),
+          ] as const;
+        }),
+      ),
+    ]);
+    return {
+      success: true,
+      data: { ...totals, columns: Object.fromEntries(columns) },
+    };
+  }
+
+  /** Matches nothing when the warning is switched off. */
+  private pastOperatorWarning(now: Date): Prisma.OrderWhereInput {
+    const hours = this.offlinePolicy.operatorWarningHours;
+    return hours > 0 ? waitingOfflineOrders(now, hours) : { id: { in: [] } };
+  }
+
+  private async statusTotals() {
+    const rows = await this.prisma.order.groupBy({
+      by: ['status'],
+      _count: { _all: true },
+      _sum: { totalUzs: true },
+    });
+    const counts = Object.fromEntries(
+      ORDER_STATUSES.map((status) => [status, 0]),
+    ) as Record<(typeof ORDER_STATUSES)[number], number>;
+    let totalOrders = 0;
+    let revenueUzs = 0;
+    for (const row of rows) {
+      const key = row.status.toLowerCase() as keyof typeof counts;
+      counts[key] = row._count._all;
+      totalOrders += row._count._all;
+      if (REVENUE_STATUSES.includes(row.status)) {
+        revenueUzs += Number(row._sum.totalUzs ?? 0);
+      }
+    }
+    return { counts, totalOrders, revenueUzs };
   }
 
   /**
