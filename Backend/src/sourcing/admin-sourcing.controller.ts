@@ -77,9 +77,10 @@ export class AdminSourcingController {
   }
 
   @Delete(':id')
+  @Roles(AdminRole.SUPER_ADMIN, AdminRole.MANAGER)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Delete a sourcing ticket',
+    summary: 'Delete a sourcing ticket (manager or super admin)',
     description: 'Permanently removes the ticket. Idempotent envelope: { success }.',
   })
   @ApiOkResponse({ description: 'The ticket was deleted.' })

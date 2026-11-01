@@ -212,6 +212,29 @@ export const ANTIFREEZE_ROOT_ID: string =
   VEHICLE_CATEGORY_TO_SLUG[PartVehicleCategory.MAINTENANCE_AND_FLUIDS];
 
 /**
+ * Categories the application reaches BY ID, so removing the row breaks something
+ * no foreign key on it can report:
+ *   • a home-grid bucket: the projection files a listing bucketed BRAKES on
+ *     'brakes' (MAIN_CATEGORY_TO_SLUG), and with the row gone it dies on the
+ *     catalog_parts FK, for a listing that references the category only by enum;
+ *   • an anchor, or the root ANTIFREEZE hangs under: the seller bot starts its
+ *     questionnaires from these ids;
+ *   • the fallback bucket every unclassified part lands on.
+ * Hiding one is what isActive is for, and is reversible. Everything else in the
+ * tree stays hard-deletable once nothing references it.
+ */
+export const LOAD_BEARING_CATEGORY_IDS: ReadonlySet<string> = new Set([
+  'cat_uncategorized',
+  ANTIFREEZE_ROOT_ID,
+  ...Object.values(CategoryAnchor),
+  ...Object.values(MAIN_CATEGORY_TO_SLUG),
+]);
+
+export function isLoadBearingCategory(categoryId: string): boolean {
+  return LOAD_BEARING_CATEGORY_IDS.has(categoryId);
+}
+
+/**
  * Reverse lookups: category id → the legacy enum it mirrors, or undefined for an
  * admin-created category that mirrors none. Used when a dynamic category pick
  * must also populate the legacy enum columns during the compatibility stage.

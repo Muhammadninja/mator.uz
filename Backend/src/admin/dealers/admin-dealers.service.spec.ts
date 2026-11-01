@@ -491,6 +491,53 @@ describe('AdminDealersService', () => {
       expect(prisma.catalogSeller.update).not.toHaveBeenCalled();
     });
 
+    it('suspending through PATCH revokes the badges, as POST /:id/suspend does', async () => {
+      prisma.catalogSeller.findUnique
+        .mockResolvedValueOnce(
+          mutableRow({
+            status: DealerStatus.ACTIVE,
+            certified: true,
+            lowestPrice: true,
+          }),
+        )
+        .mockResolvedValueOnce(detailRow());
+
+      await service.update('d1', { status: 'suspended', reason: 'x' }, CTX);
+
+      expect(prisma.catalogSeller.update).toHaveBeenCalledWith({
+        where: { id: 'd1' },
+        data: expect.objectContaining({
+          status: DealerStatus.SUSPENDED,
+          certified: false,
+          lowestPrice: false,
+        }),
+      });
+    });
+
+    it('refuses a badge on a suspended dealer', async () => {
+      prisma.catalogSeller.findUnique.mockResolvedValueOnce(
+        mutableRow({ status: DealerStatus.SUSPENDED, certified: false }),
+      );
+
+      await expect(
+        service.update('d1', { certified: true }, CTX),
+      ).rejects.toThrow(BadRequestException);
+      expect(prisma.catalogSeller.update).not.toHaveBeenCalled();
+    });
+
+    it('a null tin clears it instead of crashing', async () => {
+      prisma.catalogSeller.findUnique
+        .mockResolvedValueOnce(mutableRow({ tin: '301234567' }))
+        .mockResolvedValueOnce(detailRow());
+
+      await service.update('d1', { tin: null }, CTX);
+
+      expect(prisma.catalogSeller.update).toHaveBeenCalledWith({
+        where: { id: 'd1' },
+        data: { tin: null },
+      });
+    });
+
     it('flips a badge and audits the specific verb', async () => {
       prisma.catalogSeller.findUnique
         .mockResolvedValueOnce(mutableRow({ certified: false }))

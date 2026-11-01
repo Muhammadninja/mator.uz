@@ -1683,11 +1683,71 @@ model Order {
   items             OrderItem[]
   payments          Payment[]
   statusHistory     OrderStatusHistory[]
+  financialRefunds  FinancialRefund[]
+  // Set while the registry accounts for all the money this order took in, so "is a
+  // refund still owed" can be filtered without summing per row. Maintained only in
+  // the transaction that writes the registry: see financial-refund.ledger.ts.
+  refundSettledAt   DateTime?            @map("refund_settled_at") @db.Timestamptz(3)
 
   @@index([userId])
   @@index([status])
   @@index([createdAt])
   @@map("orders")
+}
+
+// How the money went back to the customer. PROVIDER means through the payment
+// provider's own cabinet or callback; the rest happen outside any provider.
+enum RefundMethod {
+  PROVIDER
+  TERMINAL
+  CASH
+  BANK_TRANSFER
+}
+
+// Who put the entry in the registry.
+enum RefundSource {
+  MANUAL
+  PROVIDER_CALLBACK
+}
+
+// The registry of money actually returned to customers. Separate from the order
+// and payment statuses on purpose: an entry records that money moved and says what
+// proves it, and it never changes a status. REFUNDED stays the provider's word
+// alone. Entries are never deleted: a mistake is voided, with a reason, so the
+// history of what was claimed survives.
+model FinancialRefund {
+  id                  String       @id @db.VarChar(64)
+  orderId             String       @map("order_id") @db.VarChar(64)
+  // Null when no payment row exists, as for cash and terminal orders.
+  paymentId           String?      @map("payment_id") @db.VarChar(64)
+  amountUzs           Decimal      @map("amount_uzs") @db.Decimal(14, 2)
+  method              RefundMethod
+  source              RefundSource @default(MANUAL)
+  // The document behind it: a provider transaction id, a cabinet record, a receipt.
+  reference           String       @db.VarChar(120)
+  reason              String       @db.VarChar(500)
+  // When the money moved, which can be earlier than when it was written down.
+  refundedAt          DateTime     @map("refunded_at") @db.Timestamptz(3)
+  // Set when the provider's own callback confirms the refund.
+  providerConfirmedAt DateTime?    @map("provider_confirmed_at") @db.Timestamptz(3)
+  // Snapshots rather than FKs, like the audit trail: the entry must stay readable
+  // after an administrator is removed. Null for a provider callback.
+  createdById         String?      @map("created_by_id")
+  createdByEmail      String?      @map("created_by_email") @db.VarChar(255)
+  createdByName       String?      @map("created_by_name") @db.VarChar(120)
+  voidedAt            DateTime?    @map("voided_at") @db.Timestamptz(3)
+  voidedById          String?      @map("voided_by_id")
+  voidedByEmail       String?      @map("voided_by_email") @db.VarChar(255)
+  voidReason          String?      @map("void_reason") @db.VarChar(500)
+  createdAt           DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt           DateTime     @updatedAt @map("updated_at") @db.Timestamptz(3)
+  order               Order        @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  payment             Payment?     @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+
+  @@index([orderId])
+  @@index([paymentId])
+  @@index([refundedAt])
+  @@map("financial_refunds")
 }
 
 // Snapshot line item (no FK to catalog — immutable order history).
@@ -1753,6 +1813,7 @@ model Payment {
   createdAt             DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt             DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
   order                 Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  financialRefunds      FinancialRefund[]
 
   @@unique([provider, providerTransactionId])
   @@index([orderId])
@@ -1971,6 +2032,24 @@ enum AdminAuditAction {
   // secret can be read back out of.
   DEALER_API_KEY_ISSUED
   DEALER_API_KEY_REVOKED
+  // Catalog changes (/v1/admin/categories, /v1/admin/products, /v1/admin/inventory,
+  // /v1/admin/brands, /v1/admin/models). previousValues/newValues hold only what
+  // changed, per target, so a price or stock edit reads as old value and new value.
+  CATEGORY_DELETED
+  CATEGORY_ITEMS_TRANSFERRED
+  CATALOG_PART_MOVED
+  INVENTORY_UPDATED
+  BRAND_DELETED
+  MODEL_DELETED
+  // Operator order actions. The order's status history stays the record of the
+  // lifecycle; these add the money side an operator is accountable for, including
+  // how a payment was confirmed and what the provider's transaction said then.
+  ORDER_PAYMENT_CONFIRMED
+  ORDER_CANCELLED
+  // Name or email of an administrator account changed (PATCH /v1/admins/:id).
+  ADMIN_PROFILE_UPDATED
+  REFUND_RECORDED
+  REFUND_VOIDED
 }
 
 // What kind of thing an audit entry is about, for entries whose target is not
@@ -1978,6 +2057,11 @@ enum AdminAuditAction {
 // the targetAdminId FK.
 enum AdminAuditEntity {
   DEALER
+  CATEGORY
+  CATALOG_PART
+  ORDER
+  BRAND
+  VEHICLE_MODEL
 }
 
 model AppAdmin {

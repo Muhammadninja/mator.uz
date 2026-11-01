@@ -6,6 +6,7 @@ import {
   Param,
   ParseIntPipe,
   Patch,
+  Req,
   UseGuards,
 } from '@nestjs/common';
 import {
@@ -19,6 +20,8 @@ import {
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 import { AdminRole } from '@prisma/client';
+import type { Request } from 'express';
+import { AuthenticatedAdmin } from '../auth/strategies/admin-jwt.strategy';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { AdminJwtGuard } from '../auth/guards/admin-jwt.guard';
 import { AdminRoleGuard } from '../auth/guards/admin-role.guard';
@@ -69,8 +72,15 @@ export class AdminProductsController {
   })
   @ApiBadRequestResponse({ description: 'Invalid body.' })
   @ApiNotFoundResponse({ description: 'No such target category.' })
-  bulkMove(@Body() dto: BulkMoveProductsDto) {
-    return this.categories.bulkMoveProducts(dto);
+  bulkMove(
+    @Body() dto: BulkMoveProductsDto,
+    @Req() req: Request & { user: AuthenticatedAdmin },
+  ) {
+    return this.categories.bulkMoveProducts(dto, {
+      actor: { id: req.user.id, email: req.user.email, name: req.user.name },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
   }
 
   @Patch(':id/rating')

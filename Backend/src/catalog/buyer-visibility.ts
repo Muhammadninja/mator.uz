@@ -45,6 +45,9 @@ export const BUYER_VISIBLE_PART = {
 export const BUYER_LISTED_PART = {
   ...BUYER_VISIBLE_PART,
   images: { isEmpty: false },
+  // A price of 0 is a data error: the order gate refuses it, so the listing must
+  // not offer what checkout will reject.
+  NOT: { priceUzs: { lte: 0 } },
 } satisfies Prisma.CatalogPartWhereInput;
 
 /** `where` AND buyer-listed, without clobbering a caller's own `seller` filter. */

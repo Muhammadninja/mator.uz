@@ -185,6 +185,11 @@ lives in `src/common/app-lang.util.ts` (`AppLang`, `toAppLang`/`toBotLanguage`,
 4. `id === slug`; both unique. A bucket id ∈ `MAIN_CATEGORY_BY_SLUG` keys.
 5. Buckets are hidden from BOTH drills (app + bot); they surface only on the home grid.
 6. `cat_uncategorized` can never be deleted (fallback bucket); it is hidden from the storefront.
+   Neither can the 12 buckets, the seller-bot anchors or `maintenance-and-fluids`: the application
+   reaches them by id (`LOAD_BEARING_CATEGORY_IDS`), so hard-deleting one breaks projection or the
+   bot with no FK to report it. Deactivate them instead. A hard delete physically removes the row,
+   and is refused while listings, live drafts or children point at it; a terminal draft does not
+   count, since the sweep keeps those rows forever. Structural writes run under one advisory lock.
 
 ---
 
@@ -192,16 +197,23 @@ lives in `src/common/app-lang.util.ts` (`AppLang`, `toAppLang`/`toBotLanguage`,
 
 | Command | Does |
 |---|---|
-| `npm run seed:categories` | create the 52 subcategories under the roots |
+| `npm run seed:categories` | **dry-run** — the 52 subcategories against the tree; `-- --apply` creates what is missing, `-- --apply --overwrite` also resets existing rows |
 | `npm run seed:category-titles` | backfill `name_ru`/`name_uz`/`name_en` from the shared translation table (roots, buckets + subs) |
 | `npm run fix:category-slugs` | diagnose + repair root slugs to canonical unique values |
-| `npm run restore:buyer-buckets` | reactivate/recreate the 12 home-grid buckets, ordered by importance |
+| `npm run restore:buyer-buckets` | **dry-run** — the state of the 12 home-grid buckets; `-- --apply` reactivates/recreates them, ordered by importance |
 | `npm run reclassify:subcategories` | **dry-run** — re-file existing parts onto subcategories |
 | `npm run reclassify:subcategories -- --apply` | persist the reclassification |
 | `npm run backfill:root-buckets` | **dry-run** — fill NULL `main_category` from the tree rule; lists every row, per-bucket counts, tile counts before/after, what stays unbucketed |
 | `npm run backfill:root-buckets -- --apply` | persist it (NULLs only; re-runs are no-ops) |
 
 After any of these that change the tree: `redis-cli DEL cache:reference:categories`.
+
+Once a database is live the tree belongs to operators, so these scripts no longer write it unless
+asked. `seed` refuses `NODE_ENV=production` without `--allow-production`, and skips categories on a
+database with real listings unless given `--reconcile-categories`. `seed:categories` and
+`restore:buyer-buckets` are dry-runs without `--apply`; `seed:categories -- --apply` creates what is
+missing (read the dry-run first: a missing row may be one an operator removed on purpose), and only
+`--overwrite` resets existing rows.
 
 ---
 

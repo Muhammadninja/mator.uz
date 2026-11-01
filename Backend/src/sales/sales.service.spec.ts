@@ -300,6 +300,21 @@ describe('SalesService', () => {
       ).rejects.toThrow(BadRequestException);
     });
 
+    it('an explicit null endAt makes the sale open-ended, not one ending in 1970', async () => {
+      prisma.sale.findFirst.mockResolvedValue({
+        ...stored,
+        endAt: new Date('2026-08-01T00:00:00Z'),
+      });
+      prisma.sale.findUniqueOrThrow.mockResolvedValue(makeRow());
+
+      await service.update('sale_1', { endAt: null });
+
+      expect(prisma.sale.update).toHaveBeenCalledWith({
+        where: { id: 'sale_1' },
+        data: { endAt: null },
+      });
+    });
+
     it('re-checks the window against the STORED startAt when only endAt changes', async () => {
       prisma.sale.findFirst.mockResolvedValue(stored);
 

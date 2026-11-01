@@ -13,6 +13,7 @@ import {
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { AdminRole } from '@prisma/client';
+import type { Request as ExpressRequest } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { Roles } from '../admin/auth/decorators/roles.decorator';
 import { AdminJwtGuard } from '../admin/auth/guards/admin-jwt.guard';
@@ -68,7 +69,7 @@ export class OrdersController {
   @Roles(AdminRole.SUPER_ADMIN, AdminRole.MANAGER, AdminRole.OPERATOR)
   @HttpCode(HttpStatus.OK)
   updateStatus(
-    @Request() req: { user: AuthenticatedAdmin },
+    @Request() req: ExpressRequest & { user: AuthenticatedAdmin },
     @Param('id') id: string,
     @Body() dto: UpdateOrderStatusDto,
   ) {
@@ -79,8 +80,13 @@ export class OrdersController {
     const actor: StatusActor = {
       id: req.user.id,
       role: 'ADMIN',
+      adminRole: req.user.role,
+      email: req.user.email,
       displayName: req.user.name,
     };
-    return this.orders.updateStatus(id, dto, actor);
+    return this.orders.updateStatus(id, dto, actor, {
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
   }
 }

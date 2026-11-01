@@ -1,14 +1,18 @@
 import { Injectable } from '@nestjs/common';
-import { OrderActorType, OrderStatus, Prisma } from '@prisma/client';
+import { AdminRole, OrderActorType, OrderStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { prefixedId, IdPrefix } from '../common/ulid.util';
+import {
+  OFFLINE_PAYMENT_TYPES,
+  waitingOfflineOrders,
+} from './offline-order.policy';
 
 /**
  * Provider transaction state meaning "created, awaiting confirmation" — Payme
  * state 1 (Click's prepare stage uses the same value). An order carrying one is
  * reserved and must not be expired out from under the provider.
  */
-const ACTIVE_PROVIDER_STATE = 1;
+export const ACTIVE_PROVIDER_STATE = 1;
 
 /**
  * The acting user behind a status change — a subset of `req.user` (AppUser).
@@ -17,6 +21,10 @@ const ACTIVE_PROVIDER_STATE = 1;
 export interface TransitionActor {
   id: string;
   role?: string | null;
+  /** The operator's console role, which decides what they may confirm. */
+  adminRole?: AdminRole | null;
+  /** Snapshotted into the audit trail along with the name. */
+  email?: string | null;
   displayName?: string | null;
   firstName?: string | null;
   lastName?: string | null;
@@ -138,6 +146,15 @@ export class OrderStatusService {
         // is performed, cancelled or times out, the order becomes eligible again
         // on a later sweep.
         payments: { none: { providerState: ACTIVE_PROVIDER_STATE } },
+        // A cash or terminal order has no payment window to miss: EXPIRED is
+        // terminal, so this sweep would destroy a live order nobody has looked at.
+        // Its own, longer wait is expireUnconfirmedOffline. Spelled with OR because
+        // `notIn` alone is SQL `NOT IN`, which also drops NULL: orders from clients
+        // that send no payment_type must still expire.
+        OR: [
+          { paymentType: null },
+          { paymentType: { notIn: OFFLINE_PAYMENT_TYPES } },
+        ],
       },
       select: { id: true },
     });
@@ -167,6 +184,53 @@ export class OrderStatusService {
             ),
           });
           expired += 1;
+        }
+      });
+    }
+    return expired;
+  }
+
+  /**
+   * Close cash and terminal orders no operator confirmed within `timeoutHours`.
+   * Guarded like the sweep above, so an order confirmed between the scan and the
+   * write is skipped and gets no history entry. Measured from creation, not from
+   * `expiresAt`: that is the online payment window, which never applied to these.
+   *
+   * @returns the orders this call actually expired.
+   */
+  async expireUnconfirmedOffline(
+    now: Date,
+    timeoutHours: number,
+    limit: number,
+  ): Promise<{ id: string; userId: string }[]> {
+    const where = {
+      ...waitingOfflineOrders(now, timeoutHours),
+      payments: { none: { providerState: ACTIVE_PROVIDER_STATE } },
+    };
+    const overdue = await this.prisma.order.findMany({
+      where,
+      select: { id: true, userId: true },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: limit,
+    });
+
+    const expired: { id: string; userId: string }[] = [];
+    for (const order of overdue) {
+      await this.prisma.$transaction(async (tx) => {
+        const res = await tx.order.updateMany({
+          where: { ...where, id: order.id },
+          data: { status: OrderStatus.EXPIRED },
+        });
+        if (res.count === 1) {
+          await tx.orderStatusHistory.create({
+            data: this.historyData(
+              order.id,
+              OrderStatus.EXPIRED,
+              undefined,
+              `Expired: not confirmed by an operator within ${timeoutHours}h`,
+            ),
+          });
+          expired.push(order);
         }
       });
     }

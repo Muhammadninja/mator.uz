@@ -78,7 +78,11 @@ function adminWorld(rows: PartRow[], tree: readonly TreeRow[] = LIVE_TREE) {
     },
     product: { count: jest.fn().mockResolvedValue(0) },
     productDraft: { count: jest.fn().mockResolvedValue(0) },
+    sale: { findMany: jest.fn().mockResolvedValue([]) },
     catalogPart: {
+      findMany: jest.fn(({ where }: { where: unknown }) =>
+        Promise.resolve(rows.filter((r) => matchesWhere(r, where))),
+      ),
       count: jest.fn(({ where }: { where: unknown }) =>
         Promise.resolve(rows.filter((r) => matchesWhere(r, where)).length),
       ),
@@ -90,12 +94,23 @@ function adminWorld(rows: PartRow[], tree: readonly TreeRow[] = LIVE_TREE) {
         },
       ),
     },
-    $transaction: jest.fn((ops: Promise<unknown>[]) => Promise.all(ops)),
+    // The row lock in remove(), with the category it deletes present.
+    $queryRaw: jest.fn().mockResolvedValue([{ parent_id: 'brake-system' }]),
+    $executeRaw: jest.fn().mockResolvedValue(0),
+    $transaction: jest.fn((arg: unknown): unknown =>
+      typeof arg === 'function'
+        ? (arg as (tx: unknown) => unknown)(prisma)
+        : Promise.all(arg as unknown[]),
+    ),
   };
   const categories = { invalidate: jest.fn().mockResolvedValue(undefined) };
   const service = new AdminCategoriesService(
     prisma as never,
     categories as never,
+    {
+      record: jest.fn().mockResolvedValue(undefined),
+      recordMany: jest.fn().mockResolvedValue(undefined),
+    } as never,
   );
   return { service, prisma };
 }

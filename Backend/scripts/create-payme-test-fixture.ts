@@ -107,6 +107,14 @@ async function main() {
   // Without it, an existing state-1 transaction would (correctly) make the next
   // CreateTransaction fail with "another transaction is in progress".
   if (args.reset) {
+    // A refund tried out on this order entered the registry, which holds the payment.
+    await prisma.financialRefund.deleteMany({
+      where: { orderId: TEST_ORDER_ID },
+    });
+    await prisma.order.update({
+      where: { id: TEST_ORDER_ID },
+      data: { refundSettledAt: null },
+    });
     const removed = await prisma.payment.deleteMany({
       where: { orderId: TEST_ORDER_ID },
     });

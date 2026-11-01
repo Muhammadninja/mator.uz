@@ -5,6 +5,7 @@ import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { ScheduleModule } from '@nestjs/schedule';
 import { EventEmitterModule } from '@nestjs/event-emitter';
 import { APP_GUARD } from '@nestjs/core';
+import { THROTTLERS } from './admin/auth/admin-throttle';
 import { PrismaModule } from './prisma/prisma.module';
 import { RedisModule } from './redis/redis.module';
 import { QueueModule } from './queue/queue.module';
@@ -52,7 +53,8 @@ import { isBlueprintEnabled } from './blueprint/blueprint-auth';
     // materialises the Payme defaults.
     ConfigModule.forRoot({ isGlobal: true, validate: validateEnv }),
     // Global baseline rate limit; sensitive auth routes tighten this further.
-    ThrottlerModule.forRoot([{ ttl: 60 * 1000, limit: 100 }]),
+    // Counted per administrator for admin traffic: see admin-throttle.ts.
+    ThrottlerModule.forRoot(THROTTLERS),
     ScheduleModule.forRoot(),
     // In-process domain events. Used to decouple the image worker from Telegram:
     // DraftCoordinator emits draft.* events; TelegramService reacts (@OnEvent).

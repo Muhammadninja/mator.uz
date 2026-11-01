@@ -230,6 +230,19 @@ describe('cycle prevention', () => {
     ).rejects.toBeInstanceOf(BadRequestException);
   });
 
+  it('rejects a move that takes the deepest node of the subtree past the cap', async () => {
+    const { service } = makeService([
+      row({ id: 'host', level: MAX_DEPTH - 1 }),
+      row({ id: 'moved', level: 0 }),
+      row({ id: 'moved-child', parentId: 'moved', level: 1 }),
+    ]);
+
+    // 'moved' itself fits at the cap; its child would not.
+    await expect(service.validateMove('moved', 'host')).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+  });
+
   it('allows a legitimate move and returns the derived level', async () => {
     const { service } = makeService();
     expect(await service.validateMove('oil-filters', 'brakes')).toBe(2);

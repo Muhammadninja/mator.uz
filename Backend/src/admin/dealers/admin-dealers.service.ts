@@ -325,8 +325,20 @@ export class AdminDealersService {
         newValues: Prisma.InputJsonValue;
       }> = [];
 
+      const suspended =
+        (dto.status ? STATUS_BY_WIRE[dto.status] : dealer.status) ===
+        DealerStatus.SUSPENDED;
       for (const field of ['certified', 'lowestPrice'] as const) {
-        const next = dto[field];
+        // A suspended storefront never carries a trust badge, whichever route
+        // suspended it: this path revokes them just as POST /:id/suspend does, and
+        // refuses to grant one, since reactivation would otherwise hand back a
+        // badge the dealer is meant to re-earn.
+        if (suspended && dto[field] === true) {
+          throw new BadRequestException(
+            `A suspended dealer cannot hold the ${field} badge`,
+          );
+        }
+        const next = suspended && dealer[field] ? false : dto[field];
         if (next === undefined || next === dealer[field]) continue;
         data[field] = next;
         entries.push({
@@ -393,7 +405,7 @@ export class AdminDealersService {
       // They join the same DEALER_UPDATED entry — one operator edit, one row in
       // the trail — while status/badges keep their own verbs.
       if (dto.tin !== undefined) {
-        const next = dto.tin.trim() || null;
+        const next = dto.tin?.trim() || null;
         if (next !== dealer.tin) {
           data.tin = next;
           presPrev.tin = dealer.tin;

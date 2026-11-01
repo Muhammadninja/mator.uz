@@ -11,6 +11,7 @@ export const IdPrefix = {
   ORDER_ITEM: 'oi',
   ORDER_STATUS_HISTORY: 'osh',
   PAYMENT: 'pay',
+  FINANCIAL_REFUND: 'rfd',
   BOOKING: 'bk',
   BOOKING_SERVICE: 'bks',
   CART: 'cart',

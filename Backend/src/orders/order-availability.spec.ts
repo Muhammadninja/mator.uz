@@ -136,6 +136,7 @@ describe('availability at each step', () => {
       fakeRealtime(),
       new OrderStatusService(prisma),
       fakeDiscounts(),
+      { record: jest.fn() } as never,
     );
     await expect(svc.createFromCart('usr_1', {})).rejects.toThrow(
       /Brake pads \(out_of_stock\)/,

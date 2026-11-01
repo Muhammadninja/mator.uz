@@ -79,6 +79,14 @@ export function createPrismaMock(): PrismaMock {
   return proxy;
 }
 
+/** AdminAuditService double, for services that write an audit entry. */
+export function fakeAudit(): any {
+  return {
+    record: jest.fn().mockResolvedValue(undefined),
+    recordMany: jest.fn().mockResolvedValue(undefined),
+  };
+}
+
 /** Minimal ConfigService double backed by a plain map. */
 export function fakeConfig(map: Record<string, string | undefined> = {}): any {
   return { get: (key: string) => map[key] };
