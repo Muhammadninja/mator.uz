@@ -10,6 +10,8 @@ import { PhoneChangeService } from './phone-change.service';
 import { AccountDeletionService } from './account-deletion.service';
 import { UserController } from './user.controller';
 import { OrdersModule } from '../orders/orders.module';
+import { FavoritesController } from './favorites/favorites.controller';
+import { FavoritesService } from './favorites/favorites.service';
 
 @Module({
   // CloudinaryModule is @Global (available app-wide), but it is imported here
@@ -20,7 +22,7 @@ import { OrdersModule } from '../orders/orders.module';
   // AccountDeletionService takes TokenService (from AuthModule) so deletion goes
   // through the SINGLE existing revocation entry point, and CloudinaryService to
   // clean up the avatar asset.
-  providers: [UserService, AvatarService, PhoneChangeService, AccountDeletionService],
-  controllers: [UserController],
+  providers: [UserService, AvatarService, PhoneChangeService, AccountDeletionService, FavoritesService],
+  controllers: [UserController, FavoritesController],
 })
 export class UserModule {}
