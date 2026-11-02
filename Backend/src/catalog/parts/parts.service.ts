@@ -313,7 +313,7 @@ export class PartsService {
       },
       maybe: {
         status: 'UNCERTAIN',
-        isCompatible: true,
+        isCompatible: false,
         color: 'yellow',
         text: 'Требует уточнения (проверьте VIN)',
         matchedBy: 'MODEL_REF',

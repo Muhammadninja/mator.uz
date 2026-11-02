@@ -138,6 +138,6 @@ describe('Real-world fitment — Chevrolet garage', () => {
     const { svc } = makeService({ part: COBALT_BRAKE_PADS, vehicleById: null });
     const res = await svc.checkCompatibility(COBALT_BRAKE_PADS.id, {});
     expect(res.status).toBe('UNCERTAIN');
-    expect(res.isCompatible).toBe(true);
+    expect(res.isCompatible).toBe(false);
   });
 });

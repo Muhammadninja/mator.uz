@@ -109,6 +109,7 @@ describe('PartsService.checkCompatibility — contract mapping', () => {
     });
     const res = await svc.checkCompatibility('part_1', { vehicleId: 'v1' });
     expect(res.status).toBe('UNCERTAIN');
+    expect(res.isCompatible).toBe(false);
     expect(res.badge.color).toBe('yellow');
   });
 
@@ -119,6 +120,7 @@ describe('PartsService.checkCompatibility — contract mapping', () => {
     });
     const res = await svc.checkCompatibility('part_1', {});
     expect(res.status).toBe('UNCERTAIN');
+    expect(res.isCompatible).toBe(false);
     expect(res.vehicleId).toBeNull();
   });
 
