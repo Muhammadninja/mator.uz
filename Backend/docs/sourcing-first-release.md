@@ -35,13 +35,13 @@ SELECT migration_name, finished_at FROM _prisma_migrations ORDER BY finished_at 
 
 ## Release order
 
-Check first what production runs: this branch is based on `origin/main`, so deploying it also ships anything on `main` that isn't live yet.
+Check first what production runs: this is merged into `main`, so deploying it also ships anything on `main` that isn't live yet.
 
 1. Back up the database.
 2. Set the new variables, with `SOURCING_TICKETS_ENABLED=false`.
 3. Deploy with the switch off:
    ```bash
-   git fetch origin && git checkout feat/sourcing-first-release && git pull
+   git pull origin main
    cd Backend && npm ci && npx prisma generate && npx prisma migrate deploy && npm run build && pm2 restart mator-backend
    ```
 4. Verify with the switch off:
