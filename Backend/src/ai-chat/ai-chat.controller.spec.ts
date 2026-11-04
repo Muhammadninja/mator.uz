@@ -39,3 +39,25 @@ describe('AiChatController.sendMessage — ticket ownership', () => {
     expect(captured.dto.userId).toBeUndefined();
   });
 });
+
+describe('AiChatController.sendMessage — request context', () => {
+  const req = { user: { id: 'u1' } } as unknown as Request;
+
+  it('passes the verified user, request id and vehicle on', async () => {
+    const { controller, aiChat } = build();
+    await controller.sendMessage({ message: 'x' } as never, req, 'user-123:v1', 'v1');
+    expect(aiChat.processUserMessage).toHaveBeenCalledWith(expect.anything(), {
+      userId: 'u1',
+      idempotencyKey: 'user-123:v1',
+      selectedVehicleId: 'v1',
+    });
+  });
+
+  it.each(['short', 'has spaces in it', 'x'.repeat(129)])('rejects request id %s', async (key) => {
+    const { controller, aiChat } = build();
+    expect(() => controller.sendMessage({ message: 'x' } as never, req, key)).toThrow(
+      expect.objectContaining({ response: expect.objectContaining({ code: 'INVALID_IDEMPOTENCY_KEY' }) }),
+    );
+    expect(aiChat.processUserMessage).not.toHaveBeenCalled();
+  });
+});

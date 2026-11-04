@@ -7,6 +7,11 @@ import { AdminAuthModule } from '../admin/auth/admin-auth.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { CartModule } from '../cart/cart.module';
 import { TelegramNotifierModule } from '../telegram/telegram-notifier.module';
+import { EventsModule } from '../events/events.module';
+import { SourcingConfig } from './sourcing.config';
+import { SourcingRequestService } from './sourcing-request.service';
+import { SourcingLifecycleService } from './sourcing-lifecycle.service';
+import { SourcingCapabilitiesController } from './sourcing-capabilities.controller';
 
 /**
  * Sourcing-ticket persistence + the mator-admin operator console. PrismaModule
@@ -17,9 +22,21 @@ import { TelegramNotifierModule } from '../telegram/telegram-notifier.module';
  * tickets) and SourcingOfferService (the Telegram offer-DM flow records offers).
  */
 @Module({
-  imports: [AdminAuthModule, NotificationsModule, CartModule, TelegramNotifierModule],
-  providers: [SourcingService, SourcingOfferService],
-  controllers: [AdminSourcingController, SourcingController],
-  exports: [SourcingService, SourcingOfferService],
+  imports: [AdminAuthModule, NotificationsModule, CartModule, TelegramNotifierModule, EventsModule],
+  providers: [
+    SourcingConfig,
+    SourcingService,
+    SourcingOfferService,
+    SourcingRequestService,
+    SourcingLifecycleService,
+  ],
+  controllers: [AdminSourcingController, SourcingController, SourcingCapabilitiesController],
+  exports: [
+    SourcingConfig,
+    SourcingService,
+    SourcingOfferService,
+    SourcingRequestService,
+    SourcingLifecycleService,
+  ],
 })
 export class SourcingModule {}

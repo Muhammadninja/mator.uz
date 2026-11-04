@@ -16,7 +16,7 @@ import { AuthModule } from '../auth/auth.module';
  * same sale-adjusted price as the catalog, and fans new sourcing tickets out to
  * the dealers' Telegram group via TelegramNotifierModule. AuthModule provides
  * the passport JWT strategy the route's OptionalJwtAuthGuard relies on to bind a
- * ticket to the authenticated customer (anonymous still allowed).
+ * ticket to the authenticated customer. Guests can chat, but never create one.
  */
 @Module({
   imports: [SourcingModule, EventsModule, SalesModule, TelegramNotifierModule, AuthModule],

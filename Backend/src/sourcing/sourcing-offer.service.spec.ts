@@ -29,6 +29,29 @@ const OWNED_OFFER = {
   ticket: { userId: 'usr_1', extractedData: { part_name: 'Тормозные колодки' } },
 };
 
+/** Behaves like the table for what delivery relies on: claiming is exclusive. */
+function offerStore(overrides: Record<string, any>) {
+  let created: Record<string, any> | null = null;
+  return {
+    create: jest.fn(async ({ data }: { data: Record<string, any> }) => (created = { ...data })),
+    findUnique: jest.fn(async () =>
+      created
+        ? {
+            ...created,
+            ticket: await overrides.sourcingTicket?.findUnique() ?? OWNED_OFFER.ticket,
+          }
+        : OWNED_OFFER,
+    ),
+    updateMany: jest.fn(async ({ where, data }: { where: Record<string, any>; data: any }) => {
+      if (created && where.customerNotifyPending === true && !created.customerNotifyPending) {
+        return { count: 0 };
+      }
+      if (created) Object.assign(created, data);
+      return { count: 1 };
+    }),
+  };
+}
+
 function makePrisma(overrides: Record<string, unknown> = {}) {
   return {
     sourcingTicket: {
@@ -36,13 +59,7 @@ function makePrisma(overrides: Record<string, unknown> = {}) {
       updateMany: jest.fn(async () => ({ count: 1 })),
       update: jest.fn(async () => TICKET),
     },
-    sourcingOffer: {
-      create: jest.fn(async ({ data }: { data: Record<string, unknown> }) => ({
-        ...data,
-      })),
-      findUnique: jest.fn(async () => OWNED_OFFER),
-      updateMany: jest.fn(async () => ({ count: 1 })),
-    },
+    sourcingOffer: offerStore(overrides),
     appUser: {
       findUnique: jest.fn(async () => ({ id: 'usr_1' })),
     },
@@ -62,6 +79,7 @@ function build(prisma = makePrisma()) {
     notifications as never,
     cart as never,
     telegram as never,
+    { offerTtlMs: 3_600_000 } as never,
   );
   jest.spyOn((service as any).logger, 'warn').mockImplementation(() => undefined);
   jest.spyOn((service as any).logger, 'debug').mockImplementation(() => undefined);
@@ -147,13 +165,30 @@ describe('SourcingOfferService.createOffer', () => {
     expect(notifications.emit).not.toHaveBeenCalled();
   });
 
-  it('never fails offer creation when notification throws', async () => {
-    const { service, notifications } = build();
-    notifications.emit.mockRejectedValueOnce(new Error('push down'));
+  it('never fails offer creation when notification throws, and keeps it owed', async () => {
+    const { service, prisma, notifications } = build();
+    notifications.emit.mockRejectedValueOnce(new Error('inbox down'));
 
     const offer = await service.createOffer(baseInput);
 
     expect(offer.price).toBe(250000);
+    expect(prisma.sourcingOffer.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({ data: { customerNotifyPending: true } }),
+    );
+  });
+
+  it('sets an expiry on new offers', async () => {
+    const { service, prisma } = build();
+    await service.createOffer(baseInput);
+    const data = prisma.sourcingOffer.create.mock.calls[0][0].data;
+    expect((data.expiresAt as Date).getTime()).toBeGreaterThan(Date.now());
+  });
+
+  it('does not deliver twice when two runs overlap', async () => {
+    const { service, notifications } = build();
+    await service.createOffer(baseInput);
+    await service.deliverOfferNotification('any');
+    expect(notifications.emit).toHaveBeenCalledTimes(1);
   });
 
   it('throws NotFoundException for a missing ticket', async () => {
@@ -174,8 +209,8 @@ describe('SourcingOfferService.acceptOffer', () => {
 
     expect(prisma.sourcingOffer.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: 'soff_1', status: 'SENT' },
-        data: { status: 'ACCEPTED' },
+        where: expect.objectContaining({ id: 'soff_1', status: 'SENT' }),
+        data: { status: 'ACCEPTED', customerNotifyPending: false },
       }),
     );
     expect(cart.addSourcedOffer).toHaveBeenCalledWith(
@@ -233,7 +268,7 @@ describe('SourcingOfferService.rejectOffer', () => {
     expect(prisma.sourcingOffer.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { id: 'soff_1', status: 'SENT' },
-        data: { status: 'DECLINED', declineReason: 'TOO_EXPENSIVE', declineNote: 'дорого' },
+        data: expect.objectContaining({ status: 'DECLINED', declineReason: 'TOO_EXPENSIVE', declineNote: 'дорого' }),
       }),
     );
     expect(prisma.sourcingTicket.update).not.toHaveBeenCalled();
@@ -262,5 +297,18 @@ describe('SourcingOfferService.rejectOffer', () => {
     await expect(
       service.rejectOffer('soff_1', 'usr_1', 'OTHER'),
     ).rejects.toBeInstanceOf(ConflictException);
+  });
+});
+
+describe('SourcingOfferService — expiry', () => {
+  it('will not accept an expired offer', async () => {
+    const { service, prisma, cart } = build();
+    prisma.sourcingOffer.updateMany.mockResolvedValueOnce({ count: 0 });
+    await expect(service.acceptOffer('soff_1', 'usr_1')).rejects.toBeInstanceOf(ConflictException);
+    expect(prisma.sourcingOffer.updateMany.mock.calls[0][0].where.OR).toEqual([
+      { expiresAt: null },
+      { expiresAt: { gt: expect.any(Date) } },
+    ]);
+    expect(cart.addSourcedOffer).not.toHaveBeenCalled();
   });
 });

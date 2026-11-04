@@ -18,6 +18,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { CartService } from '../cart/cart.service';
 import { TelegramNotifierService } from '../telegram/telegram-notifier.service';
 import { prefixedId, IdPrefix } from '../common/ulid.util';
+import { SourcingConfig } from './sourcing.config';
 
 /** Decline reason → short RU label for the dealer DM. */
 const DECLINE_REASON_RU: Record<SourcingOfferDeclineReason, string> = {
@@ -78,6 +79,7 @@ export class SourcingOfferService {
     private readonly notifications: NotificationsService,
     private readonly cart: CartService,
     private readonly telegram: TelegramNotifierService,
+    private readonly config: SourcingConfig,
   ) {}
 
   /**
@@ -107,6 +109,8 @@ export class SourcingOfferService {
         sellerTgId: input.sellerTgId,
         sellerName: input.sellerName ?? null,
         sellerUsername: input.sellerUsername ?? null,
+        expiresAt: new Date(Date.now() + this.config.offerTtlMs),
+        customerNotifyPending: Boolean(ticket.userId),
       },
     });
 
@@ -122,7 +126,7 @@ export class SourcingOfferService {
       data: { status: SourcingTicketStatus.OFFERED },
     });
 
-    await this.notifyCustomer(ticket.userId, ticket.extractedData, offer);
+    await this.deliverOfferNotification(offer.id);
     return offer;
   }
 
@@ -162,8 +166,12 @@ export class SourcingOfferService {
     const offer = await this.loadOwnedOffer(offerId, userId);
 
     const flip = await this.prisma.sourcingOffer.updateMany({
-      where: { id: offerId, status: 'SENT' },
-      data: { status: 'ACCEPTED' },
+      where: {
+        id: offerId,
+        status: 'SENT',
+        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+      },
+      data: { status: 'ACCEPTED', customerNotifyPending: false },
     });
     if (flip.count === 0) {
       throw new ConflictException('Offer is no longer available');
@@ -203,7 +211,12 @@ export class SourcingOfferService {
     const offer = await this.loadOwnedOffer(offerId, userId);
     const flip = await this.prisma.sourcingOffer.updateMany({
       where: { id: offerId, status: 'SENT' },
-      data: { status: 'DECLINED', declineReason: reason, declineNote: note ?? null },
+      data: {
+        status: 'DECLINED',
+        declineReason: reason,
+        declineNote: note ?? null,
+        customerNotifyPending: false,
+      },
     });
     if (flip.count === 0) {
       throw new ConflictException('Offer can no longer be declined');
@@ -232,16 +245,39 @@ export class SourcingOfferService {
   }
 
   /**
-   * Emit the SOURCING_OFFER notification. Guarded end-to-end: only fires for a
-   * ticket owned by a real AppUser, and any failure is logged, never thrown, so
-   * it can't roll back the committed offer.
+   * Deliver an offer to its customer, claiming the delivery first so overlapping
+   * runs don't double it. On failure it's marked pending again for the next sweep,
+   * and it never throws, so it can't undo the committed offer. The inbox row is
+   * written before push is even queued, so push trouble doesn't affect it.
    */
+  async deliverOfferNotification(offerId: string): Promise<void> {
+    const claimed = await this.prisma.sourcingOffer.updateMany({
+      where: { id: offerId, customerNotifyPending: true },
+      data: { customerNotifyPending: false },
+    });
+    if (claimed.count === 0) return;
+    const offer = await this.prisma.sourcingOffer.findUnique({
+      where: { id: offerId },
+      include: { ticket: { select: { userId: true, extractedData: true } } },
+    });
+    if (!offer) return;
+    const { ticket, ...plain } = offer;
+    const delivered = await this.notifyCustomer(ticket.userId, ticket.extractedData, plain);
+    if (!delivered) {
+      await this.prisma.sourcingOffer.updateMany({
+        where: { id: offerId, status: 'SENT' },
+        data: { customerNotifyPending: true },
+      });
+    }
+  }
+
+  /** Emit the SOURCING_OFFER notification. False means it should be retried. */
   private async notifyCustomer(
     userId: string | null,
     extractedData: Prisma.JsonValue,
     offer: SourcingOffer,
-  ): Promise<void> {
-    if (!userId) return; // anonymous request — nobody to notify.
+  ): Promise<boolean> {
+    if (!userId) return true; // anonymous request — nobody to notify.
     try {
       const owner = await this.prisma.appUser.findUnique({
         where: { id: userId },
@@ -251,7 +287,7 @@ export class SourcingOfferService {
         this.logger.debug(
           `Offer ${offer.id}: ticket owner ${userId} is not an AppUser — skipping notification.`,
         );
-        return;
+        return true;
       }
 
       const partName = this.partName(extractedData);
@@ -279,12 +315,14 @@ export class SourcingOfferService {
           sellerUsername: offer.sellerUsername,
         },
       });
+      return true;
     } catch (err) {
       this.logger.warn(
         `Offer ${offer.id}: notification to ${userId} failed (offer is saved): ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
+      return false;
     }
   }
 

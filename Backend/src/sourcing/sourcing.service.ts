@@ -3,17 +3,10 @@ import { Prisma, SourcingTicket, SourcingTicketStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { clampLimit } from '../common/pagination.util';
 import { QuerySourcingTicketsDto } from './dto/query-sourcing-tickets.dto';
+import { noticeForStatus } from './sourcing-notice.copy';
 
 const MAX_PAGE_SIZE = 100;
-
-export interface CreateSourcingTicketInput {
-  /** Optional client-supplied user id (chat is anonymous-capable). */
-  userId?: string | null;
-  /** The verbatim customer message that triggered the ticket. */
-  rawMessage: string;
-  /** The LLM's structured extraction (brand/model/year/vin/part_name/preference). */
-  extractedData: Record<string, unknown>;
-}
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Persistence for part-sourcing tickets. A ticket is opened by AiChatService
@@ -25,36 +18,25 @@ export class SourcingService {
   constructor(private readonly prisma: PrismaService) {}
 
   /**
-   * A still-open (PENDING) ticket for the same part opened within `windowMinutes`
-   * — used to de-duplicate rapid repeats so operators don't get N copies of one
-   * ask. Scoped to `userId` when it's known; otherwise matches on part alone.
+   * A customer's still-open ticket for the same part on the same car, so asking
+   * again doesn't send staff a second copy. Scoped to the account and vehicle, so
+   * different customers or cars never merge.
    */
-  findRecentDuplicate(input: {
-    partName: string;
-    userId?: string | null;
-    windowMinutes?: number;
+  findOpenDuplicate(input: {
+    userId: string;
+    partKey: string;
+    vehicleKey: string;
+    since: Date;
   }): Promise<SourcingTicket | null> {
-    const since = new Date(Date.now() - (input.windowMinutes ?? 10) * 60_000);
     return this.prisma.sourcingTicket.findFirst({
       where: {
-        status: SourcingTicketStatus.PENDING,
-        createdAt: { gte: since },
-        // jsonb: extracted_data->>'part_name' = partName (exact).
-        extractedData: { path: ['part_name'], equals: input.partName },
-        ...(input.userId ? { userId: input.userId } : {}),
+        userId: input.userId,
+        partKey: input.partKey,
+        vehicleKey: input.vehicleKey,
+        status: { in: [SourcingTicketStatus.PENDING, SourcingTicketStatus.IN_PROGRESS] },
+        createdAt: { gte: input.since },
       },
       orderBy: { createdAt: 'desc' },
-    });
-  }
-
-  createTicket(input: CreateSourcingTicketInput): Promise<SourcingTicket> {
-    return this.prisma.sourcingTicket.create({
-      data: {
-        userId: input.userId ?? null,
-        rawMessage: input.rawMessage,
-        extractedData: input.extractedData as unknown as Prisma.InputJsonValue,
-        // status defaults to PENDING at the DB level.
-      },
     });
   }
 
@@ -106,7 +88,7 @@ export class SourcingService {
 
     return {
       success: true,
-      data,
+      data: await this.withCustomerContact(data),
       meta: {
         total,
         page,
@@ -114,6 +96,46 @@ export class SourcingService {
         totalPages: Math.max(1, Math.ceil(total / limit)),
       },
     };
+  }
+
+  /**
+   * Add the customer's verified contact for staff. This route is the only place it
+   * leaves the server: an unverified phone number is left out, since it may not be
+   * the customer's.
+   */
+  private async withCustomerContact<T extends { userId: string | null }>(tickets: T[]) {
+    // Old tickets can hold a client-supplied id that isn't a uuid at all.
+    const ids = [...new Set(tickets.map((t) => t.userId))].filter(
+      (id): id is string => !!id && UUID.test(id),
+    );
+    const users = ids.length
+      ? await this.prisma.appUser.findMany({
+          where: { id: { in: ids } },
+          select: {
+            id: true,
+            displayName: true,
+            firstName: true,
+            lastName: true,
+            phoneE164: true,
+            phoneVerified: true,
+          },
+        })
+      : [];
+    const byId = new Map(users.map((u) => [u.id, u]));
+    return tickets.map((ticket) => {
+      const user = ticket.userId ? byId.get(ticket.userId) : undefined;
+      return {
+        ...ticket,
+        customer: user
+          ? {
+              name:
+                user.displayName ??
+                ([user.firstName, user.lastName].filter(Boolean).join(' ') || null),
+              phone: user.phoneVerified ? user.phoneE164 : null,
+            }
+          : null,
+      };
+    });
   }
 
   /**
@@ -125,10 +147,18 @@ export class SourcingService {
     status: SourcingTicketStatus,
   ): Promise<SourcingTicket> {
     try {
-      return await this.prisma.sourcingTicket.update({
+      const ticket = await this.prisma.sourcingTicket.update({
         where: { id },
         data: { status },
       });
+      // Only tickets from the current flow: older ones may have no reachable owner.
+      const notice = ticket.requestId ? noticeForStatus(status) : null;
+      return notice
+        ? await this.prisma.sourcingTicket.update({
+            where: { id },
+            data: { customerNotice: notice },
+          })
+        : ticket;
     } catch (err) {
       if (
         err instanceof Prisma.PrismaClientKnownRequestError &&

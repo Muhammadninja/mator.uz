@@ -21,6 +21,7 @@ const CLOSE_RATE_LIMITED = 4429;
 
 /** The realtime frame admins receive when a new sourcing ticket is opened. */
 export const NEW_SOURCING_TICKET = 'NEW_SOURCING_TICKET';
+export const SOURCING_TICKET_ESCALATED = 'SOURCING_TICKET_ESCALATED';
 
 interface TrackedSocket extends WebSocket {
   adminId?: string;
@@ -99,6 +100,19 @@ export class AdminEventsGateway
         userId: ticket.userId,
         rawMessage: ticket.rawMessage,
         extractedData: ticket.extractedData,
+        createdAt: ticket.createdAt,
+      },
+    });
+  }
+
+  notifyAdminsTicketEscalated(ticket: SourcingTicket): void {
+    this.broadcast({
+      type: SOURCING_TICKET_ESCALATED,
+      data: {
+        id: ticket.id,
+        status: ticket.status,
+        partName: ticket.partName,
+        staffNotifyStatus: ticket.staffNotifyStatus,
         createdAt: ticket.createdAt,
       },
     });

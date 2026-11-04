@@ -3,6 +3,10 @@ import { ConfigService } from '@nestjs/config';
 import { Markup, Telegraf } from 'telegraf';
 import type { InlineKeyboardMarkup } from 'telegraf/types';
 import type { SourcingTicket } from '@prisma/client';
+import { maskVin } from '../sourcing/sourcing-keys';
+
+/** How a send went. Sourcing retries on failure, so it has to know. */
+export type TelegramSendResult = { ok: true } | { ok: false; error: string };
 
 /**
  * Shape of the LLM extraction stored on a sourcing ticket's `extractedData`
@@ -23,7 +27,7 @@ interface ExtractedFields {
  *
  * When the AI chat can't find a requested part in stock it opens a sourcing
  * ticket; this fans that ticket out to the dealers' Telegram group so a human
- * can quote it fast (the 15-minute SLA the chat promises).
+ * can quote it.
  *
  * ── Why a send-only Telegraf client (same call as TelegramAlertChannel) ──
  * The existing TelegramService is the SELLER bot: it long-polls via
@@ -44,6 +48,7 @@ export class TelegramNotifierService {
   private readonly logger = new Logger(TelegramNotifierService.name);
   private readonly botToken: string;
   private readonly dealersGroupId: string;
+  private readonly escalationChatId: string;
   /**
    * URL the «Связаться для доставки» card button opens (a manager's Telegram).
    * Empty → the card is sent without the button. Env-configured, never hardcoded.
@@ -58,6 +63,8 @@ export class TelegramNotifierService {
     this.botToken = config.get<string>('TELEGRAM_BOT_TOKEN')?.trim() ?? '';
     this.dealersGroupId =
       config.get<string>('TELEGRAM_DEALERS_GROUP_ID')?.trim() ?? '';
+    this.escalationChatId =
+      config.get<string>('TELEGRAM_SOURCING_ESCALATION_CHAT_ID')?.trim() ?? '';
     this.managerContactUrl = this.normalizeContactUrl(
       config.get<string>('TELEGRAM_MANAGER_USERNAME'),
     );
@@ -87,51 +94,70 @@ export class TelegramNotifierService {
   }
 
   /**
-   * Post one sourcing ticket to the dealers group as an HTML card.
-   *
-   * Resolves (never rejects) so a Telegram outage can't fail the AI-chat
-   * request that triggered it — the caller dispatches this without awaiting.
-   * Delivery problems are logged, not thrown.
+   * Post one sourcing ticket to the dealers group as an HTML card. Never rejects,
+   * and reports the outcome so the caller can retry. An unconfigured deployment
+   * counts as a failure: the ticket has not reached anyone.
    */
-  async sendSourcingTicketToDealers(ticket: SourcingTicket): Promise<void> {
-    if (!this.configured) return;
-
+  async sendSourcingTicketToDealers(ticket: SourcingTicket): Promise<TelegramSendResult> {
+    if (!this.configured) return { ok: false, error: 'Dealers group not configured' };
     try {
-      const text = this.formatTicket(ticket);
-      await this.bot().telegram.sendMessage(this.dealersGroupId, text, {
+      await this.bot().telegram.sendMessage(this.dealersGroupId, this.formatTicket(ticket), {
         parse_mode: 'HTML',
         link_preview_options: { is_disabled: true },
         ...(await this.cardMarkup(ticket.id)),
       });
       this.logger.debug(`Sourcing ticket ${ticket.id} sent to dealers group`);
+      return { ok: true };
     } catch (err) {
-      this.logger.error(
-        `Failed to send sourcing ticket ${ticket.id} to Telegram: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
+      const error = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Failed to send sourcing ticket ${ticket.id} to Telegram: ${error}`);
+      return { ok: false, error };
     }
   }
 
-  /** Build the HTML message body. Exposed for unit testing the formatting. */
+  get escalationConfigured(): boolean {
+    return this.botToken !== '' && this.escalationChatId !== '';
+  }
+
+  /** Tell internal staff a ticket needs attention. No customer details. */
+  async sendSourcingEscalation(ticket: SourcingTicket): Promise<TelegramSendResult> {
+    if (!this.escalationConfigured) return { ok: false, error: 'Escalation chat not configured' };
+    const part = this.str(ticket.partName) ?? '—';
+    const delivery = ticket.staffNotifyStatus === 'FAILED' ? 'не доставлена дилерам' : 'не взята в работу';
+    try {
+      await this.bot().telegram.sendMessage(
+        this.escalationChatId,
+        `⚠️ <b>Заявка требует внимания</b> (${delivery})\n\n` +
+          `<b>Part:</b> ${this.escape(part)}\n<i>Ticket ${this.escape(ticket.id)}</i>`,
+        { parse_mode: 'HTML', link_preview_options: { is_disabled: true } },
+      );
+      return { ok: true };
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Failed to escalate sourcing ticket ${ticket.id}: ${error}`);
+      return { ok: false, error };
+    }
+  }
+
+  /**
+   * The HTML card dealers see: the part and what's needed to quote it. The group
+   * is outside the company, so no customer contact, no raw message (it can hold
+   * anything the customer typed), and no full VIN.
+   */
   formatTicket(ticket: SourcingTicket): string {
     const data = (ticket.extractedData ?? {}) as ExtractedFields;
+    const vin = this.str(data.vin);
 
     const rows: string[] = [
       '🔧 <b>New sourcing request</b>',
       '',
+      this.row('Part', ticket.partName ?? data.part_name),
       this.row('Brand', data.brand),
       this.row('Model', data.model),
       this.row('Year', data.year),
-      this.row('VIN', data.vin),
-      this.row('Part', data.part_name),
+      this.row('VIN', vin ? maskVin(vin) : null),
       this.row('Preference', data.preference),
     ].filter((r): r is string => r !== null);
-
-    const raw = this.str(ticket.rawMessage);
-    if (raw) {
-      rows.push('', `<b>Message:</b> ${this.escape(raw)}`);
-    }
 
     rows.push('', `<i>Ticket ${this.escape(ticket.id)}</i>`);
     return rows.join('\n');

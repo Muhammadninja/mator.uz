@@ -1,23 +1,43 @@
-import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
+import { HttpException, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Anthropic from '@anthropic-ai/sdk';
 import { SendMessageDto } from './dto/send-message.dto';
 import { RagSearchService, StockItem } from './rag-search.service';
 import { SourcingService } from '../sourcing/sourcing.service';
 import { AdminEventsGateway } from '../events/admin-events.gateway';
-import { CANONICAL_RESPONSES, detectLanguage } from '../common/i18n.util';
-import { TelegramNotifierService } from '../telegram/telegram-notifier.service';
+import {
+  CANONICAL_RESPONSES,
+  detectConversationLanguage,
+  makesUnsupportedPromise,
+  type SupportedLang,
+} from '../common/i18n.util';
+import { randomUUID } from 'crypto';
+import type { VehicleCompatContext } from '../catalog/parts/part.presenter';
+import {
+  toVehicleFitContext,
+  VEHICLE_FIT_SELECT,
+} from '../catalog/compatibility/vehicle-fitment';
+import { PrismaService } from '../prisma/prisma.service';
+import { sourcingPartKey, sourcingVehicleKey } from '../sourcing/sourcing-keys';
+import { SourcingConfig } from '../sourcing/sourcing.config';
+import { SourcingLifecycleService } from '../sourcing/sourcing-lifecycle.service';
+import {
+  SourcingLeaseLostError,
+  SourcingRequestService,
+  sourcingPayloadHash,
+  type NewSourcingItem,
+  type RequestClaim,
+} from '../sourcing/sourcing-request.service';
 
-/**
- * Intent on the response. The LLM only ever returns the first three; the
- * orchestration adds FOUND_IN_STOCK when RAG matches local inventory, and
- * forces CREATE_SOURCING_TICKET when it doesn't.
- */
+/** Intent on the response. The LLM only ever returns the first three. */
 export type ChatIntent =
   | 'SEARCH_PART'
   | 'CREATE_SOURCING_TICKET'
   | 'GENERAL_QUESTION'
-  | 'FOUND_IN_STOCK';
+  | 'FOUND_IN_STOCK'
+  | 'SOURCING_AUTH_REQUIRED'
+  | 'SOURCING_UNAVAILABLE'
+  | 'PARTS_RESULT';
 
 export type ChatPreference = 'cheapest' | 'oem' | 'fastest' | null;
 
@@ -30,15 +50,69 @@ export interface ExtractedData {
   preference: ChatPreference;
 }
 
+export type ChatPartStatus =
+  | 'FOUND_IN_STOCK'
+  | 'TICKET_CREATED'
+  | 'AUTH_REQUIRED'
+  | 'NEEDS_CLARIFICATION'
+  | 'UNAVAILABLE';
+
+/** The outcome for one requested part. */
+export interface ChatPart {
+  part_name: string;
+  status: ChatPartStatus;
+  items?: StockItem[];
+  ticket_id?: string;
+}
+
 /** Structured envelope returned to the client (and forwarded to mator-admin). */
 export interface ChatResponse {
   reply_text: string;
   intent: ChatIntent;
   extracted_data: ExtractedData;
-  /** Present only when intent is FOUND_IN_STOCK. */
+  /** One entry per requested part, none dropped. Empty for a plain question. */
+  parts: ChatPart[];
+  /** True only when `parts` covers everything the customer asked for. */
+  all_parts_accounted: boolean;
+  /** The garage vehicle matches were checked against, when there was one. */
+  selected_vehicle: { id: string; label: string } | null;
+  /** Single-part replies keep these for installed apps. */
   items?: StockItem[];
-  /** Set on CREATE_SOURCING_TICKET — the new or de-duplicated existing ticket. */
   ticket_id?: string;
+}
+
+/** What the controller verified. Nothing here comes from the request body. */
+export interface ChatRequestContext {
+  userId: string | null;
+  idempotencyKey: string | null;
+  selectedVehicleId: string | null;
+}
+
+/** The model's reading of one message, before matching. */
+interface Classified {
+  reply_text: string;
+  intent: 'SEARCH_PART' | 'CREATE_SOURCING_TICKET' | 'GENERAL_QUESTION';
+  extracted_data: ExtractedData;
+  parts: { part_name: string; clarification_question: string | null }[];
+  all_parts_accounted: boolean;
+}
+
+interface SelectedVehicle {
+  id: string;
+  label: string;
+  make: string | null;
+  model: string | null;
+  year: number;
+  vin: string | null;
+  fit: VehicleCompatContext;
+}
+
+type RawClassification = Partial<Omit<Classified, 'parts'>> & {
+  parts?: { part_name?: unknown; clarification_question?: unknown }[];
+};
+
+function same(a: string, b: string): boolean {
+  return a.trim().toLowerCase() === b.trim().toLowerCase();
 }
 
 // Cheap, fast triage tier — the right Claude model for high-volume structured
@@ -63,111 +137,58 @@ export class AiChatService {
   private readonly client: Anthropic | null;
 
   constructor(
-    config: ConfigService,
+    configService: ConfigService,
     private readonly rag: RagSearchService,
     private readonly sourcing: SourcingService,
     private readonly adminEvents: AdminEventsGateway,
-    private readonly telegram: TelegramNotifierService,
+    private readonly prisma: PrismaService,
+    private readonly requests: SourcingRequestService,
+    private readonly lifecycle: SourcingLifecycleService,
+    private readonly config: SourcingConfig,
   ) {
-    const apiKey = config.get<string>('ANTHROPIC_API_KEY');
-    this.client = apiKey ? new Anthropic({ apiKey }) : null;
+    const apiKey = configService.get<string>('ANTHROPIC_API_KEY');
+    // Bounded, so the server answers before the app's timeout.
+    this.client = apiKey
+      ? new Anthropic({ apiKey, timeout: this.config.llmTimeoutMs, maxRetries: 1 })
+      : null;
     if (!this.client) {
       this.logger.warn('ANTHROPIC_API_KEY not set — AI chat is disabled');
     }
   }
 
-  async processUserMessage(dto: SendMessageDto): Promise<ChatResponse> {
-    // 1. LLM extracts structured data + a first-pass intent/reply.
-    const base = await this.classify(dto);
-    // 2. RAG + sourcing orchestration decides the final intent.
-    return this.orchestrate(base, dto);
-  }
-
-  /** Run RAG, then either surface in-stock matches or open a sourcing ticket. */
-  private async orchestrate(
-    base: ChatResponse,
+  async processUserMessage(
     dto: SendMessageDto,
+    context: ChatRequestContext = { userId: null, idempotencyKey: null, selectedVehicleId: null },
   ): Promise<ChatResponse> {
-    const hasValidPart = Boolean(base.extracted_data.part_name?.trim());
+    const vehicle = await this.loadSelectedVehicle(context);
+    const payloadHash = sourcingPayloadHash(dto.message, vehicle?.id ?? null, dto.vin);
 
-    // If the model wants a ticket but extracted no concrete part, downgrade to a
-    // normal dialogue turn — you can't source "nothing". This keeps the
-    // invariant that CREATE_SOURCING_TICKET in a response ALWAYS means a real
-    // ticket was persisted (with the canonical SLA copy).
-    if (base.intent === 'CREATE_SOURCING_TICKET' && !hasValidPart) {
-      base.intent = 'GENERAL_QUESTION';
+    // A guest's request can't create anything, so there's nothing to deduplicate.
+    let claim: Extract<RequestClaim, { kind: 'owner' }> | null = null;
+    if (context.userId && context.idempotencyKey) {
+      const claimed = await this.requests.claim({
+        userId: context.userId,
+        idempotencyKey: context.idempotencyKey,
+        payloadHash,
+        vehicleId: vehicle?.id ?? null,
+      });
+      if (claimed.kind === 'replay') return claimed.response as ChatResponse;
+      claim = claimed;
     }
 
-    // No concrete part (or a plain question) → return Claude's free-form reply.
-    if (base.intent === 'GENERAL_QUESTION' || !hasValidPart) {
-      return base;
-    }
-
-    // Reply in the user's language (canonical copy is localized RU / UZ).
-    const lang = detectLanguage(dto.message);
-    // Non-null past the gate above; keep a typed local for the dedup lookup.
-    const partName = base.extracted_data.part_name as string;
-
-    // From here on part_name is guaranteed → RAG → FOUND_IN_STOCK | CREATE_SOURCING_TICKET.
     try {
-      // Same `lang` the canonical replies use — the chat detects the buyer's
-      // language ONCE and the category labels in the results follow it, so the
-      // model is never told a category is called something the buyer cannot read.
-      const rag = await this.rag.searchInStock(
-        {
-          partName,
-          brand: base.extracted_data.brand,
-          model: base.extracted_data.model,
-        },
-        lang,
-      );
-
-      if (rag.found) {
-        return {
-          ...base,
-          intent: 'FOUND_IN_STOCK',
-          reply_text: CANONICAL_RESPONSES.FOUND_IN_STOCK[lang],
-          items: rag.items,
-        };
-      }
-
-      // De-dup: a still-open ticket for the same part (same user when known)
-      // in the last 10 min → reuse it. Skip BOTH the WS broadcast and the
-      // Telegram fan-out so operators don't get a second copy of the same request.
-      const duplicate = await this.sourcing.findRecentDuplicate({
-        partName,
-        userId: dto.userId ?? null,
-      });
-      if (duplicate) {
-        return {
-          ...base,
-          intent: 'CREATE_SOURCING_TICKET',
-          reply_text: CANONICAL_RESPONSES.CREATE_SOURCING_TICKET[lang],
-          ticket_id: duplicate.id,
-        };
-      }
-
-      // Not in local stock and not a duplicate → persist + notify admins.
-      const ticket = await this.sourcing.createTicket({
-        userId: dto.userId ?? null,
-        rawMessage: dto.message,
-        // Widen the typed extraction to a plain JSON object for jsonb storage
-        // (an interface has no index signature, so the cast is required).
-        extractedData: base.extracted_data as unknown as Record<string, unknown>,
-      });
-      this.adminEvents.notifyAdminsNewTicket(ticket);
-      // Fan the new ticket out to the dealers' Telegram group. Fire-and-forget:
-      // the notifier resolves even on failure, and we deliberately do NOT await
-      // it so a slow/down Telegram never delays (or fails) the chat response.
-      void this.telegram.sendSourcingTicketToDealers(ticket);
-
-      return {
-        ...base,
-        intent: 'CREATE_SOURCING_TICKET',
-        reply_text: CANONICAL_RESPONSES.CREATE_SOURCING_TICKET[lang],
-        ticket_id: ticket.id,
-      };
+      const classified = await this.classify(dto, vehicle);
+      return await this.orchestrate(classified, dto, context, vehicle, claim, payloadHash);
     } catch (err) {
+      if (claim && !(err instanceof SourcingLeaseLostError)) {
+        // Nothing committed, so a retry must be free to run again.
+        await this.requests.release(claim).catch(() => undefined);
+      }
+      if (err instanceof SourcingLeaseLostError) {
+        // Another worker took this over: its result is the result.
+        return this.processUserMessage(dto, context);
+      }
+      if (err instanceof HttpException) throw err;
       this.logger.error(
         `Sourcing orchestration failed: ${err instanceof Error ? err.message : String(err)}`,
       );
@@ -175,8 +196,226 @@ export class AiChatService {
     }
   }
 
+  /** Only the caller's own, undeleted vehicle. Anything else is treated as none. */
+  private async loadSelectedVehicle(context: ChatRequestContext): Promise<SelectedVehicle | null> {
+    if (!context.userId || !context.selectedVehicleId) return null;
+    const row = await this.prisma.vehicle.findFirst({
+      where: { id: context.selectedVehicleId, userId: context.userId, deletedAt: null },
+      select: { ...VEHICLE_FIT_SELECT, id: true, vin: true },
+    });
+    if (!row) return null;
+    const make = row.make?.name ?? null;
+    const model = row.model?.name ?? null;
+    return {
+      id: row.id,
+      label: [make, model, row.year].filter(Boolean).join(' '),
+      make,
+      model,
+      year: row.year,
+      vin: row.vin,
+      fit: toVehicleFitContext(row),
+    };
+  }
+
+  /** Decide an outcome for every requested part, then commit any tickets at once. */
+  private async orchestrate(
+    classified: Classified,
+    dto: SendMessageDto,
+    context: ChatRequestContext,
+    selected: SelectedVehicle | null,
+    claim: Extract<RequestClaim, { kind: 'owner' }> | null,
+    payloadHash: string,
+  ): Promise<ChatResponse> {
+    const lang = detectConversationLanguage(
+      dto.message,
+      (dto.history ?? []).filter((h) => h.role === 'user').map((h) => h.content),
+    );
+
+    if (classified.intent === 'GENERAL_QUESTION' || classified.parts.length === 0) {
+      if (claim) await this.requests.release(claim);
+      return {
+        reply_text: makesUnsupportedPromise(classified.reply_text)
+          ? CANONICAL_RESPONSES.ASK_PART[lang]
+          : classified.reply_text,
+        intent: 'GENERAL_QUESTION',
+        extracted_data: classified.extracted_data,
+        parts: [],
+        all_parts_accounted: false,
+        selected_vehicle: selected ? { id: selected.id, label: selected.label } : null,
+      };
+    }
+
+    // A car named in the message wins over the one selected in the app.
+    const vehicle = this.namesAnotherCar(classified.extracted_data, selected) ? null : selected;
+    const extracted: ExtractedData = vehicle
+      ? {
+          ...classified.extracted_data,
+          brand: vehicle.make,
+          model: vehicle.model,
+          year: String(vehicle.year),
+          vin: classified.extracted_data.vin ?? vehicle.vin,
+        }
+      : classified.extracted_data;
+    const vehicleKey = sourcingVehicleKey({
+      vehicleId: vehicle?.id ?? null,
+      brand: extracted.brand,
+      model: extracted.model,
+      year: extracted.year,
+    });
+
+    const parts: ChatPart[] = [];
+    const newItems: NewSourcingItem[] = [];
+    const seen = new Map<string, ChatPart>();
+    let question: string | null = null;
+
+    for (const { part_name, clarification_question } of classified.parts) {
+      if (clarification_question) {
+        question ??= clarification_question;
+        parts.push({ part_name, status: 'NEEDS_CLARIFICATION' });
+        continue;
+      }
+      const rag = await this.rag.searchInStock(
+        { partName: part_name, brand: extracted.brand, model: extracted.model, vehicle: vehicle?.fit },
+        lang,
+      );
+      if (rag.found) {
+        parts.push({ part_name, status: 'FOUND_IN_STOCK', items: rag.items });
+        continue;
+      }
+      if (!context.userId || !this.config.ticketsEnabled) {
+        parts.push({ part_name, status: this.config.ticketsEnabled ? 'AUTH_REQUIRED' : 'UNAVAILABLE' });
+        continue;
+      }
+      const partKey = sourcingPartKey(part_name);
+      const repeated = seen.get(partKey);
+      if (repeated) {
+        parts.push({ ...repeated, part_name });
+        continue;
+      }
+      const duplicate = await this.sourcing.findOpenDuplicate({
+        userId: context.userId,
+        partKey,
+        vehicleKey,
+        since: new Date(Date.now() - this.config.duplicateWindowMs),
+      });
+      const ticketId = duplicate?.id ?? randomUUID();
+      const part: ChatPart = { part_name, status: 'TICKET_CREATED', ticket_id: ticketId };
+      seen.set(partKey, part);
+      parts.push(part);
+      if (!duplicate) {
+        newItems.push({
+          id: ticketId,
+          partName: part_name,
+          partKey,
+          vehicleKey,
+          vehicleId: vehicle?.id ?? null,
+          extractedData: { ...extracted, part_name },
+        });
+      }
+    }
+
+    const response = this.buildResponse({
+      parts,
+      lang,
+      question,
+      extracted,
+      accounted: classified.all_parts_accounted,
+      selected: vehicle,
+    });
+
+    const hasTicket = parts.some((p) => p.status === 'TICKET_CREATED');
+    if (!hasTicket) {
+      if (claim) await this.requests.release(claim);
+      return response;
+    }
+
+    const tickets = await this.requests.commit({
+      claim,
+      userId: context.userId as string,
+      payloadHash,
+      vehicleId: vehicle?.id ?? null,
+      rawMessage: dto.message,
+      items: newItems,
+      response,
+    });
+    for (const ticket of tickets) {
+      this.adminEvents.notifyAdminsNewTicket(ticket);
+      // Not awaited: a slow Telegram must not delay the reply. Retries come from
+      // the lifecycle sweep, which picks up whatever this attempt leaves pending.
+      void this.lifecycle.dispatchStaffNotification(ticket.id).catch((err: unknown) =>
+        this.logger.error(
+          `Staff notification for ${ticket.id} will retry: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
+    }
+    return response;
+  }
+
+  private buildResponse(input: {
+    parts: ChatPart[];
+    lang: SupportedLang;
+    question: string | null;
+    extracted: ExtractedData;
+    accounted: boolean;
+    selected: SelectedVehicle | null;
+  }): ChatResponse {
+    const { parts, lang, question } = input;
+    const has = (status: ChatPartStatus) => parts.some((p) => p.status === status);
+    const intent: ChatIntent =
+      parts.length > 1
+        ? 'PARTS_RESULT'
+        : has('TICKET_CREATED')
+          ? 'CREATE_SOURCING_TICKET'
+          : has('AUTH_REQUIRED')
+            ? 'SOURCING_AUTH_REQUIRED'
+            : has('UNAVAILABLE')
+              ? 'SOURCING_UNAVAILABLE'
+              : has('FOUND_IN_STOCK')
+                ? 'FOUND_IN_STOCK'
+                : 'GENERAL_QUESTION';
+
+    // A question must be asked as written, so it replaces the summary.
+    const replyText = question && !makesUnsupportedPromise(question)
+      ? question
+      : CANONICAL_RESPONSES[
+          has('TICKET_CREATED')
+            ? 'CREATE_SOURCING_TICKET'
+            : has('AUTH_REQUIRED')
+              ? 'SOURCING_AUTH_REQUIRED'
+              : has('UNAVAILABLE')
+                ? 'SOURCING_UNAVAILABLE'
+                : has('FOUND_IN_STOCK')
+                  ? 'FOUND_IN_STOCK'
+                  : 'ASK_PART'
+        ][lang];
+
+    const single = parts.length === 1 ? parts[0] : undefined;
+    return {
+      reply_text: replyText,
+      intent,
+      extracted_data: input.extracted,
+      parts,
+      all_parts_accounted: input.accounted,
+      selected_vehicle: input.selected
+        ? { id: input.selected.id, label: input.selected.label }
+        : null,
+      ...(single?.items ? { items: single.items } : {}),
+      ...(single?.ticket_id ? { ticket_id: single.ticket_id } : {}),
+    };
+  }
+
+  private namesAnotherCar(extracted: ExtractedData, selected: SelectedVehicle | null): boolean {
+    if (!selected) return false;
+    const differs = (named: string | null, actual: string | null) =>
+      !!named && !!actual && !same(named, actual);
+    return differs(extracted.brand, selected.make) || differs(extracted.model, selected.model);
+  }
+
   /** Single Claude call → validated {@link ChatResponse} (pre-orchestration). */
-  private async classify(dto: SendMessageDto): Promise<ChatResponse> {
+  private async classify(
+    dto: SendMessageDto,
+    vehicle: SelectedVehicle | null,
+  ): Promise<Classified> {
     if (!this.client) {
       throw new ServiceUnavailableException('AI chat is not configured');
     }
@@ -187,7 +426,7 @@ export class AiChatService {
         max_tokens: MAX_TOKENS,
         temperature: TEMPERATURE,
         system: this.buildSystemPrompt(),
-        messages: this.buildMessages(dto),
+        messages: this.buildMessages(dto, vehicle),
       });
 
       const text = message.content.find((block) => block.type === 'text')?.text;
@@ -215,7 +454,9 @@ export class AiChatService {
       '    "brand": string | null, "model": string | null, "year": string | null,',
       '    "vin": string | null, "part_name": string | null,',
       '    "preference": "cheapest" | "oem" | "fastest" | null',
-      '  }',
+      '  },',
+      '  "parts": [{ "part_name": string, "clarification_question": string | null }],',
+      '  "all_parts_accounted": boolean',
       '}',
       '',
       'Behaviour rules (follow strictly):',
@@ -225,7 +466,10 @@ export class AiChatService {
       '- If a part name AND a brand are present (e.g. "тормозные колодки на Chevrolet"), you have enough: set a part-request intent immediately, do NOT ask a clarifying question.',
       '- Apply these rules identically in Russian, Uzbek and English. Do not become more inquisitive in one language than another.',
       '- Use GENERAL_QUESTION ONLY when no part can be identified at all, or for greetings / advice / off-topic. Ask at most ONE short clarifying question, and only about the part itself (e.g. front vs rear) — never about the vehicle, its year, or its model.',
-      '- For a part request, reply_text should say our sourcing department is checking prices and will respond within 15 minutes.',
+      '- List EVERY part the customer asked for in "parts", one entry each. "cabin filter and oil filter" is two entries. Never drop one. "part_name" holds the first.',
+      '- Set "clarification_question" on a part only when the answer changes which part it is (for example front or rear), written in the user language. The other parts still proceed.',
+      '- Set "all_parts_accounted" to true only when "parts" covers everything asked for. If you are unsure, set it to false.',
+      '- NEVER promise a response time, and never say a request was submitted or that anyone is checking or will contact the customer. The system confirms requests itself.',
       '',
       'Examples of correct intent:',
       '- "Нужны передние колодки на Chevrolet Cobalt" → part identified (передние колодки) → SEARCH_PART. Do not ask for the year.',
@@ -238,10 +482,17 @@ export class AiChatService {
     ].join('\n');
   }
 
-  private buildUserContent(dto: SendMessageDto): string {
+  private buildUserContent(dto: SendMessageDto, vehicle: SelectedVehicle | null): string {
     // Surface a client-supplied VIN as an explicit hint; the model still owns
     // extraction, but this anchors the `vin` field when the scanner provided it.
-    return dto.vin ? `${dto.message}\n\n[known VIN: ${dto.vin}]` : dto.message;
+    // The selected car is context only, so a car named in the message still wins.
+    return [
+      dto.message,
+      dto.vin ? `[known VIN: ${dto.vin}]` : null,
+      vehicle ? `[selected vehicle: ${vehicle.label}; use it unless the customer names another car]` : null,
+    ]
+      .filter(Boolean)
+      .join('\n\n');
   }
 
   /**
@@ -250,12 +501,15 @@ export class AiChatService {
    * part is named later). Anthropic requires the first message to be `user`,
    * so any leading assistant turns are dropped.
    */
-  private buildMessages(dto: SendMessageDto): Anthropic.MessageParam[] {
+  private buildMessages(
+    dto: SendMessageDto,
+    vehicle: SelectedVehicle | null,
+  ): Anthropic.MessageParam[] {
     const history: Anthropic.MessageParam[] = (dto.history ?? [])
       .filter((h) => h.content?.trim())
       .map((h) => ({ role: h.role, content: h.content }));
     while (history.length > 0 && history[0].role === 'assistant') history.shift();
-    return [...history, { role: 'user', content: this.buildUserContent(dto) }];
+    return [...history, { role: 'user', content: this.buildUserContent(dto, vehicle) }];
   }
 
   /**
@@ -263,21 +517,27 @@ export class AiChatService {
    * JSON, but we defensively strip a ```json fence if one slips through so a
    * stray code block doesn't fail the whole request.
    */
-  private parseJson(text: string): Partial<ChatResponse> {
+  private parseJson(text: string): RawClassification {
     const cleaned = text
       .trim()
       .replace(/^```(?:json)?\s*/i, '')
       .replace(/\s*```$/, '')
       .trim();
-    return JSON.parse(cleaned) as Partial<ChatResponse>;
+    return JSON.parse(cleaned) as RawClassification;
   }
 
   /**
    * Defensive normalization: coerce every field and fall back to a safe default
    * rather than let a malformed model response reach the client.
    */
-  private normalize(data: Partial<ChatResponse>, dto: SendMessageDto): ChatResponse {
+  private normalize(data: RawClassification, dto: SendMessageDto): Classified {
     const extracted = (data.extracted_data ?? {}) as Partial<ExtractedData>;
+    const partName = this.str(extracted.part_name);
+    const listed = Array.isArray(data.parts) ? data.parts : [];
+    const parts = listed.flatMap((p) => {
+      const name = this.str(p?.part_name);
+      return name ? [{ part_name: name, clarification_question: this.str(p?.clarification_question) }] : [];
+    });
     return {
       reply_text:
         typeof data.reply_text === 'string' && data.reply_text.trim().length > 0
@@ -289,13 +549,16 @@ export class AiChatService {
         model: this.str(extracted.model),
         year: this.str(extracted.year),
         vin: this.str(extracted.vin) ?? dto.vin ?? null,
-        part_name: this.str(extracted.part_name),
+        part_name: partName ?? parts[0]?.part_name ?? null,
         preference: this.coercePreference(extracted.preference),
       },
+      // A reply with only the old single field can't say it covered everything.
+      parts: parts.length > 0 ? parts : partName ? [{ part_name: partName, clarification_question: null }] : [],
+      all_parts_accounted: parts.length > 0 && data.all_parts_accounted === true,
     };
   }
 
-  private coerceIntent(value: unknown): ChatIntent {
+  private coerceIntent(value: unknown): Classified['intent'] {
     return value === 'SEARCH_PART' || value === 'CREATE_SOURCING_TICKET'
       ? value
       : 'GENERAL_QUESTION';
