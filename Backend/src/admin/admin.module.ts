@@ -4,6 +4,8 @@ import { AdminService } from './admin.service';
 import { AdminController } from './admin.controller';
 import { AdminOrdersService } from './orders/admin-orders.service';
 import { AdminOrdersController } from './orders/admin-orders.controller';
+import { AdminRefundsController } from './refunds/admin-refunds.controller';
+import { AdminRefundsService } from './refunds/admin-refunds.service';
 import { AdminUsersService } from './users/admin-users.service';
 import { AdminUsersController } from './users/admin-users.controller';
 import { AdminDealersService } from './dealers/admin-dealers.service';
@@ -13,6 +15,7 @@ import { AdminBrandsController } from './brands/admin-brands.controller';
 import { AdminModelsController } from './brands/admin-models.controller';
 import { PartCategoryModule } from '../catalog/categories/part-category.module';
 import { AdminCategoriesService } from './categories/admin-categories.service';
+import { AdminCategoryTransferService } from './categories/admin-category-transfer.service';
 import { AdminCategoriesController } from './categories/admin-categories.controller';
 import { AdminProductsController } from './categories/admin-products.controller';
 import { AdminInventoryService } from './inventory/admin-inventory.service';
@@ -50,16 +53,19 @@ import { FitmentStudioModule } from './fitment-studio/fitment-studio.module';
   providers: [
     AdminService,
     AdminOrdersService,
+    AdminRefundsService,
     AdminUsersService,
     AdminDealersService,
     AdminBrandsService,
     AdminCategoriesService,
+    AdminCategoryTransferService,
     AdminInventoryService,
     AdminProductsRatingService,
   ],
   controllers: [
     AdminController,
     AdminOrdersController,
+    AdminRefundsController,
     AdminUsersController,
     AdminDealersController,
     AdminBrandsController,

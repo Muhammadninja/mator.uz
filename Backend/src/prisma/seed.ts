@@ -134,7 +134,34 @@ async function seedVehicleCatalog() {
   }
 }
 
+/**
+ * Whether this database already holds real data, so reference rows are no longer
+ * the seed's to write: an operator's edit is the truth from then on. Only the
+ * supply side counts. The launch catalogue this script itself creates is curated
+ * parts, so a second seed run on a developer's database still reads as fresh.
+ */
+async function databaseIsLive(): Promise<boolean> {
+  return (
+    (await prisma.seller.count()) > 0 && (await prisma.product.count()) > 0
+  );
+}
+
 async function seedCategories() {
+  // Every row below is upserted with isActive: true and its seeded name, parent and
+  // order. On a live database that brings back whatever an operator deleted,
+  // re-enables what they deactivated and overwrites what they edited, so it takes
+  // an explicit request.
+  if (
+    (await databaseIsLive()) &&
+    !process.argv.includes('--reconcile-categories')
+  ) {
+    console.warn(
+      '[seed] categories skipped: this database holds real listings, and the seed ' +
+        'would undo operators’ changes. Use seed:categories to review the differences.',
+    );
+    return;
+  }
+
   // The category TREE: 8 level-0 vehicle categories, then the 12 canonical
   // level-1 main categories parented under them, then the fallback bucket.
   // Matches the migration exactly so a fresh DB and a migrated DB converge.
@@ -516,6 +543,18 @@ async function seedLegalDocuments() {
 }
 
 async function main() {
+  // This writes reference data over whatever is there, dealers and categories
+  // included. On production that is only ever a deliberate, one-off act.
+  if (
+    process.env.NODE_ENV === 'production' &&
+    !process.argv.includes('--allow-production')
+  ) {
+    throw new Error(
+      'Refusing to seed with NODE_ENV=production. Pass --allow-production only if ' +
+        'overwriting reference data on this database is really what you want.',
+    );
+  }
+
   await seedAdmin();
   await seedVehicleCatalog();
   await seedCategories();

@@ -5,6 +5,19 @@
  * PartCategory (the single source of truth for the buyer grid, the Telegram
  * seller bot, and the admin console under the /mtr-ops-… categories route).
  *
+ * The tree belongs to operators once it is live, and this script cannot tell a
+ * category they deleted from one that never existed. So it reports by default and
+ * writes only what is asked for:
+ *
+ *   npm run seed:categories                         # dry-run: what differs, no writes
+ *   npm run seed:categories -- --apply              # create what is missing
+ *   npm run seed:categories -- --apply --overwrite  # also reset existing rows to the
+ *                                                   # taxonomy: names, parent, order,
+ *                                                   # and isActive back to true
+ *
+ * Read the dry-run before --apply: a "missing" row may be one an operator removed on
+ * purpose, and --apply brings it back.
+ *
  * Design notes (why it looks the way it does):
  *   • PartCategory carries THREE required display columns — name_ru / name_uz /
  *     name_en — filled from the shared translation table
@@ -20,18 +33,17 @@
  *     slugs some tools show (brakes, engine, suspension…) are NOT the root ids;
  *     the mapping is recorded in the comment on each block.
  *
- * Idempotent: every write is an `upsert` keyed on the deterministic slug/id, so
- * re-runs converge and never duplicate. Parents are found-or-created (a missing
- * root is created at level 0 rather than aborting the run).
- *
- * Run:  npm run seed:categories
- *   (= ts-node --compiler-options '{"module":"commonjs"}' prisma/seed-categories.ts)
+ * Idempotent: keyed on the deterministic slug/id, so re-runs converge and never
+ * duplicate.
  */
 import { PrismaClient } from '@prisma/client';
 import { localizedNamesFor } from '../src/prisma/seed-data/category-names.seed';
 import { TAXONOMY } from '../src/prisma/seed-data/subcategory-taxonomy.seed';
 
 const prisma = new PrismaClient();
+
+const APPLY = process.argv.includes('--apply');
+const OVERWRITE = process.argv.includes('--overwrite');
 
 /**
  * Deterministic ASCII slug guard — mirrors the admin console's slugify so the
@@ -49,9 +61,9 @@ function slugify(value: string): string {
 }
 
 /**
- * Ensure a root exists and return its level. Found → returned as-is (we never
- * rename or re-slug an existing root here). Missing → created as a level-0 root
- * so the run can proceed instead of aborting.
+ * The level a root sits at, creating it only when writing. Found → returned as-is
+ * (we never rename or re-slug an existing root here). Missing on a dry run → reported
+ * as level 0, the level it would be created at.
  */
 async function ensureRoot(parentId: string, parentName: string): Promise<number> {
   const existing = await prisma.partCategory.findUnique({
@@ -60,6 +72,10 @@ async function ensureRoot(parentId: string, parentName: string): Promise<number>
   });
   if (existing) return existing.level;
 
+  if (!APPLY) {
+    console.log(`  ! root "${parentId}" ("${parentName}") is missing`);
+    return 0;
+  }
   const created = await prisma.partCategory.create({
     data: {
       id: parentId,
@@ -76,9 +92,14 @@ async function ensureRoot(parentId: string, parentName: string): Promise<number>
 }
 
 async function main(): Promise<void> {
-  console.log('Seeding subcategory taxonomy…\n');
-  let created = 0;
-  let updated = 0;
+  console.log(
+    APPLY
+      ? `Seeding subcategory taxonomy (${OVERWRITE ? 'create + overwrite' : 'create missing only'})…\n`
+      : 'DRY RUN — nothing is written. Pass --apply to create what is missing.\n',
+  );
+  let missing = 0;
+  let differing = 0;
+  let overwritten = 0;
 
   for (const group of TAXONOMY) {
     const parentLevel = await ensureRoot(group.parentId, group.parentName);
@@ -92,47 +113,59 @@ async function main(): Promise<void> {
       const id = slugify(sub.slug);
       if (!id) throw new Error(`Empty slug for "${sub.name}" — fix the taxonomy`);
 
-      // Detect create-vs-update purely for the run summary; the write itself is
-      // a single idempotent upsert.
+      const taxonomy = {
+        name: sub.name,
+        ...localizedNamesFor(id, sub.name),
+        slug: id,
+        level: childLevel,
+        sortOrder: i,
+        isActive: true,
+        parent: { connect: { id: group.parentId } },
+      };
       const before = await prisma.partCategory.findUnique({
         where: { id },
-        select: { id: true },
-      });
-
-      await prisma.partCategory.upsert({
-        where: { id },
-        create: {
-          id,
-          name: sub.name,
-          ...localizedNamesFor(id, sub.name),
-          slug: id,
-          level: childLevel,
-          sortOrder: i,
+        select: {
+          name: true,
+          parentId: true,
+          level: true,
+          sortOrder: true,
           isActive: true,
-          parent: { connect: { id: group.parentId } },
-        },
-        update: {
-          // Reconcile the row to the taxonomy on re-run: name, position, parent
-          // and derived level. mainCategory is intentionally left untouched —
-          // subcategories are not one of the 12 canonical buyer buckets.
-          name: sub.name,
-          ...localizedNamesFor(id, sub.name),
-          slug: id,
-          level: childLevel,
-          sortOrder: i,
-          isActive: true,
-          parent: { connect: { id: group.parentId } },
         },
       });
 
-      if (before) updated++;
-      else created++;
-      console.log(`   ${before ? '~' : '+'} ${id.padEnd(28)} ${sub.name}`);
+      if (!before) {
+        missing++;
+        console.log(`   + ${id.padEnd(28)} ${sub.name}${APPLY ? '' : '  (missing)'}`);
+        if (APPLY) await prisma.partCategory.create({ data: { id, ...taxonomy } });
+        continue;
+      }
+
+      const differs: string[] = [
+        before.name !== sub.name ? `name "${before.name}"` : '',
+        before.parentId !== group.parentId ? `parent "${before.parentId}"` : '',
+        before.level !== childLevel ? `level ${before.level}` : '',
+        before.sortOrder !== i ? `order ${before.sortOrder}` : '',
+        before.isActive ? '' : 'deactivated',
+      ].filter(Boolean);
+      if (differs.length === 0) continue;
+
+      differing++;
+      console.log(`   ~ ${id.padEnd(28)} differs: ${differs.join(', ')}`);
+      if (APPLY && OVERWRITE) {
+        await prisma.partCategory.update({ where: { id }, data: taxonomy });
+        overwritten++;
+      }
     }
   }
 
   const total = TAXONOMY.reduce((n, g) => n + g.subs.length, 0);
-  console.log(`\nDone. ${total} subcategories reconciled (${created} created, ${updated} updated).`);
+  console.log(
+    `\nDone. ${total} subcategories checked: ${missing} missing${APPLY ? ' (created)' : ''}, ` +
+      `${differing} differ from the taxonomy${APPLY && OVERWRITE ? ` (${overwritten} overwritten)` : ' (left alone)'}.`,
+  );
+  if (APPLY) {
+    console.log('Reference caches expire within 300s; force with: redis-cli DEL cache:reference:categories');
+  }
 }
 
 main()

@@ -17,7 +17,13 @@ describe('Cart smoke', () => {
       items: [buildCartItem({ partId: 'part_belt', priceUzsSnapshot: 185000, quantity: 1 })],
     });
     prisma.cart.upsert.mockResolvedValueOnce(empty).mockResolvedValue(withItem);
-    prisma.catalogPart.findUnique.mockResolvedValue({ id: 'part_belt', title: 'Timing belt', images: ['x'], priceUzs: 185000 });
+    prisma.catalogPart.findFirst.mockResolvedValue({
+      id: 'part_belt',
+      title: 'Timing belt',
+      images: ['x'],
+      priceUzs: 185000,
+      inStock: true,
+    });
     prisma.cartItem.create.mockResolvedValue({});
 
     const res = await svc.addItem('usr_1', { part_id: 'part_belt', quantity: 1 } as any);
@@ -34,7 +40,13 @@ describe('Cart smoke', () => {
       items: [buildCartItem({ id: 'item_1', partId: 'part_belt', quantity: 1 })],
     });
     prisma.cart.upsert.mockResolvedValue(existing);
-    prisma.catalogPart.findUnique.mockResolvedValue({ id: 'part_belt', title: 'Timing belt', images: [], priceUzs: 185000 });
+    prisma.catalogPart.findFirst.mockResolvedValue({
+      id: 'part_belt',
+      title: 'Timing belt',
+      images: [],
+      priceUzs: 185000,
+      inStock: true,
+    });
     prisma.cartItem.update.mockResolvedValue({});
 
     await svc.addItem('usr_1', { part_id: 'part_belt', quantity: 2 } as any);

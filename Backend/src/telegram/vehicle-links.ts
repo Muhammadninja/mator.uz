@@ -74,8 +74,23 @@ export async function persistVehicleLinks(
   await db.partModel.deleteMany({ where: { partId: productId } });
 
   if (compat.isUniversal) return;
+  await addVehicleLinks(db, productId, compat.vehicles);
+}
 
-  for (const vehicle of compat.vehicles) {
+/**
+ * ADD one part_models row per (brand, model) pair — never removing one. The
+ * additive counterpart of persistVehicleLinks, for writers that must not
+ * erase links they did not create (the Driver's Village imports). Same
+ * reference upserts; idempotent: a link that exists is left as it is.
+ */
+export async function addVehicleLinks(
+  db: Omit<VehicleLinkDb, 'partModel'> & {
+    partModel: Pick<VehicleLinkDb['partModel'], 'upsert'>;
+  },
+  productId: number,
+  vehicles: ParsedVehicle[],
+): Promise<void> {
+  for (const vehicle of vehicles) {
     if (!vehicle.brand) continue;
     const brand = await db.brand.upsert({
       where: { name: vehicle.brand },

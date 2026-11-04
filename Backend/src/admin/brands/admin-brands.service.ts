@@ -3,8 +3,10 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { AdminAuditAction, AdminAuditEntity, Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { AdminAuditService } from '../auth/admin-audit.service';
+import { AdminAuditContext } from '../auth/admin-auth.service';
 import { clampLimit } from '../../common/pagination.util';
 import { CacheService } from '../../redis/cache.service';
 import { RedisKeys } from '../../redis/redis.keys';
@@ -43,6 +45,7 @@ export class AdminBrandsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly cache: CacheService,
+    private readonly audit: AdminAuditService,
   ) {}
 
   async list(query: ListAdminBrandsQueryDto) {
@@ -152,12 +155,79 @@ export class AdminBrandsService {
     return { success: true, data: presentAdminBrandRow(brand) };
   }
 
-  async remove(id: string) {
+  /**
+   * What deleting a brand would take with it, so the console can say so first.
+   * Fitment bindings are operator work: each one was checked and placed by hand, and
+   * they go silently through the cascade.
+   */
+  async deletePreview(id: string) {
     await this.requireBrand(id);
+    const [models, fitmentBindings, vehicles] = await Promise.all([
+      this.prisma.vehicleModelRef.count({ where: { makeId: id } }),
+      this.prisma.fitmentBinding.count({
+        where: { vehicleModel: { makeId: id } },
+      }),
+      this.prisma.vehicle.count({ where: { makeId: id } }),
+    ]);
+    return { success: true, data: { models, fitmentBindings, vehicles } };
+  }
+
+  /** What deleting a model would take with it. */
+  async modelDeletePreview(id: string) {
+    const existing = await this.prisma.vehicleModelRef.findUnique({
+      where: { id },
+      select: { id: true },
+    });
+    if (!existing) throw new NotFoundException('Model not found');
+    const [fitmentBindings, vehicles] = await Promise.all([
+      this.prisma.fitmentBinding.count({ where: { vehicleModelId: id } }),
+      this.prisma.vehicle.count({ where: { modelId: id } }),
+    ]);
+    return { success: true, data: { fitmentBindings, vehicles } };
+  }
+
+  /**
+   * Delete a brand. If fitment bindings would go with it, the caller must state how
+   * many it accepts losing (`acceptedFitmentLoss`, from the preview): a 409 otherwise,
+   * and also when the number has changed since.
+   */
+  async remove(
+    id: string,
+    acceptedFitmentLoss?: number,
+    ctx: AdminAuditContext = {},
+  ) {
+    const brand = await this.prisma.vehicleMake.findUnique({
+      where: { id },
+      select: { id: true, name: true },
+    });
+    if (!brand) throw new NotFoundException('Brand not found');
     try {
       // Models cascade via the existing FK; a garage Vehicle referencing the
       // make blocks the delete with P2003.
-      await this.prisma.vehicleMake.delete({ where: { id } });
+      await this.prisma.$transaction(async (tx) => {
+        const fitmentBindings = await tx.fitmentBinding.count({
+          where: { vehicleModel: { makeId: id } },
+        });
+        assertFitmentLossAccepted(fitmentBindings, acceptedFitmentLoss);
+        await tx.vehicleMake.delete({ where: { id } });
+        await this.audit.record(
+          {
+            action: AdminAuditAction.BRAND_DELETED,
+            actor: ctx.actor,
+            actorLabel: ctx.actorLabel,
+            target: {
+              entity: AdminAuditEntity.BRAND,
+              id,
+              name: brand.name,
+            },
+            previousValues: { fitmentBindings },
+            newValues: { deleted: true },
+            ip: ctx.ip,
+            userAgent: ctx.userAgent,
+          },
+          tx,
+        );
+      });
     } catch (err) {
       if (isPrismaError(err, PRISMA_FK_VIOLATION)) {
         throw new ConflictException(
@@ -228,15 +298,43 @@ export class AdminBrandsService {
     return { success: true, data: presentAdminModelRow(model) };
   }
 
-  async removeModel(id: string) {
+  /** Delete a model, under the same fitment rule as {@link remove}. */
+  async removeModel(
+    id: string,
+    acceptedFitmentLoss?: number,
+    ctx: AdminAuditContext = {},
+  ) {
     const existing = await this.prisma.vehicleModelRef.findUnique({
       where: { id },
-      select: { id: true, makeId: true },
+      select: { id: true, makeId: true, name: true },
     });
     if (!existing) throw new NotFoundException('Model not found');
 
     try {
-      await this.prisma.vehicleModelRef.delete({ where: { id } });
+      await this.prisma.$transaction(async (tx) => {
+        const fitmentBindings = await tx.fitmentBinding.count({
+          where: { vehicleModelId: id },
+        });
+        assertFitmentLossAccepted(fitmentBindings, acceptedFitmentLoss);
+        await tx.vehicleModelRef.delete({ where: { id } });
+        await this.audit.record(
+          {
+            action: AdminAuditAction.MODEL_DELETED,
+            actor: ctx.actor,
+            actorLabel: ctx.actorLabel,
+            target: {
+              entity: AdminAuditEntity.VEHICLE_MODEL,
+              id,
+              name: existing.name,
+            },
+            previousValues: { fitmentBindings, makeId: existing.makeId },
+            newValues: { deleted: true },
+            ip: ctx.ip,
+            userAgent: ctx.userAgent,
+          },
+          tx,
+        );
+      });
     } catch (err) {
       if (isPrismaError(err, PRISMA_FK_VIOLATION)) {
         throw new ConflictException(
@@ -359,6 +457,19 @@ function slugify(name: string): string {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-+|-+$/g, '');
+}
+
+/** Refuse a delete that would lose fitment bindings the caller did not account for. */
+function assertFitmentLossAccepted(
+  fitmentBindings: number,
+  accepted: number | undefined,
+): void {
+  if (fitmentBindings > 0 && accepted !== fitmentBindings) {
+    throw new ConflictException({
+      code: 'FITMENT_WOULD_BE_LOST',
+      message: `This would delete ${fitmentBindings} fitment binding(s). Confirm that number to go ahead.`,
+    });
+  }
 }
 
 /** Narrow an unknown error to a Prisma known-request error with a given code. */

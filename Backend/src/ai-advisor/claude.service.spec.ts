@@ -156,10 +156,12 @@ describe('ClaudeService', () => {
 
       // The third argument is the language the tools label categories in; it
       // defaults to the platform default when `reply` is called without one.
+      // The fourth is the session owner (none here) — see the next test.
       expect(toolRun).toHaveBeenCalledWith(
         'search_catalog',
         { q: 'brake pads' },
         'ru',
+        null,
       );
       expect(res.citedItems).toBe(1);
       expect(res.toolRounds).toBe(1);
@@ -171,6 +173,29 @@ describe('ClaudeService', () => {
       expect(lastTurn.role).toBe('user');
       expect(lastTurn.content[0].type).toBe('tool_result');
       expect(lastTurn.content[0].tool_use_id).toBe('tu_1');
+    });
+
+    it('forwards the session owner to the tools (scopes a model-supplied vehicle_id)', async () => {
+      const toolRun = jest
+        .fn()
+        .mockResolvedValue({ content: '{}', itemCount: 0 });
+      const create = jest
+        .fn()
+        .mockResolvedValueOnce(
+          toolResponse('search_catalog', { vehicle_id: 'veh_other' }),
+        )
+        .mockResolvedValueOnce(textResponse('ok'));
+      const { svc } = buildService(toolRun);
+      withClient(svc, create);
+
+      await svc.reply('sys', [{ role: 'user', content: 'x' }], 'uz', 'usr_1');
+
+      expect(toolRun).toHaveBeenCalledWith(
+        'search_catalog',
+        { vehicle_id: 'veh_other' },
+        'uz',
+        'usr_1',
+      );
     });
 
     it('advertises the catalogue tools on every provider call', async () => {

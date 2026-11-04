@@ -3,6 +3,7 @@ import {
   Get,
   Patch,
   Param,
+  ParseEnumPipe,
   ParseIntPipe,
   Query,
   UseGuards,
@@ -26,7 +27,10 @@ export class AdminController {
 
   @Get('sellers')
   @HttpCode(HttpStatus.OK)
-  listSellers(@Query('status') status?: SellerStatus) {
+  listSellers(
+    @Query('status', new ParseEnumPipe(SellerStatus, { optional: true }))
+    status?: SellerStatus,
+  ) {
     return this.adminService.listSellers(status);
   }
 

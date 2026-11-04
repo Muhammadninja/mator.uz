@@ -11,13 +11,24 @@ import {
   Max,
   MaxLength,
   Min,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 
+/** catalog_parts money columns are Decimal(14, 2). */
+const MAX_PRICE_UZS = 999_999_999_999.99;
+/** What a part sells for is strictly positive: 0 would give it away. */
+const MIN_RETAIL_PRICE_UZS = 0.01;
+/** catalog_parts.stock_qty is a 32-bit Int. */
+const MAX_STOCK_QTY = 2_147_483_647;
+/** Present but null must still reach the validators: the column is NOT NULL. */
+const whenPresent = (_: unknown, value: unknown) => value !== undefined;
+
 /**
  * One row of the inventory batch update. Every field but `id` is optional; only
- * the provided fields are written. Numbers are non-negative; cashbackPct is
- * bounded to 0–100.
+ * the provided fields are written. Numbers are non-negative and bounded by their
+ * column; cashbackPct is bounded to 0–100. Only purchasePrice may be null, which
+ * clears it (the column means "cost unknown"); the other three are NOT NULL.
  */
 export class BatchUpdateInventoryItemDto {
   @ApiProperty({ description: 'Part (CatalogPart) id.', example: 'part_abc' })
@@ -26,30 +37,34 @@ export class BatchUpdateInventoryItemDto {
   id!: string;
 
   @ApiPropertyOptional({
-    description: 'Wholesale/purchase price in UZS (non-negative).',
+    description:
+      'Wholesale/purchase price in UZS (non-negative), or null to clear it.',
     example: 120000,
+    nullable: true,
   })
   @IsOptional()
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
-  purchasePrice?: number;
+  @Max(MAX_PRICE_UZS)
+  purchasePrice?: number | null;
 
   @ApiPropertyOptional({
-    description: 'Retail (sell) price in UZS (non-negative).',
+    description: 'Retail (sell) price in UZS (greater than zero).',
     example: 180000,
   })
-  @IsOptional()
+  @ValidateIf(whenPresent)
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })
-  @Min(0)
+  @Min(MIN_RETAIL_PRICE_UZS, { message: 'retailPrice must be greater than 0' })
+  @Max(MAX_PRICE_UZS)
   retailPrice?: number;
 
   @ApiPropertyOptional({
     description: 'Cashback as a percentage of retail (0–100).',
     example: 5,
   })
-  @IsOptional()
+  @ValidateIf(whenPresent)
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
@@ -60,10 +75,11 @@ export class BatchUpdateInventoryItemDto {
     description: 'On-hand unit count (non-negative integer).',
     example: 42,
   })
-  @IsOptional()
+  @ValidateIf(whenPresent)
   @Type(() => Number)
   @IsInt()
   @Min(0)
+  @Max(MAX_STOCK_QTY)
   stock?: number;
 }
 

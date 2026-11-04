@@ -100,6 +100,51 @@ describe('OrderStatusService', () => {
     });
   });
 
+  describe('transitionIf (conditional transition)', () => {
+    it('moves a still-allowed order and writes ONE history row', async () => {
+      const moved = await service.transitionIf(
+        'ord_1',
+        [OrderStatus.PENDING_PAYMENT],
+        OrderStatus.PAID,
+        { note: 'Payment received' },
+      );
+      expect(moved).toBe(true);
+      expect(prisma.order.updateMany).toHaveBeenCalledWith({
+        where: { id: 'ord_1', status: { in: [OrderStatus.PENDING_PAYMENT] } },
+        data: { status: OrderStatus.PAID },
+      });
+      expect(prisma.orderStatusHistory.create).toHaveBeenCalledTimes(1);
+      // No unconditional write path is taken.
+      expect(prisma.order.update).not.toHaveBeenCalled();
+    });
+
+    it('does nothing (no history) when the order already left the source status', async () => {
+      prisma.order.updateMany.mockResolvedValue({ count: 0 });
+      const moved = await service.transitionIf(
+        'ord_1',
+        [OrderStatus.PENDING_PAYMENT],
+        OrderStatus.PAID,
+      );
+      expect(moved).toBe(false);
+      expect(prisma.orderStatusHistory.create).not.toHaveBeenCalled();
+    });
+
+    it('enlists in a caller transaction when one is passed', async () => {
+      const tx = {
+        order: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+        orderStatusHistory: { create: jest.fn().mockResolvedValue({}) },
+      };
+      await service.transitionIf(
+        'ord_1',
+        [OrderStatus.PAID],
+        OrderStatus.PROCESSING,
+        { tx: tx as never },
+      );
+      expect(tx.order.updateMany).toHaveBeenCalled();
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+  });
+
   describe('recordCreation', () => {
     it('writes the opening history row on the provided tx', async () => {
       const tx = { orderStatusHistory: { create: jest.fn().mockResolvedValue({}) } };
@@ -150,6 +195,25 @@ describe('OrderStatusService', () => {
       expect(await service.expireOverdue(now)).toBe(0);
       expect(prisma.order.updateMany).not.toHaveBeenCalled();
       expect(prisma.orderStatusHistory.create).not.toHaveBeenCalled();
+    });
+
+    it('never expires a cash or terminal order: it has no payment window to miss', async () => {
+      prisma.order.findMany.mockResolvedValue([]);
+
+      await service.expireOverdue(now);
+
+      expect(prisma.order.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            // Null stays in: SQL `NOT IN` alone would stop expiring every order
+            // from a client that sends no payment_type.
+            OR: [
+              { paymentType: null },
+              { paymentType: { notIn: ['CASH', 'TERMINAL'] } },
+            ],
+          }),
+        }),
+      );
     });
 
     it('excludes orders reserved by an active provider transaction from the scan', async () => {

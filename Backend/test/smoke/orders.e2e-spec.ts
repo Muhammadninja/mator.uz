@@ -1,14 +1,31 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { OrdersService } from '../../src/orders/orders.service';
 import { OrderStatusService } from '../../src/orders/order-status.service';
-import { createPrismaMock, fakeConfig, fakeNotifications, fakeRealtime, buildCart, buildCartItem, buildOrder, buildAppUser, fakeDiscounts, PrismaMock } from '../utils/harness';
+import { createPrismaMock, fakeConfig, fakeNotifications, fakeRealtime, buildCart, buildCartItem, buildOrder, buildAppUser, fakeDiscounts, PrismaMock, fakeAudit } from '../utils/harness';
 
 describe('Orders smoke', () => {
   let prisma: PrismaMock;
-  beforeEach(() => (prisma = createPrismaMock()));
+  beforeEach(() => {
+    prisma = createPrismaMock();
+    // Every part the cart names exists, is in stock and its dealer is active —
+    // the availability gate (order-availability.ts) and the sale pricing both
+    // read these rows. Tests about unavailable parts override this.
+    prisma.catalogPart.findMany.mockImplementation(
+      ({ where }: { where?: { id?: { in?: string[] } } }) =>
+        Promise.resolve(
+          (where?.id?.in ?? []).map((id) => ({
+            id,
+            inStock: true,
+            seller: { status: 'ACTIVE' },
+            categoryId: 'cat_1',
+            sellerId: 'seller_1',
+          })),
+        ),
+    );
+  });
 
   it('creates an order from the cart with correct totals and consumes the cart', async () => {
-    const svc = new OrdersService(prisma, fakeConfig(), fakeNotifications(), fakeRealtime(), new OrderStatusService(prisma), fakeDiscounts());
+    const svc = new OrdersService(prisma, fakeConfig(), fakeNotifications(), fakeRealtime(), new OrderStatusService(prisma), fakeDiscounts(), fakeAudit());
     prisma.cart.findUnique.mockResolvedValue(
       buildCart({
         id: 'cart_1',
@@ -51,7 +68,7 @@ describe('Orders smoke', () => {
     // beside them: a Payme receipt has no discount field, so whatever the items
     // do not carry can never be fiscalized. Two lines that divide awkwardly
     // (3 × 33 333 and 1 × 100 001) so the flooring remainder is real.
-    const svc = new OrdersService(prisma, fakeConfig(), fakeNotifications(), fakeRealtime(), new OrderStatusService(prisma), fakeDiscounts());
+    const svc = new OrdersService(prisma, fakeConfig(), fakeNotifications(), fakeRealtime(), new OrderStatusService(prisma), fakeDiscounts(), fakeAudit());
     prisma.cart.findUnique.mockResolvedValue(
       buildCart({
         id: 'cart_1',
@@ -87,13 +104,13 @@ describe('Orders smoke', () => {
   });
 
   it('rejects checkout on an empty cart', async () => {
-    const svc = new OrdersService(prisma, fakeConfig(), fakeNotifications(), fakeRealtime(), new OrderStatusService(prisma), fakeDiscounts());
+    const svc = new OrdersService(prisma, fakeConfig(), fakeNotifications(), fakeRealtime(), new OrderStatusService(prisma), fakeDiscounts(), fakeAudit());
     prisma.cart.findUnique.mockResolvedValue(buildCart({ items: [] }));
     await expect(svc.createFromCart('usr_1', {} as any)).rejects.toBeInstanceOf(BadRequestException);
   });
 
   it("does not return another user's order", async () => {
-    const svc = new OrdersService(prisma, fakeConfig(), fakeNotifications(), fakeRealtime(), new OrderStatusService(prisma), fakeDiscounts());
+    const svc = new OrdersService(prisma, fakeConfig(), fakeNotifications(), fakeRealtime(), new OrderStatusService(prisma), fakeDiscounts(), fakeAudit());
     prisma.order.findUnique.mockResolvedValue(buildOrder({ id: 'ord_1', userId: 'someone_else' }));
     await expect(svc.getOrder('usr_1', 'ord_1')).rejects.toBeInstanceOf(NotFoundException);
   });

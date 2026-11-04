@@ -396,7 +396,7 @@ describe('CatalogProjectionService — mapping', () => {
   // root and the keyword classifier assigns no mainCategory, so the part used
   // to project with mainCategory = null — invisible to the home grid's
   // "Масла и жидкости" tile, which both counts and lists by mainCategory.
-  describe('bucket derived from the category ROOT', () => {
+  describe('bucket derived from the category tree', () => {
     /** The oil branch of the real tree, plus an unmapped root for contrast. */
     const TREE = [
       { id: 'motor-oil', parentId: null },
@@ -450,8 +450,8 @@ describe('CatalogProjectionService — mapping', () => {
     });
 
     it('leaves mainCategory null under a root with no unambiguous bucket', async () => {
-      // 'transmission' is deliberately absent from ROOT_TO_MAIN_CATEGORY — no
-      // buyer-grid bucket corresponds to it, so guessing would be wrong.
+      // The transmission branch is listed in CATEGORIES_WITHOUT_MAIN_CATEGORY —
+      // no buyer-grid bucket corresponds to it, so guessing would be wrong.
       const part = await projectWith({
         mainCategory: null,
         categoryId: 'clutch-kits',
@@ -632,5 +632,68 @@ describe('CatalogProjectionService — imported dealer positions (Driver\'s Vill
     svc.buildProjectionOps(buildStock());
     expect(prisma.catalogPartMakeFit.deleteMany).toHaveBeenCalledWith({ where: { partId: 'part_stock_500' } });
     expect(prisma.catalogPartMakeFit.createMany).not.toHaveBeenCalled();
+  });
+
+  it('writes an imported position\'s classification on create only, so a category set in Mator survives', () => {
+    svc.buildProjectionOps(imported({ product: { categoryId: null, mainCategory: null, vehicleCategory: null } }));
+    const part = upsertArg(prisma, 'catalogPart');
+    // A new imported position lands in the fallback bucket…
+    expect(part.create).toMatchObject({ categoryId: 'cat_uncategorized', mainCategory: null, vehicleCategory: null });
+    // …and no later projection (re-import, photo update, rating edit) moves it.
+    for (const key of ['categoryId', 'mainCategory', 'vehicleCategory']) {
+      expect(part.update).not.toHaveProperty(key);
+    }
+    // Everything the source owns still updates.
+    expect(part.update).toMatchObject({ title: 'Timing belt', priceUzs: 185000, stockQty: 8, inStock: true });
+  });
+
+  it('a Telegram listing still updates its classification from the product', () => {
+    svc.buildProjectionOps(buildStock());
+    expect(upsertArg(prisma, 'catalogPart').update).toMatchObject({
+      categoryId: 'belts-and-hoses',
+      mainCategory: 'BELTS_AND_HOSES',
+      vehicleCategory: 'ENGINE',
+    });
+  });
+
+  it('keepClassification leaves a Telegram part where an operator moved it, and still classifies a new one', () => {
+    svc.buildProjectionOps(buildStock(), new Map(), {
+      keepClassification: true,
+    });
+    const part = upsertArg(prisma, 'catalogPart');
+    for (const key of ['categoryId', 'mainCategory', 'vehicleCategory']) {
+      expect(part.update).not.toHaveProperty(key);
+    }
+    expect(part.update).toMatchObject({
+      title: 'Timing belt',
+      priceUzs: 185000,
+    });
+    expect(part.create).toMatchObject({
+      categoryId: 'belts-and-hoses',
+      mainCategory: 'BELTS_AND_HOSES',
+    });
+  });
+
+  it('keepPriceAndStock leaves an operator-edited price and stock on an existing part', () => {
+    svc.buildProjectionOps(buildStock(), new Map(), {
+      keepClassification: true,
+      keepPriceAndStock: true,
+    });
+    const part = upsertArg(prisma, 'catalogPart');
+    for (const key of ['priceUzs', 'inStock', 'stockQty']) {
+      expect(part.update).not.toHaveProperty(key);
+    }
+    expect(part.update).toMatchObject({ title: 'Timing belt' });
+    // A part this projection creates still needs a price to exist at all.
+    expect(part.create).toMatchObject({ priceUzs: 185000, inStock: true });
+  });
+
+  it('projectProduct hands keepClassification to every stock it re-projects', async () => {
+    prisma.stock.findMany.mockResolvedValue([{ id: 500 }]);
+    prisma.stock.findUnique.mockResolvedValue(buildStock());
+    await svc.projectProduct(100, { keepClassification: true });
+    expect(upsertArg(prisma, 'catalogPart').update).not.toHaveProperty(
+      'categoryId',
+    );
   });
 });

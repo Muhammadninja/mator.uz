@@ -7,6 +7,10 @@ import {
   Param,
   Patch,
   UseGuards,
+  Get,
+  ParseIntPipe,
+  Query,
+  Req,
 } from '@nestjs/common';
 import {
   ApiBadRequestResponse,
@@ -20,6 +24,8 @@ import {
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 import { AdminRole } from '@prisma/client';
+import type { Request } from 'express';
+import { AuthenticatedAdmin } from '../auth/strategies/admin-jwt.strategy';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { AdminJwtGuard } from '../auth/guards/admin-jwt.guard';
 import { AdminRoleGuard } from '../auth/guards/admin-role.guard';
@@ -59,17 +65,39 @@ export class AdminModelsController {
     return this.brands.updateModel(id, dto);
   }
 
+  @Get(':id/delete-preview')
+  @Roles(AdminRole.SUPER_ADMIN, AdminRole.MANAGER)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'What deleting a model would take with it' })
+  @ApiNotFoundResponse({ description: 'No such model.' })
+  deletePreview(@Param('id') id: string) {
+    return this.brands.modelDeletePreview(id);
+  }
+
   @Delete(':id')
+  @Roles(AdminRole.SUPER_ADMIN, AdminRole.MANAGER)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Delete a model (admin/operator)',
+    summary: 'Delete a model (manager or super admin)',
     description:
-      'Blocked with 409 if a garage vehicle references the model.',
+      'Its fitment bindings cascade, so if any exist their number must be stated in ' +
+      '?acceptedFitmentLoss=. Blocked with 409 if a garage vehicle references the model.',
   })
   @ApiOkResponse({ description: 'The deleted model id.' })
   @ApiNotFoundResponse({ description: 'No such model.' })
-  @ApiConflictResponse({ description: 'Vehicles reference this model.' })
-  remove(@Param('id') id: string) {
-    return this.brands.removeModel(id);
+  @ApiConflictResponse({
+    description: 'Vehicles reference this model, or fitment would be lost.',
+  })
+  remove(
+    @Param('id') id: string,
+    @Query('acceptedFitmentLoss', new ParseIntPipe({ optional: true }))
+    acceptedFitmentLoss: number | undefined,
+    @Req() req: Request & { user: AuthenticatedAdmin },
+  ) {
+    return this.brands.removeModel(id, acceptedFitmentLoss, {
+      actor: { id: req.user.id, email: req.user.email, name: req.user.name },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
   }
 }

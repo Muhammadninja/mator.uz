@@ -22,6 +22,8 @@ export const EN: BotStrings = {
   'start.awaitingApproval':
     '⏳ Your application has not been approved yet. Please wait.',
   'start.accountRejected': '⛔ Your account was rejected by an administrator.',
+  'start.storeSuspended':
+    '⛔ Your store has been suspended by an administrator. Publishing is unavailable.',
   'seller.approved':
     '✅ Your application has been approved!\n\n' +
     'You can now publish products on Mator.\n\n' +
@@ -106,7 +108,8 @@ export const EN: BotStrings = {
     '✅ Product added successfully.\nPress /start to add the next product.\n' +
     'To change the language — /language',
   'confirm.failed':
-    '⚠️ Something went wrong while adding the product.\n`{error}`',
+    '⚠️ Something went wrong while adding the product. Press /start to begin again.\n' +
+    'To change the language — /language',
 
   'btn.back': '⬅️ Back',
   'btn.skip': '⏭ Skip',
@@ -198,6 +201,10 @@ export const EN: BotStrings = {
 
   'dv.notFound':
     "❌ No Driver's Village position has the code {code}. Check the 1C code in the photo caption.",
+  'dv.invalidCode':
+    '❌ Could not read the 1C code in the caption. Send the photos with a caption like: 1C 87654321',
+  'dv.ambiguous':
+    "⚠️ The code {code} matches several Driver's Village positions:\n{positions}\nSend the photos again with the exact code in the caption: 1C <code>",
   'dv.photosReceived':
     '📸 Photos received ({count}) for position {code}. Processing — a preview will follow.',
   'dv.previewHeader': "🖼 *New photos for a Driver's Village position*",

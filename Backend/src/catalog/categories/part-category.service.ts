@@ -3,9 +3,11 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CacheService } from '../../redis/cache.service';
 import { RedisKeys } from '../../redis/redis.keys';
+import { BUYER_LISTED_PART } from '../buyer-visibility';
 import { CategoryAnchor } from './category-map';
 
 /**
@@ -27,6 +29,8 @@ import { CategoryAnchor } from './category-map';
 export class PartCategoryService {
   /** Categories change rarely and are read on every wizard step. */
   private static readonly CACHE_TTL_SECONDS = 300;
+  /** Part counts move with every listing, so they live shorter than the tree. */
+  private static readonly COUNTS_CACHE_TTL_SECONDS = 60;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -34,26 +38,61 @@ export class PartCategoryService {
   ) {}
 
   /**
-   * Active root categories in display order — the bot's first category step.
+   * Every active root category in display order, the "Другое" root included —
+   * the public category tree (GET /v1/reference/categories) the buyer app
+   * browses.
    *
    * Filtered on level 0 AND parentId null, not on parentId alone: the internal
-   * 'cat_uncategorized' fallback bucket is parentless but is not a taxonomy a
-   * seller may choose, so it is parked at level 1 and excluded here.
+   * 'cat_uncategorized' fallback bucket is parentless but is not part of the
+   * taxonomy, so it is parked at level 1 and excluded here.
    */
-  async findRootCategories(): Promise<CategoryNode[]> {
+  async findCatalogRootCategories(): Promise<CategoryNode[]> {
     return this.cache.remember(
       RedisKeys.cacheReferenceCategories(),
       PartCategoryService.CACHE_TTL_SECONDS,
-      () =>
-        this.loadActive({
-          parentId: null,
-          level: 0,
-          // The "Другое" root is reached by its own button, not from the
-          // vehicle-category grid, so it is excluded here. It is otherwise an
-          // ordinary category — findChildren('other') serves its admin-managed
-          // children to the bot.
-          excludeIds: [CategoryAnchor.OTHER],
-        }),
+      () => this.loadActive({ parentId: null, level: 0 }),
+    );
+  }
+
+  /**
+   * The roots the bot offers at its vehicle-category step: every catalog root
+   * except "Другое", which the bot reaches through its own button rather than
+   * from this grid. It is otherwise an ordinary category — findChildren('other')
+   * serves its admin-managed children to the bot.
+   */
+  async findRootCategories(): Promise<CategoryNode[]> {
+    const roots = await this.findCatalogRootCategories();
+    return roots.filter((root) => root.id !== CategoryAnchor.OTHER);
+  }
+
+  /**
+   * Buyer-listed parts per catalog root — the number the home grid shows under
+   * each tile (see {@link catalogRootProductCounts} for what counts). Two reads
+   * whatever the number of roots: the tree's nodes and one GROUP BY category
+   * over the listed parts. No part row is loaded.
+   *
+   * Cached apart from the roots: a count is not part of the tree the bot reads.
+   */
+  async findCatalogRootProductCounts(): Promise<Record<string, number>> {
+    return this.cache.remember(
+      RedisKeys.cacheReferenceCategoryCounts(),
+      PartCategoryService.COUNTS_CACHE_TTL_SECONDS,
+      async () => {
+        const [nodes, filed] = await Promise.all([
+          this.prisma.partCategory.findMany({
+            select: { id: true, parentId: true, level: true, isActive: true },
+          }),
+          this.prisma.catalogPart.groupBy({
+            by: ['categoryId'],
+            where: BUYER_LISTED_PART,
+            _count: { _all: true },
+          }),
+        ]);
+        return catalogRootProductCounts(
+          nodes,
+          filed.map((g) => [g.categoryId, g._count._all] as const),
+        );
+      },
     );
   }
 
@@ -81,8 +120,11 @@ export class PartCategoryService {
   }
 
   /** One category by id, or null. Not cached (used by write-path validation). */
-  async findById(id: string): Promise<CategoryRow | null> {
-    return this.prisma.partCategory.findUnique({
+  async findById(
+    id: string,
+    client: CategoryReader = this.prisma,
+  ): Promise<CategoryRow | null> {
+    return client.partCategory.findUnique({
       where: { id },
       select: CATEGORY_SELECT,
     });
@@ -109,11 +151,15 @@ export class PartCategoryService {
    * The level a category would sit at under `parentId`, validating the parent
    * exists and is usable. Root (`null` parent) is level 0; otherwise
    * parent.level + 1. This is the ONLY way a level is ever produced — no caller
-   * may pass one in.
+   * may pass one in. Pass the transaction `client` when validating inside one,
+   * so the read sees what that transaction sees and needs no second connection.
    */
-  async validateParent(parentId: string | null | undefined): Promise<number> {
+  async validateParent(
+    parentId: string | null | undefined,
+    client: CategoryReader = this.prisma,
+  ): Promise<number> {
     if (parentId == null) return 0;
-    const parent = await this.findById(parentId);
+    const parent = await this.findById(parentId, client);
     if (!parent) throw new NotFoundException('Parent category not found');
     if (parent.level + 1 > MAX_DEPTH) {
       throw new BadRequestException(
@@ -125,19 +171,30 @@ export class PartCategoryService {
 
   /**
    * Guard a re-parent: a category may not become its own parent, nor descend
-   * under one of its own descendants (either would create a cycle). Returns the
-   * new level so the caller writes a derived value.
+   * under one of its own descendants (either would create a cycle), nor take its
+   * subtree past the depth cap — the cap has to hold for the deepest node that
+   * moves, not just the one named in the request. Returns the new level so the
+   * caller writes a derived value.
    */
-  async validateMove(id: string, parentId: string | null): Promise<number> {
+  async validateMove(
+    id: string,
+    parentId: string | null,
+    client: CategoryReader = this.prisma,
+  ): Promise<number> {
     if (parentId === id) {
       throw new BadRequestException('A category cannot be its own parent');
     }
-    const level = await this.validateParent(parentId);
+    const level = await this.validateParent(parentId, client);
     if (parentId != null) {
-      const descendants = await this.descendantIds(id);
+      const { descendants, height } = await this.subtreeOf(id, client);
       if (descendants.has(parentId)) {
         throw new BadRequestException(
           'Cannot move a category under one of its own descendants',
+        );
+      }
+      if (level + height > MAX_DEPTH) {
+        throw new BadRequestException(
+          `Category nesting is limited to ${MAX_DEPTH + 1} levels`,
         );
       }
     }
@@ -196,6 +253,8 @@ export class PartCategoryService {
    */
   async invalidate(...parentIds: (string | null | undefined)[]): Promise<void> {
     await this.cache.delete(RedisKeys.cacheReferenceCategories());
+    // A move or a deactivation re-roots whole subtrees of parts.
+    await this.cache.delete(RedisKeys.cacheReferenceCategoryCounts());
     const unique = new Set(parentIds.filter((p): p is string => !!p));
     await Promise.all(
       [...unique].map((p) =>
@@ -209,8 +268,21 @@ export class PartCategoryService {
    * parentId) edge set then a BFS in memory — the taxonomy is small, so this is
    * cheaper than a recursive CTE and easy to reason about.
    */
-  async descendantIds(rootId: string): Promise<Set<string>> {
-    const edges = await this.prisma.partCategory.findMany({
+  async descendantIds(
+    rootId: string,
+    client: CategoryReader = this.prisma,
+  ): Promise<Set<string>> {
+    return (await this.subtreeOf(rootId, client)).descendants;
+  }
+
+  // ── internals ──────────────────────────────────────────────────────────────
+
+  /** Every descendant of `rootId`, and how many levels sit below it (leaf = 0). */
+  private async subtreeOf(
+    rootId: string,
+    client: CategoryReader,
+  ): Promise<{ descendants: Set<string>; height: number }> {
+    const edges = await client.partCategory.findMany({
       select: { id: true, parentId: true },
     });
     const childrenOf = new Map<string, string[]>();
@@ -222,18 +294,17 @@ export class PartCategoryService {
     }
 
     const descendants = new Set<string>();
-    const queue = [...(childrenOf.get(rootId) ?? [])];
-    while (queue.length > 0) {
-      const next = queue.shift()!;
-      if (descendants.has(next)) continue;
-      descendants.add(next);
-      const kids = childrenOf.get(next);
-      if (kids) queue.push(...kids);
+    let height = 0;
+    let frontier = childrenOf.get(rootId) ?? [];
+    while (frontier.length > 0) {
+      const fresh = frontier.filter((id) => !descendants.has(id));
+      if (fresh.length === 0) break;
+      height += 1;
+      for (const id of fresh) descendants.add(id);
+      frontier = fresh.flatMap((id) => childrenOf.get(id) ?? []);
     }
-    return descendants;
+    return { descendants, height };
   }
-
-  // ── internals ──────────────────────────────────────────────────────────────
 
   /** Walk up from `category` looking for `ancestorId`. Depth-bounded (no cycles). */
   private async isDescendantOf(
@@ -252,15 +323,9 @@ export class PartCategoryService {
   private async loadActive(where: {
     parentId: string | null;
     level?: number;
-    excludeIds?: string[];
   }): Promise<CategoryNode[]> {
-    const { excludeIds, ...scope } = where;
     const rows = await this.prisma.partCategory.findMany({
-      where: {
-        ...scope,
-        isActive: true,
-        ...(excludeIds?.length ? { id: { notIn: excludeIds } } : {}),
-      },
+      where: { ...where, isActive: true },
       orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
       select: CATEGORY_SELECT,
     });
@@ -274,6 +339,9 @@ export class PartCategoryService {
  * bounds the ancestor walk in {@link PartCategoryService.validateCategorySelection}.
  */
 export const MAX_DEPTH = 4;
+
+/** The Prisma surface tree validation reads through: the client or a transaction. */
+export type CategoryReader = Pick<Prisma.TransactionClient, 'partCategory'>;
 
 const CATEGORY_SELECT = {
   id: true,
@@ -371,4 +439,63 @@ export function buildTree(rows: CategoryRow[]): TreeNode[] {
     nodes.get(row.parentId)?.children.push(node);
   }
   return roots;
+}
+
+/** What the root counting reads of a category. */
+export interface CountedNode {
+  id: string;
+  parentId: string | null;
+  level: number;
+  isActive: boolean;
+}
+
+/** A root {@link PartCategoryService.findCatalogRootCategories} serves. */
+function isCatalogRoot(node: CountedNode): boolean {
+  return node.isActive && node.parentId === null && node.level === 0;
+}
+
+/**
+ * The served root `categoryId` sits under, or null: up at most MAX_DEPTH
+ * parents — the reach of GET /v1/catalog/parts?category=<root> — and only
+ * through active nodes. Bounded, so a malformed cycle ends.
+ */
+function catalogRootOf(
+  categoryId: string,
+  byId: ReadonlyMap<string, CountedNode>,
+): string | null {
+  let node = byId.get(categoryId);
+  for (let depth = 0; node && depth <= MAX_DEPTH; depth += 1) {
+    if (!node.isActive) return null;
+    if (node.parentId === null) return isCatalogRoot(node) ? node.id : null;
+    node = byId.get(node.parentId);
+  }
+  return null;
+}
+
+/**
+ * Parts per served root, from the tree's `nodes` and the listed parts grouped
+ * by category (`[categoryId, count]`). Every served root is present, with 0
+ * when nothing is filed beneath it.
+ *
+ * A part counts toward the root its category hangs under — the root itself,
+ * an intermediate node such as wheel-hubs-bearings, or a node below that — as
+ * long as every node on the way is active: a deactivated node ('rul') is out
+ * of the public tree together with what is filed on and beneath it. A part has
+ * one category and a category at most one root, so no part counts twice; a
+ * part with no served root above it ('cat_uncategorized') counts nowhere.
+ */
+export function catalogRootProductCounts(
+  nodes: readonly CountedNode[],
+  filed: Iterable<readonly [categoryId: string, count: number]>,
+): Record<string, number> {
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const counts = new Map<string, number>();
+  for (const node of nodes) {
+    if (isCatalogRoot(node)) counts.set(node.id, 0);
+  }
+  for (const [categoryId, count] of filed) {
+    const root = catalogRootOf(categoryId, byId);
+    if (root !== null) counts.set(root, (counts.get(root) ?? 0) + count);
+  }
+  return Object.fromEntries(counts);
 }

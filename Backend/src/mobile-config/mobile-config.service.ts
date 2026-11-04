@@ -3,7 +3,7 @@ import { Injectable } from '@nestjs/common';
 // Android resolves by package; iOS needs the numeric App Store id, so the iOS
 // link should be set explicitly via env once the app is published.
 const DEFAULT_ANDROID_STORE_URL =
-  'https://play.google.com/store/apps/details?id=com.fotih12.mator';
+  'https://play.google.com/store/apps/details?id=com.mator.myapp';
 
 export interface MobileAppConfig {
   min_supported_version: string;

@@ -1,4 +1,5 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { isUUID } from 'class-validator';
 import { Markup, Telegraf } from 'telegraf';
 import type { Context } from 'telegraf';
 import {
@@ -98,7 +99,10 @@ export class TelegramOfferService {
     if (!from) return true;
 
     const ticketId = payload.slice(OFFER_DEEPLINK_PREFIX.length).trim();
-    const ticket = ticketId
+    // Ticket ids are UUIDs (a @db.Uuid column). Anything else — a truncated or
+    // hand-edited link — names no ticket, and handing it to PostgreSQL fails the
+    // query instead of answering it, so it is answered as "not found" here.
+    const ticket = isUUID(ticketId)
       ? await this.prisma.sourcingTicket.findUnique({ where: { id: ticketId } })
       : null;
     if (!ticket) {

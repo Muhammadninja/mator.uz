@@ -7,6 +7,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { OnEvent } from '@nestjs/event-emitter';
 import {
+  DealerStatus,
   DraftStatus,
   OilType,
   PackageForm,
@@ -36,7 +37,8 @@ import { CatalogProjectionService } from '../catalog/projection/catalog-projecti
 import { QueueService } from '../queue/queue.service';
 import { DraftLock } from '../redis/draft-lock.service';
 import { RedisKeys } from '../redis/redis.keys';
-import { MediaGroupBuffer } from './media-group-buffer';
+import { MediaGroupBuffer, type FlushedGroup } from './media-group-buffer';
+import { BotPollingSupervisor, errorForLog } from './bot-polling';
 import { TelegramOfferService } from './telegram-offer.service';
 import { persistVehicleLinks } from './vehicle-links';
 import {
@@ -48,8 +50,11 @@ import {
 } from './product-draft.service';
 import {
   DriversVillagePhotoService,
-  code1cFromCaption,
   escapeMarkdown,
+  listPositions,
+  markdownToPlainText,
+  parseDvCaption,
+  type DvLookup,
   type DvPosition,
 } from './drivers-village-photo.service';
 import { DraftCoordinator } from './draft-coordinator';
@@ -311,6 +316,17 @@ interface PendingProduct {
 }
 
 /**
+ * What a preview delivery achieved. It lets /start tell "the preview is on its
+ * way" from "there is nothing to show", so it never ends up answering nothing.
+ *   sent        — this call answered (the preview, or why there is none);
+ *   elsewhere   — another candidate holds this preview's lock or won its
+ *                 send-once claim, and is delivering it;
+ *   unavailable — nothing deliverable: the draft is gone, no longer
+ *                 READY_FOR_PREVIEW, or missing the data a preview needs.
+ */
+type PreviewDelivery = 'sent' | 'elsewhere' | 'unavailable';
+
+/**
  * Human-readable vehicle line for the preview caption. Universal parts say so
  * explicitly; otherwise (brand, model) pairs are grouped per brand so a
  * single-brand listing reads exactly as before ("Chevrolet Cobalt, Gentra")
@@ -454,17 +470,20 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(TelegramService.name);
   private bot: Telegraf;
 
+  // The long-polling lifecycle (start, retry, shutdown) — see bot-polling.ts.
+  // Absent when this instance does not poll (TELEGRAM_POLLING_DISABLED).
+  private polling?: BotPollingSupervisor;
+
   // Draft TTL (ms), resolved once from DRAFT_TTL_HOURS.
   private readonly draftTtlMs: number;
 
   // Step-by-step product-creation wizard sessions, one per Telegram user.
   private readonly wizard = new WizardSessionStore();
 
-  // Buffer for in-flight album uploads. `ctx` for the flush is captured per
-  // group via the closure below (the latest ctx of the album is sufficient —
-  // all updates in an album come from the same chat).
-  private mediaBuffer!: MediaGroupBuffer;
-  private readonly groupCtx = new Map<string, Context>();
+  // Buffer for in-flight album uploads. Each photo's `ctx` is kept ON its
+  // album's group (the latest one is sufficient — all updates in an album come
+  // from the same chat), so two albums of one user never share or lose it.
+  private mediaBuffer!: MediaGroupBuffer<Context>;
 
   // One pending confirmation per Telegram user, keyed by tgUserId. Caches the
   // sent preview's data until the seller presses "Добавить товар" (the backing
@@ -521,8 +540,8 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     private readonly categories: PartCategoryService,
     // The "У меня есть" → DM offer-capture flow (isolated session state).
     private readonly offerFlow: TelegramOfferService,
-    // Driver's Village photo updates (album + caption = code_1c): position
-    // lookup and gallery replacement. Only reached for a code-shaped caption.
+    // Driver's Village photo updates (album + caption `1C <code_1c>`): position
+    // lookup and gallery replacement. Only reached for such a caption.
     private readonly dvPhotos: DriversVillagePhotoService,
   ) {
     this.draftTtlMs = resolveDraftTtlMs(
@@ -535,23 +554,19 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     const token = this.config.get<string>('TELEGRAM_BOT_TOKEN');
     if (!token) throw new Error('TELEGRAM_BOT_TOKEN is not set');
 
-    this.mediaBuffer = new MediaGroupBuffer(
+    this.mediaBuffer = new MediaGroupBuffer<Context>(
       MEDIA_GROUP_DEBOUNCE_MS,
       MAX_IMAGES_PER_LISTING,
-      (group) => {
-        const ctx = this.groupCtx.get(String(group.tgUserId));
-        this.groupCtx.delete(String(group.tgUserId));
-        if (ctx)
-          void this.routePhotos(
-            ctx,
-            group.tgUserId,
-            group.fileIds,
-            group.caption,
-          );
-      },
+      (group) => void this.flushAlbum(group),
     );
 
     this.bot = new Telegraf(token);
+    // Registered before any handler can run. Telegraf's DEFAULT error handler
+    // rethrows, and a rethrow ends the polling loop — for every seller, until
+    // the process restarts: one expired callback, DB blip or Telegram refusal
+    // left the backend up and the bot deaf. A failure (Telegraf's 90 s handler
+    // timeout included) now costs only the update it happened in.
+    this.bot.catch((err, ctx) => this.logUpdateFailure(err, ctx));
     this.registerHandlers();
 
     // Only ONE process may long-poll a given bot token — Telegram 409s every
@@ -573,25 +588,17 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     // race to overwrite the same list with an identical payload for no gain.
     void this.publishCommandMenu();
 
-    // launch() only resolves once polling stops (i.e. on shutdown) — log
-    // start-up separately. A launch failure (e.g. a transient network error
-    // reaching api.telegram.org) must not crash the whole backend as an
-    // unhandled rejection; log it and leave the bot offline instead.
-    this.bot
-      .launch()
-      .then(() => this.logger.log('Bot stopped (long polling ended)'))
-      .catch((err: unknown) =>
-        this.logger.error(
-          `Bot launch failed: ${err instanceof Error ? err.message : String(err)}`,
-          err instanceof Error ? err.stack : undefined,
-        ),
-      );
-    this.logger.log('Bot starting (long polling)...');
+    // launch() settles only when polling ENDS, and Telegraf never restarts it:
+    // a failed connect at boot or a 401/409 used to leave the bot offline for
+    // the life of the process. The supervisor retries the transient failures,
+    // reports the permanent ones without retrying, and never starts again after
+    // shutdown.
+    this.polling = new BotPollingSupervisor(this.bot, this.logger);
+    this.polling.start();
   }
 
   onModuleDestroy() {
     this.mediaBuffer?.clear();
-    this.groupCtx.clear();
     this.offerFlow.clear();
     this.wizard.clear();
     this.staleNoticeSentAt.clear();
@@ -600,7 +607,33 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     this.liveNotice?.clear();
     for (const session of this.pending.values()) clearTimeout(session.expiry);
     this.pending.clear();
-    this.bot?.stop('SIGTERM');
+    // Ends polling for good and cancels any pending retry. Never throws — not
+    // even when polling never started, where Telegraf's own stop() would.
+    this.polling?.stop();
+  }
+
+  /**
+   * The bot-wide error handler (`bot.catch`). Logs WHICH update failed and why
+   * — never the update itself, which carries the seller's messages, name and
+   * phone number — and never throws: a throw here ends polling exactly as
+   * Telegraf's default handler did.
+   */
+  private logUpdateFailure(err: unknown, ctx: Context): void {
+    try {
+      const { message, stack } = errorForLog(err);
+      // Derived here rather than read from `ctx.updateType`, which throws —
+      // with the whole update serialized into its message — when it cannot
+      // tell the type.
+      const updateType =
+        Object.keys(ctx.update ?? {}).find((key) => key !== 'update_id') ??
+        'unknown';
+      this.logger.error(
+        `Update ${ctx.update?.update_id ?? '?'} (${updateType}) failed: ${message}`,
+        stack,
+      );
+    } catch {
+      // Logging itself failed; nothing safer is left to do.
+    }
   }
 
   /**
@@ -1032,7 +1065,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       const groupId = 'media_group_id' in msg ? msg.media_group_id : undefined;
       // Only one photo of an album carries the caption; the buffer keeps the
       // first non-empty one. It is read ONLY to recognize a Driver's Village
-      // code_1c — the ordinary wizard still ignores captions.
+      // photo update (`1C <code_1c>`) — the ordinary wizard ignores captions.
       const caption =
         'caption' in msg && typeof msg.caption === 'string'
           ? msg.caption
@@ -1041,8 +1074,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       if (groupId) {
         // Buffer ALL albums (even out-of-step ones) so the flush validates the
         // wizard state exactly once per album instead of once per photo.
-        this.groupCtx.set(String(from.id), ctx);
-        this.mediaBuffer.add(groupId, bestPhoto.file_id, caption, from.id);
+        this.mediaBuffer.add(groupId, bestPhoto.file_id, caption, from.id, ctx);
         return;
       }
 
@@ -1052,7 +1084,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
     // ── Confirmation buttons on the preview message ─────────────────────────
     this.bot.action(CONFIRM_ADD, async (ctx) => {
-      await ctx.answerCbQuery();
+      await this.ackCallback(ctx);
       // Retire the preview first so a second tap can't re-trigger the action.
       await this.consumeCallbackMessage(ctx);
       const from = ctx.from;
@@ -1071,7 +1103,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     });
 
     this.bot.action(CONFIRM_CANCEL, async (ctx) => {
-      await ctx.answerCbQuery();
+      await this.ackCallback(ctx);
       // Retire the preview first so a second tap can't re-trigger the action.
       await this.consumeCallbackMessage(ctx);
       const from = ctx.from;
@@ -1095,7 +1127,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     // text/price. The draft's READY images are untouched and reused, so no image
     // processing re-runs.
     this.bot.action(CONFIRM_BACK, async (ctx) => {
-      await ctx.answerCbQuery();
+      await this.ackCallback(ctx);
       await this.consumeCallbackMessage(ctx);
       const from = ctx.from;
       if (from) await this.reopenDraftForEdit(ctx, from.id);
@@ -1105,7 +1137,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     // source CANCELLED, its assets deleted) and start the new one at PHOTOS_FIRST,
     // so the fresh photos go through the queue like any other upload.
     this.bot.action(CONFIRM_CHANGE_PHOTOS, async (ctx) => {
-      await ctx.answerCbQuery();
+      await this.ackCallback(ctx);
       await this.consumeCallbackMessage(ctx);
       const from = ctx.from;
       if (from) await this.replaceDraftPhotos(ctx, from.id);
@@ -1116,13 +1148,13 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     // message) is retired first so a second tap cannot re-trigger the action;
     // the user's own photos and caption are never touched.
     this.bot.action(DV_PHOTO_CONFIRM, async (ctx) => {
-      await ctx.answerCbQuery();
+      await this.ackCallback(ctx);
       await this.consumeDvPreviewMessage(ctx);
       const from = ctx.from;
       if (from) await this.commitDvPhotos(ctx, from.id, ctx.match[1]);
     });
     this.bot.action(DV_PHOTO_CANCEL, async (ctx) => {
-      await ctx.answerCbQuery();
+      await this.ackCallback(ctx);
       await this.consumeDvPreviewMessage(ctx);
       const from = ctx.from;
       if (from) await this.cancelDvPhotos(ctx, from.id, ctx.match[1]);
@@ -1130,13 +1162,13 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
     // ── /start resume prompt ────────────────────────────────────────────────
     this.bot.action(DRAFT_RESUME, async (ctx) => {
-      await ctx.answerCbQuery();
+      await this.ackCallback(ctx);
       await this.consumeCallbackMessage(ctx);
       const from = ctx.from;
       if (from) await this.resumeDraft(ctx, from.id);
     });
     this.bot.action(DRAFT_RESTART, async (ctx) => {
-      await ctx.answerCbQuery();
+      await this.ackCallback(ctx);
       await this.consumeCallbackMessage(ctx);
       const from = ctx.from;
       if (!from) return;
@@ -1161,13 +1193,13 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
     // ── Image-failure recovery ──────────────────────────────────────────────
     this.bot.action(DRAFT_RETRY_IMAGES, async (ctx) => {
-      await ctx.answerCbQuery();
+      await this.ackCallback(ctx);
       await this.consumeCallbackMessage(ctx);
       const from = ctx.from;
       if (from) await this.retryFailedImages(ctx, from.id);
     });
     this.bot.action(DRAFT_CANCEL, async (ctx) => {
-      await ctx.answerCbQuery();
+      await this.ackCallback(ctx);
       await this.consumeCallbackMessage(ctx);
       const from = ctx.from;
       if (!from) return;
@@ -1218,14 +1250,22 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     sellerId: number,
     lang: AppLang,
   ): Promise<void> {
-    // Recovery: a draft that is READY_FOR_PREVIEW but whose preview delivery was
-    // lost (crash after the coordinator flipped it, before the message was sent) is
-    // invisible to the resume prompt below. Re-present it here — idempotent, and it
-    // rescues the seller's fully-processed draft instead of forcing a restart.
+    // Recovery: a READY_FOR_PREVIEW draft is invisible to the resume prompt below,
+    // so it is presented here — idempotent, and it rescues the seller's
+    // fully-processed draft instead of forcing a restart. Two cases:
+    //   • never sent (crash after the coordinator flipped it, before the message
+    //     went out) → the ordinary first delivery, send-once claim and all;
+    //   • sent before (the seller has not answered it, or the send failed after
+    //     the claim) → the claim is spent, so the first-delivery path would bail
+    //     and /start would answer NOTHING; it is sent again instead.
     const awaitingPreview = await this.drafts.findAwaitingPreview(sellerId);
     if (awaitingPreview) {
-      await this.presentDraftPreview(awaitingPreview.id, tgUserId);
-      return;
+      const delivery = awaitingPreview.previewSentAt
+        ? await this.resendDraftPreview(awaitingPreview.id, tgUserId)
+        : await this.presentDraftPreview(awaitingPreview.id, tgUserId);
+      if (delivery !== 'unavailable') return;
+      // Nothing could be shown after all (the draft moved on, or lacks the data
+      // a preview needs): fall through to the ordinary flow, so /start answers.
     }
 
     // A draft whose image batch is still in flight BLOCKS starting a new listing.
@@ -1567,27 +1607,29 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   private async presentDraftPreview(
     draftId: string,
     chatId: number,
-  ): Promise<void> {
+  ): Promise<PreviewDelivery> {
     // Dedup the two legitimate candidates (the coordinator's ready_for_preview
     // event and a /start recovery) BEFORE they both read the draft and race on
     // the claim. `claimPreviewSend` remains the authority — it is the only thing
     // that decides who sends — so a lock that is unavailable, expired or failed
     // open changes nothing: the loser of the CAS still bails without sending.
-    await this.locks.withLock(RedisKeys.lockDraftPreview(draftId), () =>
-      this.deliverDraftPreview(draftId, chatId),
+    const delivery = await this.locks.withLock(
+      RedisKeys.lockDraftPreview(draftId),
+      () => this.deliverDraftPreview(draftId, chatId),
     );
+    // A held lock: the other candidate is delivering this very preview now.
+    return delivery ?? 'elsewhere';
   }
 
   /** The guarded body of {@link presentDraftPreview}; see the locking note there. */
   private async deliverDraftPreview(
     draftId: string,
     chatId: number,
-  ): Promise<void> {
+  ): Promise<PreviewDelivery> {
     const draft = await this.drafts.findWithImages(draftId);
-    if (!draft || draft.status !== 'READY_FOR_PREVIEW') return;
+    if (!draft || draft.status !== 'READY_FOR_PREVIEW') return 'unavailable';
     if (isPhotoUpdateDraft(draft)) {
-      await this.deliverDvPhotoPreview(draft, chatId);
-      return;
+      return this.deliverDvPhotoPreview(draft, chatId);
     }
 
     const processedUrls = draft.images
@@ -1602,7 +1644,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       this.logger.error(
         `Draft ${draftId} reached preview with incomplete data — skipping.`,
       );
-      return;
+      return 'unavailable';
     }
 
     // Atomically claim the right to send. Two candidates (the worker's
@@ -1611,7 +1653,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     // so storePending never runs twice for the same draft (which would delete the
     // first preview's Cloudinary assets). The loser simply bails.
     const claimed = await this.drafts.claimPreviewSend(draftId);
-    if (!claimed) return;
+    if (!claimed) return 'elsewhere';
 
     const pending = this.buildPendingFromDraft(draft, chatId, {
       processedUrls,
@@ -1623,6 +1665,62 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
     this.storePending(pending);
     await this.sendPreviewToChat(chatId, pending, processedUrls);
+    return 'sent';
+  }
+
+  /**
+   * /start found a READY_FOR_PREVIEW draft whose preview was ALREADY claimed:
+   * sent earlier and not yet answered, or claimed and then lost to a failed
+   * send. The send-once claim guards the FIRST delivery, so
+   * {@link presentDraftPreview} would bail here and /start would answer nothing
+   * — the seller asked for their preview, so it is sent again.
+   *
+   * No claim is taken (the draft is already past it) and the version is the
+   * row's current one. Under the same per-draft lock as the first delivery, so
+   * a double /start or a racing first delivery sends one preview, not two.
+   *
+   * No photos are deleted. Any cached record is dropped WITHOUT its assets
+   * before the new one is stored, because storePending's replace path deletes
+   * the REPLACED record's photos: for this same draft those are exactly the
+   * photos being shown again, and another draft keeps its own until its TTL
+   * sweep reclaims them.
+   */
+  private async resendDraftPreview(
+    draftId: string,
+    tgUserId: number,
+  ): Promise<PreviewDelivery> {
+    const delivery = await this.locks.withLock(
+      RedisKeys.lockDraftPreview(draftId),
+      async (): Promise<PreviewDelivery> => {
+        const draft = await this.drafts.findWithImages(draftId);
+        if (
+          !draft ||
+          draft.status !== 'READY_FOR_PREVIEW' ||
+          isPhotoUpdateDraft(draft)
+        ) {
+          return 'unavailable';
+        }
+        const processedUrls = this.processedUrlsOf(draft);
+        if (processedUrls.length === 0 || !isDraftFormComplete(draft)) {
+          this.logger.error(
+            `Draft ${draftId} cannot be re-presented — incomplete data.`,
+          );
+          return 'unavailable';
+        }
+        const pending = this.buildPendingFromDraft(draft, tgUserId, {
+          processedUrls,
+          publicIds: draft.images
+            .filter((img) => img.processedPublicId)
+            .map((img) => img.processedPublicId as string),
+          draftVersion: draft.version,
+        });
+        this.takePending(tgUserId);
+        this.storePending(pending);
+        await this.sendPreviewToChat(tgUserId, pending, processedUrls);
+        return 'sent';
+      },
+    );
+    return delivery ?? 'elsewhere';
   }
 
   /**
@@ -2325,6 +2423,21 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Acknowledge a button tap, best-effort — the same convention as every other
+   * acknowledgement in this file. Telegram refuses an answer that comes too late
+   * ("query is too old": the ~15 s window has passed, e.g. a tap that queued
+   * while the bot was busy or down), and the action the tap asked for must
+   * still run.
+   */
+  private async ackCallback(ctx: Context): Promise<void> {
+    try {
+      await ctx.answerCbQuery();
+    } catch {
+      // Expired callback — proceed with the action regardless.
+    }
+  }
+
+  /**
    * Shared handler for every wizard inline button: answer the callback, apply
    * the transition, and on success strip the tapped keyboard and prompt for the
    * next step. Stale taps (old messages, wrong step, no session) are ignored so
@@ -2819,7 +2932,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     await this.handlePhotos(ctx, tgUserId, session, fileIds);
   }
 
-  // ── Driver's Village photo updates (photos + caption = code_1c) ─────────────
+  // ── Driver's Village photo updates (photos + caption `1C <code_1c>`) ────────
   // Any Telegram user who knows a position's code_1c may replace its photos. The
   // photos travel the SAME pipeline as a new listing — draft → BullMQ worker
   // (FLUX + Cloudinary) → coordinator rendezvous → preview media — and on
@@ -2828,9 +2941,35 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   // session and single `pending` slot are never touched.
 
   /**
-   * Route incoming photos (one photo, or a flushed album). A caption that is a
-   * Driver's Village code_1c starts a photo update of that position; no caption
-   * or any other caption goes to the ordinary listing wizard exactly as before.
+   * Hand a buffered album to {@link routePhotos}. This runs from the buffer's
+   * timer, where nothing above would catch, and an unhandled rejection exits
+   * the whole process (main.ts) — so every failure ends here: logged, and the
+   * sender told the photos were not accepted. Never handed to another flow.
+   */
+  private async flushAlbum(group: FlushedGroup<Context>): Promise<void> {
+    const { ctx, tgUserId } = group;
+    if (!ctx) return;
+    try {
+      await this.routePhotos(ctx, tgUserId, group.fileIds, group.caption);
+    } catch (err) {
+      this.logger.error(
+        `Album from ${tgUserId} failed: ${err instanceof Error ? err.message : String(err)}`,
+        err instanceof Error ? err.stack : undefined,
+      );
+      try {
+        await ctx.reply(t(await this.langOf(tgUserId), 'photos.notAccepted'));
+      } catch {
+        // Telegram itself may be what failed; the log above is the record.
+      }
+    }
+  }
+
+  /**
+   * Route incoming photos (one photo, or a flushed album). The caption
+   * `1C <code_1c>` (or a legacy 1C code alone) starts a photo update of that
+   * position and never falls back to the listing wizard: a `1C` caption
+   * without a valid code is refused. No caption or any other caption goes to
+   * the ordinary listing wizard exactly as before.
    */
   private async routePhotos(
     ctx: Context,
@@ -2838,9 +2977,13 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     fileIds: string[],
     caption: string | null,
   ): Promise<void> {
-    const code1c = code1cFromCaption(caption);
-    if (code1c) {
-      await this.handleDvPhotos(ctx, tgUserId, fileIds, code1c);
+    const dv = parseDvCaption(caption);
+    if (dv.kind === 'code') {
+      await this.handleDvPhotos(ctx, tgUserId, fileIds, dv.code1c);
+      return;
+    }
+    if (dv.kind === 'invalid') {
+      await ctx.reply(t(await this.langOf(tgUserId), 'dv.invalidCode'));
       return;
     }
     await this.handleWizardPhotos(ctx, tgUserId, fileIds);
@@ -2849,8 +2992,9 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   /**
    * Start a photo update: resolve the position by its Stock source fields, then
    * create a PHOTO-UPDATE draft and queue its images exactly like
-   * {@link handlePhotos} does. An unknown code is answered and NOTHING is
-   * written — no draft, no job, no upload.
+   * {@link handlePhotos} does. An unknown or ambiguous code, or a failed
+   * lookup, is answered and NOTHING is written — no draft, no job, no upload —
+   * and the photos never reach the listing wizard.
    */
   private async handleDvPhotos(
     ctx: Context,
@@ -2862,11 +3006,31 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     const images = fileIds.slice(0, MAX_IMAGES_PER_LISTING);
     if (images.length === 0) return;
 
-    const position = await this.dvPhotos.resolvePosition(code1c);
-    if (!position) {
+    let lookup: DvLookup;
+    try {
+      lookup = await this.dvPhotos.resolvePosition(code1c);
+    } catch (err) {
+      // The sender may be any Telegram user: the error is logged, never echoed.
+      this.logger.error(
+        `Driver's Village lookup failed for ${code1c} (tg ${tgUserId}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      await ctx.reply(t(lang, 'photos.notAccepted'));
+      return;
+    }
+    if (lookup.kind === 'notFound') {
       await ctx.reply(t(lang, 'dv.notFound', { code: code1c }));
       return;
     }
+    if (lookup.kind === 'ambiguous') {
+      await ctx.reply(
+        t(lang, 'dv.ambiguous', {
+          code: code1c,
+          positions: listPositions(lookup.positions),
+        }),
+      );
+      return;
+    }
+    const { position } = lookup;
 
     let draft: DraftWithImages;
     try {
@@ -2906,8 +3070,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
+    // The position's own code: when the 8-digit key found it, it differs from
+    // the caption's (`96273708` → `96273708 GMB`).
     const receipt = t(lang, 'dv.photosReceived', {
-      code: code1c,
+      code: position.code1c,
       count: images.length,
     });
     if (this.dvMayUseLivePrompt(tgUserId)) {
@@ -2946,16 +3112,16 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   private async deliverDvPhotoPreview(
     draft: DraftWithImages,
     chatId: number,
-  ): Promise<void> {
+  ): Promise<PreviewDelivery> {
     const processedUrls = this.processedUrlsOf(draft);
     if (processedUrls.length === 0) {
       this.logger.error(
         `Photo-update draft ${draft.id} reached preview with no images — skipping.`,
       );
-      return;
+      return 'unavailable';
     }
     const claimed = await this.drafts.claimPreviewSend(draft.id);
-    if (!claimed) return;
+    if (!claimed) return 'elsewhere';
 
     const lang = await this.langOf(chatId);
     const position = await this.dvPhotos.describeTarget(
@@ -2969,7 +3135,8 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         draft.version + 1,
       );
       await this.bot.telegram.sendMessage(chatId, t(lang, 'dv.positionGone'));
-      return;
+      // No preview, but the user has their answer — why there is none.
+      return 'sent';
     }
 
     const caption = [
@@ -2996,6 +3163,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       await this.consumePromptMessage(chatId);
     }
     await this.sendPreviewMedia(chatId, processedUrls, caption, buttons);
+    return 'sent';
   }
 
   /**
@@ -3298,10 +3466,36 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn(
         `Failed to send preview media to chat ${chatId}, falling back to text: ${err instanceof Error ? err.message : String(err)}`,
       );
+      await this.sendPreviewText(chatId, caption, buttons);
+    }
+  }
+
+  /**
+   * The preview as a text message — the fallback when its media could not be
+   * sent. Formatted when Telegram accepts it; otherwise sent again as PLAIN
+   * text, because the fallback must not fail for the reason the media may have
+   * (a caption Telegram refuses to parse). That costs the seller the bold
+   * labels, never the preview: its buttons are how they publish.
+   */
+  private async sendPreviewText(
+    chatId: number,
+    caption: string,
+    buttons: ReturnType<typeof Markup.inlineKeyboard>,
+  ): Promise<void> {
+    try {
       await this.bot.telegram.sendMessage(chatId, caption, {
         parse_mode: 'Markdown',
         ...buttons,
       });
+    } catch (err) {
+      this.logger.warn(
+        `Formatted preview refused in chat ${chatId}, sending it as plain text: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      await this.bot.telegram.sendMessage(
+        chatId,
+        markdownToPlainText(caption),
+        buttons,
+      );
     }
   }
 
@@ -3358,17 +3552,25 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
           ? 'OEM №'
           : 'OEM/GM №';
 
+    // The caption is legacy Markdown, and one unpaired `_`, `*`, `` ` `` or `[`
+    // in it makes Telegram refuse the whole preview. Every value below that a
+    // person typed — the seller's title, description, part number and
+    // free-text viscosity, an admin's category name — is therefore escaped.
+    const md = (value: string | null): string | null =>
+      value === null ? null : escapeMarkdown(value);
+
     const kindLines = previewLines(
       {
         kind: listing.kind,
-        vehicleCategoryLabel:
+        vehicleCategoryLabel: escapeMarkdown(
           categoryLabel ??
-          (listing.vehicleCategory
-            ? (CATEGORY_LABELS.get(listing.vehicleCategory) ?? '—')
-            : '—'),
+            (listing.vehicleCategory
+              ? (CATEGORY_LABELS.get(listing.vehicleCategory) ?? '—')
+              : '—'),
+        ),
         partNumberLabel: numberLabel,
-        partNumber: metadata.gm_number,
-        oilViscosity: listing.oilViscosity,
+        partNumber: md(metadata.gm_number),
+        oilViscosity: md(listing.oilViscosity),
         oilType: listing.oilType,
         oilVolumeMl: listing.oilVolumeMl,
         antifreezeWeightG: listing.antifreezeWeightG,
@@ -3376,14 +3578,14 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         // shows that car in the preview while a "Другое" oil shows none.
         isUniversal: metadata.isUniversal,
       },
-      formatVehicleLine(metadata, lang),
+      escapeMarkdown(formatVehicleLine(metadata, lang)),
       lang,
     );
 
     const caption = [
       `${t(lang, 'preview.header')}\n`,
-      `🔩 *${t(lang, 'preview.title')}:* ${metadata.title}`,
-      `📝 *${t(lang, 'preview.description')}:* ${metadata.description ?? '—'}`,
+      `🔩 *${t(lang, 'preview.title')}:* ${escapeMarkdown(metadata.title ?? '')}`,
+      `📝 *${t(lang, 'preview.description')}:* ${escapeMarkdown(metadata.description ?? '—')}`,
       ...kindLines,
       `💰 *${t(lang, 'preview.price')}:* ${price.toFixed(0)} UZS`,
     ].join('\n');
@@ -3404,6 +3606,42 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * May this seller publish right now? ACTIVE supply-side status AND a
+   * storefront (the CatalogSeller its listings project into) that an admin has
+   * not SUSPENDED. Replies with the reason and returns false otherwise. The
+   * seller is looked up again by Telegram id and must be the draft's seller.
+   */
+  private async sellerMayPublish(
+    ctx: Context,
+    tgUserId: number,
+    sellerId: number,
+    lang: AppLang,
+  ): Promise<boolean> {
+    const seller = await this.sellers.findByTgId(BigInt(tgUserId));
+    if (!seller || seller.id !== sellerId) {
+      await ctx.reply(t(lang, 'start.notRegistered'));
+      return false;
+    }
+    if (seller.status === SellerStatus.PENDING) {
+      await ctx.reply(t(lang, 'start.awaitingApproval'));
+      return false;
+    }
+    if (seller.status !== SellerStatus.ACTIVE) {
+      await ctx.reply(t(lang, 'start.accountRejected'));
+      return false;
+    }
+    const storefront = await this.prisma.catalogSeller.findUnique({
+      where: { id: CatalogProjectionService.catalogSellerIdFor(seller) },
+      select: { status: true },
+    });
+    if (storefront?.status === DealerStatus.SUSPENDED) {
+      await ctx.reply(t(lang, 'start.storeSuspended'));
+      return false;
+    }
+    return true;
+  }
+
+  /**
    * Commit a confirmed pending product: perform the database writes, then send a
    * simple success message (the preview already showed the full product). No-op
    * with a notice if there is nothing to confirm. Uploaded assets are kept.
@@ -3419,6 +3657,14 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       (await this.rebuildPendingFromDraft(tgUserId));
     if (!session) {
       await ctx.reply(t(lang, 'confirm.nothingPending'));
+      return;
+    }
+
+    // Re-gate the seller at PUBLICATION, not only at /start: an admin may have
+    // rejected the seller or suspended their storefront while the draft was in
+    // progress. Checked before the claim, so a refused draft stays as it was
+    // (READY_FOR_PREVIEW) and its TTL sweep reclaims it — nothing is published.
+    if (!(await this.sellerMayPublish(ctx, tgUserId, session.sellerId, lang))) {
       return;
     }
 
@@ -3657,9 +3903,11 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         `Commit error: ${errMsg}`,
         error instanceof Error ? error.stack : undefined,
       );
-      await ctx.reply(t(lang, 'confirm.failed', { error: errMsg }), {
-        parse_mode: 'Markdown',
-      });
+      // The reason stays in the log above. The seller is shown neither Prisma's
+      // wording nor infrastructure detail, in plain text — the notice can no
+      // longer be refused for its formatting, which used to turn a failed
+      // publish into an error escaping the handler.
+      await ctx.reply(t(lang, 'confirm.failed'));
     }
   }
 

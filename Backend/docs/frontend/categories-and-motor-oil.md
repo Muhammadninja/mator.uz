@@ -307,6 +307,11 @@ Public, no auth. **Only active categories are ever returned**, at any level.
 category is a leaf". `GET /v1/reference/categories/:id/children` is an identical
 path-param form.
 
+Without `parentId` (the roots), each item also carries `productsCount`: the
+buyer-listed parts of the root's whole active subtree, each counted once (cached
+up to 60 s). It is **not** the admin tree's `productsCount`, which counts only the
+parts filed directly on a node. Children never carry it.
+
 > ⚠️ **Do not use `GET /v1/categories` for this.** That endpoint serves only the
 > 12 main buyer-grid categories (it filters on `mainCategory != null`) and will
 > not return OTHER children.
@@ -671,7 +676,7 @@ PATCH  /v1/admin/categories/:id/move        { parentId, sortOrder? }
 DELETE /v1/admin/categories/:id?reassignTo=
 
 # ── Buyer (public) ──
-GET /v1/reference/categories?parentId=<id>          # active only; roots when omitted
+GET /v1/reference/categories?parentId=<id>          # active only; roots (+ productsCount) when omitted
 GET /v1/reference/categories/:id/children
 GET /v1/catalog/parts?category=<id>&kind=motor_oil&viscosity=&oil_type=&volume_ml=
                       &q=&make=&model=&vehicle_id=&sort=&page=&page_size=

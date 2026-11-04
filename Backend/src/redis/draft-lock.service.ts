@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { RedisService } from './redis.service';
+import { RedisService, withRedisTimeout } from './redis.service';
 
 /**
  * DraftLock — a short-lived, self-expiring mutex for the draft/preview flow.
@@ -18,7 +18,9 @@ import { RedisService } from './redis.service';
  * never means "this succeeded". An acquired lock means nothing at all until the
  * DB guard downstream also passes. If Redis is unavailable, every acquire
  * fails OPEN (returns true) — a flaky cache must never block a seller from
- * publishing, because the DB is still there to reject the duplicate.
+ * publishing, because the DB is still there to reject the duplicate. That
+ * includes a Redis that does not answer at all: every command is bounded by
+ * REDIS_TIMEOUT_MS.
  *
  * Stale-safety: locks are acquired with `SET NX EX`, so a holder that crashes
  * mid-operation cannot wedge the key — Redis expires it within `ttlSeconds` and
@@ -58,6 +60,15 @@ export class DraftLock {
   static readonly ENQUEUE_TTL_SECONDS = 5;
 
   /**
+   * Longest a lock command may take before the lock fails open. Far above a
+   * healthy round-trip and far below Telegraf's 90 s handler timeout: during a
+   * Redis outage the shared client waits for the reconnect (see
+   * withRedisTimeout), and a bot handler waiting here holds up every seller's
+   * updates queued behind it.
+   */
+  static readonly REDIS_TIMEOUT_MS = 2_000;
+
+  /**
    * Fenced release: DEL only when the stored value still equals our token.
    * Compare-and-delete must be atomic, hence Lua — a GET-then-DEL could observe
    * our token, lose the CPU, and delete a lock a newer holder acquired in the gap.
@@ -84,13 +95,25 @@ export class DraftLock {
     ttlSeconds: number = DraftLock.DEFAULT_TTL_SECONDS,
   ): Promise<DraftLockHandle | null> {
     const token = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+    let command: Promise<'OK' | null> | undefined;
     try {
-      const res = await this.redis
-        .getClient()
-        .set(key, token, 'EX', ttlSeconds, 'NX');
+      command = this.redis.getClient().set(key, token, 'EX', ttlSeconds, 'NX');
+      const res = await withRedisTimeout(
+        command,
+        DraftLock.REDIS_TIMEOUT_MS,
+        `SET ${key}`,
+      );
       if (res !== 'OK') return null; // held by someone else — duplicate tap
       return { key, token, release: () => this.release(key, token) };
     } catch (err) {
+      // A SET that timed out is still queued, and may take the lock once Redis
+      // is back — long after this caller went ahead unguarded. Release it the
+      // moment it lands (fenced: only our own token is ever deleted) rather than
+      // let it shadow legitimate retries for a whole TTL.
+      void command?.then(
+        (res) => (res === 'OK' ? this.release(key, token) : undefined),
+        () => undefined,
+      );
       this.logger.warn(
         `Lock acquire failed for "${key}" (${err instanceof Error ? err.message : String(err)}) — proceeding unguarded; the DB guard still applies.`,
       );
@@ -126,9 +149,11 @@ export class DraftLock {
    */
   private async release(key: string, token: string): Promise<void> {
     try {
-      await this.redis
-        .getClient()
-        .eval(DraftLock.RELEASE_SCRIPT, 1, key, token);
+      await withRedisTimeout(
+        this.redis.getClient().eval(DraftLock.RELEASE_SCRIPT, 1, key, token),
+        DraftLock.REDIS_TIMEOUT_MS,
+        `release of ${key}`,
+      );
     } catch (err) {
       this.logger.debug(
         `Lock release failed for "${key}" (${err instanceof Error ? err.message : String(err)}) — it will expire on its own.`,

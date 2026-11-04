@@ -205,7 +205,12 @@ describe('CatalogToolsService', () => {
         vehicle_id: 'veh_1',
       });
 
-      expect(parts.detail).toHaveBeenCalledWith('part_pads', 'veh_1');
+      expect(parts.detail).toHaveBeenCalledWith(
+        'part_pads',
+        'veh_1',
+        'ru',
+        null,
+      );
       const item = JSON.parse(res.content).items[0];
       expect(item.part_id).toBe('part_pads');
       expect(item.oem_numbers).toEqual(['13476876']);
@@ -262,6 +267,7 @@ describe('CatalogToolsService', () => {
         expect(categories.list).toHaveBeenCalledWith(
           expect.objectContaining({ scope: 'main' }),
           lang,
+          null,
         );
       },
     );
@@ -269,7 +275,11 @@ describe('CatalogToolsService', () => {
     it('falls back to the default language when the caller passes none', async () => {
       categories.list.mockResolvedValue({ items: [], total: 0 });
       await tools.run('get_categories', { scope: 'main' });
-      expect(categories.list).toHaveBeenCalledWith(expect.anything(), 'ru');
+      expect(categories.list).toHaveBeenCalledWith(
+        expect.anything(),
+        'ru',
+        null,
+      );
     });
 
     // The id is what `search_catalog` must be given back, so it may never
@@ -291,6 +301,52 @@ describe('CatalogToolsService', () => {
       categories.list.mockResolvedValue({ items: [], total: 0 });
       await tools.run('get_categories', { scope: 'nonsense' });
       expect(categories.list.mock.calls[0][0].scope).toBe('main');
+    });
+  });
+
+  // A vehicle_id arrives from the MODEL, so it is untrusted: every tool hands
+  // the session owner to the catalogue services, which resolve the id only in
+  // that user's garage (a foreign id then behaves like an unknown one).
+  describe('session owner scoping of vehicle_id', () => {
+    it('search_catalog forwards the owner with the vehicle id', async () => {
+      parts.list.mockResolvedValue({ items: [], total: 0 });
+      await tools.run('search_catalog', { vehicle_id: 'veh_1' }, 'uz', 'usr_1');
+      expect(parts.list).toHaveBeenCalledWith(
+        expect.objectContaining({ vehicle_id: 'veh_1' }),
+        'ru',
+        'usr_1',
+      );
+    });
+
+    it('get_product forwards the owner with the vehicle id', async () => {
+      parts.detail.mockResolvedValue(buildPresentedPart());
+      await tools.run(
+        'get_product',
+        { part_id: 'part_pads', vehicle_id: 'veh_1' },
+        'ru',
+        'usr_1',
+      );
+      expect(parts.detail).toHaveBeenCalledWith(
+        'part_pads',
+        'veh_1',
+        'ru',
+        'usr_1',
+      );
+    });
+
+    it('get_categories forwards the owner with the vehicle id', async () => {
+      categories.list.mockResolvedValue({ items: [], total: 0 });
+      await tools.run(
+        'get_categories',
+        { scope: 'main', vehicle_id: 'veh_1' },
+        'en',
+        'usr_1',
+      );
+      expect(categories.list).toHaveBeenCalledWith(
+        expect.objectContaining({ vehicle_id: 'veh_1' }),
+        'en',
+        'usr_1',
+      );
     });
   });
 

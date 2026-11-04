@@ -135,6 +135,7 @@ export class ClaudeService {
     system: string,
     messages: Anthropic.MessageParam[],
     lang: AppLang = DEFAULT_APP_LANG,
+    userId: string | null = null,
   ): Promise<ReplyResult> {
     if (!this.client) {
       return {
@@ -191,7 +192,7 @@ export class ClaudeService {
         );
         const results: Anthropic.ToolResultBlockParam[] = [];
         for (const call of calls) {
-          const run = await this.tools.run(call.name, call.input, lang);
+          const run = await this.tools.run(call.name, call.input, lang, userId);
           citedItems += run.itemCount;
           results.push({
             type: 'tool_result',

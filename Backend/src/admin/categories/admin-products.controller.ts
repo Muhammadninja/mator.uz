@@ -6,6 +6,7 @@ import {
   Param,
   ParseIntPipe,
   Patch,
+  Req,
   UseGuards,
 } from '@nestjs/common';
 import {
@@ -19,6 +20,8 @@ import {
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 import { AdminRole } from '@prisma/client';
+import type { Request } from 'express';
+import { AuthenticatedAdmin } from '../auth/strategies/admin-jwt.strategy';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { AdminJwtGuard } from '../auth/guards/admin-jwt.guard';
 import { AdminRoleGuard } from '../auth/guards/admin-role.guard';
@@ -56,13 +59,28 @@ export class AdminProductsController {
     summary: 'Reassign many products to one category (transactional)',
     description:
       'Moves every listed part (CatalogPart) into targetCategoryId in a single ' +
-      'transaction. Validates the target category exists. Returns the moved count.',
+      'transaction. Validates the target category exists. The home-grid bucket ' +
+      '(mainCategory) and vehicle system (vehicleCategory) are re-derived from ' +
+      'the target’s place in the category tree, so a moved part shows on the ' +
+      'tile of its new category. Nothing else of the part is changed.',
   })
-  @ApiOkResponse({ description: 'The number of products moved.' })
+  @ApiOkResponse({
+    description:
+      '{ moved, categoryId, mainCategory, vehicleCategory } — the number of ' +
+      'products moved and the filing they now carry (mainCategory null = on ' +
+      'no home tile).',
+  })
   @ApiBadRequestResponse({ description: 'Invalid body.' })
   @ApiNotFoundResponse({ description: 'No such target category.' })
-  bulkMove(@Body() dto: BulkMoveProductsDto) {
-    return this.categories.bulkMoveProducts(dto);
+  bulkMove(
+    @Body() dto: BulkMoveProductsDto,
+    @Req() req: Request & { user: AuthenticatedAdmin },
+  ) {
+    return this.categories.bulkMoveProducts(dto, {
+      actor: { id: req.user.id, email: req.user.email, name: req.user.name },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
   }
 
   @Patch(':id/rating')

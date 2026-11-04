@@ -64,9 +64,12 @@ export class AdminUsersService {
     const search = this.buildSearch(query.search);
     if (search) where.OR = search;
 
-    const orderBy: Prisma.AppUserOrderByWithRelationInput = {
-      [SORT_COLUMN[sortField]]: direction,
-    };
+    // The secondary `id` key makes the order total: customers sharing a sort value
+    // (most have no display name) could otherwise repeat or vanish between pages.
+    const orderBy: Prisma.AppUserOrderByWithRelationInput[] = [
+      { [SORT_COLUMN[sortField]]: direction },
+      { id: 'asc' },
+    ];
 
     const [users, totalItems] = await this.prisma.$transaction([
       this.prisma.appUser.findMany({

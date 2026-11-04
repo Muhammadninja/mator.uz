@@ -84,7 +84,8 @@ describe('Payments + webhooks smoke', () => {
             packageCodeSet: null,
           },
           // The operator has not entered this dealer's ИНН / ставка НДС yet.
-          seller: { tin: null, vatPercent: null },
+          inStock: true,
+          seller: { status: 'ACTIVE', tin: null, vatPercent: null },
         },
       ]);
 
@@ -131,7 +132,8 @@ describe('Payments + webhooks smoke', () => {
             packageCodeSingle: '1417722',
             packageCodeSet: null,
           },
-          seller: { tin: '301234567', vatPercent: 0 },
+          inStock: true,
+          seller: { status: 'ACTIVE', tin: '301234567', vatPercent: 0 },
         },
       ]);
       prisma.payment.create.mockResolvedValue({ id: 'pay_1' });

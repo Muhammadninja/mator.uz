@@ -106,6 +106,41 @@ export class AdminAuditService {
     entry: AdminAuditEntry,
     tx?: Prisma.TransactionClient,
   ): Promise<void> {
+    await this.db(tx).adminAudit.create({ data: this.toRow(entry) });
+    // The same id is prefixed onto this line, so grepping it returns the HTTP
+    // request, any exception, and this audit write together.
+    const requestId = entry.requestId ?? getRequestId();
+    this.logger.log(
+      `${requestId ? `[${requestId}] ` : ''}[audit] ${entry.action} ` +
+        `target=${entry.target.id} ` +
+        `actor=${entry.actor?.id ?? entry.actorLabel ?? 'unknown'}`,
+    );
+  }
+
+  /**
+   * Record one action that touched many targets, one entry each, so the history of
+   * any single part reads the same however it was changed. One statement however
+   * many there are; a batch of a thousand must not cost a thousand round trips
+   * inside the transaction holding its row locks.
+   */
+  async recordMany(
+    entries: AdminAuditEntry[],
+    tx?: Prisma.TransactionClient,
+  ): Promise<void> {
+    if (entries.length === 0) return;
+    await this.db(tx).adminAudit.createMany({
+      data: entries.map((entry) => this.toRow(entry)),
+    });
+    const [first] = entries;
+    const requestId = first.requestId ?? getRequestId();
+    this.logger.log(
+      `${requestId ? `[${requestId}] ` : ''}[audit] ${first.action} ` +
+        `targets=${entries.length} ` +
+        `actor=${first.actor?.id ?? first.actorLabel ?? 'unknown'}`,
+    );
+  }
+
+  private toRow(entry: AdminAuditEntry) {
     // An admin-account target fills the targetAdminId FK; any other entity
     // fills targetEntity/targetEntityId instead. Both snapshot targetName.
     const target = isEntityTarget(entry.target)
@@ -124,35 +159,25 @@ export class AdminAuditService {
           targetEntityId: null,
         };
 
-    await this.db(tx).adminAudit.create({
-      data: {
-        action: entry.action,
-        actorId: entry.actor?.id ?? null,
-        actorEmail: entry.actor?.email ?? null,
-        actorName: entry.actor?.name ?? null,
-        actorLabel: entry.actorLabel ?? null,
-        ...target,
-        previousRole: entry.previousRole ?? null,
-        newRole: entry.newRole ?? null,
-        previousValues: entry.previousValues ?? Prisma.DbNull,
-        newValues: entry.newValues ?? Prisma.DbNull,
-        reason: truncate(entry.reason, 500),
-        ip: truncate(entry.ip, 45),
-        userAgent: truncate(entry.userAgent, 400),
-        // Taken from the ambient context when not given explicitly, so every
-        // action performed over HTTP is correlatable without the call sites
-        // having to thread it through.
-        requestId: truncate(entry.requestId ?? getRequestId(), 64),
-      },
-    });
-    // The same id is prefixed onto this line, so grepping it returns the HTTP
-    // request, any exception, and this audit write together.
-    const requestId = entry.requestId ?? getRequestId();
-    this.logger.log(
-      `${requestId ? `[${requestId}] ` : ''}[audit] ${entry.action} ` +
-        `target=${entry.target.id} ` +
-        `actor=${entry.actor?.id ?? entry.actorLabel ?? 'unknown'}`,
-    );
+    return {
+      action: entry.action,
+      actorId: entry.actor?.id ?? null,
+      actorEmail: entry.actor?.email ?? null,
+      actorName: entry.actor?.name ?? null,
+      actorLabel: entry.actorLabel ?? null,
+      ...target,
+      previousRole: entry.previousRole ?? null,
+      newRole: entry.newRole ?? null,
+      previousValues: entry.previousValues ?? Prisma.DbNull,
+      newValues: entry.newValues ?? Prisma.DbNull,
+      reason: truncate(entry.reason, 500),
+      ip: truncate(entry.ip, 45),
+      userAgent: truncate(entry.userAgent, 400),
+      // Taken from the ambient context when not given explicitly, so every
+      // action performed over HTTP is correlatable without the call sites
+      // having to thread it through.
+      requestId: truncate(entry.requestId ?? getRequestId(), 64),
+    };
   }
 
   /**

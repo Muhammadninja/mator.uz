@@ -6,13 +6,20 @@
  * provably never reaches a write method.
  *
  * ── What a write touches (and what it never touches) ──
- * Writes: Product (import-owned columns only), Stock (price, quantity, unit,
- * source identity), part_models, part_makes, and brands / car_models rows for
- * vehicles that do not exist yet — the same reference upserts the Telegram
- * pipeline performs through persistVehicleLinks.
- * Never: product photos (ProductImage rows), products.image_url, description, ratings, kind,
- * package form, sellers, catalog_sellers, part_categories. Photos added to an
- * imported product (the future album + caption flow) survive every re-import.
+ * A position is found by its exact (seller, DRIVERS_VILLAGE_1C, code_1c) only.
+ * • Initial creation of a NEW position (createPosition): Product (the
+ *   importOwnedProductData allowlist below), Stock (price, quantity, unit,
+ *   source identity), part_models / part_makes from the file, and brands /
+ *   car_models rows for vehicles that do not exist yet.
+ * • Synchronization of a STORED position (syncStock): stocks.price_uzs and —
+ *   only when the file states it — stocks.quantity. Nothing else: not the
+ *   product, its name, numbers or unit, not its vehicle links.
+ * Never, in either case: the category (products.category_id /
+ * vehicle_category_id and the main_category / vehicle_category mirrors),
+ * product photos (ProductImage rows), products.image_url, description,
+ * ratings, kind, package form, fitment_bindings, part_compatibilities,
+ * sellers, catalog_sellers, part_categories. Classification is written only by
+ * the separate classification import (drivers-village-classification.store).
  */
 import {
   PrismaClient,
@@ -20,16 +27,18 @@ import {
   ProductKind,
   PartNumberType,
 } from '@prisma/client';
-import { persistVehicleLinks } from '../../telegram/vehicle-links';
+import { addVehicleLinks } from '../../telegram/vehicle-links';
 import { CatalogProjectionService } from '../../catalog/projection/catalog-projection.service';
 import {
   DRIVERS_VILLAGE_SOURCE_SYSTEM,
   IMPORT_LIMITS,
 } from './drivers-village.constants';
 import type {
-  CategoryNode,
+  BatchWrite,
   ExistingPosition,
   PositionWrite,
+  StockSync,
+  VehicleReference,
 } from './drivers-village.types';
 
 export interface CatalogSellerRef {
@@ -51,16 +60,20 @@ export interface WrittenPosition {
   created: boolean;
 }
 
-/** The migration that adds every column the importer reads and writes. */
-export const REQUIRED_MIGRATION = '20260923000000_drivers_village_1c_import';
+/** The migrations that add every column the importer reads and writes. */
+export const REQUIRED_MIGRATIONS = [
+  '20260923000000_drivers_village_1c_import',
+  '20261009000000_drivers_village_source_part_number',
+] as const;
 
 export interface DriversVillageStore {
-  /** False when the database predates REQUIRED_MIGRATION. Read-only check. */
+  /** False when the database predates REQUIRED_MIGRATIONS. Read-only check. */
   schemaReady(): Promise<boolean>;
   findCatalogSeller(id: string): Promise<CatalogSellerRef | null>;
   /** The supply-side seller explicitly linked to the catalog dealer, if any. */
   findLinkedSeller(catalogSellerId: string): Promise<LinkedSellerRef | null>;
-  loadCategories(): Promise<CategoryNode[]>;
+  /** Buyer vehicle reference names, to check fitment against. Read-only. */
+  loadVehicleReference(): Promise<VehicleReference>;
   /** Existing imported positions of this seller, keyed by code_1c. */
   loadPositions(
     sellerId: number,
@@ -71,7 +84,7 @@ export interface DriversVillageStore {
   /** Write one batch atomically: all positions or none. */
   applyBatch(
     sellerId: number,
-    writes: PositionWrite[],
+    writes: BatchWrite[],
   ): Promise<WrittenPosition[]>;
 }
 
@@ -104,8 +117,8 @@ export class PrismaDriversVillageStore implements DriversVillageStore {
       WHERE table_schema = current_schema()
         AND ((table_name = 'stocks' AND column_name IN ('source_system', 'source_code', 'unit'))
           OR (table_name = 'sellers' AND column_name = 'catalog_seller_id')
-          OR (table_name = 'products' AND column_name IN ('gm_numbers', 'oem_numbers')))`;
-    return Number(rows[0]?.n ?? 0) === 6;
+          OR (table_name = 'products' AND column_name IN ('gm_numbers', 'oem_numbers', 'source_part_number')))`;
+    return Number(rows[0]?.n ?? 0) === 7;
   }
 
   findCatalogSeller(id: string): Promise<CatalogSellerRef | null> {
@@ -122,10 +135,20 @@ export class PrismaDriversVillageStore implements DriversVillageStore {
     });
   }
 
-  loadCategories(): Promise<CategoryNode[]> {
-    return this.prisma.partCategory.findMany({
-      select: { id: true, parentId: true, level: true, isActive: true },
-    });
+  async loadVehicleReference(): Promise<VehicleReference> {
+    const [makes, models] = await Promise.all([
+      this.prisma.vehicleMake.findMany({ select: { id: true, name: true } }),
+      this.prisma.vehicleModelRef.findMany({
+        select: { makeId: true, name: true },
+      }),
+    ]);
+    const makeName = new Map(makes.map((m) => [m.id, m.name]));
+    return {
+      makes: makes.map((m) => m.name),
+      models: models
+        .filter((m) => makeName.has(m.makeId))
+        .map((m) => `${makeName.get(m.makeId)}|${m.name}`),
+    };
   }
 
   async loadPositions(
@@ -151,9 +174,9 @@ export class PrismaDriversVillageStore implements DriversVillageStore {
             select: {
               title: true,
               gmNumbers: true,
+              sourcePartNumber: true,
               oemNumbers: true,
               categoryId: true,
-              vehicleCategoryId: true,
               isUniversal: true,
               partModels: {
                 select: {
@@ -168,7 +191,8 @@ export class PrismaDriversVillageStore implements DriversVillageStore {
           },
         },
       });
-      const projected = new Set(
+      // The projected catalog part, where an operator classifies a position.
+      const projected = new Map(
         (
           await this.prisma.catalogPart.findMany({
             where: {
@@ -178,12 +202,13 @@ export class PrismaDriversVillageStore implements DriversVillageStore {
                 ),
               },
             },
-            select: { id: true },
+            select: { id: true, categoryId: true },
           })
-        ).map((p) => p.id),
+        ).map((p) => [p.id, p.categoryId]),
       );
       for (const s of stocks) {
         if (!s.sourceCode) continue;
+        const partId = CatalogProjectionService.catalogPartId(s.id);
         out.set(s.sourceCode, {
           stockId: s.id,
           productId: s.productId,
@@ -193,18 +218,16 @@ export class PrismaDriversVillageStore implements DriversVillageStore {
           unit: s.unit,
           title: s.product.title,
           gmNumbers: s.product.gmNumbers,
+          sourcePartNumber: s.product.sourcePartNumber,
           oemNumbers: s.product.oemNumbers,
-          categoryId: s.product.categoryId,
-          vehicleCategoryId: s.product.vehicleCategoryId,
+          categoryId: projected.get(partId) ?? s.product.categoryId,
           isUniversal: s.product.isUniversal,
           models: s.product.partModels
             .map((pm) => `${pm.model.brand.name}|${pm.model.name}`)
             .sort(),
           makes: s.product.partMakes.map((pm) => pm.brand.name).sort(),
           imageCount: s.product._count.images,
-          hasCatalogPart: projected.has(
-            CatalogProjectionService.catalogPartId(s.id),
-          ),
+          hasCatalogPart: projected.has(partId),
         });
       }
     }
@@ -221,7 +244,7 @@ export class PrismaDriversVillageStore implements DriversVillageStore {
 
   applyBatch(
     sellerId: number,
-    writes: PositionWrite[],
+    writes: BatchWrite[],
   ): Promise<WrittenPosition[]> {
     return this.prisma.$transaction(
       async (tx) => {
@@ -238,93 +261,150 @@ export class PrismaDriversVillageStore implements DriversVillageStore {
   }
 }
 
+/** Write one planned position inside the batch transaction. */
+export function writePosition(
+  tx: Prisma.TransactionClient,
+  sellerId: number,
+  w: BatchWrite,
+): Promise<WrittenPosition> {
+  return w.kind === 'create'
+    ? createPosition(tx, sellerId, w)
+    : syncStock(tx, sellerId, w);
+}
+
+/** The unique key of a position: (seller, DRIVERS_VILLAGE_1C, code_1c). */
+export const stockKey = (sellerId: number, code1c: string) => ({
+  sellerId_sourceSystem_sourceCode: {
+    sellerId,
+    sourceSystem: DRIVERS_VILLAGE_SOURCE_SYSTEM,
+    sourceCode: code1c,
+  },
+});
+
 /**
- * Upsert one position inside the batch transaction. The Stock's
- * (seller, source system, code_1c) key decides create vs update, so a
- * re-import converges on the same Stock and Product rows.
+ * Initial creation of a position: product, its fitment links, stock. Refuses
+ * (and so rolls the batch back) when the code already has a position — one
+ * that appeared after planning — rather than touching it.
  */
-export async function writePosition(
+async function createPosition(
   tx: Prisma.TransactionClient,
   sellerId: number,
   w: PositionWrite,
 ): Promise<WrittenPosition> {
-  const key = {
-    sellerId,
-    sourceSystem: DRIVERS_VILLAGE_SOURCE_SYSTEM,
-    sourceCode: w.code1c,
-  };
   const existing = await tx.stock.findUnique({
-    where: { sellerId_sourceSystem_sourceCode: key },
+    where: stockKey(sellerId, w.code1c),
+    select: { id: true },
+  });
+  if (existing)
+    throw new Error(
+      `code_1c "${w.code1c}" already has a position (stock ${existing.id}) that appeared after planning — re-run the import`,
+    );
+
+  // gmNumber stays NULL: it is the Telegram upsert key, so an imported product
+  // can never be matched (and overwritten) by a wizard listing. No category
+  // either: the position starts unclassified (the projection files it under
+  // the fallback bucket). is_universal keeps its default (false): no file
+  // cell ever states "fits every vehicle".
+  const { id: productId } = await tx.product.create({
+    data: { ...importOwnedProductData(w), kind: ProductKind.SPARE_PART },
+    select: { id: true },
+  });
+  await addVehicleLinks(
+    tx,
+    productId,
+    w.models.map((v) => ({ brand: v.make, model: v.model })),
+  );
+  await addMakeLinks(tx, productId, w.makes);
+
+  // The already-normalized price, the quantity and the unit. A quantity the
+  // file does not give is left out: the stock gets the column default
+  // (stocks.quantity DEFAULT 1), which lives in the schema only. A quantity of
+  // 0 is written as 0 — the position exists, out of stock.
+  const stock = await tx.stock.create({
+    data: {
+      sellerId,
+      sourceSystem: DRIVERS_VILLAGE_SOURCE_SYSTEM,
+      sourceCode: w.code1c,
+      productId,
+      priceUzs: new Prisma.Decimal(w.priceUzs),
+      ...(w.quantity === null ? {} : { quantity: w.quantity }),
+      unit: w.unit,
+    },
+    select: { id: true },
+  });
+  return { code1c: w.code1c, stockId: stock.id, productId, created: true };
+}
+
+/**
+ * Synchronization of a stored position: the price and/or the quantity of its
+ * stock — the only columns it writes. The stock is looked up again by the
+ * exact key and must still be the one planned, so a code can only ever write
+ * its own position.
+ */
+async function syncStock(
+  tx: Prisma.TransactionClient,
+  sellerId: number,
+  w: StockSync,
+): Promise<WrittenPosition> {
+  const stock = await tx.stock.findUnique({
+    where: stockKey(sellerId, w.code1c),
     select: { id: true, productId: true },
   });
-
-  // Import-owned product columns ONLY. Photos, image_url, description, rating,
-  // kind and package form are never listed here, so they are never changed.
-  const productData = {
-    title: w.product.title,
-    gmNumbers: w.product.gmNumbers,
-    oemNumbers: w.product.oemNumbers,
-    ...numberLabels(w.product.gmNumbers, w.product.oemNumbers),
-    isUniversal: w.product.isUniversal,
-    categoryId: w.product.categoryId,
-    vehicleCategoryId: w.product.vehicleCategoryId,
-    mainCategory: w.product.mainCategory,
-    vehicleCategory: w.product.vehicleCategory,
-  };
-
-  const productId = existing
-    ? (
-        await tx.product.update({
-          where: { id: existing.productId },
-          data: productData,
-          select: { id: true },
-        })
-      ).id
-    : // gmNumber stays NULL: it is the Telegram upsert key, so an imported
-      // product can never be matched (and overwritten) by a wizard listing.
-      (
-        await tx.product.create({
-          data: { ...productData, kind: ProductKind.SPARE_PART },
-          select: { id: true },
-        })
-      ).id;
-
-  // Specific models: the shared reconcile-then-recreate writer the Telegram
-  // pipeline uses (clears stale links, so no duplicate fitment).
-  await persistVehicleLinks(tx, productId, {
-    isUniversal: w.product.isUniversal,
-    vehicles: w.models.map((v) => ({ brand: v.make, model: v.model })),
+  if (!stock || stock.id !== w.stockId)
+    throw new Error(
+      `the position of code_1c "${w.code1c}" (stock ${w.stockId}) changed after planning — re-run the import`,
+    );
+  await tx.stock.update({
+    where: { id: stock.id },
+    data: {
+      ...(w.priceUzs === null
+        ? {}
+        : { priceUzs: new Prisma.Decimal(w.priceUzs) }),
+      ...(w.quantity === null ? {} : { quantity: w.quantity }),
+    },
+    select: { id: true },
   });
+  return {
+    code1c: w.code1c,
+    stockId: stock.id,
+    productId: stock.productId,
+    created: false,
+  };
+}
 
-  // Make-wide link, reconciled the same way.
-  await tx.partMake.deleteMany({ where: { partId: productId } });
-  if (w.make) {
+/** ADD make-wide links (part_makes), never removing one. Idempotent. */
+export async function addMakeLinks(
+  tx: Prisma.TransactionClient,
+  productId: number,
+  makes: string[],
+): Promise<void> {
+  for (const make of makes) {
     const brand = await tx.brand.upsert({
-      where: { name: w.make },
+      where: { name: make },
       update: {},
-      create: { name: w.make },
+      create: { name: make },
       select: { id: true },
     });
-    await tx.partMake.create({
-      data: { partId: productId, brandId: brand.id },
+    await tx.partMake.upsert({
+      where: { partId_brandId: { partId: productId, brandId: brand.id } },
+      update: {},
+      create: { partId: productId, brandId: brand.id },
     });
   }
+}
 
-  const stockData = {
-    priceUzs: new Prisma.Decimal(w.priceUzs),
-    quantity: w.quantity,
-    unit: w.unit,
+/**
+ * The ONLY product columns the 1C import writes, and only when it creates the
+ * product. A column missing here is never set by an import: the category ids
+ * and their main/vehicle enum mirrors, photos, image_url, description,
+ * rating, kind, package form, oil/antifreeze attributes.
+ */
+function importOwnedProductData(w: PositionWrite) {
+  return {
+    title: w.product.title,
+    gmNumbers: w.product.gmNumbers,
+    sourcePartNumber: w.product.sourcePartNumber,
+    oemNumbers: w.product.oemNumbers,
+    ...numberLabels(w.product.gmNumbers, w.product.oemNumbers),
   };
-  const stock = existing
-    ? await tx.stock.update({
-        where: { id: existing.id },
-        data: stockData,
-        select: { id: true },
-      })
-    : await tx.stock.create({
-        data: { ...key, productId, ...stockData },
-        select: { id: true },
-      });
-
-  return { code1c: w.code1c, stockId: stock.id, productId, created: !existing };
 }

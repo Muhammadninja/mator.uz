@@ -84,7 +84,16 @@ function part(over: Partial<PartWithRelations> = {}): PartWithRelations {
     compatibilities: [],
     fits: [],
     makeFits: [],
+    fitmentBindings: [],
     ...over,
+  };
+}
+
+/** A curated Fitment Studio binding as PART_INCLUDE loads it. */
+function binding(vehicleModelId: string, model: string, make = 'Chevrolet') {
+  return {
+    vehicleModelId,
+    vehicleModel: { name: model, make: { name: make } },
   };
 }
 
@@ -520,5 +529,69 @@ describe('presentPartItem — category label follows the request language', () =
     expect(uz.main_category).toBe(ru.main_category);
     // Everything except the label is byte-identical across languages.
     expect({ ...uz, category: null }).toEqual({ ...ru, category: null });
+  });
+});
+
+describe('presentPartItem — curated fitment (fitment_bindings)', () => {
+  it('fits[] lists the curated models and make_fits[] is empty (curation wins)', () => {
+    const out = presentPartItem(
+      part({
+        fitmentBindings: [
+          binding('nexia-3', 'Nexia 3'),
+          binding('cobalt', 'Cobalt'),
+          binding('cobalt', 'Cobalt'), // same model at a second node
+        ],
+        // Legacy rows the operator overrode — must not leak onto the card.
+        fits: [fit({ modelSlug: 'model_chevrolet_spark', modelName: 'Spark' })],
+        makeFits: [
+          {
+            partId: 'part-1',
+            makeSlug: 'make_chevrolet',
+            makeName: 'Chevrolet',
+          },
+        ],
+      }),
+      null,
+    );
+    expect(out.fits).toEqual([
+      {
+        make_slug: 'make_chevrolet',
+        make_name: 'Chevrolet',
+        model_slug: 'model_chevrolet_cobalt',
+        model_name: 'Cobalt',
+      },
+      {
+        make_slug: 'make_chevrolet',
+        make_name: 'Chevrolet',
+        model_slug: 'model_chevrolet_nexia-3',
+        model_name: 'Nexia 3',
+      },
+    ]);
+    expect(out.make_fits).toEqual([]);
+  });
+
+  it('an uncurated part keeps its legacy fit rows unchanged', () => {
+    const out = presentPartItem(part({ fits: [fit()] }), null);
+    expect(out.fits).toHaveLength(1);
+  });
+
+  it('compatibility is "fits" for the curated model and "does_not_fit" for another', () => {
+    const curated = part({ fitmentBindings: [binding('cobalt', 'Cobalt')] });
+    const cobalt = {
+      modelId: 'cobalt',
+      trimId: null,
+      engineId: null,
+      year: 2022,
+    };
+    const spark = {
+      modelId: 'spark',
+      trimId: null,
+      engineId: null,
+      year: 2022,
+    };
+    expect(presentPartItem(curated, cobalt).compatibility?.status).toBe('fits');
+    expect(presentPartItem(curated, spark).compatibility?.status).toBe(
+      'does_not_fit',
+    );
   });
 });

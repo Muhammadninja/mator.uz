@@ -215,6 +215,13 @@ export function suggestedNodeFor(
  * seeded after this table) is allowed anywhere — a data-entry tool that refuses
  * work it cannot classify is worse than one that trusts the operator.
  */
+/** Whether the bind guard above decides anything by this category's slug. */
+export function categoryIsNodeBound(slug: string): boolean {
+  return Object.values(NODE_ALLOWED_CATEGORIES).some((slugs) =>
+    slugs.includes(slug),
+  );
+}
+
 export function isCategoryAllowedOnNode(
   node: NodeCategory,
   slug?: string | null,

@@ -6,11 +6,16 @@
 //   • text/photos are only consumed while a session is active
 //   • price is required; photo is optional (price-only offer is valid)
 //   • finalize records the offer with the seller's Telegram identity
+//   • a malformed or truncated ticket id is answered "not found" and never queried
 
 import { TelegramOfferService } from './telegram-offer.service';
 
+// Ticket ids are UUIDs (a @db.Uuid column), so a fixture must be one too.
+const TICKET_ID = '3f2b8c1e-4d5a-4b6c-9d7e-8f9a0b1c2d3e';
+const OFFER_LINK = `offer_${TICKET_ID}`;
+
 const TICKET = {
-  id: 'ticket-1',
+  id: TICKET_ID,
   status: 'PENDING',
   extractedData: { part_name: 'Тормозные колодки' },
 };
@@ -53,10 +58,47 @@ describe('TelegramOfferService', () => {
   it('opens a session and asks for price on a valid deep-link', async () => {
     const { service, prisma } = build();
     const c = ctx();
-    const consumed = await service.startFromDeepLink(c, 'offer_ticket-1');
+    const consumed = await service.startFromDeepLink(c, OFFER_LINK);
     expect(consumed).toBe(true);
-    expect(prisma.sourcingTicket.findUnique).toHaveBeenCalled();
+    expect(prisma.sourcingTicket.findUnique).toHaveBeenCalledWith({
+      where: { id: TICKET_ID },
+    });
     expect(c.reply.mock.calls[0][0]).toContain('цену');
+  });
+
+  // A non-UUID reaching the @db.Uuid lookup makes the query FAIL rather than
+  // find nothing — before bot.catch existed, that took the whole bot down.
+  it.each([
+    ['malformed', 'offer_not-a-uuid'],
+    ['truncated', `offer_${TICKET_ID.slice(0, 20)}`],
+    ['hyphen-less', `offer_${TICKET_ID.replace(/-/g, '')}`],
+  ])(
+    'answers a %s ticket id as "not found" without querying',
+    async (_kind, link) => {
+      const { service, prisma } = build();
+      const c = ctx();
+
+      expect(await service.startFromDeepLink(c, link)).toBe(true); // consumed
+      expect(prisma.sourcingTicket.findUnique).not.toHaveBeenCalled();
+      expect(c.reply).toHaveBeenCalledTimes(1);
+      expect(c.reply.mock.calls[0][0]).toBe(
+        'Заявка не найдена — возможно, она уже закрыта.',
+      );
+      // No session was opened: the next text is not an offer price.
+      expect(await service.handleText(ctx('250000'))).toBe(false);
+    },
+  );
+
+  it('answers a well-formed id that matches no ticket as "not found"', async () => {
+    const { service, prisma } = build();
+    prisma.sourcingTicket.findUnique.mockResolvedValueOnce(null as never);
+    const c = ctx();
+
+    expect(await service.startFromDeepLink(c, OFFER_LINK)).toBe(true);
+    expect(prisma.sourcingTicket.findUnique).toHaveBeenCalledTimes(1);
+    expect(c.reply.mock.calls[0][0]).toBe(
+      'Заявка не найдена — возможно, она уже закрыта.',
+    );
   });
 
   it('does not consume text when there is no active session', async () => {
@@ -66,7 +108,7 @@ describe('TelegramOfferService', () => {
 
   it('rejects an unparseable price and re-prompts', async () => {
     const { service } = build();
-    await service.startFromDeepLink(ctx(), 'offer_ticket-1');
+    await service.startFromDeepLink(ctx(), OFFER_LINK);
     const c = ctx('сколько?');
     expect(await service.handleText(c)).toBe(true);
     expect(c.reply.mock.calls[0][0]).toContain('числом');
@@ -74,13 +116,13 @@ describe('TelegramOfferService', () => {
 
   it('captures a price-only offer (no photo) end to end', async () => {
     const { service, offers } = build();
-    await service.startFromDeepLink(ctx(), 'offer_ticket-1');
+    await service.startFromDeepLink(ctx(), OFFER_LINK);
     await service.handleText(ctx('250000')); // PRICE → CONDITION
     await (service as any).finalize(ctx());
 
     expect(offers.createOffer).toHaveBeenCalledWith(
       expect.objectContaining({
-        ticketId: 'ticket-1',
+        ticketId: TICKET_ID,
         price: 250000,
         images: [],
         condition: 'UNKNOWN',
@@ -96,7 +138,7 @@ describe('TelegramOfferService', () => {
       .spyOn(global, 'fetch' as never)
       .mockResolvedValue({ ok: true, arrayBuffer: async () => new ArrayBuffer(4) } as never);
 
-    await service.startFromDeepLink(ctx(), 'offer_ticket-1');
+    await service.startFromDeepLink(ctx(), OFFER_LINK);
     await service.handleText(ctx('300000'));
     const photoConsumed = await service.handlePhoto(ctx(), 'file-abc');
     await (service as any).finalize(ctx());
@@ -112,7 +154,7 @@ describe('TelegramOfferService', () => {
 
   it('will not accept a photo before a price', async () => {
     const { service, telegramFile } = build();
-    await service.startFromDeepLink(ctx(), 'offer_ticket-1');
+    await service.startFromDeepLink(ctx(), OFFER_LINK);
     const c = ctx();
     const consumed = await service.handlePhoto(c, 'file-abc');
     expect(consumed).toBe(true); // consumed (session active) but rejected
@@ -131,7 +173,7 @@ describe('TelegramOfferService', () => {
       {} as never,
     );
     const c = ctx();
-    expect(await service.startFromDeepLink(c, 'offer_ticket-1')).toBe(true);
+    expect(await service.startFromDeepLink(c, OFFER_LINK)).toBe(true);
     expect(c.reply.mock.calls[0][0]).toContain('закрыта');
   });
 });
@@ -186,7 +228,7 @@ describe('TelegramOfferService — callback screen cleanup', () => {
   it('deletes the condition screen and moves on to photos', async () => {
     const { service } = build();
     const tap = wire(service);
-    await service.startFromDeepLink(ctx(), 'offer_ticket-1');
+    await service.startFromDeepLink(ctx(), OFFER_LINK);
     await service.handleText(ctx('250000')); // PRICE → CONDITION
 
     const { ctx: c, rec } = cbCtx();
@@ -199,7 +241,7 @@ describe('TelegramOfferService — callback screen cleanup', () => {
   it('deletes the submit screen once the offer is recorded', async () => {
     const { service, offers } = build();
     const tap = wire(service);
-    await service.startFromDeepLink(ctx(), 'offer_ticket-1');
+    await service.startFromDeepLink(ctx(), OFFER_LINK);
     await service.handleText(ctx('250000'));
 
     const { ctx: c, rec } = cbCtx();
@@ -212,7 +254,7 @@ describe('TelegramOfferService — callback screen cleanup', () => {
   it('does NOT delete when submit is rejected for a missing price', async () => {
     const { service, offers } = build();
     const tap = wire(service);
-    await service.startFromDeepLink(ctx(), 'offer_ticket-1'); // no price yet
+    await service.startFromDeepLink(ctx(), OFFER_LINK); // no price yet
 
     const { ctx: c, rec } = cbCtx();
     await tap('sof:submit', c);
@@ -226,7 +268,7 @@ describe('TelegramOfferService — callback screen cleanup', () => {
   it('records the offer even when Telegram refuses the delete', async () => {
     const { service, offers } = build();
     const tap = wire(service);
-    await service.startFromDeepLink(ctx(), 'offer_ticket-1');
+    await service.startFromDeepLink(ctx(), OFFER_LINK);
     await service.handleText(ctx('250000'));
 
     const { ctx: c, rec } = cbCtx('throws');
@@ -240,7 +282,7 @@ describe('TelegramOfferService — callback screen cleanup', () => {
   it('deletes the screen on cancel and clears the session', async () => {
     const { service } = build();
     const tap = wire(service);
-    await service.startFromDeepLink(ctx(), 'offer_ticket-1');
+    await service.startFromDeepLink(ctx(), OFFER_LINK);
 
     const { ctx: c, rec } = cbCtx();
     await tap('sof:cancel', c);

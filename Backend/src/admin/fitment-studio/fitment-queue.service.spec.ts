@@ -3,13 +3,17 @@
 //
 // What these pin, in the order the operator meets them:
 //   • the queue's row shape, ordering, and the filter → predicate mapping
-//   • top300 degrading to `unmapped` while nothing is ranked yet
+//   • top300 = the stored fitment_priority ranking (fitment-queue.top300.spec.ts)
 //   • bind REPLACING the set (the delete is what makes a correction possible)
 //   • the category guard against the REAL taxonomy slugs, both directions
 //   • unknown vehicle ids → 400, not an FK 500
 
+import 'reflect-metadata';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { plainToInstance } from 'class-transformer';
+import { validateSync } from 'class-validator';
 import { FitmentQueueService } from './fitment-queue.service';
+import { BindPartFitmentDto } from './dto/bind-part-fitment.dto';
 import { GetPartsQueueQueryDto } from './dto/get-parts-queue-query.dto';
 
 const QUEUE_ROW = (over: Record<string, unknown> = {}) => ({
@@ -43,15 +47,22 @@ function makePrisma(over: Record<string, Record<string, jest.Mock>> = {}) {
       deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
       createMany: jest.fn().mockResolvedValue({ count: 0 }),
     },
-    $transaction: jest.fn((ops: Promise<unknown>[]) => Promise.all(ops)),
+    // The row-lock query bindPart issues inside its interactive transaction.
+    $queryRaw: jest.fn().mockResolvedValue([]),
   };
+  // Array form (queue reads) and interactive form (bindPart) — the callback
+  // runs against this same stub. Attached after the literal so the stub keeps
+  // its inferred type (a self-reference inside the initializer would not).
+  const stub = Object.assign(prisma, {
+    $transaction: jest.fn(
+      (arg: Promise<unknown>[] | ((tx: unknown) => Promise<unknown>)) =>
+        typeof arg === 'function' ? arg(prisma) : Promise.all(arg),
+    ),
+  });
   for (const [model, methods] of Object.entries(over)) {
-    Object.assign(
-      (prisma as Record<string, unknown>)[model] as object,
-      methods,
-    );
+    Object.assign((stub as Record<string, unknown>)[model] as object, methods);
   }
-  return prisma;
+  return stub;
 }
 
 const svc = (prisma: ReturnType<typeof makePrisma>) =>
@@ -117,26 +128,6 @@ describe('FitmentQueueService.getPartsQueue', () => {
     await svc(prisma).getPartsQueue(query({ filter: 'unmapped' }));
     expect(prisma.catalogPart.findMany).toHaveBeenCalledWith(
       expect.objectContaining({ where: { fitmentBindings: { none: {} } } }),
-    );
-  });
-
-  it('filter=top300 degrades to unmapped while nothing is ranked', async () => {
-    const prisma = makePrisma({
-      catalogPart: { count: jest.fn().mockResolvedValue(0) },
-    });
-    await svc(prisma).getPartsQueue(query({ filter: 'top300' }));
-    expect(prisma.catalogPart.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { fitmentBindings: { none: {} } } }),
-    );
-  });
-
-  it('filter=top300 uses the ranked slice once the backfill has run', async () => {
-    const prisma = makePrisma({
-      catalogPart: { count: jest.fn().mockResolvedValue(300) },
-    });
-    await svc(prisma).getPartsQueue(query({ filter: 'top300' }));
-    expect(prisma.catalogPart.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { fitmentPriority: { not: null } } }),
     );
   });
 
@@ -298,5 +289,218 @@ describe('FitmentQueueService.bindPart', () => {
     expect(a).toEqual(b);
     const calls = prisma.fitmentBinding.createMany.mock.calls as unknown[][];
     expect(calls[0][0]).toEqual(calls[1][0]);
+  });
+});
+
+describe('FitmentQueueService.bindPart — empty set, lock, concurrency', () => {
+  const PART_ROW = {
+    id: 'part_1',
+    oemNumbers: [],
+    gmNumbers: [],
+    category: { slug: 'front-brake-pads', parent: { slug: 'brake-system' } },
+  };
+
+  it('an EMPTY set clears this part at THIS node only, atomically', async () => {
+    const prisma = makePrisma({
+      catalogPart: { findUnique: jest.fn().mockResolvedValue(PART_ROW) },
+    });
+    const res = await svc(prisma).bindPart({
+      partId: 'part_1',
+      vehicleModelIds: [],
+      nodeKey: 'FRONT_BRAKES',
+    } as never);
+
+    expect(prisma.fitmentBinding.deleteMany).toHaveBeenCalledWith({
+      where: { partId: 'part_1', nodeId: 'node_fb' },
+    });
+    expect(prisma.fitmentBinding.createMany).not.toHaveBeenCalled();
+    expect(prisma.vehicleModelRef.findMany).not.toHaveBeenCalled();
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(res.boundCount).toBe(0);
+  });
+
+  it('takes the part row lock BEFORE deleting, inside the same transaction', async () => {
+    const order: string[] = [];
+    const prisma = makePrisma({
+      catalogPart: { findUnique: jest.fn().mockResolvedValue(PART_ROW) },
+      vehicleModelRef: {
+        findMany: jest.fn().mockResolvedValue([{ id: 'cobalt' }]),
+      },
+      fitmentBinding: {
+        deleteMany: jest.fn().mockImplementation(() => {
+          order.push('delete');
+          return Promise.resolve({ count: 0 });
+        }),
+        createMany: jest.fn().mockImplementation(() => {
+          order.push('create');
+          return Promise.resolve({ count: 1 });
+        }),
+      },
+    });
+    prisma.$queryRaw.mockImplementation((strings: TemplateStringsArray) => {
+      order.push(strings.join('?').includes('FOR UPDATE') ? 'lock' : 'sql');
+      return Promise.resolve([]);
+    });
+    await svc(prisma).bindPart({
+      partId: 'part_1',
+      vehicleModelIds: ['cobalt'],
+      nodeKey: 'FRONT_BRAKES',
+    } as never);
+    expect(order).toEqual(['lock', 'delete', 'create']);
+  });
+
+  describe('BindPartFitmentDto', () => {
+    const parse = (raw: Record<string, unknown>) => {
+      const dto = plainToInstance(BindPartFitmentDto, {
+        partId: 'part_1',
+        nodeKey: 'ENGINE',
+        ...raw,
+      });
+      return { dto, errors: validateSync(dto).map((e) => e.property) };
+    };
+
+    it('accepts an empty list (= clear this node)', () => {
+      expect(parse({ vehicleModelIds: [] }).errors).toEqual([]);
+    });
+
+    it('rejects a blank id instead of silently turning it into an empty set', () => {
+      expect(parse({ vehicleModelIds: [''] }).errors).toContain(
+        'vehicleModelIds',
+      );
+      expect(parse({ vehicleModelIds: ['  '] }).errors).toContain(
+        'vehicleModelIds',
+      );
+    });
+
+    it('dedupes and trims ids, keeping order', () => {
+      expect(
+        parse({ vehicleModelIds: ['cobalt', ' gentra ', 'cobalt'] }).dto
+          .vehicleModelIds,
+      ).toEqual(['cobalt', 'gentra']);
+    });
+
+    it('still requires an array', () => {
+      expect(parse({ vehicleModelIds: 'cobalt' }).errors).toContain(
+        'vehicleModelIds',
+      );
+    });
+  });
+
+  /**
+   * In-memory bindings with transactions SERIALISED the way the part row lock
+   * serialises them in PostgreSQL, and every call yielding so concurrent
+   * requests genuinely interleave. Proves the replace-set logic under that
+   * lock — not PostgreSQL itself.
+   */
+  function bindingStore() {
+    let rows: { partId: string; vehicleModelId: string; nodeId: string }[] = [];
+    let queue: Promise<unknown> = Promise.resolve();
+    const tick = () => new Promise<void>((r) => setImmediate(r));
+    const api = {
+      deleteMany: async ({
+        where,
+      }: {
+        where: {
+          partId: string;
+          nodeId: string;
+          vehicleModelId?: { notIn: string[] };
+        };
+      }) => {
+        await tick();
+        const notIn = where.vehicleModelId?.notIn;
+        rows = rows.filter(
+          (r) =>
+            !(
+              r.partId === where.partId &&
+              r.nodeId === where.nodeId &&
+              (!notIn || !notIn.includes(r.vehicleModelId))
+            ),
+        );
+        return { count: 0 };
+      },
+      createMany: async ({ data }: { data: typeof rows }) => {
+        await tick();
+        for (const d of data) {
+          if (
+            !rows.some(
+              (r) =>
+                r.partId === d.partId &&
+                r.nodeId === d.nodeId &&
+                r.vehicleModelId === d.vehicleModelId,
+            )
+          ) {
+            rows.push(d);
+          }
+        }
+        return { count: data.length };
+      },
+    };
+    const serialise = (fn: () => Promise<unknown>) => {
+      const run = queue.then(fn, fn);
+      queue = run.catch(() => undefined);
+      return run;
+    };
+    return {
+      api,
+      serialise,
+      models: () => rows.map((r) => r.vehicleModelId).sort(),
+    };
+  }
+
+  it("two CONCURRENT binds of one part end with exactly ONE request's set — never the union", async () => {
+    const store = bindingStore();
+    const prisma = makePrisma({
+      catalogPart: { findUnique: jest.fn().mockResolvedValue(PART_ROW) },
+      vehicleModelRef: {
+        findMany: jest
+          .fn()
+          .mockImplementation(
+            ({ where }: { where: { id: { in: string[] } } }) =>
+              Promise.resolve(where.id.in.map((id) => ({ id }))),
+          ),
+      },
+      fitmentBinding: {
+        deleteMany: jest.fn(store.api.deleteMany),
+        createMany: jest.fn(store.api.createMany),
+      },
+    });
+    prisma.$transaction.mockImplementation(
+      (fn: (tx: unknown) => Promise<unknown>) =>
+        store.serialise(() => fn(prisma)),
+    );
+
+    const bind = (ids: string[]) =>
+      svc(prisma).bindPart({
+        partId: 'part_1',
+        vehicleModelIds: ids,
+        nodeKey: 'FRONT_BRAKES',
+      } as never);
+    await Promise.all([bind(['cobalt', 'gentra']), bind(['spark'])]);
+
+    // Serialised: the later request's set wins outright (last-write-wins).
+    expect(store.models()).toEqual(['spark']);
+  });
+
+  it('sanity: WITHOUT serialisation the old delete/insert interleaving leaves the union', async () => {
+    const store = bindingStore();
+    // The pre-fix shape: delete-then-insert per request, no lock, interleaved.
+    const oldBind = async (ids: string[]) => {
+      await store.api.deleteMany({
+        where: {
+          partId: 'part_1',
+          nodeId: 'node_fb',
+          vehicleModelId: { notIn: ids },
+        },
+      });
+      await store.api.createMany({
+        data: ids.map((vehicleModelId) => ({
+          partId: 'part_1',
+          vehicleModelId,
+          nodeId: 'node_fb',
+        })),
+      });
+    };
+    await Promise.all([oldBind(['cobalt', 'gentra']), oldBind(['spark'])]);
+    expect(store.models()).toEqual(['cobalt', 'gentra', 'spark']);
   });
 });

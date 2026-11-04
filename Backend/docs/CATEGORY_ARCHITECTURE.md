@@ -82,7 +82,11 @@ CatalogPart.categoryId =
    1. product.categoryId                     // the subcategory the seller picked     ← primary
    2. else MAIN_CATEGORY_TO_SLUG[mainCategory]   // bucket fallback (auto-classified)
    3. else 'cat_uncategorized'               // synthetic fallback (categoryId is NOT NULL)
-CatalogPart.mainCategory = product.mainCategory   // always kept — powers the bucket rollup
+CatalogPart.mainCategory =                        // powers the bucket rollup
+   1. product.mainCategory                   // assigned (classifier, operator) — always wins
+   2. else mainCategoryForCategory(categoryId)   // tree rule: the node's own entry, else its
+                                             //   nearest ancestor's (category-map.ts)
+   3. else null                              // no home bucket: listed or unreviewed node
 ```
 
 **Key facts**
@@ -92,6 +96,19 @@ CatalogPart.mainCategory = product.mainCategory   // always kept — powers the 
   its bucket on the home grid.
 - `product.categoryId` is priority #1, so once the bot captures a subcategory id the
   part lands there with no other change.
+- Driver's Village (1C) positions get no classifier guess: the classification import
+  sets `mainCategory` only for a bucket row, so their bucket comes from the tree rule
+  (`CATEGORY_ID_TO_MAIN_CATEGORY`; nodes with no bucket among the 12 are listed in
+  `CATEGORIES_WITHOUT_MAIN_CATEGORY`). An imported part's classification is written on
+  create only, so rows that already exist are filled by `npm run backfill:root-buckets`.
+- **Operator move** (`PATCH /v1/admin/products/bulk-move`, `DELETE
+  /v1/admin/categories/:id?reassignTo=`) writes `CatalogPart.categoryId` together with
+  `mainCategory = mainCategoryForCategory(target)` and `vehicleCategory =` the enum of the
+  target's root (`vehicleCategoryForCategory`), read from the live tree by id. The old
+  bucket is never kept — it belonged to the old filing — so a moved part shows on the
+  tile of its new category, or on none when the target has no bucket. Nothing else of
+  the part is written. A rating edit re-projects with `keepClassification`, so it cannot
+  undo a move; a Telegram seller re-listing the same part still re-files it.
 
 ---
 
@@ -99,7 +116,7 @@ CatalogPart.mainCategory = product.mainCategory   // always kept — powers the 
 
 | Surface | Endpoint | Backend | What it returns |
 |---|---|---|---|
-| Home **"Shop by category"** | `GET /v1/categories` | `categories.service.ts` | the 12 buckets (`isActive AND mainCategory ≠ null`), `sortOrder`; **count grouped by `mainCategory`** so sub-filed parts roll up |
+| Home **"Shop by category"** | `GET /v1/reference/categories` | `reference.service.ts` → `part-category.service.ts` | the 10 roots, localized, each with **`productsCount`**: the buyer-listed parts filed on the root or anywhere beneath it through active nodes, each part once (`catalogRootProductCounts`: one GROUP BY `category_id` + one tree read) |
 | After brand → **systems** | `GET /v1/reference/categories` | `reference.service.ts` → `part-category.service.ts` | the 10 roots, localized; app strips buckets |
 | System → **subcategories** | `GET /v1/reference/categories?parentId=<root>` | same | the 52 subs; app strips buckets |
 | Subcategory → **parts** | `GET /v1/catalog/parts?category=<subId>` | catalog parts | parts with that exact `categoryId` |
@@ -112,12 +129,16 @@ CatalogPart.mainCategory = product.mainCategory   // always kept — powers the 
   language, falling back down the chain rather than rendering an empty label.
 - `hooks/use-system-categories.ts` — the after-brand systems list (roots), localized,
   hides `cat_uncategorized`.
-- Home grid stays on `GET /v1/categories` (`hooks/use-categories.ts`) — the buckets.
+- Home grid: the roots of `GET /v1/reference/categories` with their `productsCount`
+  (`hooks/use-categories.ts`); the systems list ignores the count.
 
 > **Reference cache:** `GET /v1/reference/categories` returns `slug ?? id` and is
 > Redis-cached (`PartCategoryService.CACHE_TTL_SECONDS = 300`). It **masks** null/duplicate
 > slugs. The admin panel (`admin-categories.presenter.ts`) reads the raw column — trust
 > it, not the API, for slug truth. Bust early with `redis-cli DEL cache:reference:categories`.
+> The roots' `productsCount` is cached apart (`cache:reference:categories:counts`, 60 s)
+> and merged per request, so the roots payload the bot shares never holds a count; every
+> admin category write drops both keys.
 
 ---
 
@@ -159,11 +180,16 @@ lives in `src/common/app-lang.util.ts` (`AppLang`, `toAppLang`/`toBotLanguage`,
 ## 7. Invariants
 
 1. `mainCategory` = bucket (coarse, home grid). `categoryId` = precise node (fine, browse).
-2. Every part has a `mainCategory`; `categoryId` is a subcategory when known, else a bucket, else `cat_uncategorized`.
+2. A part has a `mainCategory` unless its category has no home bucket (`CATEGORIES_WITHOUT_MAIN_CATEGORY`, or a node no rule covers yet) — then it is on no tile but still reachable by drill and search; `categoryId` is a subcategory when known, else a bucket, else `cat_uncategorized`.
 3. `level` is always derived from the parent — never accepted from a client.
 4. `id === slug`; both unique. A bucket id ∈ `MAIN_CATEGORY_BY_SLUG` keys.
 5. Buckets are hidden from BOTH drills (app + bot); they surface only on the home grid.
 6. `cat_uncategorized` can never be deleted (fallback bucket); it is hidden from the storefront.
+   Neither can the 12 buckets, the seller-bot anchors or `maintenance-and-fluids`: the application
+   reaches them by id (`LOAD_BEARING_CATEGORY_IDS`), so hard-deleting one breaks projection or the
+   bot with no FK to report it. Deactivate them instead. A hard delete physically removes the row,
+   and is refused while listings, live drafts or children point at it; a terminal draft does not
+   count, since the sweep keeps those rows forever. Structural writes run under one advisory lock.
 
 ---
 
@@ -171,14 +197,23 @@ lives in `src/common/app-lang.util.ts` (`AppLang`, `toAppLang`/`toBotLanguage`,
 
 | Command | Does |
 |---|---|
-| `npm run seed:categories` | create the 52 subcategories under the roots |
+| `npm run seed:categories` | **dry-run** — the 52 subcategories against the tree; `-- --apply` creates what is missing, `-- --apply --overwrite` also resets existing rows |
 | `npm run seed:category-titles` | backfill `name_ru`/`name_uz`/`name_en` from the shared translation table (roots, buckets + subs) |
 | `npm run fix:category-slugs` | diagnose + repair root slugs to canonical unique values |
-| `npm run restore:buyer-buckets` | reactivate/recreate the 12 home-grid buckets, ordered by importance |
+| `npm run restore:buyer-buckets` | **dry-run** — the state of the 12 home-grid buckets; `-- --apply` reactivates/recreates them, ordered by importance |
 | `npm run reclassify:subcategories` | **dry-run** — re-file existing parts onto subcategories |
 | `npm run reclassify:subcategories -- --apply` | persist the reclassification |
+| `npm run backfill:root-buckets` | **dry-run** — fill NULL `main_category` from the tree rule; lists every row, per-bucket counts, tile counts before/after, what stays unbucketed |
+| `npm run backfill:root-buckets -- --apply` | persist it (NULLs only; re-runs are no-ops) |
 
 After any of these that change the tree: `redis-cli DEL cache:reference:categories`.
+
+Once a database is live the tree belongs to operators, so these scripts no longer write it unless
+asked. `seed` refuses `NODE_ENV=production` without `--allow-production`, and skips categories on a
+database with real listings unless given `--reconcile-categories`. `seed:categories` and
+`restore:buyer-buckets` are dry-runs without `--apply`; `seed:categories -- --apply` creates what is
+missing (read the dry-run first: a missing row may be one an operator removed on purpose), and only
+`--overwrite` resets existing rows.
 
 ---
 

@@ -7,6 +7,7 @@ import {
   Patch,
   Query,
   UseGuards,
+  Req,
 } from '@nestjs/common';
 import {
   ApiBadRequestResponse,
@@ -18,6 +19,8 @@ import {
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 import { AdminRole } from '@prisma/client';
+import type { Request } from 'express';
+import { AuthenticatedAdmin } from '../auth/strategies/admin-jwt.strategy';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { AdminJwtGuard } from '../auth/guards/admin-jwt.guard';
 import { AdminRoleGuard } from '../auth/guards/admin-role.guard';
@@ -71,7 +74,14 @@ export class AdminInventoryController {
   })
   @ApiOkResponse({ description: 'The number of rows updated.' })
   @ApiBadRequestResponse({ description: 'Invalid body or out-of-range value.' })
-  batchUpdate(@Body() dto: BatchUpdateInventoryDto) {
-    return this.inventory.batchUpdate(dto);
+  batchUpdate(
+    @Body() dto: BatchUpdateInventoryDto,
+    @Req() req: Request & { user: AuthenticatedAdmin },
+  ) {
+    return this.inventory.batchUpdate(dto, {
+      actor: { id: req.user.id, email: req.user.email, name: req.user.name },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
   }
 }

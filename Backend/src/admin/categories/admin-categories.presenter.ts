@@ -1,9 +1,25 @@
-import { Prisma, PartMainCategory } from '@prisma/client';
+import { DraftStatus, Prisma, PartMainCategory } from '@prisma/client';
 import {
   isCategoryFiscallyConfigured,
   offersPackageChoice,
 } from '../../common/fiscal.util';
-import { isFiscalizedByOilType } from '../../catalog/categories/category-map';
+import {
+  isFiscalizedByOilType,
+  isLoadBearingCategory,
+} from '../../catalog/categories/category-map';
+
+/**
+ * Drafts that can still become a listing, and so genuinely depend on their
+ * category. PUBLISHED / CANCELLED / EXPIRED rows are history: the sweep keeps
+ * them forever, nothing reads their category again, and their FK is SET NULL. If
+ * they counted, one abandoned draft would pin a category for good, with nothing
+ * an operator could do about it.
+ */
+export const LIVE_DRAFT_STATUSES: DraftStatus[] = [
+  DraftStatus.CREATING,
+  DraftStatus.READY_FOR_PREVIEW,
+  DraftStatus.COMMITTING,
+];
 
 /**
  * Prisma `select` for a category node in the admin tree. `_count.parts` yields
@@ -30,10 +46,18 @@ export const ADMIN_CATEGORY_NODE_SELECT = {
   mxik: true,
   packageCodeSingle: true,
   packageCodeSet: true,
-  // Parts (buyer catalog) plus the supply-side listings and drafts that point
-  // here. The delete guard needs all three: a category is only detachable when
-  // nothing at all references it.
-  _count: { select: { parts: true, products: true, drafts: true } },
+  // Parts (buyer catalog) plus the supply-side listings and live drafts that
+  // point here, through either column. The same set the delete guard checks, so
+  // what the console reports up front is what the server will answer.
+  _count: {
+    select: {
+      parts: true,
+      products: true,
+      productsVehicle: true,
+      drafts: { where: { status: { in: LIVE_DRAFT_STATUSES } } },
+      draftsVehicle: { where: { status: { in: LIVE_DRAFT_STATUSES } } },
+    },
+  },
 } satisfies Prisma.PartCategorySelect;
 
 export type AdminCategoryNodeRow = Prisma.PartCategoryGetPayload<{
@@ -81,8 +105,10 @@ export interface AdminCategoryTreeNode {
   offersPackageChoice: boolean;
   /** Buyer-catalog parts linked directly to this node. */
   productsCount: number;
-  /** Supply-side listings + drafts pointing here (what blocks a hard delete). */
+  /** Supply-side listings + live drafts pointing here (what blocks a hard delete). */
   listingsCount: number;
+  /** The application depends on this row by id: it can be deactivated, not deleted. */
+  deleteProtected: boolean;
   children: AdminCategoryTreeNode[];
 }
 
@@ -116,7 +142,14 @@ export function presentAdminCategoryNode(
     fiscalByOilType: byOilType,
     offersPackageChoice: offersPackageChoice(row),
     productsCount: row._count.parts,
-    listingsCount: row._count.products + row._count.drafts,
+    // The larger of the two columns, not their sum: a listing filed on a childless
+    // root carries the root in both, and must count once. The lineage rule makes
+    // this exact (a category column on a root implies the vehicle column), and at
+    // worst it understates a row without ever reporting a blocker that isn't one.
+    listingsCount:
+      Math.max(row._count.products, row._count.productsVehicle) +
+      Math.max(row._count.drafts, row._count.draftsVehicle),
+    deleteProtected: isLoadBearingCategory(row.id),
   };
 }
 

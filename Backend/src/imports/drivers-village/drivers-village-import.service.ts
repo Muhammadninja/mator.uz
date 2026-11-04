@@ -1,5 +1,6 @@
 /**
- * Driver's Village 1C import — orchestration.
+ * Driver's Village 1C import — the price/stock synchronization (run by hand or
+ * by the Telegram ingest timer).
  *
  *   1C text export ──► read + decode ──► parse rows ──► plan against the DB
  *        ──► (dry run: report) / (import: batched writes ──► projection)
@@ -10,10 +11,28 @@
  * writes the buyer catalog itself.
  *
  * Guarantees:
+ *   • A position is found by its exact (seller, DRIVERS_VILLAGE_1C, code_1c)
+ *     only. A code without a position of its own is a NEW position — never a
+ *     takeover of another code's position, whatever their 8-digit keys say;
+ *     a shared key is reported (drivers-village-code-key.ts).
+ *   • A stored position is SYNCHRONIZED, not re-imported: only its stock price
+ *     and — when the file states one — its quantity are written, and only the
+ *     catalog columns those feed (projectStockLevels). Its name, numbers,
+ *     unit, vehicle links (part_models / part_makes / catalog_part_fits),
+ *     category, photos and catalog settings are never touched; where the file
+ *     differs, the report lists it (`notApplied`).
+ *   • A new position is CREATED from the file (initial creation): name, unit,
+ *     code_1c as its part number, price, quantity, and the vehicles of every
+ *     row of its code. No category — it starts unclassified. Empty vehicle
+ *     cells add no link and never make a part universal.
  *   • Dry run: every read, parse, match and validation step runs; no write
  *     method of the store is ever called.
- *   • Idempotent: a position is keyed by (seller, DRIVERS_VILLAGE_1C, code_1c);
- *     a re-import updates it in place, and an unchanged row is not rewritten.
+ *   • Idempotent: a re-import of the same file plans every row as unchanged
+ *     and writes nothing; no position is ever created twice.
+ *   • One position per code_1c: a code on several rows is written once, at the
+ *     highest valid price among them (resolveDuplicateCodes); a code with no
+ *     valid price writes nothing, so its stored price stays. Rows stating
+ *     different quantities give no confirmed count: none is written.
  *   • Batched: each batch is one transaction — all of its positions or none.
  *     A failed batch stops the run; committed batches stand, and re-running the
  *     same file resumes (committed rows plan as unchanged, missing
@@ -22,39 +41,66 @@
  *     linked to the catalog dealer 'drivers-village' (sellers.catalog_seller_id,
  *     tg_id NULL). The importer never creates a seller; a missing or
  *     non-BUSINESS link is a setup error that blocks the import.
- *   • Exact price: the file's price is written to Stock.priceUzs and projected
- *     to CatalogPart.priceUzs verbatim — no markup, no retail conversion, no
- *     rounding (see drivers-village-row.parser.ts).
+ *   • One price rule, applied once: the file's price goes through
+ *     normalizeSourcePrice (below 1000 → ×1000) while the row is parsed, and
+ *     the result is written to Stock.priceUzs and projected to
+ *     CatalogPart.priceUzs — no markup, no rounding. A stored price is never
+ *     an input, so re-importing a file cannot scale a price twice.
+ *   • Absence is not deletion: positions missing from a file are listed, never
+ *     changed, zeroed or deleted.
  */
 import { createHash } from 'crypto';
 import {
   DRIVERS_VILLAGE_CATALOG_SELLER_ID,
   DRIVERS_VILLAGE_SOURCE_SYSTEM,
   IMPORT_LIMITS,
+  PRICE_JUMP_REVIEW_RATIO,
 } from './drivers-village.constants';
 import { mapHeaders, parseRow } from './drivers-village-row.parser';
 import {
-  buildWrite,
-  diffPosition,
+  keySharedIssue,
+  resolveCodeKeys,
+  sameSearchNumberIssue,
+} from './drivers-village-code-key';
+import type { NumberFormat } from './drivers-village-price';
+import {
+  buildCreate,
+  cardDifferences,
+  detectRowNumberCodes,
+  findFitsNotInReference,
   findLookAlikes,
-  resolveCategories,
+  isPriceJump,
+  isUnclassified,
+  planStockSync,
+  resolveDuplicateCodes,
+  type SourceLine,
 } from './drivers-village.planner';
 import type {
   ImportReport,
   RowReport,
   VehicleMappingSummary,
 } from './drivers-village.report';
-import {
-  REQUIRED_MIGRATION,
-  type DriversVillageStore,
-} from './drivers-village.store';
+import { checkEnvironment } from './drivers-village-environment';
+import type { DriversVillageStore } from './drivers-village.store';
 import type {
+  BatchWrite,
   ExistingPosition,
-  ImportIssue,
   ParsedRow,
   RowPlan,
+  VehicleLinks,
 } from './drivers-village.types';
-import { decodeSource, parseTsv, type SourceEncoding } from './tsv-reader';
+import {
+  decodeSource,
+  detectDelimiter,
+  parseDelimited,
+  type SourceEncoding,
+} from './tsv-reader';
+
+/** The number format follows the export format (see NumberFormat). */
+const NUMBER_FORMAT = {
+  tab: 'decimal-comma',
+  semicolon: 'thousands-comma',
+} as const satisfies Record<string, NumberFormat>;
 
 export interface ImportOptions {
   dryRun: boolean;
@@ -64,9 +110,15 @@ export interface ImportOptions {
   batchSize?: number;
 }
 
-/** The one projection capability the importer needs. */
+/** The projection capabilities the importer needs (CatalogProjectionService). */
 export interface StockProjector {
+  /** Full projection — a new position's catalog part. */
   projectStock(stockId: number): Promise<string | null>;
+  /** Only the synced price / quantity of an existing catalog part. */
+  projectStockLevels(
+    stockId: number,
+    changed: { price: boolean; quantity: boolean },
+  ): Promise<string | null>;
 }
 
 export class DriversVillageImportService {
@@ -110,10 +162,19 @@ export class DriversVillageImportService {
       );
     }
     let decoded: ReturnType<typeof decodeSource>;
-    let parsedRecords: ReturnType<typeof parseTsv>;
+    let parsedRecords: ReturnType<typeof parseDelimited>;
+    let delimiter: ReturnType<typeof detectDelimiter>;
     try {
       decoded = decodeSource(bytes, options.encoding);
-      parsedRecords = parseTsv(decoded.text);
+      // The delimiter comes from the header's structure: the one that yields
+      // every required column; a header valid both ways is refused.
+      delimiter = detectDelimiter(
+        decoded.text,
+        (cells) => mapHeaders(cells).errors.length === 0,
+      );
+      parsedRecords = delimiter.ok
+        ? parseDelimited(decoded.text, delimiter.delimiter)
+        : [];
     } catch (error) {
       return abort(
         `Cannot read the file: ${error instanceof Error ? error.message : String(error)}`,
@@ -121,6 +182,10 @@ export class DriversVillageImportService {
     }
     report.meta.encoding = decoded.encoding;
     report.meta.encodingDetected = decoded.detected;
+    if (!delimiter.ok) return abort(delimiter.reason);
+    const numberFormat = NUMBER_FORMAT[delimiter.name];
+    report.meta.delimiter = delimiter.name;
+    report.meta.numberFormat = numberFormat;
     const [header, ...records] = parsedRecords;
     if (!header) return abort('The file has no header row.');
     if (records.length > IMPORT_LIMITS.maxRows) {
@@ -133,15 +198,16 @@ export class DriversVillageImportService {
       columns: header.cells.map((c) => c.trim()),
       mapped: headers.source,
       ignored: headers.ignored,
+      notImported: headers.notImported,
     };
     if (headers.errors.length)
       return abort(`Header problems: ${headers.errors.join(' ')}`);
 
     // ── 2. Parse ─────────────────────────────────────────────────────────────
     const rowReports = new Map<number, RowReport>();
-    const parsed: ParsedRow[] = [];
+    const lines: SourceLine[] = [];
     for (const rec of records) {
-      const result = parseRow(rec.cells, rec.line, headers);
+      const result = parseRow(rec.cells, rec.line, headers, numberFormat);
       rowReports.set(rec.line, {
         line: rec.line,
         code1c: result.code1c,
@@ -149,157 +215,141 @@ export class DriversVillageImportService {
         changes: [],
         issues: result.issues,
       });
-      if (result.row) parsed.push(result.row);
+      lines.push({ line: rec.line, ...result });
     }
     report.summary.totalRows = records.length;
 
-    // Duplicate code_1c: every occurrence is rejected — picking one would be a
-    // silent choice between two different positions.
-    const byCode = new Map<string, number[]>();
-    for (const r of rowReports.values()) {
-      if (r.code1c)
-        byCode.set(r.code1c, [...(byCode.get(r.code1c) ?? []), r.line]);
+    // A code_1c column of row numbers (1…N) means the part numbers are not in
+    // the file at all; importing it would overwrite every part number.
+    const rowNumbers = detectRowNumberCodes(lines.map((l) => l.code1c));
+    if (rowNumbers) {
+      return abort(
+        `code_1c looks like row numbers, not part numbers: ${rowNumbers.distinct} of ${rowNumbers.rows} rows hold distinct whole numbers from ${rowNumbers.min} to ${rowNumbers.max}. Nothing was imported — check that code_1c holds the articles.`,
+      );
     }
-    const duplicateCodes = [...byCode].filter(([, lines]) => lines.length > 1);
-    report.summary.duplicateSourceCodes = duplicateCodes.length;
-    const duplicateLines = new Set(
-      duplicateCodes.flatMap(([, lines]) => lines),
-    );
-    for (const [code, lines] of duplicateCodes) {
-      for (const line of lines) {
-        const r = rowReports.get(line)!;
-        r.outcome = 'rejected';
-        r.issues.push({
-          line,
-          code1c: code,
-          kind: 'data',
-          severity: 'error',
-          code: 'duplicate_code_1c',
-          field: 'code1c',
-          message: `code_1c "${code}" appears on lines ${lines.join(', ')}`,
-        });
-      }
+
+    // One position per code_1c: the rows of a repeated code are folded into
+    // the one with the highest valid price (see resolveDuplicateCodes).
+    const codes = resolveDuplicateCodes(lines);
+    for (const [line, patch] of codes.patches) {
+      const r = rowReports.get(line)!;
+      r.issues = patch.issues;
+      if (patch.outcome) r.outcome = patch.outcome;
     }
-    const valid = parsed.filter((r) => !duplicateLines.has(r.line));
-    this.summarizeSource(report, valid);
+    report.duplicates = codes.duplicates;
+    report.summary.duplicateSourceCodes = codes.duplicates.length;
+    report.summary.duplicateCodesMaxPrice = codes.duplicates.filter(
+      (d) => d.chosenLine !== null,
+    ).length;
+    report.summary.codesWithoutValidPrice = codes.codesWithoutValidPrice.length;
+    report.summary.codesWithAmbiguousQuantity = codes.duplicates.filter(
+      (d) => d.chosenLine !== null && d.differs.includes('quantity'),
+    ).length;
+    const valid = codes.positions;
+    this.summarizeSource(report, valid, codes.vehicles);
 
     // ── 3. Environment (reference data in THIS database) ────────────────────
-    const envIssue = (
-      code: string,
-      message: string,
-      severity: 'error' | 'warning' = 'error',
-    ): ImportIssue => ({
-      line: null,
-      code1c: null,
-      kind: 'reference',
-      severity,
-      code,
-      field: null,
-      message,
-    });
-    const schemaReady = await this.store.schemaReady();
-    if (!schemaReady) {
-      report.environment.issues.push(
-        envIssue(
-          'schema_not_migrated',
-          `This database does not have migration ${REQUIRED_MIGRATION} yet (run \`npx prisma migrate deploy\`). Existing positions cannot be read, so every valid row is planned as a create.`,
-        ),
-      );
-    }
-    const catalogSeller = await this.store.findCatalogSeller(catalogSellerId);
+    const env = await checkEnvironment(this.store, catalogSellerId);
+    const { catalogSeller, linked } = env;
     report.environment.catalogSeller = catalogSeller;
-    if (!catalogSeller) {
-      report.environment.issues.push(
-        envIssue(
-          'catalog_seller_missing',
-          `Catalog seller "${catalogSellerId}" does not exist in this database. The importer never creates it.`,
-        ),
-      );
-    }
-    const linked = schemaReady
-      ? await this.store.findLinkedSeller(catalogSellerId)
-      : null;
     report.environment.linkedSellerId = linked?.id ?? null;
     report.environment.linkedSellerStatus = linked?.status ?? null;
     report.environment.linkedSellerType = linked?.sellerType ?? null;
-    if (!linked && schemaReady) {
-      report.environment.issues.push(
-        envIssue(
-          'linked_seller_missing',
-          `Setup required: no supply-side seller is linked to catalog seller "${catalogSellerId}". ` +
-            `Create the Driver's Village BUSINESS seller (tg_id NULL) with catalog_seller_id = "${catalogSellerId}" ` +
-            `as described in docs/DRIVERS_VILLAGE_IMPORT.md §1. The importer never creates a seller.`,
-        ),
-      );
-    }
-    if (linked && linked.sellerType !== 'BUSINESS') {
-      // Driver's Village is an organization fed by 1C, not a Telegram account.
-      // A TELEGRAM seller linked here is a setup mistake (someone's bot account
-      // would own the dealer's whole inventory), so it blocks the import.
-      report.environment.issues.push(
-        envIssue(
-          'linked_seller_not_business',
-          `Seller #${linked.id} linked to "${catalogSellerId}" is a ${linked.sellerType} seller; ` +
-            `the Driver's Village seller must be a BUSINESS seller (docs/DRIVERS_VILLAGE_IMPORT.md §1).`,
-        ),
-      );
-    }
-    if (linked && linked.status !== 'ACTIVE') {
-      report.environment.issues.push(
-        envIssue(
-          'linked_seller_not_active',
-          `Seller #${linked.id} linked to "${catalogSellerId}" has status ${linked.status} (expected ACTIVE).`,
-          'warning',
-        ),
-      );
-    }
-    const tree = new Map(
-      (await this.store.loadCategories()).map((c) => [c.id, c]),
-    );
-    report.environment.categoriesInDatabase = tree.size;
-
+    report.environment.issues.push(...env.issues);
     // ── 4. Plan ──────────────────────────────────────────────────────────────
+    // A position is found by its exact code_1c only: a stored one is
+    // synchronized (price, a stated quantity), any other is created. Shared
+    // 8-digit keys and search numbers are reported, never acted on.
+    const storedCodes = linked
+      ? await this.store.loadAllSourceCodes(linked.id)
+      : [];
+    const keys = resolveCodeKeys(
+      [...rowReports.values()].flatMap((r) => (r.code1c ? [r.code1c] : [])),
+      storedCodes,
+    );
     const existing = linked
       ? await this.store.loadPositions(
           linked.id,
           valid.map((r) => r.code1c),
         )
       : new Map<string, ExistingPosition>();
-    const missingIds = new Set<string>();
     const plans: RowPlan[] = [];
+    const creates: { row: ParsedRow; links: VehicleLinks }[] = [];
     for (const row of valid) {
       const rr = rowReports.get(row.line)!;
-      const cats = resolveCategories(row, tree);
-      rr.issues.push(...cats.issues);
-      if (!cats.write) {
-        rr.outcome = 'blocked';
-        for (const id of [row.categoryId, row.subcategoryId])
-          if (!tree.has(id)) missingIds.add(id);
+      const links = codes.vehicles.get(row.code1c) ?? { models: [], makes: [] };
+      const prev = existing.get(row.code1c) ?? null;
+      rr.price = {
+        source: row.sourcePrice,
+        scaled: row.priceScaled,
+        from: prev?.priceUzs ?? null,
+        to: row.priceUzs,
+      };
+      rr.quantity = { from: prev?.quantity ?? null, to: row.quantity };
+
+      if (!prev) {
+        const shared = keys.shared.get(row.code1c);
+        if (shared) {
+          rr.issues.push(keySharedIssue(row, shared));
+          report.keyShared.push({
+            ...shared,
+            line: row.line,
+            code1c: row.code1c,
+          });
+        }
+        const same = keys.sameSearchNumber.get(row.code1c);
+        if (same) rr.issues.push(sameSearchNumberIssue(row, same));
+        rr.outcome = 'create';
+        rr.partNumber = { from: null, to: row.sourcePartNumber };
+        creates.push({ row, links });
+        plans.push({
+          row,
+          action: 'create',
+          write: buildCreate(row, links, keys.searchKeys.get(row.code1c)),
+          changes: [],
+          existing: null,
+        });
         continue;
       }
-      const write = buildWrite(row, cats.write);
-      const prev = existing.get(row.code1c) ?? null;
-      const changes = prev ? diffPosition(write, prev) : [];
-      const action = !prev ? 'create' : changes.length ? 'update' : 'unchanged';
+
+      const { changes, write } = planStockSync(row, prev);
+      const action = write ? 'update' : 'unchanged';
       rr.outcome = action;
       rr.changes = changes;
-      rr.price = { from: prev?.priceUzs ?? null, to: write.priceUzs };
-      rr.quantity = { from: prev?.quantity ?? null, to: write.quantity };
+      const notApplied = cardDifferences(row, links, prev);
+      if (notApplied.length) rr.notApplied = notApplied;
+      if (changes.includes('price') && isPriceJump(prev.priceUzs, row.priceUzs))
+        rr.issues.push({
+          line: row.line,
+          code1c: row.code1c,
+          kind: 'data',
+          severity: 'warning',
+          code: 'price_jump',
+          field: 'price',
+          message: `price changes from ${prev.priceUzs} to ${row.priceUzs} UZS (source "${row.sourcePrice}") — ${PRICE_JUMP_REVIEW_RATIO}× or more; check the scale of the export and of the stored price`,
+        });
+      if (isUnclassified(prev.categoryId))
+        report.summary.existingWithoutCategory += 1;
       plans.push({ row, action, write, changes, existing: prev });
     }
-    report.environment.missingCategoryIds = [...missingIds].sort();
+    // Fitment is written for new positions only: check those against the
+    // buyer vehicle reference.
+    const fitCheck = findFitsNotInReference(
+      creates,
+      await this.store.loadVehicleReference(),
+    );
+    report.vehicles.notInBuyerReference = fitCheck.missing;
+    for (const issue of fitCheck.issues)
+      rowReports.get(issue.line!)!.issues.push(issue);
     report.summary.existingPositionsWithPhotos = [...existing.values()].filter(
       (p) => p.imageCount > 0,
     ).length;
-    if (linked) {
-      const inFile = new Set([...rowReports.values()].map((r) => r.code1c));
-      report.positionsNotInFile = (
-        await this.store.loadAllSourceCodes(linked.id)
-      )
-        .filter((c) => !inFile.has(c))
-        .sort();
-    }
+    const inFile = new Set([...rowReports.values()].map((r) => r.code1c));
+    report.positionsNotInFile = storedCodes
+      .filter((c) => !inFile.has(c))
+      .sort();
     report.rows = [...rowReports.values()].sort((a, b) => a.line - b.line);
+    report.prices.examples = priceExamples(report.rows);
     this.summarizeOutcomes(report);
 
     if (options.dryRun) return finish();
@@ -338,8 +388,16 @@ export class DriversVillageImportService {
       projectionFailures: 0,
     };
     report.summary.written = written;
-    const toWrite = plans.filter((p) => p.action !== 'unchanged');
-    const toProject = new Map<string, number>(); // code_1c → stockId
+    const toWrite = plans.filter(
+      (p): p is RowPlan & { write: BatchWrite } => p.write !== null,
+    );
+    // code_1c → the stock and what its catalog part needs: `levels` for a
+    // synced stock (only the changed price/quantity), null for a full
+    // projection (a new position, or one whose part is missing).
+    const toProject = new Map<
+      string,
+      { stockId: number; levels: { price: boolean; quantity: boolean } | null }
+    >();
 
     for (const p of plans) {
       if (p.action !== 'unchanged') continue;
@@ -347,7 +405,10 @@ export class DriversVillageImportService {
       written.skippedUnchanged += 1;
       // Resume path: a batch committed but its projection never ran.
       if (p.existing && !p.existing.hasCatalogPart)
-        toProject.set(p.row.code1c, p.existing.stockId);
+        toProject.set(p.row.code1c, {
+          stockId: p.existing.stockId,
+          levels: null,
+        });
     }
     for (const p of toWrite) rows.get(p.row.line)!.written = 'not_written';
 
@@ -363,7 +424,16 @@ export class DriversVillageImportService {
           rows.get(plan.row.line)!.written = w.created ? 'created' : 'updated';
           if (w.created) written.created += 1;
           else written.updated += 1;
-          toProject.set(w.code1c, w.stockId);
+          toProject.set(w.code1c, {
+            stockId: w.stockId,
+            levels:
+              plan.write.kind === 'sync'
+                ? {
+                    price: plan.write.priceUzs !== null,
+                    quantity: plan.write.quantity !== null,
+                  }
+                : null,
+          });
         }
         this.log(
           `batch ${i / batchSize + 1}: wrote ${result.length} position(s) (${i + batch.length}/${toWrite.length})`,
@@ -377,12 +447,14 @@ export class DriversVillageImportService {
     }
 
     // Project every written (or previously unprojected) stock through the one
-    // shared mapping. A failure is recorded, not fatal: supply data is
-    // committed, and re-running the import re-projects anything missing.
+    // shared mapping — a synced one only in the columns it changed. A failure
+    // is recorded, not fatal: supply data is committed, and re-running the
+    // import re-projects anything missing.
     const lineByCode = new Map(plans.map((p) => [p.row.code1c, p.row.line]));
-    for (const [code1c, stockId] of toProject) {
+    for (const [code1c, { stockId, levels }] of toProject) {
       try {
-        await this.projector.projectStock(stockId);
+        if (levels) await this.projector.projectStockLevels(stockId, levels);
+        else await this.projector.projectStock(stockId);
         written.projected += 1;
         rows.get(lineByCode.get(code1c)!)!.projected = true;
       } catch (error) {
@@ -397,18 +469,29 @@ export class DriversVillageImportService {
     }
   }
 
-  /** Source-side statistics (units, vehicle normalization, look-alikes). */
-  private summarizeSource(report: ImportReport, rows: ParsedRow[]): void {
+  /**
+   * Source-side statistics (units, vehicle normalization, look-alikes), per
+   * position — the vehicles merged over the rows of its code.
+   */
+  private summarizeSource(
+    report: ImportReport,
+    rows: ParsedRow[],
+    vehicles: Map<string, VehicleLinks>,
+  ): void {
     const mappings = new Map<string, VehicleMappingSummary>();
     for (const r of rows) {
       report.units[r.unit] = (report.units[r.unit] ?? 0) + 1;
+      if (r.quantity === null) report.summary.rowsWithoutQuantity += 1;
+      if (r.priceScaled) report.summary.rowsWithScaledPrice += 1;
       const v = report.vehicles;
-      if (r.vehicle.kind === 'universal') v.universalRows += 1;
-      else if (r.vehicle.kind === 'make') v.makeWideRows += 1;
-      else {
+      const links = vehicles.get(r.code1c) ?? { models: [], makes: [] };
+      if (links.models.length === 0 && links.makes.length === 0)
+        v.rowsWithoutVehicles += 1;
+      if (links.makes.length > 0) v.makeWideRows += 1;
+      if (links.models.length > 0) {
         v.specificModelRows += 1;
-        v.modelLinks += r.vehicle.models.length;
-        if (r.vehicle.models.length > 1) v.multiModelRows += 1;
+        v.modelLinks += links.models.length;
+        if (links.models.length > 1) v.multiModelRows += 1;
       }
       for (const m of r.vehicleMappings) {
         const key = `${m.sourceMake}|${m.sourceModel ?? ''}`;
@@ -429,10 +512,18 @@ export class DriversVillageImportService {
     const s = report.summary;
     for (const r of report.rows) {
       if (r.outcome === 'rejected') s.rejectedRows += 1;
-      else if (r.outcome === 'blocked') s.blockedRows += 1;
-      else if (r.outcome === 'create') s.rowsToCreate += 1;
-      else if (r.outcome === 'update') s.rowsToUpdate += 1;
+      else if (r.outcome === 'create') {
+        s.rowsToCreate += 1;
+        if (r.issues.some((i) => i.code === 'code_key_shared'))
+          s.rowsToCreateWithSharedKey += 1;
+      } else if (r.outcome === 'update') s.rowsToUpdate += 1;
+      else if (r.outcome === 'merged') s.rowsMerged += 1;
       else s.rowsUnchanged += 1;
+      if (r.outcome === 'update' && r.changes.includes('price'))
+        s.rowsWithPriceChange += 1;
+      if (r.outcome === 'update' && r.changes.includes('quantity'))
+        s.rowsWithQuantityChange += 1;
+      if (r.notApplied?.length) s.rowsWithCardDifferences += 1;
       for (const i of r.issues) {
         const isError = i.severity === 'error';
         if (i.kind === 'data') {
@@ -443,9 +534,30 @@ export class DriversVillageImportService {
       }
     }
     s.validRows = s.totalRows - s.rejectedRows;
+    // Every new position is created unclassified (the import sets no category).
+    s.newWithoutCategory = s.rowsToCreate;
     s.lookAlikeGroups = report.lookAlikes.length;
     s.positionsNotInFile = report.positionsNotInFile.length;
+    s.rowsWithPossibleRename = report.keyShared.filter(
+      (k) => k.possibleRenameOf.length > 0,
+    ).length;
   }
+}
+
+/**
+ * The first few scaled and unscaled prices of the file, in file order, so a
+ * reviewer sees the rule applied to real cells (×1000 below 1000, as-is above).
+ */
+function priceExamples(
+  rows: RowReport[],
+  perKind = 5,
+): ImportReport['prices']['examples'] {
+  const pick = (scaled: boolean) =>
+    rows
+      .filter((r) => r.price && r.code1c && r.price.scaled === scaled)
+      .slice(0, perKind)
+      .map((r) => ({ line: r.line, code1c: r.code1c!, ...r.price! }));
+  return [...pick(true), ...pick(false)].sort((a, b) => a.line - b.line);
 }
 
 function emptyReport(
@@ -463,6 +575,8 @@ function emptyReport(
       bytes: bytes.length,
       encoding: '',
       encodingDetected: false,
+      delimiter: null,
+      numberFormat: null,
       catalogSellerId,
       sourceSystem: DRIVERS_VILLAGE_SOURCE_SYSTEM,
       currency: 'UZS',
@@ -472,25 +586,34 @@ function emptyReport(
       aborted: false,
       abortReason: null,
     },
-    headers: { columns: [], mapped: {}, ignored: [] },
+    headers: { columns: [], mapped: {}, ignored: [], notImported: [] },
     environment: {
       catalogSeller: null,
       linkedSellerId: null,
       linkedSellerStatus: null,
       linkedSellerType: null,
-      categoriesInDatabase: 0,
-      missingCategoryIds: [],
       issues: [],
     },
     summary: {
       totalRows: 0,
       validRows: 0,
       rejectedRows: 0,
-      blockedRows: 0,
       rowsToCreate: 0,
       rowsToUpdate: 0,
       rowsUnchanged: 0,
+      rowsWithPriceChange: 0,
+      rowsWithQuantityChange: 0,
+      rowsWithCardDifferences: 0,
+      rowsWithScaledPrice: 0,
+      newWithoutCategory: 0,
+      existingWithoutCategory: 0,
       duplicateSourceCodes: 0,
+      duplicateCodesMaxPrice: 0,
+      rowsMerged: 0,
+      codesWithoutValidPrice: 0,
+      codesWithAmbiguousQuantity: 0,
+      rowsToCreateWithSharedKey: 0,
+      rowsWithPossibleRename: 0,
       dataErrors: 0,
       dataWarnings: 0,
       referenceErrors: 0,
@@ -498,17 +621,22 @@ function emptyReport(
       lookAlikeGroups: 0,
       positionsNotInFile: 0,
       existingPositionsWithPhotos: 0,
+      rowsWithoutQuantity: 0,
       written: null,
     },
     vehicles: {
-      universalRows: 0,
+      rowsWithoutVehicles: 0,
       makeWideRows: 0,
       specificModelRows: 0,
       multiModelRows: 0,
       modelLinks: 0,
       mappings: [],
+      notInBuyerReference: [],
     },
+    prices: { examples: [] },
     units: {},
+    duplicates: [],
+    keyShared: [],
     lookAlikes: [],
     positionsNotInFile: [],
     projectionFailures: [],

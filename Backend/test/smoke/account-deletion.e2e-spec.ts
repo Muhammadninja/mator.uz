@@ -9,9 +9,10 @@
 //   • the SAME token is rejected with 401 AFTER deletion;
 //   • the old refresh token cannot mint a new session (401);
 //   • the controller answers 204 with no body;
-//   • the endpoint acts on the AUTHENTICATED principal, never a client-sent id.
+//   • the endpoint acts on the AUTHENTICATED principal, never a client-sent id;
+//   • an order in progress refuses deletion (409) and the token keeps working.
 
-import { UnauthorizedException } from '@nestjs/common';
+import { ConflictException, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { AccountDeletionService } from '../../src/user/account-deletion.service';
 import { UserController } from '../../src/user/user.controller';
@@ -246,5 +247,35 @@ describe('DELETE /v1/me — account deletion smoke', () => {
     expect(cloudinary.deleteAssets).toHaveBeenCalledWith([
       'mator/avatars/aziz',
     ]);
+  });
+
+  it('an order in progress refuses deletion with 409 — the SAME token keeps working', async () => {
+    const { service, strategy, tokens, keys, prisma, cloudinary } = build();
+    const session = await tokens.issueSession({
+      id: USER_ID,
+      email: null,
+      role: 'USER',
+      tokenVersion: 0,
+    });
+    const payload = await payloadOf(session.accessToken, keys);
+    // One PAID order of this user is still being fulfilled.
+    prisma.order.count.mockResolvedValue(1);
+
+    const err = await service.deleteAccount(USER_ID).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ConflictException);
+    expect((err as ConflictException).getStatus()).toBe(409);
+    expect((err as ConflictException).getResponse()).toMatchObject({
+      code: 'ACCOUNT_HAS_ACTIVE_ORDERS',
+    });
+
+    // Nothing was revoked: the very same access token still authenticates…
+    await expect(
+      strategy.validate({} as never, payload),
+    ).resolves.toMatchObject({ id: USER_ID });
+    // …the refresh family is intact, and no PII left the order or the account.
+    expect(prisma.refreshToken.deleteMany).not.toHaveBeenCalled();
+    expect(prisma.order.updateMany).not.toHaveBeenCalled();
+    expect(prisma.appUser.update).not.toHaveBeenCalled();
+    expect(cloudinary.deleteAssets).not.toHaveBeenCalled();
   });
 });

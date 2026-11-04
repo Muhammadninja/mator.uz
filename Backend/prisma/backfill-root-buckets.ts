@@ -1,127 +1,81 @@
 /**
- * BACKFILL: give every unclassified part under a mapped ROOT its buyer-grid
- * bucket (`mainCategory`).
+ * BACKFILL: give every unbucketed part the home-grid bucket (`mainCategory`) its
+ * category resolves to in the tree.
  *
  * WHY. The home grid both COUNTS and LISTS by `mainCategory`
- * (categories.service.ts / parts.service.ts), while sellers file listings on a
- * PartCategory anywhere in the tree. A part filed on a real subcategory that the
- * keyword classifier never bucketed therefore carries `mainCategory = null` and
- * is invisible to its own tile — reachable only by drilling the exact
- * subcategory id.
+ * (categories.service.ts / parts.service.ts), while listings are filed on a
+ * PartCategory anywhere in the tree. A part filed on a real subcategory that
+ * nothing ever bucketed carries `mainCategory = null` and is invisible to every
+ * tile — reachable only by drilling the exact subcategory id. The Driver's
+ * Village classification import buckets only positions filed on a bucket row
+ * itself, which left every tile but "Масла и жидкости" empty.
  *
- * That is what hid the motor oils: they sit on 'synthetic-motor-oil' /
- * 'semi-synthetic-motor-oil' (children of the 'motor-oil' root) with no
- * mainCategory, so "Масла и жидкости" listed only the 4 legacy rows that
- * happened to carry the enum.
- *
- * CatalogProjectionService now derives the bucket from the category's root for
- * every NEW projection (see ROOT_TO_MAIN_CATEGORY). This script applies the same
- * rule to rows already in the database, on both sides so the two agree and the
- * change survives a future projection:
+ * CatalogProjectionService derives the bucket for every NEW projection by the
+ * same rule this script applies to rows already in the database:
+ * mainCategoryForCategory — the node's own entry in CATEGORY_ID_TO_MAIN_CATEGORY,
+ * else its nearest ancestor's; nodes in CATEGORIES_WITHOUT_MAIN_CATEGORY stay
+ * unbucketed. Both sides are filled so they agree:
  *   - Product     (supply source, read first by the projection)
  *   - CatalogPart (buyer read model, what the grid counts and lists)
  *
- * SAFE BY DEFAULT: dry-run — prints every planned change and writes nothing.
- * Pass --apply to persist. Only ever fills a NULL: a row that already carries a
- * mainCategory is left untouched, so a real classification is never overwritten
- * and re-running after apply is a no-op.
+ * SAFE BY DEFAULT: the dry-run lists every row it would fill, per-category and
+ * per-bucket counts, each tile's count before/after, what stays unbucketed and
+ * why, and the stored buckets it leaves alone — and writes nothing. Pass
+ * --apply to persist. Only ever fills a NULL, so a real classification is never
+ * overwritten and re-running after apply is a no-op.
  *
  * Run:  npm run backfill:root-buckets            # dry-run
  *       npm run backfill:root-buckets -- --apply
  */
 import { PrismaClient } from '@prisma/client';
-import { ROOT_TO_MAIN_CATEGORY } from '../src/catalog/categories/category-map';
+import {
+  applyMainCategoryBackfill,
+  describeBackfillPlan,
+  planMainCategoryBackfill,
+} from '../src/catalog/categories/main-category-backfill';
 
-const prisma = new PrismaClient();
 const APPLY = process.argv.includes('--apply');
 
-/** Every category id whose ROOT ancestor is `rootId`, including the root. */
-async function descendantsOf(rootId: string): Promise<string[]> {
-  const rows = await prisma.partCategory.findMany({
-    select: { id: true, parentId: true },
-  });
-  const childrenOf = new Map<string, string[]>();
-  for (const r of rows) {
-    if (!r.parentId) continue;
-    childrenOf.set(r.parentId, [...(childrenOf.get(r.parentId) ?? []), r.id]);
-  }
-  const out: string[] = [];
-  const queue = [rootId];
-  while (queue.length) {
-    const id = queue.shift() as string;
-    if (out.includes(id)) continue; // cycle guard
-    out.push(id);
-    queue.push(...(childrenOf.get(id) ?? []));
-  }
-  return out;
-}
-
-async function main() {
+async function main(prisma: PrismaClient) {
   console.log(
     APPLY
-      ? 'APPLYING root → bucket backfill…\n'
+      ? 'APPLYING category → bucket backfill…\n'
       : 'DRY-RUN (no writes; pass --apply to persist)\n',
   );
 
-  let totalParts = 0;
-  let totalProducts = 0;
+  const plan = await planMainCategoryBackfill(prisma);
+  for (const line of describeBackfillPlan(plan)) console.log(line);
 
-  for (const [rootId, mainCategory] of Object.entries(ROOT_TO_MAIN_CATEGORY)) {
-    const ids = await descendantsOf(rootId);
-    if (ids.length === 0) {
-      console.warn(`[skip] root '${rootId}' is not in the tree`);
-      continue;
+  const planned = plan.fills.reduce(
+    (n, f) => n + f.catalogParts.length + f.products.length,
+    0,
+  );
+  if (!APPLY) {
+    if (planned > 0) {
+      console.log('\nRe-run with -- --apply to persist these changes.');
     }
+    return;
+  }
 
-    // Only NULLs — a classifier-assigned bucket always wins.
-    const where = { categoryId: { in: ids }, mainCategory: null } as const;
-    const parts = await prisma.catalogPart.findMany({
-      where,
-      select: { id: true, title: true, categoryId: true },
-      orderBy: { id: 'asc' },
-    });
-    const products = await prisma.product.count({ where });
-
+  const written = await applyMainCategoryBackfill(prisma, plan);
+  console.log('\nWROTE');
+  for (const w of written) {
     console.log(
-      `root '${rootId}' → ${mainCategory}\n` +
-        `  tree: ${ids.join(', ')}\n` +
-        `  CatalogPart rows to fill: ${parts.length}\n` +
-        `  Product rows to fill:     ${products}`,
+      `  ${w.mainCategory.padEnd(18)}catalog_parts ${w.catalogParts}   products ${w.products}`,
     );
-    for (const p of parts) {
-      console.log(`    ${p.id}  [${p.categoryId}]  ${p.title}`);
-    }
-
-    if (APPLY) {
-      const a = await prisma.catalogPart.updateMany({
-        where,
-        data: { mainCategory },
-      });
-      const b = await prisma.product.updateMany({
-        where,
-        data: { mainCategory },
-      });
-      console.log(`  WROTE CatalogPart=${a.count} Product=${b.count}`);
-      totalParts += a.count;
-      totalProducts += b.count;
-    } else {
-      totalParts += parts.length;
-      totalProducts += products;
-    }
-    console.log('');
   }
-
-  console.table({
-    Mode: APPLY ? 'APPLIED' : 'DRY-RUN',
-    'CatalogPart rows': totalParts,
-    'Product rows': totalProducts,
-  });
-  if (!APPLY && totalParts + totalProducts > 0) {
-    console.log('\nRe-run with -- --apply to persist these changes.');
-  }
+  // A second plan proves the run converged: anything left appeared or was moved
+  // after the plan was read, and a re-run picks it up.
+  const after = await planMainCategoryBackfill(prisma);
+  const left = after.fills.reduce(
+    (n, f) => n + f.catalogParts.length + f.products.length,
+    0,
+  );
+  console.log(`\nRe-check: ${left} row(s) still to fill (expected 0).`);
 }
 
-main()
+const prisma = new PrismaClient();
+main(prisma)
   .catch((e) => {
     console.error(e);
     process.exitCode = 1;

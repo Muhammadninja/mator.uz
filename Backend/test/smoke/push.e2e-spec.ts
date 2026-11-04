@@ -127,6 +127,10 @@ describe('Push delivery smoke', () => {
         amountUzs: 215000,
         order: { userId: 'usr_1' },
       });
+      // markPaid claims the payment and moves the order with conditional
+      // writes; both match here (a pending payment, a payable order).
+      prisma.payment.updateMany.mockResolvedValue({ count: 1 });
+      prisma.order.updateMany.mockResolvedValue({ count: 1 });
 
       await settlement.markPaid('pay_1', 1700000000000);
 

@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { ExecutionContext, Injectable } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 
 /**
@@ -16,5 +16,24 @@ export class OptionalJwtAuthGuard extends AuthGuard('jwt') {
   // and hand back null so the route runs either way.
   handleRequest<TUser = unknown>(_err: unknown, user: TUser): TUser | null {
     return (user as TUser) ?? null;
+  }
+}
+
+/**
+ * {@link OptionalJwtAuthGuard}, run only when the request names a garage
+ * vehicle (`?vehicle_id=`). The public catalogue reads it guards stay free of
+ * token verification and the per-request user lookup when no vehicle is
+ * involved, while a `vehicle_id` can only ever resolve for the caller who owns
+ * that vehicle. Without the parameter `req.user` stays unset, exactly as for
+ * an anonymous caller.
+ */
+@Injectable()
+export class OptionalJwtForVehicleGuard extends OptionalJwtAuthGuard {
+  canActivate(context: ExecutionContext) {
+    const req = context
+      .switchToHttp()
+      .getRequest<{ query?: Record<string, unknown> }>();
+    if (!req.query?.vehicle_id) return true;
+    return super.canActivate(context);
   }
 }

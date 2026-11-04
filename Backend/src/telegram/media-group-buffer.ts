@@ -8,29 +8,33 @@
  * (debounce) elapses with no new photos.
  *
  * Pure and I/O-free so it can be unit-tested with fake timers. The owner
- * supplies the flush callback that runs the listing pipeline.
+ * supplies the flush callback that runs the listing pipeline, and may attach
+ * an opaque context `C` to each photo (the bot's reply context).
  */
-export interface FlushedGroup {
+export interface FlushedGroup<C = unknown> {
   tgUserId: number;
   fileIds: string[]; // ordered, deduped, capped
   caption: string | null;
+  /** The context attached to the group's latest photo, if any. */
+  ctx?: C;
 }
 
-interface PendingGroup {
+interface PendingGroup<C> {
   fileIds: string[];
   seen: Set<string>;
   caption: string | null;
   tgUserId: number;
+  ctx?: C;
   timer: ReturnType<typeof setTimeout> | null;
 }
 
-export class MediaGroupBuffer {
-  private readonly groups = new Map<string, PendingGroup>();
+export class MediaGroupBuffer<C = unknown> {
+  private readonly groups = new Map<string, PendingGroup<C>>();
 
   constructor(
     private readonly debounceMs: number,
     private readonly maxImages: number,
-    private readonly onFlush: (group: FlushedGroup) => void,
+    private readonly onFlush: (group: FlushedGroup<C>) => void,
   ) {}
 
   /** Add one album photo; (re)arms the debounce timer for its group. */
@@ -39,6 +43,7 @@ export class MediaGroupBuffer {
     fileId: string,
     caption: string | null,
     tgUserId: number,
+    ctx?: C,
   ): void {
     let group = this.groups.get(groupId);
     if (!group) {
@@ -56,6 +61,9 @@ export class MediaGroupBuffer {
     if (!group.caption && caption && caption.trim() !== '') {
       group.caption = caption;
     }
+    // The latest context wins. It lives ON the group, so two albums of one
+    // user, flushed one after the other, each keep their own.
+    if (ctx !== undefined) group.ctx = ctx;
     // Preserve order, dedupe, and cap.
     if (!group.seen.has(fileId) && group.fileIds.length < this.maxImages) {
       group.seen.add(fileId);
@@ -76,6 +84,7 @@ export class MediaGroupBuffer {
       tgUserId: group.tgUserId,
       fileIds: group.fileIds,
       caption: group.caption,
+      ctx: group.ctx,
     });
   }
 

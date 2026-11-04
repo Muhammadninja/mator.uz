@@ -1,10 +1,11 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { validatePaymeEnv } from './orders/webhooks/payme.config';
+import { validateEnv } from './env.validation';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { ScheduleModule } from '@nestjs/schedule';
 import { EventEmitterModule } from '@nestjs/event-emitter';
 import { APP_GUARD } from '@nestjs/core';
+import { THROTTLERS } from './admin/auth/admin-throttle';
 import { PrismaModule } from './prisma/prisma.module';
 import { RedisModule } from './redis/redis.module';
 import { QueueModule } from './queue/queue.module';
@@ -47,11 +48,13 @@ import { isBlueprintEnabled } from './blueprint/blueprint-auth';
     // `validate` runs before any provider is constructed, so a Payme
     // misconfiguration (missing merchant id/key, blank key, non-https checkout
     // URL) aborts bootstrap instead of exposing a webhook whose Basic auth
-    // degrades to a publicly computable value. It also materialises the Payme
-    // defaults; no other environment variable is inspected.
-    ConfigModule.forRoot({ isGlobal: true, validate: validatePaymeEnv }),
+    // degrades to a publicly computable value, and AUTH_DEV_MODE=true in
+    // production (OTP codes returned in the API) aborts it too. It also
+    // materialises the Payme defaults.
+    ConfigModule.forRoot({ isGlobal: true, validate: validateEnv }),
     // Global baseline rate limit; sensitive auth routes tighten this further.
-    ThrottlerModule.forRoot([{ ttl: 60 * 1000, limit: 100 }]),
+    // Counted per administrator for admin traffic: see admin-throttle.ts.
+    ThrottlerModule.forRoot(THROTTLERS),
     ScheduleModule.forRoot(),
     // In-process domain events. Used to decouple the image worker from Telegram:
     // DraftCoordinator emits draft.* events; TelegramService reacts (@OnEvent).

@@ -26,6 +26,8 @@ export const UZ: BotStrings = {
   'start.awaitingApproval':
     '⏳ Arizangiz hali tasdiqlanmagan. Iltimos, kuting.',
   'start.accountRejected': '⛔ Hisobingiz administrator tomonidan rad etilgan.',
+  'start.storeSuspended':
+    '⛔ Do‘koningiz administrator tomonidan to‘xtatilgan. E’lon joylashtirib bo‘lmaydi.',
   'seller.approved':
     '✅ Arizangiz muvaffaqiyatli tasdiqlandi!\n\n' +
     'Endi Mator’da mahsulot joylashtirishingiz mumkin.\n\n' +
@@ -110,7 +112,9 @@ export const UZ: BotStrings = {
   'confirm.success':
     '✅ Mahsulot muvaffaqiyatli qo‘shildi.\nKeyingi mahsulotni qo‘shish uchun /start ni bosing.\n' +
     'Tilni o‘zgartirish — /language',
-  'confirm.failed': '⚠️ Mahsulot qo‘shishda xatolik yuz berdi.\n`{error}`',
+  'confirm.failed':
+    '⚠️ Mahsulot qo‘shishda xatolik yuz berdi. Boshidan boshlash uchun /start ni bosing.\n' +
+    'Tilni o‘zgartirish — /language',
 
   'btn.back': '⬅️ Orqaga',
   'btn.skip': '⏭ O‘tkazib yuborish',
@@ -204,6 +208,10 @@ export const UZ: BotStrings = {
 
   'dv.notFound':
     "❌ Driver's Village pozitsiyasi {code} kodi bilan topilmadi. Rasm izohidagi 1C kodini tekshiring.",
+  'dv.invalidCode':
+    '❌ Izohdagi 1C kodini aniqlab bo‘lmadi. Rasmlarni shunday izoh bilan yuboring: 1C 87654321',
+  'dv.ambiguous':
+    "⚠️ {code} kodi bir nechta Driver's Village pozitsiyasiga mos keladi:\n{positions}\nRasmlarni izohda aniq kod bilan qayta yuboring: 1C <kod>",
   'dv.photosReceived':
     '📸 {code} pozitsiyasi uchun rasmlar qabul qilindi ({count}). Ishlov berilmoqda — oldindan ko‘rishni yuboramiz.',
   'dv.previewHeader': "🖼 *Driver's Village pozitsiyasi uchun yangi rasmlar*",

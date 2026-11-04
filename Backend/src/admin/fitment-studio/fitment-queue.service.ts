@@ -69,7 +69,7 @@ export class FitmentQueueService {
    * one.
    */
   async getPartsQueue(q: GetPartsQueueQueryDto) {
-    const where = await this.queueWhere(q);
+    const where = this.queueWhere(q);
 
     const [total, rows] = await this.prisma.$transaction([
       this.prisma.catalogPart.count({ where }),
@@ -95,9 +95,17 @@ export class FitmentQueueService {
    *
    * REPLACE, not append: the part-first UI has no per-model unbind, so the set
    * the client sends is the truth for this (part, node) and anything missing
-   * from it is deleted. All-or-nothing in one transaction — the client rolls an
-   * optimistic row back on failure, and a partial write would make that
+   * from it is deleted — an EMPTY set clears this node for the part (its other
+   * nodes are untouched). All-or-nothing in one transaction — the client rolls
+   * an optimistic row back on failure, and a partial write would make that
    * rollback a lie.
+   *
+   * Concurrency: two binds for the same part would otherwise interleave their
+   * delete and insert (A deletes, B deletes, A inserts, B inserts) and leave the
+   * UNION of both sets — neither operator's answer. The transaction first takes
+   * a row lock on the part (`SELECT … FOR UPDATE`), so binds of one part run one
+   * after another and the final set is exactly the last committed request's
+   * (last-write-wins), never a mix.
    */
   async bindPart(dto: BindPartFitmentDto) {
     const [node, part] = await Promise.all([
@@ -137,39 +145,47 @@ export class FitmentQueueService {
 
     // Every model id must exist: a typo'd id would otherwise fail the FK
     // mid-transaction and surface as a 500 the operator cannot act on.
-    const known = await this.prisma.vehicleModelRef.findMany({
-      where: { id: { in: dto.vehicleModelIds } },
-      select: { id: true },
-    });
-    if (known.length !== dto.vehicleModelIds.length) {
-      const found = new Set(known.map((m) => m.id));
-      const missing = dto.vehicleModelIds.filter((id) => !found.has(id));
-      throw new BadRequestException(
-        `Unknown vehicle model id(s): ${missing.join(', ')}`,
-      );
+    const ids = dto.vehicleModelIds;
+    if (ids.length > 0) {
+      const known = await this.prisma.vehicleModelRef.findMany({
+        where: { id: { in: ids } },
+        select: { id: true },
+      });
+      if (known.length !== ids.length) {
+        const found = new Set(known.map((m) => m.id));
+        const missing = ids.filter((id) => !found.has(id));
+        throw new BadRequestException(
+          `Unknown vehicle model id(s): ${missing.join(', ')}`,
+        );
+      }
     }
 
-    await this.prisma.$transaction([
-      this.prisma.fitmentBinding.deleteMany({
+    await this.prisma.$transaction(async (tx) => {
+      // Serialise binds of THIS part (see the method doc): every bind takes the
+      // same row lock before touching its bindings.
+      await tx.$queryRaw`SELECT id FROM catalog_parts WHERE id = ${part.id} FOR UPDATE`;
+      await tx.fitmentBinding.deleteMany({
         where: {
           partId: part.id,
           nodeId: node.id,
-          vehicleModelId: { notIn: dto.vehicleModelIds },
+          ...(ids.length > 0 ? { vehicleModelId: { notIn: ids } } : {}),
         },
-      }),
-      this.prisma.fitmentBinding.createMany({
-        data: dto.vehicleModelIds.map((vehicleModelId) => ({
-          partId: part.id,
-          vehicleModelId,
-          nodeId: node.id,
-        })),
-        skipDuplicates: true,
-      }),
-    ]);
+      });
+      if (ids.length > 0) {
+        await tx.fitmentBinding.createMany({
+          data: ids.map((vehicleModelId) => ({
+            partId: part.id,
+            vehicleModelId,
+            nodeId: node.id,
+          })),
+          skipDuplicates: true,
+        });
+      }
+    });
 
     return {
       partId: part.id,
-      boundCount: dto.vehicleModelIds.length,
+      boundCount: ids.length,
       // Echoed so the operator can confirm the cross-reference without leaving
       // the queue. GM numbers count: on this catalogue they are the OEM
       // reference for a GM-labelled part.
@@ -180,9 +196,7 @@ export class FitmentQueueService {
   // ── helpers ───────────────────────────────────────────────────────────────
 
   /** filter + search → one Prisma predicate. */
-  private async queueWhere(
-    q: GetPartsQueueQueryDto,
-  ): Promise<Prisma.CatalogPartWhereInput> {
+  private queueWhere(q: GetPartsQueueQueryDto): Prisma.CatalogPartWhereInput {
     const search = q.search?.trim();
     const searchWhere: Prisma.CatalogPartWhereInput | undefined = search
       ? {
@@ -196,27 +210,23 @@ export class FitmentQueueService {
         }
       : undefined;
 
-    const filterWhere = await this.filterWhere(q.filter);
-    return { ...filterWhere, ...(searchWhere ?? {}) };
+    return { ...this.filterWhere(q.filter), ...(searchWhere ?? {}) };
   }
 
-  private async filterWhere(
+  private filterWhere(
     filter: GetPartsQueueQueryDto['filter'],
-  ): Promise<Prisma.CatalogPartWhereInput> {
+  ): Prisma.CatalogPartWhereInput {
     if (filter === 'all') return {};
     // Vehicle-agnostic on purpose: part-first has no vehicle in scope, so
     // "unmapped" means "bound to nothing at all", not "missing from this car".
     if (filter === 'unmapped') return { fitmentBindings: { none: {} } };
 
-    // top300: the curated slice. Until fitment_priority is backfilled nothing
-    // carries a rank, and a literally empty queue would read as "all done" — so
-    // it degrades to `unmapped`, which is the work anyway.
-    const prioritized = await this.prisma.catalogPart.count({
-      where: { fitmentPriority: { not: null } },
-    });
-    return prioritized > 0
-      ? { fitmentPriority: { not: null } }
-      : { fitmentBindings: { none: {} } };
+    // top300: the business TOP-300 exactly as already ranked in the database —
+    // every part with a stored `fitment_priority` (1 = first), in that order
+    // (see getPartsQueue). Read as stored: nothing here recomputes a rank from
+    // sales or ratings, and nothing is substituted when no part is ranked (the
+    // tab is then empty rather than silently showing other parts).
+    return { fitmentPriority: { not: null } };
   }
 
   private mapRow(r: QueueRow) {

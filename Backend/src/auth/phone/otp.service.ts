@@ -106,6 +106,14 @@ export class OtpService {
     @Inject(RATE_LIMITER) private readonly rateLimiter: RateLimiter,
   ) {
     this.devMode = this.config.get<string>('AUTH_DEV_MODE') === 'true';
+    // Defence in depth behind the boot-time guard (validateAuthEnv): even a
+    // process assembled without that ConfigModule hook must never serve OTP
+    // codes in API responses in production.
+    if (this.devMode && this.config.get<string>('NODE_ENV') === 'production') {
+      throw new Error(
+        'AUTH_DEV_MODE=true is forbidden in production (OTP codes would be returned in API responses).',
+      );
+    }
     if (this.devMode) {
       this.logger.warn('AUTH_DEV_MODE is ON — OTPs are logged and returned in the API, SMS is skipped. Do NOT enable in production.');
     }

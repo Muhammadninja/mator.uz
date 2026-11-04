@@ -1,12 +1,20 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { AdminAuditAction, AdminAuditEntity, Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import {
+  AdminAuditEntry,
+  AdminAuditService,
+} from '../auth/admin-audit.service';
+import { AdminAuditContext } from '../auth/admin-auth.service';
 import { clampLimit } from '../../common/pagination.util';
 import {
   ADMIN_INVENTORY_ROW_SELECT,
   presentInventoryRow,
 } from './admin-inventory.presenter';
-import { BatchUpdateInventoryDto } from './dto/batch-update-inventory.dto';
+import {
+  BatchUpdateInventoryDto,
+  BatchUpdateInventoryItemDto,
+} from './dto/batch-update-inventory.dto';
 import {
   InventoryStockFilter,
   ListInventoryQueryDto,
@@ -14,6 +22,61 @@ import {
 
 const DEFAULT_ADMIN_INVENTORY_LIMIT = 20;
 const MAX_ADMIN_INVENTORY_LIMIT = 100;
+
+/** The columns one inventory edit writes. Only what the item names. */
+function toPartUpdate(
+  item: BatchUpdateInventoryItemDto,
+): Prisma.CatalogPartUpdateInput {
+  const data: Prisma.CatalogPartUpdateInput = {};
+  if (item.purchasePrice !== undefined) {
+    data.purchasePriceUzs =
+      item.purchasePrice === null
+        ? null
+        : new Prisma.Decimal(item.purchasePrice);
+  }
+  if (item.retailPrice !== undefined) {
+    data.priceUzs = new Prisma.Decimal(item.retailPrice);
+  }
+  if (item.cashbackPct !== undefined) {
+    data.cashbackPct = new Prisma.Decimal(item.cashbackPct);
+  }
+  if (item.stock !== undefined) {
+    data.stockQty = item.stock;
+    // Keep the legacy boolean availability flag consistent with the count.
+    data.inStock = item.stock > 0;
+  }
+  return data;
+}
+
+/** What an edit actually changes on a part, old and new, or null when nothing. */
+function describeChange(
+  part: {
+    purchasePriceUzs: Prisma.Decimal | null;
+    priceUzs: Prisma.Decimal;
+    cashbackPct: Prisma.Decimal;
+    stockQty: number;
+  },
+  item: BatchUpdateInventoryItemDto,
+): { previous: Prisma.InputJsonObject; next: Prisma.InputJsonObject } | null {
+  const fields: [string, number | null, number | null | undefined][] = [
+    [
+      'purchasePrice',
+      part.purchasePriceUzs === null ? null : Number(part.purchasePriceUzs),
+      item.purchasePrice,
+    ],
+    ['retailPrice', Number(part.priceUzs), item.retailPrice],
+    ['cashbackPct', Number(part.cashbackPct), item.cashbackPct],
+    ['stock', part.stockQty, item.stock],
+  ];
+  const changed = fields.filter(
+    ([, current, next]) => next !== undefined && next !== current,
+  );
+  if (changed.length === 0) return null;
+  return {
+    previous: Object.fromEntries(changed.map(([k, current]) => [k, current])),
+    next: Object.fromEntries(changed.map(([k, , next]) => [k, next ?? null])),
+  };
+}
 
 /**
  * Admin/operator Smart-Inventory console. Backs /v1/admin/inventory over the
@@ -30,7 +93,10 @@ const MAX_ADMIN_INVENTORY_LIMIT = 100;
  */
 @Injectable()
 export class AdminInventoryService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly audit: AdminAuditService,
+  ) {}
 
   async list(query: ListInventoryQueryDto) {
     const page = query.page ?? 1;
@@ -81,34 +147,60 @@ export class AdminInventoryService {
 
   /**
    * Update many parts' inventory fields in ONE transaction: either every row
-   * applies or none does. Only the fields present on an item are written.
+   * applies or none does. Only the fields present on an item are written, and each
+   * part that really changed leaves an audit entry with its old and new values.
    * Returns the number of rows updated.
    */
-  async batchUpdate(dto: BatchUpdateInventoryDto) {
-    const updates = dto.items.map((item) => {
-      const data: Prisma.CatalogPartUpdateInput = {};
-      if (item.purchasePrice !== undefined) {
-        data.purchasePriceUzs = new Prisma.Decimal(item.purchasePrice);
-      }
-      if (item.retailPrice !== undefined) {
-        data.priceUzs = new Prisma.Decimal(item.retailPrice);
-      }
-      if (item.cashbackPct !== undefined) {
-        data.cashbackPct = new Prisma.Decimal(item.cashbackPct);
-      }
-      if (item.stock !== undefined) {
-        data.stockQty = item.stock;
-        // Keep the legacy boolean availability flag consistent with the count.
-        data.inStock = item.stock > 0;
-      }
-      return this.prisma.catalogPart.updateMany({
-        where: { id: item.id },
-        data,
-      });
-    });
+  async batchUpdate(dto: BatchUpdateInventoryDto, ctx: AdminAuditContext = {}) {
+    const updated = await this.prisma.$transaction(
+      async (tx) => {
+        const before = await tx.catalogPart.findMany({
+          where: { id: { in: dto.items.map((item) => item.id) } },
+          select: {
+            id: true,
+            title: true,
+            purchasePriceUzs: true,
+            priceUzs: true,
+            cashbackPct: true,
+            stockQty: true,
+          },
+        });
+        const byId = new Map(before.map((part) => [part.id, part]));
 
-    const results = await this.prisma.$transaction(updates);
-    const updated = results.reduce((sum, r) => sum + r.count, 0);
+        let count = 0;
+        const entries: AdminAuditEntry[] = [];
+        for (const item of dto.items) {
+          const data = toPartUpdate(item);
+          const res = await tx.catalogPart.updateMany({
+            where: { id: item.id },
+            data,
+          });
+          count += res.count;
+
+          const part = byId.get(item.id);
+          const change = part ? describeChange(part, item) : null;
+          if (part && change) {
+            entries.push({
+              action: AdminAuditAction.INVENTORY_UPDATED,
+              actor: ctx.actor,
+              actorLabel: ctx.actorLabel,
+              target: {
+                entity: AdminAuditEntity.CATALOG_PART,
+                id: part.id,
+                name: part.title.slice(0, 120),
+              },
+              previousValues: change.previous,
+              newValues: change.next,
+              ip: ctx.ip,
+              userAgent: ctx.userAgent,
+            });
+          }
+        }
+        await this.audit.recordMany(entries, tx);
+        return count;
+      },
+      { maxWait: 10_000, timeout: 30_000 },
+    );
     return { success: true, data: { updated } };
   }
 

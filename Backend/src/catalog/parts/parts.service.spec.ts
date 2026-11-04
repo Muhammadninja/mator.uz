@@ -18,6 +18,8 @@ import {
 import { PartsService } from './parts.service';
 import { ListPartsQueryDto } from './dto/list-parts.query.dto';
 import { normalizeOem } from '../../common/normalize-oem.util';
+import { selectIds } from '../compatibility/where-eval.test-util';
+import * as fx from '../compatibility/fitment-fixtures.test-util';
 
 /**
  * Prisma stub that records the arguments of every catalogPart call. `findMany`
@@ -45,9 +47,13 @@ function makePrisma() {
       aggregate: jest.fn().mockResolvedValue({ _min: {}, _max: {} }),
     },
     partBrand: { findMany: jest.fn().mockResolvedValue([]) },
-    vehicle: { findUnique: jest.fn().mockResolvedValue(null) },
+    // Garage vehicles resolve only for their owner (findFirst scoped by userId).
+    vehicle: { findFirst: jest.fn().mockResolvedValue(null) },
   };
 }
+
+/** The authenticated caller every garage-vehicle listing below runs as. */
+const OWNER = 'usr_owner';
 
 /** A DiscountService stub that never discounts — these tests exercise
  *  filtering/faceting, not pricing, so every part keeps its raw price. */
@@ -185,13 +191,14 @@ describe('PartsService — search and sort survive ProductKind', () => {
     await svc.list({ sort: 'price_asc' });
     expect((prisma.calls.findMany as { orderBy: unknown }).orderBy).toEqual([
       { priceUzs: 'asc' },
+      { id: 'asc' },
     ]);
 
     const desc = makeService();
     await desc.svc.list({ sort: 'price_desc' });
     expect(
       (desc.prisma.calls.findMany as { orderBy: unknown }).orderBy,
-    ).toEqual([{ priceUzs: 'desc' }]);
+    ).toEqual([{ priceUzs: 'desc' }, { id: 'asc' }]);
   });
 
   it('the default sort is still newest-first', async () => {
@@ -199,6 +206,7 @@ describe('PartsService — search and sort survive ProductKind', () => {
     await svc.list({});
     expect((prisma.calls.findMany as { orderBy: unknown }).orderBy).toEqual([
       { createdAt: 'desc' },
+      { id: 'asc' },
     ]);
   });
 
@@ -209,7 +217,7 @@ describe('PartsService — search and sort survive ProductKind', () => {
       sort: 'price_asc',
     });
     const args = prisma.calls.findMany as { orderBy: unknown; where: unknown };
-    expect(args.orderBy).toEqual([{ priceUzs: 'asc' }]);
+    expect(args.orderBy).toEqual([{ priceUzs: 'asc' }, { id: 'asc' }]);
     expect(JSON.stringify(args.where)).toContain('MOTOR_OIL');
   });
 
@@ -231,7 +239,7 @@ describe('PartsService — search and sort survive ProductKind', () => {
     await svc.list({ mainCategory: 'brakes', sort: 'price_asc' });
     const args = prisma.calls.findMany as { orderBy: any[]; where: unknown };
     expect(JSON.stringify(args.where)).toContain('"mainCategory":"BRAKES"');
-    expect(args.orderBy).toEqual([{ priceUzs: 'asc' }]);
+    expect(args.orderBy).toEqual([{ priceUzs: 'asc' }, { id: 'asc' }]);
   });
 
   it('a multi-word main-category SLUG rolls up the whole system (not an exact categoryId)', async () => {
@@ -245,9 +253,21 @@ describe('PartsService — search and sort survive ProductKind', () => {
     expect(hasCond(and, { categoryId: 'belts-and-hoses' })).toBe(false);
   });
 
-  it('a real subcategory id still matches exactly on categoryId', async () => {
-    const { and } = await whereFor({ category: 'v-belts' });
-    expect(hasCond(and, { categoryId: 'v-belts' })).toBe(true);
+  it('a real subcategory id still lists exactly that leaf', async () => {
+    // A leaf has nothing beneath it, so its subtree is itself: never a sibling,
+    // never the bucket it sits under.
+    const filed = (id: string, categoryId: string, parentId: string) => ({
+      ...fx.part({ id }),
+      categoryId,
+      category: { id: categoryId, parentId, parent: null },
+    });
+    const rows = [
+      filed('on_v_belts', 'v-belts', 'belts-and-hoses'),
+      filed('on_sibling', 'timing-belts', 'belts-and-hoses'),
+      filed('on_bucket', 'belts-and-hoses', 'engine-system'),
+    ];
+    const { and, where } = await whereFor({ category: 'v-belts' });
+    expect(selectIds(rows, where)).toEqual(['on_v_belts']);
     expect(hasCond(and, { mainCategory: 'BELTS_AND_HOSES' })).toBe(false);
   });
 
@@ -257,6 +277,7 @@ describe('PartsService — search and sort survive ProductKind', () => {
     expect((res as { subcategories: unknown }).subcategories).toBeNull();
     expect((prisma.calls.findMany as { orderBy: unknown }).orderBy).toEqual([
       { createdAt: 'desc' },
+      { id: 'asc' },
     ]);
   });
 
@@ -300,7 +321,7 @@ describe('PartsService — the compatibility endpoint', () => {
     const prisma = makePrisma();
     (prisma.catalogPart as unknown as { findUnique: jest.Mock }).findUnique =
       jest.fn().mockResolvedValue(part);
-    prisma.vehicle.findUnique.mockResolvedValue({
+    prisma.vehicle.findFirst.mockResolvedValue({
       trimId: 'trim_1',
       engineId: null,
       year: 2020,
@@ -397,14 +418,14 @@ describe('PartsService — spare-part queries do not silently change', () => {
     // This is intended, not a leak: a motor oil fits every vehicle, so it must
     // appear for a selected car exactly like any other universal product.
     const { svc, prisma } = makeService();
-    prisma.vehicle.findUnique.mockResolvedValue({
+    prisma.vehicle.findFirst.mockResolvedValue({
       trimId: 'trim_1',
       engineId: null,
       year: 2020,
       make: { name: 'Chevrolet' },
       model: { name: 'Cobalt' },
     });
-    await svc.list({ vehicle_id: 'v1' });
+    await svc.list({ vehicle_id: 'v1' }, 'ru', OWNER);
     const where = JSON.stringify(
       (prisma.calls.findMany as { where: unknown }).where,
     );
@@ -419,38 +440,133 @@ describe('PartsService — spare-part queries do not silently change', () => {
 });
 
 describe('PartsService — make-wide fitment (imported "all models of a make")', () => {
-  const makeFitsIn = (cond: unknown) => JSON.stringify(cond).includes('makeFits');
+  // Evaluated over in-memory parts (where-eval): asserts which parts MATCH.
+  const SKODA_PARTS = [
+    fx.part({ id: 'makewide_skoda', makeFits: ['Skoda'] }),
+    fx.part({ id: 'makewide_chevrolet', makeFits: ['Chevrolet'] }),
+    fx.part({ id: 'legacy_cobalt', fits: [['Chevrolet', 'Cobalt']] }),
+  ];
 
   it('a make filter also matches make-wide parts of that make', async () => {
-    const { and } = await whereFor({ make: 'make_skoda' });
-    const makeCond = and.find((c) => 'OR' in c) as { OR: unknown[] };
-    expect(makeCond.OR).toContainEqual({
-      makeFits: { some: { OR: [{ makeSlug: 'make_skoda' }, { makeName: { equals: 'make_skoda', mode: 'insensitive' } }] } },
-    });
+    const { where } = await whereFor({ make: 'make_skoda' });
+    expect(selectIds(SKODA_PARTS, where)).toEqual(['makewide_skoda']);
   });
 
   it('a model SLUG matches make-wide parts of the make encoded in the slug', async () => {
-    const { and } = await whereFor({ model: 'model_chevrolet_cobalt' });
-    const modelCond = and.find((c) => 'OR' in c) as { OR: unknown[] };
-    expect(modelCond.OR).toContainEqual({ makeFits: { some: { makeSlug: 'make_chevrolet' } } });
+    const { where } = await whereFor({ model: 'model_chevrolet_cobalt' });
+    expect(selectIds(SKODA_PARTS, where)).toEqual([
+      'makewide_chevrolet',
+      'legacy_cobalt',
+    ]);
   });
 
   it('a bare model NAME claims make-wide parts only together with an explicit make', async () => {
     const alone = await whereFor({ model: 'Cobalt' });
-    expect(makeFitsIn(alone.and)).toBe(false);
+    expect(selectIds(SKODA_PARTS, alone.where)).toEqual(['legacy_cobalt']);
 
     const withMake = await whereFor({ model: 'Cobalt', make: 'Chevrolet' });
-    const modelCond = withMake.and.find((c) => JSON.stringify(c).includes('"modelName"')) as { OR: unknown[] };
-    expect(makeFitsIn(modelCond)).toBe(true);
+    expect(selectIds(SKODA_PARTS, withMake.where)).toEqual([
+      'makewide_chevrolet',
+      'legacy_cobalt',
+    ]);
   });
 
   it('a garage vehicle matches make-wide parts of its make', async () => {
     const { svc, prisma } = makeService();
-    prisma.vehicle.findUnique.mockResolvedValue({
-      trimId: null, engineId: null, year: 2020, make: { name: 'Skoda' }, model: { name: 'Kodiaq' },
+    prisma.vehicle.findFirst.mockResolvedValue({
+      modelId: 'kodiaq',
+      trimId: null,
+      engineId: null,
+      year: 2020,
+      make: { name: 'Skoda' },
+      model: { name: 'Kodiaq' },
     });
-    await svc.list({ vehicle_id: 'v1' });
-    const where = JSON.stringify((prisma.calls.findMany as { where: unknown }).where);
-    expect(where).toContain('{"makeFits":{"some":{"makeName":{"equals":"Skoda","mode":"insensitive"}}}}');
+    await svc.list({ vehicle_id: 'v1' }, 'ru', OWNER);
+    const where = (prisma.calls.findMany as { where: unknown }).where;
+    expect(selectIds(SKODA_PARTS, where)).toEqual(['makewide_skoda']);
+  });
+});
+
+describe('PartsService — curated fitment (fitment_bindings) reaches GET /v1/catalog/parts', () => {
+  // The listing's real where-clause, evaluated over the shared fixture parts.
+  async function listedFor(
+    query: Partial<ListPartsQueryDto>,
+    garage?: fx.VehicleKey,
+  ) {
+    const { svc, prisma } = makeService();
+    if (garage)
+      prisma.vehicle.findFirst.mockResolvedValue(
+        fx.vehicleRow(fx.VEHICLES[garage]),
+      );
+    await svc.list(query, 'ru', OWNER);
+    return selectIds(
+      fx.PARTS,
+      (prisma.calls.findMany as { where: unknown }).where,
+    );
+  }
+
+  it('garage Cobalt: sees the part bound to Cobalt, not the Spark-only ones', async () => {
+    const ids = await listedFor({ vehicle_id: 'veh_cobalt' }, 'cobalt');
+    expect(ids).toContain('curated_cobalt');
+    expect(ids).toContain('curated_multi');
+    expect(ids).not.toContain('curated_spark');
+    expect(ids).not.toContain('legacy_spark');
+  });
+
+  it('garage Spark: does not see a part bound only to Cobalt', async () => {
+    const ids = await listedFor({ vehicle_id: 'veh_spark' }, 'spark');
+    expect(ids).not.toContain('curated_cobalt');
+    expect(ids).toContain('curated_spark');
+  });
+
+  it('garage Nexia 2 vs Nexia 3: separate model ids, separate results', async () => {
+    const n2 = await listedFor({ vehicle_id: 'veh_n2' }, 'nexia2');
+    const n3 = await listedFor({ vehicle_id: 'veh_n3' }, 'nexia3');
+    expect(n2).toContain('curated_nexia2');
+    expect(n2).not.toContain('curated_nexia3');
+    expect(n3).toContain('curated_nexia3');
+    expect(n3).not.toContain('curated_nexia2');
+  });
+
+  it('?model=<reference id> matches curated parts by id (Nexia 2 only)', async () => {
+    const ids = await listedFor({ model: 'nexia-2' });
+    expect(ids).toContain('curated_nexia2');
+    expect(ids).not.toContain('curated_nexia3');
+    expect(ids).not.toContain('curated_multi');
+  });
+
+  it('?model=Nexia 3 matches curated (by reference name) and legacy rows', async () => {
+    const ids = await listedFor({ model: 'Nexia 3' });
+    expect(ids).toEqual(
+      expect.arrayContaining([
+        'curated_nexia3',
+        'curated_multi',
+        'legacy_nexia3',
+      ]),
+    );
+    expect(ids).not.toContain('curated_nexia2');
+  });
+
+  it('?model=model_chevrolet_nexia-3 (fit slug) reaches the curated Nexia 3 parts', async () => {
+    const ids = await listedFor({ model: 'model_chevrolet_nexia-3' });
+    expect(ids).toEqual(
+      expect.arrayContaining(['curated_nexia3', 'curated_multi']),
+    );
+    expect(ids).not.toContain('curated_nexia2');
+  });
+
+  it('?make= follows curation: a part curated away from a make leaves it', async () => {
+    const parts = [
+      fx.part({
+        id: 'curated_rio_legacy_chevy',
+        curated: ['kia-rio'],
+        fits: [['Chevrolet', 'Cobalt']],
+      }),
+      fx.part({ id: 'curated_cobalt', curated: ['cobalt'] }),
+    ];
+    const { svc, prisma } = makeService();
+    await svc.list({ make: 'Chevrolet' });
+    const where = (prisma.calls.findMany as { where: unknown }).where;
+    expect(selectIds(parts, where)).toEqual(['curated_cobalt']);
   });
 });

@@ -46,6 +46,8 @@ function makeCategoriesMock() {
   return {
     getOrFail: jest.fn().mockResolvedValue({ id: 'brakes' }),
     findChildren: jest.fn().mockResolvedValue([]),
+    findCatalogRootCategories: jest.fn().mockResolvedValue([]),
+    findCatalogRootProductCounts: jest.fn().mockResolvedValue({}),
     findRootCategories: jest.fn().mockResolvedValue([]),
   };
 }
@@ -275,11 +277,34 @@ describe('ReferenceService', () => {
       sortOrder: 0,
     };
 
-    it('returns the ROOT categories when no parentId is given', async () => {
-      categories.findRootCategories.mockResolvedValue([brakes]);
+    it('returns the CATALOG roots when no parentId is given — not the bot step', async () => {
+      categories.findCatalogRootCategories.mockResolvedValue([brakes]);
+      categories.findCatalogRootProductCounts.mockResolvedValue({ brakes: 7 });
       const res = await service.listCategories();
-      expect(categories.findRootCategories).toHaveBeenCalled();
-      expect(res).toEqual({ items: [brakes], total: 1 });
+      expect(categories.findCatalogRootCategories).toHaveBeenCalled();
+      // The bot's roots leave "Другое" out; the public tree must not.
+      expect(categories.findRootCategories).not.toHaveBeenCalled();
+      expect(res).toEqual({
+        items: [{ ...brakes, productsCount: 7 }],
+        total: 1,
+      });
+    });
+
+    it('gives a root the counts do not know yet a count of 0', async () => {
+      categories.findCatalogRootCategories.mockResolvedValue([brakes]);
+      const res = await service.listCategories();
+      expect(res.items).toEqual([{ ...brakes, productsCount: 0 }]);
+    });
+
+    it('serves the roots without productsCount when the count fails', async () => {
+      categories.findCatalogRootCategories.mockResolvedValue([brakes]);
+      categories.findCatalogRootProductCounts.mockRejectedValue(
+        new Error('statement timeout'),
+      );
+      await expect(service.listCategories()).resolves.toEqual({
+        items: [brakes],
+        total: 1,
+      });
     });
 
     it("returns a category's children when parentId is given", async () => {
@@ -287,6 +312,8 @@ describe('ReferenceService', () => {
       const res = await service.listCategories('brake-system');
       expect(categories.findChildren).toHaveBeenCalledWith('brake-system');
       expect(res).toEqual({ items: [brakes], total: 1 });
+      // Children carry no count, and cost none.
+      expect(categories.findCatalogRootProductCounts).not.toHaveBeenCalled();
     });
 
     it('returns 200 with an empty list for a LEAF — the bot skips the step', async () => {
@@ -311,9 +338,9 @@ describe('ReferenceService', () => {
     });
 
     it('never returns inactive categories (the service filters them out)', async () => {
-      // findChildren/findRootCategories are active-only by construction; this
-      // pins the contract that ReferenceService adds no inactive rows of its own.
-      categories.findRootCategories.mockResolvedValue([brakes]);
+      // findChildren/findCatalogRootCategories are active-only by construction;
+      // this pins the contract that ReferenceService adds no inactive rows.
+      categories.findCatalogRootCategories.mockResolvedValue([brakes]);
       const res = await service.listCategories();
       expect(res.items.every((i) => !('isActive' in i))).toBe(true);
     });

@@ -12,6 +12,8 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { prefixedId, IdPrefix } from '../../common/ulid.util';
 import { SettlementService } from './settlement.service';
 import { readPaymeConfig } from './payme.config';
+import { isPayableOrderStatus } from '../order-transitions';
+import { findUnavailableParts } from '../order-availability';
 import {
   FiscalDataIncompleteException,
   PaymeFiscalService,
@@ -39,6 +41,73 @@ class PaymeError extends Error {
 const L = (text: string) => ({ ru: text, uz: text, en: text });
 
 /**
+ * -32600: "required fields are missing or of the wrong type" (Payme's own
+ * meaning of the JSON-RPC code). Raised BEFORE any lookup, so a malformed
+ * request can never be coerced into a lookup key like the string "undefined".
+ */
+function invalidRequest(field: string): PaymeError {
+  return new PaymeError(
+    -32600,
+    `Invalid or missing parameter: ${field}`,
+    field,
+  );
+}
+
+const isNonEmptyString = (v: unknown): v is string =>
+  typeof v === 'string' && v.trim().length > 0;
+
+const isInteger = (v: unknown): v is number =>
+  typeof v === 'number' && Number.isSafeInteger(v);
+
+/**
+ * Minimum shape per method, as the Merchant API specifies it. Deliberately
+ * lenient where the protocol is: a missing `account` keeps its account-level
+ * answer (-31050), and a well-typed but WRONG amount keeps -31001 — only an
+ * absent or mistyped field is a malformed request.
+ */
+function assertParams(method: string, params: unknown): Record<string, any> {
+  if (typeof params !== 'object' || params === null || Array.isArray(params)) {
+    throw invalidRequest('params');
+  }
+  const p = params as Record<string, any>;
+  const needsId = [
+    'CreateTransaction',
+    'PerformTransaction',
+    'CancelTransaction',
+    'CheckTransaction',
+  ];
+  if (needsId.includes(method) && !isNonEmptyString(p.id)) {
+    throw invalidRequest('id');
+  }
+  if (
+    (method === 'CheckPerformTransaction' || method === 'CreateTransaction') &&
+    !(isInteger(p.amount) && p.amount > 0)
+  ) {
+    throw invalidRequest('amount');
+  }
+  if (
+    method === 'CreateTransaction' &&
+    p.time !== undefined &&
+    !isInteger(p.time)
+  ) {
+    throw invalidRequest('time');
+  }
+  if (
+    method === 'CancelTransaction' &&
+    p.reason !== undefined &&
+    p.reason !== null &&
+    !isInteger(p.reason)
+  ) {
+    throw invalidRequest('reason');
+  }
+  if (method === 'GetStatement') {
+    if (!isInteger(p.from)) throw invalidRequest('from');
+    if (!isInteger(p.to)) throw invalidRequest('to');
+  }
+  return p;
+}
+
+/**
  * Payme transaction states, as sent on the wire. A payment row mirrors these in
  * `providerState`, which is what CheckTransaction reports back verbatim.
  */
@@ -60,6 +129,22 @@ export const PaymeState = {
  * externally visible answer.
  */
 export const PAYME_TRANSACTION_TIMEOUT_MS = 43_200_000;
+
+/**
+ * Has this created-but-unperformed transaction outlived the 12-hour window
+ * (so Payme can no longer perform it)? Measured from the create time Payme
+ * assigned, against `now` (defaulting to the current clock). Only a CREATED
+ * (state 1) row can expire; a row without a create time never does.
+ */
+export function isPaymeTransactionExpired(
+  payment: Pick<Payment, 'providerState' | 'providerCreateTime'>,
+  now: number = Date.now(),
+): boolean {
+  if (payment.providerState !== PaymeState.CREATED) return false;
+  const createdAt = Number(payment.providerCreateTime ?? 0);
+  if (!createdAt) return false;
+  return now - createdAt > PAYME_TRANSACTION_TIMEOUT_MS;
+}
 
 /** Payme cancellation reason for "transaction timed out". */
 export const PAYME_TIMEOUT_REASON = 4;
@@ -176,7 +261,19 @@ export class PaymeService {
     }
   }
 
-  private dispatch(method: string | undefined, params: Record<string, any>) {
+  private dispatch(method: string | undefined, raw: unknown) {
+    const known = [
+      'CheckPerformTransaction',
+      'CreateTransaction',
+      'PerformTransaction',
+      'CancelTransaction',
+      'CheckTransaction',
+      'GetStatement',
+    ];
+    if (!method || !known.includes(method)) {
+      throw new PaymeError(-32601, 'Method not found');
+    }
+    const params = assertParams(method, raw);
     switch (method) {
       case 'CheckPerformTransaction':
         return this.checkPerform(params);
@@ -199,8 +296,44 @@ export class PaymeService {
   private async checkPerform(params: Record<string, any>) {
     const order = await this.orderFromAccount(params);
     this.assertAmount(order.totalUzs, params.amount);
-    if (order.status !== OrderStatus.PENDING_PAYMENT) {
+    if (!isPayableOrderStatus(order.status)) {
       throw new PaymeError(-31008, 'Order is not awaiting payment');
+    }
+    // One active (state 1) transaction per order — the same rule
+    // CreateTransaction enforces, answered here with the same account-level
+    // error so Payme hears a consistent "this order is already being paid"
+    // before it ever tries to create a second transaction. An incumbent past
+    // the 12-hour window does not count: CreateTransaction would expire it.
+    const active = await this.prisma.payment.findFirst({
+      where: {
+        orderId: order.id,
+        provider: PaymentProvider.PAYME,
+        providerState: PaymeState.CREATED,
+      },
+    });
+    if (active && !this.isExpired(active)) {
+      throw new PaymeError(
+        -31050,
+        'Another transaction is in progress for this order',
+        this.accountField,
+      );
+    }
+
+    // Availability backstop (the checkout path refuses first — see
+    // PaymentsService.createPaymeInvoice): never let Payme hold money for an
+    // order whose parts went out of stock or whose dealer was suspended after
+    // the link was issued. Checked here, BEFORE funds are held, and not at
+    // PerformTransaction, where refusing would bounce a payment the customer
+    // already confirmed.
+    const unavailable = await findUnavailableParts(
+      this.prisma,
+      await this.prisma.orderItem.findMany({
+        where: { orderId: order.id },
+        select: { partId: true, title: true },
+      }),
+    );
+    if (unavailable.length > 0) {
+      throw new PaymeError(-31008, 'Order items are no longer available');
     }
 
     // Fiscalization. Payme takes the receipt from THIS reply, so the items are
@@ -248,7 +381,7 @@ export class PaymeService {
 
     const order = await this.orderFromAccount(params);
     this.assertAmount(order.totalUzs, params.amount);
-    if (order.status !== OrderStatus.PENDING_PAYMENT) {
+    if (!isPayableOrderStatus(order.status)) {
       throw new PaymeError(-31008, 'Order is not awaiting payment');
     }
 
@@ -282,6 +415,21 @@ export class PaymeService {
           // refusing is what keeps concurrent same-id calls returning the same
           // answer instead of one of them getting an error.
           if (active.providerTransactionId === paymeId) return active;
+        }
+
+        // Re-check the order UNDER the lock: the status read above happened
+        // before it, so an operator could have cancelled the order in between.
+        // Binding a new transaction to a no-longer-payable order would hand
+        // Payme a payable account that settlement then refuses.
+        const locked = await tx.order.findUnique({
+          where: { id: order.id },
+          select: { status: true },
+        });
+        if (!locked || !isPayableOrderStatus(locked.status)) {
+          throw new PaymeError(-31008, 'Order is not awaiting payment');
+        }
+
+        if (active) {
           if (this.isExpired(active, createTime)) {
             // The incumbent timed out; cancel it so this order is payable again
             // rather than being wedged by an abandoned transaction.
@@ -395,14 +543,25 @@ export class PaymeService {
     }
 
     const performTime = Date.now();
-    await this.settlement.markPaid(payment.id, performTime);
+    const outcome = await this.settlement.markPaid(payment.id, performTime);
+    if (outcome === 'order_not_payable') {
+      // The order left PENDING_PAYMENT (cancelled by an operator, …) while the
+      // transaction was open. Refuse: Payme then cancels the transaction and
+      // the customer is not charged. Nothing was written on our side.
+      throw new PaymeError(-31008, 'Order is not awaiting payment');
+    }
     // Re-read so the reply carries the persisted timestamp: if a concurrent
     // Perform settled first, markPaid was a no-op and the stored value — not
     // ours — is the one Payme must keep seeing.
     const settled = await this.byPaymeId(params.id);
+    if (settled?.providerState !== PaymeState.PERFORMED) {
+      // Not settled by us nor by a concurrent Perform (e.g. cancelled in
+      // between) — never report a state-2 that the database does not hold.
+      throw new PaymeError(-31008, 'Transaction cannot be performed');
+    }
     return {
       transaction: payment.id,
-      perform_time: Number(settled?.providerPerformTime ?? performTime),
+      perform_time: Number(settled.providerPerformTime ?? performTime),
       state: PaymeState.PERFORMED,
     };
   }
@@ -523,16 +682,9 @@ export class PaymeService {
     );
   }
 
-  /**
-   * Has this created-but-unperformed transaction outlived the 12-hour window?
-   * Measured from the create time Payme assigned, against `now` (defaulting to
-   * the current clock).
-   */
+  /** See {@link isPaymeTransactionExpired}. */
   private isExpired(payment: Payment, now: number = Date.now()): boolean {
-    if (payment.providerState !== PaymeState.CREATED) return false;
-    const createdAt = Number(payment.providerCreateTime ?? 0);
-    if (!createdAt) return false;
-    return now - createdAt > PAYME_TRANSACTION_TIMEOUT_MS;
+    return isPaymeTransactionExpired(payment, now);
   }
 
   /**

@@ -22,10 +22,15 @@ export const RedisKeys = {
   // reference lists above (TTL-only), these ARE explicitly busted: the admin
   // console edits this taxonomy at runtime and the bot must not offer a category
   // that was just renamed or deactivated. Every write in PartCategoryService
-  // calls invalidate(), which deletes both keys.
+  // calls invalidate(), which deletes these keys.
   cacheReferenceCategories: (): string => `cache:reference:categories`,
   cacheReferenceCategoryChildren: (parentId: string): string =>
     `cache:reference:categories:children:${parentId}`,
+  // Listed parts per root, merged into the roots response — never into the
+  // roots payload the bot shares. A short TTL is what carries new listings
+  // into it; invalidate() drops it too, since a taxonomy edit re-roots parts.
+  cacheReferenceCategoryCounts: (): string =>
+    `cache:reference:categories:counts`,
 
   // ── Rate limiting ─────────────────────────────────────────────────────────
   // Fixed-window counters consumed via the RateLimiter (FixedWindow). One key per

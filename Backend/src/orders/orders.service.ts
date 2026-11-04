@@ -1,12 +1,23 @@
-import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
+  AdminAuditAction,
+  AdminAuditEntity,
+  AdminRole,
   DeliveryMethod,
   NotificationType,
   OrderStatus,
   PaymentType,
   Prisma,
 } from '@prisma/client';
+import { AdminAuditService } from '../admin/auth/admin-audit.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
@@ -16,33 +27,31 @@ import { priceCartLines } from '../cart/cart-pricing.util';
 import { allocatePromoDiscount } from './promo-allocation.util';
 import { DiscountService } from '../sales/discount.service';
 import { ORDER_INCLUDE, presentOrder } from './order.presenter';
-import { OrderStatusService, TransitionActor } from './order-status.service';
+import {
+  ACTIVE_PROVIDER_STATE,
+  OrderStatusService,
+  TransitionActor,
+} from './order-status.service';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { ListOrdersQueryDto } from './dto/list-orders.query.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
+import { SYSTEM_ONLY_ORDER_STATUSES, canTransition } from './order-transitions';
+import {
+  PART_UNAVAILABLE,
+  assertAllAvailable,
+  findUnavailableParts,
+} from './order-availability';
 
 const DEFAULT_ORDER_LIMIT = 20;
 
+/** Roles that may record an online payment by hand; see assertCanMarkPaid. */
+const MANUAL_ONLINE_PAYMENT_ROLES: readonly AdminRole[] = [
+  AdminRole.SUPER_ADMIN,
+  AdminRole.MANAGER,
+];
+
 /** Re-exported for the controller: the acting user shape for an operator write. */
 export type StatusActor = TransitionActor;
-
-/**
- * Server-authoritative order state machine for operator status writes.
- * Mapped onto the existing Prisma `OrderStatus` enum (not the contract's
- * `confirmed/packed/out_for_delivery` vocabulary, which has no schema column):
- * `PENDING_PAYMENT → PAID → PROCESSING → SHIPPED → DELIVERED`, with
- * `CANCELLED`/`REFUNDED`/`EXPIRED` terminal. Illegal jumps are rejected with 400.
- */
-const ALLOWED_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
-  [OrderStatus.PENDING_PAYMENT]: [OrderStatus.PAID, OrderStatus.CANCELLED, OrderStatus.EXPIRED],
-  [OrderStatus.PAID]: [OrderStatus.PROCESSING, OrderStatus.CANCELLED, OrderStatus.REFUNDED],
-  [OrderStatus.PROCESSING]: [OrderStatus.SHIPPED, OrderStatus.CANCELLED, OrderStatus.REFUNDED],
-  [OrderStatus.SHIPPED]: [OrderStatus.DELIVERED, OrderStatus.CANCELLED],
-  [OrderStatus.DELIVERED]: [],
-  [OrderStatus.CANCELLED]: [],
-  [OrderStatus.REFUNDED]: [],
-  [OrderStatus.EXPIRED]: [],
-};
 
 @Injectable()
 export class OrdersService {
@@ -55,6 +64,7 @@ export class OrdersService {
     private readonly realtime: RealtimeGateway,
     private readonly orderStatus: OrderStatusService,
     private readonly discounts: DiscountService,
+    private readonly audit: AdminAuditService,
   ) {}
 
   async createFromCart(userId: string, dto: CreateOrderDto) {
@@ -65,6 +75,15 @@ export class OrdersService {
     if (!cart || cart.items.length === 0) {
       throw new BadRequestException('Cart is empty');
     }
+    // Never create an order for parts that can no longer be sold (out of stock,
+    // removed, or a suspended dealer) — 409 PART_UNAVAILABLE naming them, so
+    // the app can tell the buyer which cart lines to remove.
+    assertAllAvailable(
+      await findUnavailableParts(
+        this.prisma,
+        cart.items.map((i) => ({ partId: i.partId, title: i.title })),
+      ),
+    );
 
     // Ownership: a caller may only attach their OWN vehicle / delivery address to
     // an order. Without these checks the ids are persisted verbatim, letting a
@@ -80,6 +99,21 @@ export class OrdersService {
       const d = lineDiscounts.get(i.id);
       return d?.appliedSale ? d.finalPrice : Number(i.priceUzsSnapshot);
     };
+
+    // A sale can take a line to nothing (100%, or a fixed amount above the price).
+    // There is no free-of-charge sale in the business: a campaign must not be able
+    // to hand out goods by accident, so such a line stops the order.
+    const freeLines = cart.items.filter(
+      (i) => (i.partId || i.offerId) && !(unitPriceOf(i) > 0),
+    );
+    if (freeLines.length > 0) {
+      throw new ConflictException({
+        code: PART_UNAVAILABLE,
+        message: `No longer available: ${freeLines
+          .map((i) => `${i.title} (no_price)`)
+          .join('; ')}`,
+      });
+    }
 
     const subtotal = cart.items.reduce((s, i) => s + unitPriceOf(i) * i.quantity, 0);
     const snap = dto.cart_snapshot ?? {};
@@ -229,12 +263,17 @@ export class OrdersService {
 
   /**
    * Operator status write (PATCH /v1/orders/:id/status). Enforces the
-   * server-authoritative state machine ({@link ALLOWED_TRANSITIONS}), persists
+   * server-authoritative state machine (order-transitions.ts), persists
    * the new status, then broadcasts to the owning customer via the same channels
    * the payment webhook already uses (realtime socket + inbox/push notification)
    * so the app reflects the change without waiting for the next poll.
    */
-  async updateStatus(orderId: string, dto: UpdateOrderStatusDto, actor?: StatusActor) {
+  async updateStatus(
+    orderId: string,
+    dto: UpdateOrderStatusDto,
+    actor?: StatusActor,
+    provenance: { ip?: string; userAgent?: string } = {},
+  ) {
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
       include: ORDER_INCLUDE,
@@ -243,7 +282,7 @@ export class OrdersService {
 
     const from = order.status;
     const to = dto.status.toUpperCase() as OrderStatus;
-    if (from !== to && !ALLOWED_TRANSITIONS[from]?.includes(to)) {
+    if (from !== to && !canTransition(from, to)) {
       throw new BadRequestException(
         `Illegal transition ${from.toLowerCase()} → ${to.toLowerCase()}`,
       );
@@ -252,37 +291,179 @@ export class OrdersService {
     // Idempotent: re-sending the current status is a no-op (no re-broadcast).
     if (from === to) return presentOrder(order);
 
+    if (SYSTEM_ONLY_ORDER_STATUSES.includes(to)) {
+      throw new BadRequestException(
+        `Status ${to.toLowerCase()} is set by the system, not by an operator`,
+      );
+    }
+    const note = (dto.note ?? dto.reason)?.trim() || null;
+    if (to === OrderStatus.CANCELLED && !note) {
+      throw new BadRequestException({
+        code: 'CANCEL_REASON_REQUIRED',
+        message: 'Cancelling an order needs a reason.',
+      });
+    }
+    const paymentsOnFile =
+      to === OrderStatus.PAID
+        ? await this.assertCanMarkPaid(order, note, actor)
+        : null;
+    const paymentReference = dto.paymentReference?.trim() || null;
+
     // Persist the transition + its audit row atomically through the single
-    // status chokepoint, then re-read for the broadcast/response.
-    await this.orderStatus.transition(orderId, to, {
-      actor,
-      note: dto.note ?? dto.reason ?? null,
+    // status chokepoint, then re-read for the broadcast/response. CONDITIONAL on
+    // the status we validated against: if a payment webhook (or another
+    // operator) moved the order meanwhile, this write must not silently
+    // overwrite it — e.g. cancel an order that was paid a moment ago.
+    //
+    // A payment confirmation or a cancellation also leaves an audit entry in the
+    // same transaction: the history records the lifecycle, the audit entry what
+    // an operator is accountable for about the money.
+    const moved = await this.prisma.$transaction(async (tx) => {
+      const changed = await this.orderStatus.transitionIf(orderId, [from], to, {
+        tx,
+        actor,
+        note: paymentReference
+          ? `${note ?? ''} [${paymentReference}]`.trim().slice(0, 500)
+          : note,
+      });
+      if (
+        changed &&
+        actor &&
+        (to === OrderStatus.PAID || to === OrderStatus.CANCELLED)
+      ) {
+        await this.audit.record(
+          {
+            action:
+              to === OrderStatus.PAID
+                ? AdminAuditAction.ORDER_PAYMENT_CONFIRMED
+                : AdminAuditAction.ORDER_CANCELLED,
+            actor: {
+              id: actor.id,
+              email: actor.email ?? '',
+              name: actor.displayName ?? '',
+            },
+            target: {
+              entity: AdminAuditEntity.ORDER,
+              id: orderId,
+              name: orderId,
+            },
+            previousValues: {
+              status: from,
+              paymentType: order.paymentType,
+              ...(paymentsOnFile ? { payments: paymentsOnFile } : {}),
+            },
+            newValues: {
+              status: to,
+              ...(paymentReference ? { paymentReference } : {}),
+            },
+            reason: note,
+            ip: provenance.ip,
+            userAgent: provenance.userAgent,
+          },
+          tx,
+        );
+      }
+      return changed;
     });
+    if (!moved) {
+      throw new ConflictException(
+        'Order status changed meanwhile — reload and try again',
+      );
+    }
     const updated = await this.prisma.order.findUniqueOrThrow({
       where: { id: orderId },
       include: ORDER_INCLUDE,
     });
 
     // Notify the owning customer the same way the payment webhook does:
-    // live socket event + persisted inbox row / push (gated by prefs).
-    this.realtime.emit(order.userId, {
-      type: 'order_status_changed',
-      data: {
-        order_id: order.id,
-        status: to.toLowerCase(),
-        previous_status: from.toLowerCase(),
-      },
-    });
-    await this.notifications.emit(order.userId, {
-      type: NotificationType.ORDER_STATUS_CHANGED,
-      title: 'Buyurtma holati yangilandi',
-      body: `Buyurtmangiz holati "${to.toLowerCase()}" ga o'zgardi.`,
-      data: { order_id: order.id, status: to.toLowerCase() },
-      deeplinkPath: '/(tabs)/(cart)/order-confirmation',
-    });
+    // live socket event + persisted inbox row / push (gated by prefs). Best
+    // effort, for the webhook's reason: the transition is committed, so a failing
+    // socket or inbox write must not tell the operator it did not happen, which
+    // is what would make them retry into a 409.
+    try {
+      this.realtime.emit(order.userId, {
+        type: 'order_status_changed',
+        data: {
+          order_id: order.id,
+          status: to.toLowerCase(),
+          previous_status: from.toLowerCase(),
+        },
+      });
+      await this.notifications.emit(order.userId, {
+        type: NotificationType.ORDER_STATUS_CHANGED,
+        title: 'Buyurtma holati yangilandi',
+        body: `Buyurtmangiz holati "${to.toLowerCase()}" ga o'zgardi.`,
+        data: { order_id: order.id, status: to.toLowerCase() },
+        deeplinkPath: '/(tabs)/(cart)/order-confirmation',
+      });
+    } catch (err) {
+      this.logger.error(
+        `Status notification failed for order ${order.id}: ${(err as Error).message}`,
+      );
+    }
     this.logger.log(`Order ${order.id} status ${from.toLowerCase()} → ${to.toLowerCase()} (operator)`);
 
     return presentOrder(updated);
+  }
+
+  /**
+   * Marking an order paid is how an operator records money that reached them
+   * outside a provider. For cash or a terminal that is the normal flow. For an order
+   * paid online it is an exception, because PAID ends the order's payability and the
+   * provider then refuses the customer's own payment:
+   *   • a provider transaction in progress always wins: the customer is paying right
+   *     now, so the provider decides, and this write would fail their payment;
+   *   • otherwise it is for reconciling a payment confirmed some other way (a failed
+   *     callback), so only a manager or super admin may do it, and it must say how.
+   *
+   * @returns what the payment rows said at that moment, for the audit entry.
+   */
+  private async assertCanMarkPaid(
+    order: { id: string; paymentType: PaymentType | null },
+    note: string | null,
+    actor?: StatusActor,
+  ) {
+    const payments = await this.prisma.payment.findMany({
+      where: { orderId: order.id },
+      select: {
+        id: true,
+        provider: true,
+        status: true,
+        providerState: true,
+        providerTransactionId: true,
+      },
+    });
+    if (payments.some((p) => p.providerState === ACTIVE_PROVIDER_STATE)) {
+      throw new ConflictException({
+        code: 'PAYMENT_IN_PROGRESS',
+        message:
+          'The customer has a payment in progress with the provider. It will mark the order paid when it completes.',
+      });
+    }
+
+    // An order from a client that recorded no method counts as online once it has
+    // a payment row. One that says CASH stays offline even with a stale row left by
+    // an abandoned checkout.
+    const online =
+      order.paymentType === PaymentType.PAYME ||
+      (order.paymentType === null && payments.length > 0);
+    if (!online) return payments;
+
+    if (!actor?.adminRole || !MANUAL_ONLINE_PAYMENT_ROLES.includes(actor.adminRole)) {
+      throw new ForbiddenException({
+        code: 'PAYMENT_CONFIRM_FORBIDDEN',
+        message:
+          'Only a manager or super admin can mark an online order paid by hand.',
+      });
+    }
+    if (!note) {
+      throw new BadRequestException({
+        code: 'PAYMENT_NOTE_REQUIRED',
+        message:
+          'This order is paid online. Marking it paid by hand needs a note saying how the payment was confirmed.',
+      });
+    }
+    return payments;
   }
 
   // ── ownership helpers ────────────────────────────────────────────────────────
