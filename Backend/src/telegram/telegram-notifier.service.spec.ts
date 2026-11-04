@@ -65,9 +65,10 @@ describe('TelegramNotifierService', () => {
     it('does nothing (and never throws) when unconfigured', async () => {
       const service = new TelegramNotifierService(configWith({}));
       const sendMessage = withFakeClient(service);
-      await expect(
-        service.sendSourcingTicketToDealers(ticket()),
-      ).resolves.toBeUndefined();
+      await expect(service.sendSourcingTicketToDealers(ticket())).resolves.toEqual({
+        ok: false,
+        error: 'Dealers group not configured',
+      });
       expect(sendMessage).not.toHaveBeenCalled();
     });
   });
@@ -75,14 +76,13 @@ describe('TelegramNotifierService', () => {
   describe('formatTicket', () => {
     const service = new TelegramNotifierService(configWith(FULL_ENV));
 
-    it('includes every populated field and the raw message + ticket id', () => {
+    it('includes every populated part and vehicle field and the ticket id', () => {
       const text = service.formatTicket(ticket());
       expect(text).toContain('<b>Brand:</b> Chevrolet');
       expect(text).toContain('<b>Model:</b> Cobalt');
       expect(text).toContain('<b>Year:</b> 2020');
       expect(text).toContain('<b>Part:</b> передние колодки');
       expect(text).toContain('<b>Preference:</b> cheapest');
-      expect(text).toContain('Нужны передние колодки');
       expect(text).toContain('tkt_1');
     });
 
@@ -92,7 +92,7 @@ describe('TelegramNotifierService', () => {
 
     it('escapes HTML-special characters to keep the markup valid', () => {
       const text = service.formatTicket(
-        ticket({ rawMessage: 'fits <A&B> models' }),
+        ticket({ partName: 'fits <A&B> models' } as never),
       );
       expect(text).toContain('fits &lt;A&amp;B&gt; models');
       expect(text).not.toContain('<A&B>');
@@ -103,7 +103,7 @@ describe('TelegramNotifierService', () => {
         ticket({ extractedData: null as never, rawMessage: 'hi' }),
       );
       expect(text).toContain('New sourcing request');
-      expect(text).toContain('hi');
+      expect(text).not.toContain('hi');
     });
   });
 
@@ -193,9 +193,67 @@ describe('TelegramNotifierService', () => {
           sendMessage: jest.fn().mockRejectedValue(new Error('429 flood')),
         },
       };
-      await expect(
-        service.sendSourcingTicketToDealers(ticket()),
-      ).resolves.toBeUndefined();
+      await expect(service.sendSourcingTicketToDealers(ticket())).resolves.toEqual({
+        ok: false,
+        error: '429 flood',
+      });
+    });
+
+    it('reports success, so the ticket can be marked as delivered', async () => {
+      const service = new TelegramNotifierService(configWith(FULL_ENV));
+      withFakeClient(service);
+      await expect(service.sendSourcingTicketToDealers(ticket())).resolves.toEqual({ ok: true });
+    });
+  });
+
+  describe('what dealers can see', () => {
+    const service = new TelegramNotifierService(configWith(FULL_ENV));
+    const vin = 'XUFCB6950K0000017';
+    const text = service.formatTicket(
+      ticket({
+        userId: 'user-secret',
+        rawMessage: 'Позвоните мне +998901234567, Иван',
+        extractedData: {
+          brand: 'Chevrolet',
+          model: 'Cobalt',
+          year: '2020',
+          vin,
+          part_name: 'радиатор',
+        },
+      } as never),
+    );
+
+    it('never includes the raw message or any customer contact', () => {
+      expect(text).not.toContain('+998901234567');
+      expect(text).not.toContain('Иван');
+      expect(text).not.toContain('user-secret');
+    });
+
+    it('shows the VIN only up to the serial number', () => {
+      expect(text).not.toContain(vin);
+      expect(text).toContain('XUFCB6950K0******');
+    });
+  });
+
+  describe('escalation', () => {
+    it('goes to its own chat, with no customer details', async () => {
+      const service = new TelegramNotifierService(
+        configWith({ ...FULL_ENV, TELEGRAM_SOURCING_ESCALATION_CHAT_ID: '-100777' }),
+      );
+      const sendMessage = withFakeClient(service);
+      const result = await service.sendSourcingEscalation(
+        ticket({ partName: 'радиатор', rawMessage: 'секрет' } as never),
+      );
+      expect(result).toEqual({ ok: true });
+      expect(sendMessage.mock.calls[0][0]).toBe('-100777');
+      expect(sendMessage.mock.calls[0][1]).toContain('радиатор');
+      expect(sendMessage.mock.calls[0][1]).not.toContain('секрет');
+    });
+
+    it('reports when no escalation chat is configured', async () => {
+      const service = new TelegramNotifierService(configWith(FULL_ENV));
+      expect(service.escalationConfigured).toBe(false);
+      await expect(service.sendSourcingEscalation(ticket())).resolves.toMatchObject({ ok: false });
     });
   });
 });

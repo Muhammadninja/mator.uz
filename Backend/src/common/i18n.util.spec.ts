@@ -1,4 +1,4 @@
-import { CANONICAL_RESPONSES, detectLanguage } from './i18n.util';
+import { CANONICAL_RESPONSES, detectLanguage, detectConversationLanguage, makesUnsupportedPromise } from './i18n.util';
 
 describe('detectLanguage', () => {
   it('detects Russian Cyrillic', () => {
@@ -26,16 +26,45 @@ describe('detectLanguage', () => {
 
 describe('CANONICAL_RESPONSES', () => {
   it('has non-empty copy for every intent × language', () => {
-    for (const intent of ['CREATE_SOURCING_TICKET', 'FOUND_IN_STOCK'] as const) {
+    for (const intent of Object.keys(CANONICAL_RESPONSES) as (keyof typeof CANONICAL_RESPONSES)[]) {
       for (const lang of ['ru', 'uz_lat', 'uz_cyr'] as const) {
         expect(CANONICAL_RESPONSES[intent][lang].length).toBeGreaterThan(10);
       }
     }
   });
 
-  it('keeps the 15-minute SLA promise across languages', () => {
-    expect(CANONICAL_RESPONSES.CREATE_SOURCING_TICKET.ru).toContain('15 минут');
-    expect(CANONICAL_RESPONSES.CREATE_SOURCING_TICKET.uz_lat).toContain('15 daqiqa');
-    expect(CANONICAL_RESPONSES.CREATE_SOURCING_TICKET.uz_cyr).toContain('15 дақиқа');
+  it('confirms a request across languages, with no response-time promise', () => {
+    expect(CANONICAL_RESPONSES.CREATE_SOURCING_TICKET.ru).toContain('Заявка принята');
+    expect(CANONICAL_RESPONSES.CREATE_SOURCING_TICKET.uz_lat).toContain('qabul qilindi');
+    expect(CANONICAL_RESPONSES.CREATE_SOURCING_TICKET.uz_cyr).toContain('қабул қилинди');
+    for (const copy of Object.values(CANONICAL_RESPONSES)) {
+      for (const text of Object.values(copy)) expect(makesUnsupportedPromise(text)).toBe(false);
+    }
+  });
+});
+
+describe('makesUnsupportedPromise', () => {
+  it.each([
+    'Наш отдел закупок проверяет цены и свяжется с вами в течение 15 минут.',
+    'Ответим через 2 часа',
+    'Ta’minot bo‘limimiz 15 daqiqa ichida bog‘lanadi',
+    'Our sourcing department will respond within 15 minutes.',
+  ])('catches %s', (text) => expect(makesUnsupportedPromise(text)).toBe(true));
+
+  it.each(['Какая запчасть вам нужна?', 'Масло 5W-30, объём 4 литра', 'Передний или задний?'])(
+    'allows %s',
+    (text) => expect(makesUnsupportedPromise(text)).toBe(false),
+  );
+});
+
+describe('detectConversationLanguage', () => {
+  it('keeps the language when a short reply shows none', () => {
+    expect(detectConversationLanguage('Salon', ['Moy filter kerak'])).toBe('uz_lat');
+  });
+  it('follows the latest message that shows one', () => {
+    expect(detectConversationLanguage('Нужен фильтр', ['Moy filter kerak'])).toBe('ru');
+  });
+  it('defaults to Russian', () => {
+    expect(detectConversationLanguage('Salon')).toBe('ru');
   });
 });

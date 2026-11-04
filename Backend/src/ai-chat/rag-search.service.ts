@@ -3,7 +3,12 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AppLang, localizedCategoryName } from '../common/app-lang.util';
 import { SupportedLang } from '../common/i18n.util';
-import { formatUzs } from '../catalog/parts/part.presenter';
+import {
+  computeCompatibility,
+  curatedModelIds,
+  formatUzs,
+  type VehicleCompatContext,
+} from '../catalog/parts/part.presenter';
 import { ActiveSale, DiscountService } from '../sales/discount.service';
 import { expandToken } from './part-synonyms.util';
 import { BUYER_LISTED_PART } from '../catalog/buyer-visibility';
@@ -22,6 +27,11 @@ export interface StockItem {
   category: string | null;
   /** The stable category id. Language-independent; safe to key logic on. */
   categoryId: string | null;
+  /**
+   * Fit against the selected vehicle. UNKNOWN when there's no data either way, and
+   * null with no vehicle to check against. Confirmed misfits aren't returned.
+   */
+  fit: 'FITS' | 'UNKNOWN' | null;
 }
 
 export interface RagSearchResult {
@@ -34,6 +44,8 @@ export interface RagQuery {
   partName: string | null;
   brand: string | null;
   model: string | null;
+  /** The customer's selected garage vehicle, when the request is for that car. */
+  vehicle?: VehicleCompatContext | null;
 }
 
 const MAX_ITEMS = 8;
@@ -101,12 +113,21 @@ export class RagSearchService {
       // Never quote a part the catalog does not list: a suspended dealer's, or
       // one without a ready photo (catalog/buyer-visibility.ts).
       where: { inStock: true, OR: or, ...BUYER_LISTED_PART },
-      include: { category: true, brand: true },
+      include: {
+        category: true,
+        brand: true,
+        compatibilities: true,
+        fitmentBindings: { select: { vehicleModelId: true } },
+      },
       take: CANDIDATE_LIMIT,
     });
 
+    const vehicle = query.vehicle ?? null;
     const ranked = candidates
-      .map((row) => {
+      .map((row) => ({ row, fit: this.fitFor(row, vehicle) }))
+      // A confirmed misfit isn't a match. An unknown one stays, labelled unknown.
+      .filter(({ fit }) => fit !== 'NOT_FIT')
+      .map(({ row, fit }) => {
         const hay = `${row.title} ${row.brand?.name ?? ''}`.toLowerCase();
         // Score = distinct QUERY tokens that matched (via any of their forms),
         // so a two-word request beats a one-word coincidental hit.
@@ -114,12 +135,13 @@ export class RagSearchService {
           (n, forms) => (forms.some((f) => hay.includes(f)) ? n + 1 : n),
           0,
         );
-        return { row, score };
+        return { row, score, fit: fit as StockItem['fit'] };
       })
       .filter((c) => c.score > 0)
       .sort(
         (a, b) =>
           b.score - a.score ||
+          Number(b.fit === 'FITS') - Number(a.fit === 'FITS') ||
           a.row.priceUzs.toNumber() - b.row.priceUzs.toNumber(),
       )
       .slice(0, MAX_ITEMS);
@@ -134,7 +156,7 @@ export class RagSearchService {
     // Cyrillic-writing buyer gets the Latin name because that is the only Uzbek
     // name that exists; the alternative is showing them Russian.
     const categoryLang = toCategoryLang(lang);
-    const items: StockItem[] = ranked.map(({ row }) => {
+    const items: StockItem[] = ranked.map(({ row, fit }) => {
       const { finalPrice } = this.discounts.calculateDiscount(
         Number(row.priceUzs),
         { id: row.id, categoryId: row.categoryId, sellerId: row.sellerId },
@@ -151,10 +173,26 @@ export class RagSearchService {
           ? localizedCategoryName(row.category, categoryLang)
           : null,
         categoryId: row.categoryId ?? null,
+        fit,
       };
     });
 
     return { found: items.length > 0, items };
+  }
+
+  private fitFor(
+    row: {
+      isUniversal: boolean;
+      compatibilities: Parameters<typeof computeCompatibility>[0];
+      fitmentBindings: { vehicleModelId: string }[];
+    },
+    vehicle: VehicleCompatContext | null,
+  ): StockItem['fit'] | 'NOT_FIT' {
+    if (!vehicle) return null;
+    if (row.isUniversal) return 'FITS';
+    const status = computeCompatibility(row.compatibilities, vehicle, curatedModelIds(row))?.status;
+    if (status === 'does_not_fit') return 'NOT_FIT';
+    return status === 'fits' ? 'FITS' : 'UNKNOWN';
   }
 
   /** Significant lowercase tokens (letters/digits/hyphen, len ≥ 2), deduped. */

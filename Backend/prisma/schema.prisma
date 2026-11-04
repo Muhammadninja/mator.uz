@@ -371,6 +371,7 @@ enum NotificationType {
   MYID_VERIFIED
   MARKETING
   SOURCING_OFFER
+  SOURCING_STATUS
 }
 
 enum AiMessageRole {
@@ -820,6 +821,8 @@ model AppUser {
   myIdSessions           MyIdSession[]
   myIdVerifications      MyIdVerification[]
   legalAcceptances       LegalAcceptance[]
+
+  sourcingRequests SourcingRequest[]
 
   @@index([deletedAt])
   @@map("app_users")
@@ -1792,27 +1795,27 @@ model OrderStatusHistory {
 }
 
 model Payment {
-  id                    String          @id @db.VarChar(64)
-  orderId               String          @map("order_id") @db.VarChar(64)
+  id                    String            @id @db.VarChar(64)
+  orderId               String            @map("order_id") @db.VarChar(64)
   provider              PaymentProvider
-  status                PaymentStatus   @default(PENDING)
-  amountUzs             Decimal         @map("amount_uzs") @db.Decimal(14, 2)
-  amountTiyin           BigInt?         @map("amount_tiyin")
-  deepLink              String?         @map("deep_link")
-  httpsFallback         String?         @map("https_fallback")
-  providerTransactionId String?         @map("provider_transaction_id") @db.VarChar(120)
+  status                PaymentStatus     @default(PENDING)
+  amountUzs             Decimal           @map("amount_uzs") @db.Decimal(14, 2)
+  amountTiyin           BigInt?           @map("amount_tiyin")
+  deepLink              String?           @map("deep_link")
+  httpsFallback         String?           @map("https_fallback")
+  providerTransactionId String?           @map("provider_transaction_id") @db.VarChar(120)
   // Provider transaction state machine (Payme states 1/2/-1/-2; Click prepare id).
-  providerState         Int?            @map("provider_state")
-  providerCreateTime    BigInt?         @map("provider_create_time")
-  providerPerformTime   BigInt?         @map("provider_perform_time")
-  providerCancelTime    BigInt?         @map("provider_cancel_time")
-  cancelReason          Int?            @map("cancel_reason")
-  providerPrepareId     String?         @map("provider_prepare_id") @db.VarChar(64)
-  paidAt                DateTime?       @map("paid_at") @db.Timestamptz(3)
-  expiresAt             DateTime?       @map("expires_at") @db.Timestamptz(3)
-  createdAt             DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt             DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
-  order                 Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  providerState         Int?              @map("provider_state")
+  providerCreateTime    BigInt?           @map("provider_create_time")
+  providerPerformTime   BigInt?           @map("provider_perform_time")
+  providerCancelTime    BigInt?           @map("provider_cancel_time")
+  cancelReason          Int?              @map("cancel_reason")
+  providerPrepareId     String?           @map("provider_prepare_id") @db.VarChar(64)
+  paidAt                DateTime?         @map("paid_at") @db.Timestamptz(3)
+  expiresAt             DateTime?         @map("expires_at") @db.Timestamptz(3)
+  createdAt             DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt             DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
+  order                 Order             @relation(fields: [orderId], references: [id], onDelete: Cascade)
   financialRefunds      FinancialRefund[]
 
   @@unique([provider, providerTransactionId])
@@ -2392,6 +2395,7 @@ enum SourcingTicketStatus {
   ACCEPTED
   CLOSED
   CANCELLED
+  NO_OFFER
 }
 
 // A seller's quote for a sourcing ticket. Price is the ONLY hard requirement —
@@ -2430,29 +2434,72 @@ enum SourcingOfferDeclineReason {
   OTHER
 }
 
+// One customer request: the idempotency record, plus the parent of its part
+// items (one SourcingTicket per part). Unique per account + key, so a retry can
+// only ever resolve to this request's own result.
+enum SourcingRequestStatus {
+  PROCESSING
+  COMPLETED
+}
+
+model SourcingRequest {
+  id             String                @id @default(uuid()) @db.Uuid
+  userId         String                @map("user_id") @db.Uuid
+  idempotencyKey String                @map("idempotency_key") @db.VarChar(128)
+  // SHA-256 of what was asked. Reusing a key for anything else is a conflict.
+  payloadHash    String                @map("payload_hash") @db.Char(64)
+  status         SourcingRequestStatus @default(PROCESSING)
+  // Whoever holds a live lease is the only one who may complete the request.
+  leaseToken     String?               @map("lease_token") @db.VarChar(64)
+  leaseExpiresAt DateTime?             @map("lease_expires_at") @db.Timestamptz(3)
+  vehicleId      String?               @map("vehicle_id") @db.VarChar(64)
+  response       Json?                 @db.JsonB
+  createdAt      DateTime              @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime              @updatedAt @map("updated_at") @db.Timestamptz(3)
+  user           AppUser               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tickets        SourcingTicket[]
+
+  @@unique([userId, idempotencyKey])
+  @@map("sourcing_requests")
+}
+
+// Whether a ticket's staff notification has gone out. NULL on tickets from
+// before the outbox: they were already sent, and must never be resent.
+enum SourcingStaffNotifyStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
 model SourcingOffer {
-  id             String                      @id @db.VarChar(64)
-  ticketId       String                      @map("ticket_id") @db.Uuid
-  price          Int
-  currency       String                      @default("UZS") @db.VarChar(8)
-  condition      SourcingOfferCondition      @default(UNKNOWN)
-  availability   SourcingOfferAvailability   @default(UNKNOWN)
-  etaDays        Int?                        @map("eta_days")
-  note           String?                     @db.Text
-  images         String[]                    @default([])
-  sellerTgId     String                      @map("seller_tg_id")
-  sellerName     String?                     @map("seller_name")
-  sellerUsername String?                     @map("seller_username")
-  status         SourcingOfferStatus         @default(SENT)
-  declineReason  SourcingOfferDeclineReason? @map("decline_reason")
-  declineNote    String?                     @map("decline_note") @db.Text
-  createdAt      DateTime                    @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt      DateTime                    @updatedAt @map("updated_at") @db.Timestamptz(3)
-  ticket         SourcingTicket              @relation(fields: [ticketId], references: [id], onDelete: Cascade)
-  cartItems      CartItem[]
+  id                    String                      @id @db.VarChar(64)
+  ticketId              String                      @map("ticket_id") @db.Uuid
+  price                 Int
+  currency              String                      @default("UZS") @db.VarChar(8)
+  condition             SourcingOfferCondition      @default(UNKNOWN)
+  availability          SourcingOfferAvailability   @default(UNKNOWN)
+  etaDays               Int?                        @map("eta_days")
+  note                  String?                     @db.Text
+  images                String[]                    @default([])
+  sellerTgId            String                      @map("seller_tg_id")
+  sellerName            String?                     @map("seller_name")
+  sellerUsername        String?                     @map("seller_username")
+  status                SourcingOfferStatus         @default(SENT)
+  declineReason         SourcingOfferDeclineReason? @map("decline_reason")
+  declineNote           String?                     @map("decline_note") @db.Text
+  createdAt             DateTime                    @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt             DateTime                    @updatedAt @map("updated_at") @db.Timestamptz(3)
+  // NULL on offers from before expiry existed: those are left alone.
+  expiresAt             DateTime?                   @map("expires_at") @db.Timestamptz(3)
+  // In-app delivery still owed to the customer, retried until it lands.
+  customerNotifyPending Boolean                     @default(false) @map("customer_notify_pending")
+  ticket                SourcingTicket              @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  cartItems             CartItem[]
 
   @@index([ticketId])
   @@index([status])
+  @@index([customerNotifyPending])
+  @@index([status, expiresAt])
   @@map("sourcing_offers")
 }
 
@@ -2462,17 +2509,38 @@ model SourcingOffer {
 // opaque tag rather than a constrained relation. `extractedData` is the LLM's
 // structured extraction (brand/model/year/vin/part_name/preference) as jsonb.
 model SourcingTicket {
-  id            String               @id @default(uuid()) @db.Uuid
-  userId        String?              @map("user_id")
-  rawMessage    String               @map("raw_message") @db.Text
-  extractedData Json                 @map("extracted_data") @db.JsonB
-  status        SourcingTicketStatus @default(PENDING)
-  createdAt     DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt     DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
-  offers        SourcingOffer[]
+  id                  String                     @id @default(uuid()) @db.Uuid
+  userId              String?                    @map("user_id")
+  rawMessage          String                     @map("raw_message") @db.Text
+  extractedData       Json                       @map("extracted_data") @db.JsonB
+  status              SourcingTicketStatus       @default(PENDING)
+  createdAt           DateTime                   @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt           DateTime                   @updatedAt @map("updated_at") @db.Timestamptz(3)
+  // The fields below are NULL on tickets from before SourcingRequest existed,
+  // and every background job filters on them, so old tickets are never touched.
+  requestId           String?                    @map("request_id") @db.Uuid
+  partName            String?                    @map("part_name") @db.Text
+  // Normalized part + vehicle, for spotting a customer asking for the same thing.
+  partKey             String?                    @map("part_key") @db.Text
+  vehicleKey          String?                    @map("vehicle_key") @db.VarChar(200)
+  vehicleId           String?                    @map("vehicle_id") @db.VarChar(64)
+  staffNotifyStatus   SourcingStaffNotifyStatus? @map("staff_notify_status")
+  staffNotifyAttempts Int                        @default(0) @map("staff_notify_attempts")
+  staffNotifyNextAt   DateTime?                  @map("staff_notify_next_at") @db.Timestamptz(3)
+  staffNotifiedAt     DateTime?                  @map("staff_notified_at") @db.Timestamptz(3)
+  staffNotifyError    String?                    @map("staff_notify_error") @db.Text
+  escalatedAt         DateTime?                  @map("escalated_at") @db.Timestamptz(3)
+  // A status update owed to the customer, retried until it lands.
+  customerNotice      String?                    @map("customer_notice") @db.VarChar(32)
+  request             SourcingRequest?           @relation(fields: [requestId], references: [id], onDelete: SetNull)
+  offers              SourcingOffer[]
 
   @@index([status])
   @@index([userId])
+  @@index([requestId])
+  @@index([userId, partKey, vehicleKey])
+  @@index([staffNotifyStatus, staffNotifyNextAt])
+  @@index([customerNotice])
   @@map("sourcing_tickets")
 }
 
