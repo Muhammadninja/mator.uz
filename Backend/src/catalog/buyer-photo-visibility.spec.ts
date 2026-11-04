@@ -459,8 +459,12 @@ describe('admin reads keep the parts without photos', () => {
       purchasePriceUzs: null,
       priceUzs: 150_000,
       cashbackPct: 0,
+      kind: 'SPARE_PART',
+      oilType: null,
+      packageForm: null,
       brand: null,
-      category: BRAKES,
+      category: { ...BRAKES, _count: { children: 0 } },
+      seller: { tin: null, vatPercent: null },
     });
     prisma.catalogPart.findMany.mockResolvedValue([
       inventoryRow('bare'),

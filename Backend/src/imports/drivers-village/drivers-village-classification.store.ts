@@ -6,7 +6,8 @@
  * Writes (applyClassification, inside one transaction per batch): the
  * product's classification columns (category_id, vehicle_category_id,
  * main_category, vehicle_category — guarded by a compare-and-set on the
- * catalog part's category), is_universal = false when the file names
+ * catalog part's category — plus kind and oil_type when an oil category states
+ * them), is_universal = false when the file names
  * vehicles for an import-universal product, and ADDED part_models /
  * part_makes (plus brands / car_models reference rows). Never: prices, stock,
  * names, numbers, photos, catalog settings, fitment_bindings,
@@ -98,6 +99,8 @@ export class PrismaClassificationStore implements ClassificationStore {
           product: {
             select: {
               isUniversal: true,
+              kind: true,
+              oilType: true,
               partModels: {
                 select: {
                   model: {
@@ -136,6 +139,8 @@ export class PrismaClassificationStore implements ClassificationStore {
           productId: s.productId,
           code1c: s.sourceCode,
           isUniversal: s.product.isUniversal,
+          kind: s.product.kind,
+          oilType: s.product.oilType,
           partCategoryId: part?.categoryId ?? null,
           models: s.product.partModels.map(
             (pm) => `${pm.model.brand.name}|${pm.model.name}`,

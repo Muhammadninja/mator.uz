@@ -10,6 +10,7 @@
  */
 
 import { Global, Module } from '@nestjs/common';
+import { confirmableFiscalCodes } from '../../src/common/fiscal.util';
 import { DiscountService } from '../../src/sales/discount.service';
 import { PaymeFiscalService } from '../../src/orders/webhooks/payme-fiscal.service';
 import { QueueService } from '../../src/queue/queue.service';
@@ -220,20 +221,80 @@ export function fakeDiscounts(): any {
  * The REAL fiscal-receipt builder over the Prisma double.
  *
  * Deliberately not a stub: with no `order_items` stubbed the mock reports an
- * order with no product lines, so `buildOrderDetail` returns null and both the
- * checkout gate and CheckPerformTransaction behave exactly as they did before
- * fiscalization existed. A test that wants a receipt stubs `orderItem.findMany`
- * / `catalogPart.findMany` and gets the production mapping, not a fake one.
+ * order with no lines, which the gate refuses exactly as production does. A test
+ * that wants a payable order uses {@link stubFiscalizableOrderLines} and gets the
+ * production mapping, not a fake one.
  *
- * `env` supplies the platform's own fiscal codes (delivery, service fee) for a
- * test that builds a receipt containing them; delivery falls back to the same
- * defaults production uses.
+ * `env` supplies what a test's receipt needs from configuration: the service fee's
+ * codes and the VAT rates (see FISCAL_TEST_ENV). Delivery's codes are a system
+ * constant, so they need nothing here.
  */
 export function fakeFiscal(
   prisma: PrismaMock,
   env: Record<string, string | undefined> = {},
 ): any {
   return new PaymeFiscalService(prisma, fakeConfig(env));
+}
+
+/**
+ * What a deployment would configure for the platform's own charges, for `fakeFiscal`.
+ * The rates are test values and say nothing about what any rate should be.
+ */
+export const FISCAL_TEST_ENV = {
+  SERVICE_FEE_MXIK: '10307001001000000',
+  SERVICE_FEE_PACKAGE_CODE: '1000001',
+  SERVICE_FEE_VAT_PERCENT: '0',
+  DELIVERY_VAT_PERCENT: '0',
+};
+
+/**
+ * A category row an operator has confirmed: by default the brake leaf with both
+ * package codes. The confirmation is computed from the row, so overriding a code in
+ * `over` yields a category confirmed for THOSE codes.
+ */
+export function confirmedCategory(over: Partial<any> = {}): any {
+  const row = {
+    id: 'brakes',
+    parentId: 'brake-system',
+    mxik: '08708005011000000',
+    packageCodeSingle: '1417722',
+    packageCodeSet: '1417723',
+    _count: { children: 0 },
+    ...over,
+  };
+  return { ...row, fiscalConfirmedCodes: confirmableFiscalCodes(row) };
+}
+
+/**
+ * Stub the one catalog line that makes `buildOrder()` fully fiscalizable: 185 000
+ * of goods, which with its 25 000 delivery and 5 000 fee (FISCAL_TEST_ENV) adds up
+ * to the 215 000 charged.
+ */
+export function stubFiscalizableOrderLines(prisma: PrismaMock): void {
+  prisma.orderItem.findMany.mockResolvedValue([
+    {
+      id: 'oi_1',
+      partId: 'part_1',
+      serviceId: null,
+      offerId: null,
+      offerSellerTgId: null,
+      title: 'Колодки',
+      quantity: 1,
+      priceUzs: 185000,
+      lineTotalUzs: 185000,
+    },
+  ]);
+  prisma.catalogPart.findMany.mockResolvedValue([
+    {
+      id: 'part_1',
+      packageForm: null,
+      kind: 'SPARE_PART',
+      oilType: null,
+      inStock: true,
+      category: confirmedCategory(),
+      seller: { status: 'ACTIVE', tin: '301234567', vatPercent: 0 },
+    },
+  ]);
 }
 
 let seq = 0;

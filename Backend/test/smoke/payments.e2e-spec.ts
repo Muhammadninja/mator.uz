@@ -3,11 +3,14 @@ import { PaymentsService } from '../../src/orders/payments.service';
 import { PaymeService } from '../../src/orders/webhooks/payme.service';
 import { ClickService } from '../../src/orders/webhooks/click.service';
 import {
+  confirmedCategory,
   createPrismaMock,
   fakeConfig,
   fakeFiscal,
+  FISCAL_TEST_ENV,
   buildOrder,
   PrismaMock,
+  stubFiscalizableOrderLines,
 } from '../utils/harness';
 
 describe('Payments + webhooks smoke', () => {
@@ -29,7 +32,7 @@ describe('Payments + webhooks smoke', () => {
           PAYME_MERCHANT_ID: 'merchant-1',
           PAYME_ACCOUNT_FIELD: 'order_id',
         }),
-        fakeFiscal(prisma),
+        fakeFiscal(prisma, FISCAL_TEST_ENV),
       );
       prisma.order.findUnique.mockResolvedValue(
         buildOrder({
@@ -39,6 +42,7 @@ describe('Payments + webhooks smoke', () => {
           totalUzs: 215000,
         }),
       );
+      stubFiscalizableOrderLines(prisma);
       prisma.payment.create.mockResolvedValue({ id: 'pay_1' });
 
       const res = await svc.createPaymeInvoice('usr_1', {
@@ -78,11 +82,7 @@ describe('Payments + webhooks smoke', () => {
           packageForm: null,
           kind: 'SPARE_PART',
           oilType: null,
-          category: {
-            mxik: '08708005011000000',
-            packageCodeSingle: '1417722',
-            packageCodeSet: null,
-          },
+          category: confirmedCategory({ packageCodeSet: null }),
           // The operator has not entered this dealer's ИНН / ставка НДС yet.
           inStock: true,
           seller: { status: 'ACTIVE', tin: null, vatPercent: null },
@@ -102,10 +102,7 @@ describe('Payments + webhooks smoke', () => {
       const svc = new PaymentsService(
         prisma,
         fakeConfig(),
-        fakeFiscal(prisma, {
-          SERVICE_FEE_MXIK: '10307001001000000',
-          SERVICE_FEE_PACKAGE_CODE: '1000001',
-        }),
+        fakeFiscal(prisma, FISCAL_TEST_ENV),
       );
       prisma.order.findUnique.mockResolvedValue(
         buildOrder({ id: 'ord_1', userId: 'usr_1', status: 'PENDING_PAYMENT' }),
@@ -127,11 +124,7 @@ describe('Payments + webhooks smoke', () => {
           packageForm: null,
           kind: 'SPARE_PART',
           oilType: null,
-          category: {
-            mxik: '08708005011000000',
-            packageCodeSingle: '1417722',
-            packageCodeSet: null,
-          },
+          category: confirmedCategory({ packageCodeSet: null }),
           inStock: true,
           seller: { status: 'ACTIVE', tin: '301234567', vatPercent: 0 },
         },
@@ -141,6 +134,34 @@ describe('Payments + webhooks smoke', () => {
       await expect(
         svc.createPaymeInvoice('usr_1', { order_id: 'ord_1' } as any),
       ).resolves.toMatchObject({ payment_id: 'pay_1' });
+    });
+
+    it('refuses to invoice a courier order holding no delivery cost', async () => {
+      const svc = new PaymentsService(
+        prisma,
+        fakeConfig(),
+        fakeFiscal(prisma, FISCAL_TEST_ENV),
+      );
+      prisma.order.findUnique.mockResolvedValue(
+        buildOrder({
+          id: 'ord_1',
+          userId: 'usr_1',
+          status: 'PENDING_PAYMENT',
+          deliveryMethod: 'COURIER',
+          deliveryUzs: 0,
+          serviceFeeUzs: 0,
+          totalUzs: 185000,
+        }),
+      );
+      stubFiscalizableOrderLines(prisma);
+
+      await expect(
+        svc.createPaymeInvoice('usr_1', { order_id: 'ord_1' } as any),
+      ).rejects.toMatchObject({
+        response: { code: 'DELIVERY_COST_UNAVAILABLE' },
+      });
+      // No payment row and no checkout link exist for it.
+      expect(prisma.payment.create).not.toHaveBeenCalled();
     });
 
     it('refuses to invoice an order that is not awaiting payment', async () => {
@@ -182,7 +203,7 @@ describe('Payments + webhooks smoke', () => {
         prisma,
         config,
         settlement as any,
-        fakeFiscal(prisma),
+        fakeFiscal(prisma, FISCAL_TEST_ENV),
       );
       prisma.order.findUnique.mockResolvedValue(
         buildOrder({
@@ -191,12 +212,14 @@ describe('Payments + webhooks smoke', () => {
           totalUzs: 215000,
         }),
       );
+      stubFiscalizableOrderLines(prisma);
       const res: any = await svc.handle(auth, {
         id: 1,
         method: 'CheckPerformTransaction',
         params: { account: { order_id: 'ord_1' }, amount: 21_500_000 },
       });
-      expect(res.result).toEqual({ allow: true });
+      expect(res.result.allow).toBe(true);
+      expect(res.result.detail.items).toHaveLength(3);
     });
 
     it('rejects an incorrect amount (-31001)', async () => {
@@ -226,8 +249,9 @@ describe('Payments + webhooks smoke', () => {
         prisma,
         config,
         settlement as any,
-        fakeFiscal(prisma),
+        fakeFiscal(prisma, FISCAL_TEST_ENV),
       );
+      stubFiscalizableOrderLines(prisma);
       // CreateTransaction: no existing transaction (findUnique, keyed on the
       // (provider, providerTransactionId) unique index), no active/bindable
       // payment -> create fresh.

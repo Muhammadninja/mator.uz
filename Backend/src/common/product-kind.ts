@@ -74,15 +74,6 @@ export interface KindCapabilities {
    * the human-facing surfaces show.
    */
   readonly unit: ProductUnit;
-  /**
-   * The listing's MXIK / package code come from its OIL TYPE rather than from
-   * its category — true only for motor oil, whose registry classification is by
-   * base composition (see OIL_TYPE_FISCAL in common/fiscal.util.ts).
-   *
-   * Every other kind fiscalizes from the category it was filed under, which is
-   * what keeps antifreeze on its own IKPU instead of borrowing an oil's.
-   */
-  readonly fiscalizedByOilType: boolean;
 }
 
 /**
@@ -112,7 +103,6 @@ export const KIND_CAPABILITIES: Record<ProductKind, KindCapabilities> = {
     // fully-answered draft look incomplete.
     requiredFields: ['brand', 'model', 'categoryId'],
     unit: 'PCS',
-    fiscalizedByOilType: false,
   },
   [ProductKind.MOTOR_OIL]: {
     // An oil MAY be sold for a specific car ("масло для Cobalt") or as a general
@@ -128,9 +118,6 @@ export const KIND_CAPABILITIES: Record<ProductKind, KindCapabilities> = {
     requiredFields: ['oilViscosity', 'oilType', 'oilVolumeMl'],
     // An oil is quoted by volume; its packaged size is oilVolumeMl.
     unit: 'L',
-    // The registry issues one MXIK per BASE COMPOSITION, so the codes come from
-    // the seller's OIL_TYPE answer and never from the category.
-    fiscalizedByOilType: true,
   },
   [ProductKind.ANTIFREEZE]: {
     // Reached only through the "Другое" branch ("Что продаёте?" → Антифриз),
@@ -146,9 +133,6 @@ export const KIND_CAPABILITIES: Record<ProductKind, KindCapabilities> = {
     // fiscalize it as "шт" — the questionnaire collects kilograms (stored as
     // grams) and every surface reads the unit from here.
     unit: 'KG',
-    // Antifreeze keeps its OWN category's IKPU / package code. It must never
-    // fall onto the oil table, whose three codes describe motor oil only.
-    fiscalizedByOilType: false,
   },
 };
 
@@ -206,13 +190,4 @@ export function hasVehicleCategory(kind: ProductKind): boolean {
 /** The unit a listing of this kind is quantified in ('PCS' | 'L' | 'KG'). */
 export function unitOf(kind: ProductKind): ProductUnit {
   return capabilitiesOf(kind).unit;
-}
-
-/**
- * Whether this kind's fiscal codes come from its OIL TYPE instead of its
- * category. Read by the Payme receipt builder, so the rule lives with the rest
- * of the kind's facts rather than as a `kind === MOTOR_OIL` check on the wire.
- */
-export function fiscalizedByOilType(kind: ProductKind): boolean {
-  return capabilitiesOf(kind).fiscalizedByOilType;
 }

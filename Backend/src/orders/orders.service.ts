@@ -37,6 +37,7 @@ import { ListOrdersQueryDto } from './dto/list-orders.query.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { SYSTEM_ONLY_ORDER_STATUSES, canTransition } from './order-transitions';
 import {
+  DELIVERY_COST_UNAVAILABLE,
   PART_UNAVAILABLE,
   assertAllAvailable,
   findUnavailableParts,
@@ -70,10 +71,24 @@ export class OrdersService {
   async createFromCart(userId: string, dto: CreateOrderDto) {
     const cart = await this.prisma.cart.findUnique({
       where: { userId },
-      include: { items: true },
+      include: { items: { include: { offer: { select: { sellerTgId: true } } } } },
     });
     if (!cart || cart.items.length === 0) {
       throw new BadRequestException('Cart is empty');
+    }
+    // A line that names no part, offer or service: its sourcing offer has been
+    // deleted since it was accepted. Its order line could not say what was sold or
+    // who sold it, so it stops here rather than at payment.
+    const orphanLines = cart.items.filter(
+      (i) => !i.partId && !i.offerId && !i.serviceId,
+    );
+    if (orphanLines.length > 0) {
+      throw new ConflictException({
+        code: PART_UNAVAILABLE,
+        message: `No longer available: ${orphanLines
+          .map((i) => `${i.title} (no_source)`)
+          .join('; ')}`,
+      });
     }
     // Never create an order for parts that can no longer be sold (out of stock,
     // removed, or a suspended dealer) — 409 PART_UNAVAILABLE naming them, so
@@ -121,10 +136,6 @@ export class OrdersService {
       String(snap.delivery_method ?? 'courier').toUpperCase() === 'PICKUP'
         ? DeliveryMethod.PICKUP
         : DeliveryMethod.COURIER;
-    const deliveryUzs =
-      deliveryMethod === DeliveryMethod.PICKUP
-        ? 0
-        : Number(this.config.get<string>('DELIVERY_COURIER_UZS') ?? 25000);
     // Persist the chosen payment method (optional — older clients omit it).
     const PAYMENT_TYPE_MAP: Record<string, PaymentType> = {
       payme: PaymentType.PAYME,
@@ -134,9 +145,26 @@ export class OrdersService {
     const paymentType = dto.payment_type
       ? PAYMENT_TYPE_MAP[dto.payment_type]
       : undefined;
-    const serviceFeeUzs = Number(this.config.get<string>('SERVICE_FEE_UZS') ?? 5000);
+    // Courier delivery has no price here yet. It will come per order from the delivery
+    // provider, and no flat figure may stand in for that, so nothing is stored rather
+    // than a made-up cost. An order to be paid online cannot go ahead without one, and
+    // refusing now leaves the customer the cart, which creating the order would consume,
+    // and the choice of pickup. Paying on delivery is settled offline, so it is not
+    // stopped here, and its total simply holds no delivery.
+    const needsDeliveryCost =
+      deliveryMethod === DeliveryMethod.COURIER &&
+      cart.items.some((i) => i.partId || i.offerId);
+    const paysOnDelivery =
+      paymentType === PaymentType.CASH || paymentType === PaymentType.TERMINAL;
+    if (needsDeliveryCost && !paysOnDelivery) {
+      throw new ConflictException({
+        code: DELIVERY_COST_UNAVAILABLE,
+        message:
+          'The cost of courier delivery is not available yet. Choose pickup to place this order.',
+      });
+    }
     const discount = cart.promoCode ? resolvePromo(cart.promoCode, subtotal).discountUzs : 0;
-    const total = Math.max(0, subtotal + deliveryUzs + serviceFeeUzs - discount);
+    const total = Math.max(0, subtotal - discount);
 
     // Spread the promo discount INTO the line prices, in tiyin, so the charged
     // amount is carried entirely by the items. A Payme receipt has no negative
@@ -166,8 +194,10 @@ export class OrdersService {
           userId,
           status: OrderStatus.PENDING_PAYMENT,
           subtotalUzs: subtotal,
-          deliveryUzs,
-          serviceFeeUzs,
+          // Written once, here. Payment reads what this stored, so nothing may change
+          // it later, least of all between Check and Perform.
+          deliveryUzs: 0,
+          serviceFeeUzs: 0,
           discountUzs: discount,
           totalUzs: total,
           vehicleId: dto.vehicle_id,
@@ -196,6 +226,10 @@ export class OrdersService {
                 partId: i.partId,
                 serviceId: i.serviceId,
                 providerId: i.providerId,
+                // What an offer line sold and who sold it: without these it reads
+                // as a line with no goods, and its receipt has no dealer to name.
+                offerId: i.offerId,
+                offerSellerTgId: i.offer?.sellerTgId ?? null,
                 title: i.title,
                 quantity: i.quantity,
                 priceUzs: unit,

@@ -2,12 +2,21 @@ import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
 import {
   IsBoolean,
+  IsIn,
   IsInt,
   IsOptional,
   IsString,
   MaxLength,
   Min,
 } from 'class-validator';
+import type { CategoryFiscalStatus } from '../../../common/fiscal.util';
+
+const CATEGORY_FISCAL_STATUSES: CategoryFiscalStatus[] = [
+  'READY',
+  'NEEDS_CONFIRMATION',
+  'NEEDS_CODES',
+  'NOT_SELLABLE',
+];
 
 /**
  * Query of GET /v1/admin/categories — the FLAT listing (the nested forest is
@@ -56,4 +65,14 @@ export class ListCategoriesQueryDto {
   })
   @IsBoolean()
   isActive?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Filter by fiscal readiness: which categories still need codes entered ' +
+      '(NEEDS_CODES) or confirmed against Tasnif (NEEDS_CONFIRMATION).',
+    enum: CATEGORY_FISCAL_STATUSES,
+  })
+  @IsOptional()
+  @IsIn(CATEGORY_FISCAL_STATUSES)
+  fiscalStatus?: CategoryFiscalStatus;
 }

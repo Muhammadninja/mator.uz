@@ -38,6 +38,7 @@ import {
   TransferCategoryDto,
   TransferPreviewQueryDto,
 } from './dto/transfer-category.dto';
+import { ConfirmCategoryFiscalDto } from './dto/confirm-category-fiscal.dto';
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { ListCategoriesQueryDto } from './dto/list-categories.query.dto';
 import { MoveCategoryDto } from './dto/move-category.dto';
@@ -192,6 +193,40 @@ export class AdminCategoriesController {
   @ApiNotFoundResponse({ description: 'No such category or target parent.' })
   update(@Param('id') id: string, @Body() dto: UpdateCategoryDto) {
     return this.categories.update(id, dto);
+  }
+
+  @Patch(':id/fiscal-confirmation')
+  @Roles(AdminRole.SUPER_ADMIN, AdminRole.MANAGER)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Confirm a category’s fiscal codes against Tasnif, or withdraw that',
+    description:
+      'Until this is done Payme checkout refuses what is filed on the category, ' +
+      'because having a code does not prove it is the right one. Confirming states ' +
+      'that the codes are true of EVERY listing on this node, so send back the ' +
+      'fiscalCodesToConfirm you checked. Editing the codes later ends the ' +
+      'confirmation for good. A parent, the fallback bucket, or a node still holding ' +
+      'a code for one product of many cannot be confirmed.',
+  })
+  @ApiOkResponse({ description: 'The updated category node.' })
+  @ApiBadRequestResponse({ description: 'Invalid body.' })
+  @ApiConflictResponse({
+    description:
+      'The codes changed since they were checked, the category has none, or it ' +
+      'is not a node products may be sold from; `code` says which.',
+  })
+  @ApiNotFoundResponse({ description: 'No such category.' })
+  confirmFiscal(
+    @Param('id') id: string,
+    @Body() dto: ConfirmCategoryFiscalDto,
+    @Req() req: Request & { user: AuthenticatedAdmin },
+  ) {
+    return this.categories.setFiscalConfirmation(
+      id,
+      dto,
+      this.auditContext(req),
+    );
   }
 
   @Delete(':id')

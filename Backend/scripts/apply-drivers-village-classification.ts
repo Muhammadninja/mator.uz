@@ -117,6 +117,7 @@ function printSummary(
     'Codes without a position (never created here)': s.positionsNotFound,
     'Category assigned (was not classified)': s.category.assign,
     'Category refined below the stored one': s.category.refine,
+    'Category the same, typed as the oil it states': s.category.retype,
     'Category already the same': s.category.unchanged,
     'Category set in Mator kept (manual_category_preserved)':
       s.category.preserved,

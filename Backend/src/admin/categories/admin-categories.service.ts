@@ -8,20 +8,27 @@ import {
 import {
   AdminAuditAction,
   AdminAuditEntity,
+  OilType,
   PartMainCategory,
   PartVehicleCategory,
   Prisma,
+  ProductKind,
   SaleScopeType,
 } from '@prisma/client';
 import {
   categoryParentMap,
+  decideListingMove,
   isLoadBearingCategory,
   mainCategoryForCategory,
   vehicleCategoryForCategory,
 } from '../../catalog/categories/category-map';
 import { PartCategoryService } from '../../catalog/categories/part-category.service';
 import { PrismaService } from '../../prisma/prisma.service';
-import { isCategoryFiscallyConfigured } from '../../common/fiscal.util';
+import {
+  categoryFiscalReadiness,
+  confirmableFiscalCodes,
+  isCategoryFiscallyConfigured,
+} from '../../common/fiscal.util';
 import { AdminAuditService } from '../auth/admin-audit.service';
 import { AdminAuditContext } from '../auth/admin-auth.service';
 import { categoryIsNodeBound } from '../fitment-studio/fitment-node.config';
@@ -36,6 +43,7 @@ import {
   writeCategoryTree,
 } from './category-tree-lock';
 import { BulkMoveProductsDto } from './dto/bulk-move-products.dto';
+import { ConfirmCategoryFiscalDto } from './dto/confirm-category-fiscal.dto';
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { ListCategoriesQueryDto } from './dto/list-categories.query.dto';
 import { MoveCategoryDto } from './dto/move-category.dto';
@@ -101,11 +109,15 @@ export class AdminCategoriesService {
       select: ADMIN_CATEGORY_NODE_SELECT,
       orderBy: [{ level: 'asc' }, { sortOrder: 'asc' }, { name: 'asc' }],
     });
-    return {
-      success: true,
-      data: rows.map(presentAdminCategoryNode),
-      meta: { total: rows.length },
-    };
+    // Filtered after presenting: the status is the resolver's verdict, not a column.
+    const data = rows
+      .map(presentAdminCategoryNode)
+      .filter(
+        (node) =>
+          query.fiscalStatus === undefined ||
+          node.fiscalStatus === query.fiscalStatus,
+      );
+    return { success: true, data, meta: { total: data.length } };
   }
 
   /** One category by id (flat node). 404 when missing. */
@@ -289,10 +301,16 @@ export class AdminCategoriesService {
       });
       if (!category) throw new NotFoundException('Category not found');
 
-      const data: Prisma.PartCategoryUpdateInput = this.resolveFiscal(
-        category,
-        dto,
-      );
+      const fiscal = this.resolveFiscal(category, dto);
+      const data: Prisma.PartCategoryUpdateInput = { ...fiscal };
+      // A confirmation is of the codes as they were: changing them ends it for good,
+      // so changing them back needs someone to look again.
+      if (
+        confirmableFiscalCodes({ ...category, ...fiscal }) !==
+        confirmableFiscalCodes(category)
+      ) {
+        data.fiscalConfirmedCodes = null;
+      }
 
       if (dto.name !== undefined) data.name = dto.name;
       if (dto.nameRu !== undefined) data.nameRu = dto.nameRu;
@@ -365,6 +383,74 @@ export class AdminCategoriesService {
     // standing ON this node should see next.
     await this.categories.invalidate(previousParentId, dto.parentId, id);
 
+    return { success: true, data: presentAdminCategoryNode(updated) };
+  }
+
+  /**
+   * Record, or withdraw, an operator's confirmation that this category's codes were
+   * checked against Tasnif and are true of everything filed on it. Stored as the
+   * exact codes, which the receipt compares against, so a row changed by any route
+   * stops being confirmed; `update` also clears it, so an edit back does not restore
+   * it. This method never changes a code.
+   */
+  async setFiscalConfirmation(
+    id: string,
+    dto: ConfirmCategoryFiscalDto,
+    ctx: AdminAuditContext = {},
+  ) {
+    const updated = await this.writeTree(async (tx) => {
+      const row = await tx.partCategory.findUnique({
+        where: { id },
+        select: ADMIN_CATEGORY_NODE_SELECT,
+      });
+      if (!row) throw new NotFoundException('Category not found');
+
+      const codes = confirmableFiscalCodes(row);
+      if (dto.confirmed) {
+        const readiness = categoryFiscalReadiness(row);
+        if (readiness.status === 'NOT_SELLABLE') {
+          throw new ConflictException({
+            code: 'CATEGORY_NOT_SELLABLE',
+            message: `Nothing should be sold from this category, so it cannot be confirmed: ${readiness.gaps.join('; ')}.`,
+          });
+        }
+        if (!codes) {
+          throw new ConflictException({
+            code: 'FISCAL_CODES_MISSING',
+            message: 'This category has no fiscal codes to confirm.',
+          });
+        }
+        if (dto.codes !== codes) {
+          throw new ConflictException({
+            code: 'FISCAL_CODES_CHANGED',
+            message: `The codes are now ${codes}. Check them and confirm again.`,
+          });
+        }
+      }
+
+      const next = dto.confirmed ? codes : null;
+      const saved = await tx.partCategory.update({
+        where: { id },
+        data: { fiscalConfirmedCodes: next },
+        select: ADMIN_CATEGORY_NODE_SELECT,
+      });
+      await this.audit.record(
+        {
+          action: dto.confirmed
+            ? AdminAuditAction.CATEGORY_FISCAL_CONFIRMED
+            : AdminAuditAction.CATEGORY_FISCAL_UNCONFIRMED,
+          actor: ctx.actor,
+          actorLabel: ctx.actorLabel,
+          target: { entity: AdminAuditEntity.CATEGORY, id, name: row.name },
+          previousValues: { fiscalConfirmedCodes: row.fiscalConfirmedCodes },
+          newValues: { fiscalConfirmedCodes: next },
+          ip: ctx.ip,
+          userAgent: ctx.userAgent,
+        },
+        tx,
+      );
+      return saved;
+    });
     return { success: true, data: presentAdminCategoryNode(updated) };
   }
 
@@ -466,17 +552,23 @@ export class AdminCategoriesService {
         }
         const target = await tx.partCategory.findUnique({
           where: { id: reassignTo },
-          select: { id: true },
+          select: { id: true, parentId: true },
         });
         if (!target)
           throw new NotFoundException('Reassign target category not found');
 
         // A reassignment is a product move, so it writes the same filing as
         // bulk-move: the parts leave this category's tile as well as its id.
-        await tx.catalogPart.updateMany({
+        const parts = await tx.catalogPart.findMany({
           where: { categoryId: id },
-          data: await this.filingOn(reassignTo, tx),
+          select: { id: true, kind: true, oilType: true, categoryId: true },
         });
+        await this.moveParts(
+          tx,
+          parts,
+          target,
+          await this.filingOn(reassignTo, tx),
+        );
       }
 
       await tx.partCategory.delete({ where: { id } });
@@ -511,7 +603,9 @@ export class AdminCategoriesService {
   /**
    * Reassign many parts to one target category in a single transaction.
    * Validates the target exists; returns the number of rows moved and the
-   * filing they now carry (`mainCategory: null` = on no home tile).
+   * filing they now carry (`mainCategory: null` = on no home tile). A part that
+   * cannot be filed there stops the whole batch (see moveParts). `dto.kind` is how
+   * an operator states what a mis-typed part really is, which only they can know.
    */
   async bulkMoveProducts(
     dto: BulkMoveProductsDto,
@@ -519,29 +613,48 @@ export class AdminCategoriesService {
   ) {
     const target = await this.prisma.partCategory.findUnique({
       where: { id: dto.targetCategoryId },
-      select: { id: true },
+      select: { id: true, parentId: true },
     });
     if (!target) throw new NotFoundException('Target category not found');
 
     const filing = await this.filingOn(dto.targetCategoryId);
-    // updateMany over the id set within one transaction: either the whole batch
-    // moves or none does, and each part that really changed filing is on the record.
-    // categoryId is a Restrict FK, so a bad target would surface as a Prisma error
-    // — but we've already checked it exists.
+    // Within one transaction: either the whole batch moves or none does, and each
+    // part that really changed is on the record. categoryId is a Restrict FK, so a
+    // bad target would surface as a Prisma error — but we've already checked it
+    // exists.
     const result = await translateCategoryDbErrors(() =>
       this.prisma.$transaction(async (tx) => {
         const before = await tx.catalogPart.findMany({
           where: { id: { in: dto.productIds } },
-          select: { id: true, title: true, categoryId: true },
+          select: {
+            id: true,
+            title: true,
+            categoryId: true,
+            kind: true,
+            oilType: true,
+          },
         });
-        const moved = await tx.catalogPart.updateMany({
-          where: { id: { in: dto.productIds } },
-          data: filing,
-        });
+        const moved = await this.moveParts(
+          tx,
+          before,
+          target,
+          filing,
+          dto.kind,
+        );
         await this.audit.recordMany(
-          before
-            .filter((part) => part.categoryId !== filing.categoryId)
-            .map((part) => ({
+          before.flatMap((part) => {
+            const oilType = moved.oilTypeOf.get(part.id);
+            const previous = {
+              ...(part.categoryId !== filing.categoryId
+                ? { categoryId: part.categoryId }
+                : {}),
+              ...(dto.kind && dto.kind !== part.kind
+                ? { kind: part.kind }
+                : {}),
+              ...(oilType !== undefined ? { oilType: part.oilType } : {}),
+            };
+            if (Object.keys(previous).length === 0) return [];
+            return {
               action: AdminAuditAction.CATALOG_PART_MOVED,
               actor: ctx.actor,
               actorLabel: ctx.actorLabel,
@@ -550,11 +663,18 @@ export class AdminCategoriesService {
                 id: part.id,
                 name: part.title.slice(0, 120),
               },
-              previousValues: { categoryId: part.categoryId },
-              newValues: { categoryId: filing.categoryId },
+              previousValues: previous,
+              newValues: {
+                ...('categoryId' in previous
+                  ? { categoryId: filing.categoryId }
+                  : {}),
+                ...('kind' in previous ? { kind: dto.kind } : {}),
+                ...(oilType !== undefined ? { oilType } : {}),
+              },
               ip: ctx.ip,
               userAgent: ctx.userAgent,
-            })),
+            };
+          }),
           tx,
         );
         return moved;
@@ -565,6 +685,79 @@ export class AdminCategoriesService {
   }
 
   // ── helpers ────────────────────────────────────────────────────────────────
+
+  /**
+   * Write a move of these parts onto `target`, under the one rule every operator move
+   * shares (decideListingMove). A part that cannot go there refuses the lot with a 409
+   * rather than moving what it can: a half-done move leaves the operator guessing.
+   *
+   * The oil type is written only where it changes, so a move of ordinary parts touches
+   * nothing but the filing. CatalogPart alone is written: the Product may be shared
+   * across sellers, and the receipt reads this row.
+   *
+   * @returns how many rows moved, and the new oil type of each part that got one.
+   */
+  private async moveParts(
+    tx: Prisma.TransactionClient,
+    parts: {
+      id: string;
+      kind: ProductKind;
+      oilType: OilType | null;
+      categoryId: string;
+    }[],
+    target: { id: string; parentId: string | null },
+    filing: Prisma.CatalogPartUncheckedUpdateManyInput,
+    kind?: ProductKind,
+  ): Promise<{ count: number; oilTypeOf: Map<string, OilType | null> }> {
+    const sameType: string[] = [];
+    const oilTypeOf = new Map<string, OilType | null>();
+    const refusals: { code: string; message: string }[] = [];
+    for (const part of parts) {
+      const decision = decideListingMove(
+        { ...part, kind: kind ?? part.kind },
+        target,
+      );
+      if (!decision.ok) {
+        refusals.push(decision);
+        continue;
+      }
+      // An oil type means nothing on a part the operator says is no oil.
+      const oilType =
+        kind && kind !== ProductKind.MOTOR_OIL ? null : decision.oilType;
+      if (oilType === part.oilType) sameType.push(part.id);
+      else oilTypeOf.set(part.id, oilType);
+    }
+    if (refusals.length > 0) {
+      throw new ConflictException({
+        code: refusals[0].code,
+        message: `${refusals.length} product(s) cannot move. ${refusals[0].message}`,
+      });
+    }
+
+    const stated = kind ? { kind } : {};
+    let count = 0;
+    if (sameType.length > 0) {
+      const res = await tx.catalogPart.updateMany({
+        where: { id: { in: sameType } },
+        data: { ...filing, ...stated },
+      });
+      count += res.count;
+    }
+    for (const oilType of new Set(oilTypeOf.values())) {
+      const res = await tx.catalogPart.updateMany({
+        where: {
+          id: {
+            in: [...oilTypeOf]
+              .filter(([, value]) => value === oilType)
+              .map(([id]) => id),
+          },
+        },
+        data: { ...filing, ...stated, oilType },
+      });
+      count += res.count;
+    }
+    return { count, oilTypeOf };
+  }
 
   private writeTree<T>(
     write: (tx: Prisma.TransactionClient) => Promise<T>,

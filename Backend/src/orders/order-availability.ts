@@ -32,6 +32,9 @@ export interface UnavailableLine {
 /** Machine-readable error code the client can switch on. */
 export const PART_UNAVAILABLE = 'PART_UNAVAILABLE';
 
+/** The order needs courier delivery, and no real cost for it is known. */
+export const DELIVERY_COST_UNAVAILABLE = 'DELIVERY_COST_UNAVAILABLE';
+
 export async function findUnavailableParts(
   prisma: Pick<PrismaService, 'catalogPart'>,
   lines: readonly { partId: string | null; title: string }[],

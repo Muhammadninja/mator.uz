@@ -10,7 +10,7 @@
  * isolated fixtures (a 'drivers-village' dealer, a linked seller, vehicles);
  * nothing here is seed data for any real database.
  */
-import type { Prisma } from '@prisma/client';
+import type { OilType, Prisma, ProductKind } from '@prisma/client';
 import type {
   CategoryNode,
   ClassificationTarget,
@@ -495,6 +495,8 @@ export class FakeClassificationStore implements ClassificationStore {
         productId: p.id,
         code1c: s.sourceCode,
         isUniversal: p.isUniversal,
+        kind: (p.kind ?? 'SPARE_PART') as ProductKind,
+        oilType: (p.oilType ?? null) as OilType | null,
         partCategoryId: part?.categoryId ?? null,
         models: st.partModels
           .filter((pm) => pm.partId === p.id)

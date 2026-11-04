@@ -27,11 +27,26 @@
  * Driver's Village product was only ever set by the 1C import from empty
  * vehicle cells (no admin path sets it), so a product marked universal that
  * way becomes specific when the file names its vehicles.
+ *
+ * ── Kind ──
+ * 1C says nothing about what a position is, so every position is imported as
+ * SPARE_PART and never typed from its name: a name is no evidence ("Oil filter",
+ * "oil seal"). The one thing that does state it is an operator filing the position
+ * on an oil category that declares its kind, here or in the admin console. Only
+ * then does the position become MOTOR_OIL, with the oil type that category states,
+ * and the report says so (`kind_set_from_category`).
  */
-import type { PartMainCategory, PartVehicleCategory } from '@prisma/client';
+import { ProductKind } from '@prisma/client';
+import type {
+  OilType,
+  PartMainCategory,
+  PartVehicleCategory,
+} from '@prisma/client';
 import { CatalogProjectionService } from '../../catalog/projection/catalog-projection.service';
 import {
+  declaredKindForCategory,
   MAIN_CATEGORY_BY_SLUG,
+  oilTypeDictatedBy,
   VEHICLE_CATEGORY_BY_SLUG,
 } from '../../catalog/categories/category-map';
 import {
@@ -146,6 +161,9 @@ export interface ClassificationTarget {
   productId: number;
   code1c: string;
   isUniversal: boolean;
+  /** What the product is typed as now. */
+  kind: ProductKind;
+  oilType: OilType | null;
   /** The catalog part's category; null when the stock has no part yet. */
   partCategoryId: string | null;
   /** 'Make|Model' pairs from part_models. */
@@ -162,11 +180,15 @@ export interface ProductClassification {
   vehicleCategoryId: string;
   mainCategory: PartMainCategory | null;
   vehicleCategory: PartVehicleCategory | null;
+  /** Written only when the category states the listing is an oil (see the header). */
+  kind?: ProductKind;
+  oilType?: OilType | null;
 }
 
 export type CategoryAction =
   | 'assign'
   | 'refine'
+  | 'retype'
   | 'unchanged'
   | 'preserved'
   | 'invalid'
@@ -189,6 +211,8 @@ export interface CategoryDecision {
  *   invalid   — the category is unknown, inactive or contradictory;
  *   assign    — the position is not classified: the file's category;
  *   unchanged — it already has exactly that category;
+ *   retype    — it already has that category, but is not typed as the oil the
+ *               category states: the kind and oil type are written;
  *   refine    — the file's category lies BELOW the stored one: filled in;
  *   preserved — anything else: the stored category stays, the file's value
  *               is ignored and reported (manual_category_preserved).
@@ -236,15 +260,26 @@ export function decideCategory(
         `${describeCells(source.category)}: ${resolved.message}; the category is not changed`,
       ),
     );
+  const retype = oilTypingFor(resolved.nodeId, target);
+  const retypeNote = retype
+    ? `"${resolved.nodeId}" states a motor oil, so the position becomes ${retype.kind}${retype.oilType ? ` (${retype.oilType})` : ''}`
+    : null;
   const set: ProductClassification = {
     categoryId: resolved.nodeId,
     vehicleCategoryId: resolved.rootId,
     mainCategory: MAIN_CATEGORY_BY_SLUG.get(resolved.nodeId) ?? null,
     vehicleCategory: VEHICLE_CATEGORY_BY_SLUG.get(resolved.rootId) ?? null,
+    ...retype,
   };
+  const kindIssue = retypeNote
+    ? warn('kind_set_from_category', retypeNote)
+    : null;
   if (existing === null)
-    return { action: 'assign', existing, set, issue: null };
-  if (existing === resolved.nodeId) return keep('unchanged', null);
+    return { action: 'assign', existing, set, issue: kindIssue };
+  if (existing === resolved.nodeId)
+    return retype
+      ? { action: 'retype', existing, set, issue: kindIssue }
+      : keep('unchanged', null);
   if (resolved.path.slice(1).includes(existing))
     return {
       action: 'refine',
@@ -252,7 +287,7 @@ export function decideCategory(
       set,
       issue: warn(
         'category_refined',
-        `the category set in Mator, "${existing}", is kept and made more precise: "${resolved.nodeId}" lies below it`,
+        `the category set in Mator, "${existing}", is kept and made more precise: "${resolved.nodeId}" lies below it${retypeNote ? `; ${retypeNote}` : ''}`,
       ),
     };
   return keep(
@@ -262,6 +297,29 @@ export function decideCategory(
       `the category set in Mator, "${existing}", is kept; the file's ${describeCells(source.category)} ("${resolved.nodeId}") is ignored — an import never replaces a category set in Mator`,
     ),
   );
+}
+
+/**
+ * The kind and oil type a category states for a position, when they differ from what
+ * it is typed as now. Only an oil category that decides the oil type does: the
+ * `motor-oil` parent names no composition, so it leaves the position as it is and
+ * the resolver refuses it until it is filed on a composition.
+ */
+function oilTypingFor(
+  categoryId: string,
+  target: ClassificationTarget,
+): { kind: ProductKind; oilType: OilType | null } | null {
+  const dictated = oilTypeDictatedBy(categoryId);
+  if (
+    !dictated ||
+    declaredKindForCategory(categoryId) !== ProductKind.MOTOR_OIL
+  ) {
+    return null;
+  }
+  return target.kind === ProductKind.MOTOR_OIL &&
+    target.oilType === dictated.oilType
+    ? null
+    : { kind: ProductKind.MOTOR_OIL, oilType: dictated.oilType };
 }
 
 export interface VehicleDecision {

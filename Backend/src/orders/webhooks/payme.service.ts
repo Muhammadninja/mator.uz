@@ -2,7 +2,6 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash, timingSafeEqual } from 'crypto';
 import {
-  OrderStatus,
   Payment,
   PaymentProvider,
   PaymentStatus,
@@ -10,7 +9,7 @@ import {
 } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { prefixedId, IdPrefix } from '../../common/ulid.util';
-import { SettlementService } from './settlement.service';
+import { MarkCancelledOutcome, SettlementService } from './settlement.service';
 import { readPaymeConfig } from './payme.config';
 import { isPayableOrderStatus } from '../order-transitions';
 import { findUnavailableParts } from '../order-availability';
@@ -148,12 +147,6 @@ export function isPaymeTransactionExpired(
 
 /** Payme cancellation reason for "transaction timed out". */
 export const PAYME_TIMEOUT_REASON = 4;
-
-/** Order statuses past which a performed payment can no longer be refunded. */
-const UNREFUNDABLE_ORDER_STATUSES: OrderStatus[] = [
-  OrderStatus.SHIPPED,
-  OrderStatus.DELIVERED,
-];
 
 interface JsonRpcBody {
   id?: number | string;
@@ -339,25 +332,27 @@ export class PaymeService {
     // Fiscalization. Payme takes the receipt from THIS reply, so the items are
     // built here — per item, each with its own dealer's TIN and VAT rate, so an
     // order spanning several dealers settles correctly.
-    //
-    // An order whose fiscal data is incomplete is REFUSED rather than allowed
-    // with a partial receipt: sending malformed fiscal data is worse than a
-    // failed payment, and the checkout path already rejects such an order
-    // before it ever gets here (see PaymentsService.createPaymeInvoice), so in
-    // practice this is the backstop for data that changed in between.
-    let detail: PaymeReceiptDetail | null;
+    const detail = await this.receiptOrRefuse(order.id);
+
+    return { allow: true, detail };
+  }
+
+  /**
+   * The receipt for an order, or a refusal. An order whose fiscal data is incomplete
+   * is REFUSED rather than allowed with a partial receipt: sending malformed fiscal
+   * data is worse than a failed payment. The checkout path already rejects such an
+   * order before it ever gets here (see PaymentsService.createPaymeInvoice), so in
+   * practice this is the backstop for data that changed in between.
+   */
+  private async receiptOrRefuse(orderId: string): Promise<PaymeReceiptDetail> {
     try {
-      detail = await this.fiscal.buildOrderDetail(order.id);
+      return await this.fiscal.buildOrderDetail(orderId);
     } catch (err) {
       if (err instanceof FiscalDataIncompleteException) {
         throw new PaymeError(-31008, 'Order cannot be fiscalized');
       }
       throw err;
     }
-
-    // An order with no product lines (services only) carries no fiscal items;
-    // it is allowed exactly as it was before fiscalization existed.
-    return detail ? { allow: true, detail } : { allow: true };
   }
 
   /**
@@ -384,6 +379,9 @@ export class PaymeService {
     if (!isPayableOrderStatus(order.status)) {
       throw new PaymeError(-31008, 'Order is not awaiting payment');
     }
+    // The last gate before funds are held: Check may have run a while ago, or not at
+    // all, and an order that cannot be fiscalized must not get a transaction.
+    await this.receiptOrRefuse(order.id);
 
     // Payme supplies the authoritative creation time; fall back to ours only if
     // the field is absent, so `create_time` echoes what Payme recorded.
@@ -537,8 +535,12 @@ export class PaymeService {
     if (payment.providerState !== PaymeState.CREATED) {
       throw new PaymeError(-31008, 'Transaction cannot be performed');
     }
-    if (this.isExpired(payment)) {
-      await this.expire(payment);
+    // `paid_meanwhile`: a concurrent Perform settled it first, so settlement below
+    // is a no-op and the reply reports what the database holds.
+    if (
+      this.isExpired(payment) &&
+      (await this.expire(payment)) !== 'paid_meanwhile'
+    ) {
       throw new PaymeError(-31008, 'Transaction timed out');
     }
 
@@ -586,30 +588,38 @@ export class PaymeService {
       };
     }
 
-    if (payment.providerState === PaymeState.PERFORMED) {
-      // A refund is only possible while the goods have not been handed over.
-      const order = await this.prisma.order.findUnique({
-        where: { id: payment.orderId },
-      });
-      if (order && UNREFUNDABLE_ORDER_STATUSES.includes(order.status)) {
-        throw new PaymeError(
-          -31007,
-          'Order has been delivered. Transaction cannot be cancelled',
-        );
-      }
-      await this.settlement.markCancelled(
+    // Which branch to try comes from the read above, which may already be stale.
+    // What decides is the conditional claim inside settlement, so a Perform that
+    // committed since the read cannot be overwritten: the attempt reports
+    // `paid_meanwhile` and the cancellation is handled as the refund it now is.
+    const performed = payment.providerState === PaymeState.PERFORMED;
+    let outcome = await this.settlement.markCancelled(
+      payment.id,
+      reason ?? undefined,
+      performed,
+    );
+    if (outcome === 'paid_meanwhile') {
+      outcome = await this.settlement.markCancelled(
         payment.id,
         reason ?? undefined,
         true,
       );
-      return this.reportCancelled(
-        payment.id,
-        PaymeState.CANCELLED_AFTER_PERFORM,
-      );
     }
 
-    await this.settlement.markCancelled(payment.id, reason ?? undefined, false);
-    return this.reportCancelled(payment.id, PaymeState.CANCELLED);
+    // A refund is only possible while the goods have not been handed over.
+    if (outcome === 'not_refundable') {
+      throw new PaymeError(
+        -31007,
+        'Order has been delivered. Transaction cannot be cancelled',
+      );
+    }
+    if (outcome === 'not_cancellable' || outcome === 'not_found') {
+      throw new PaymeError(-31008, 'Transaction cannot be cancelled');
+    }
+    return this.reportCancelled(
+      payment.id,
+      performed ? PaymeState.CANCELLED_AFTER_PERFORM : PaymeState.CANCELLED,
+    );
   }
 
   /** Re-read a just-cancelled payment so the reply carries the persisted time. */
@@ -692,8 +702,8 @@ export class PaymeService {
    * {@link SettlementService} so the order is released and an audit row written
    * exactly as for a Payme-initiated cancellation.
    */
-  private async expire(payment: Payment): Promise<void> {
-    await this.settlement.markCancelled(
+  private async expire(payment: Payment): Promise<MarkCancelledOutcome> {
+    const outcome = await this.settlement.markCancelled(
       payment.id,
       PAYME_TIMEOUT_REASON,
       false,
@@ -701,20 +711,22 @@ export class PaymeService {
     this.logger.log(
       `Payme transaction ${payment.providerTransactionId} expired (12h timeout)`,
     );
+    return outcome;
   }
 
   /**
    * Expire an incumbent transaction from inside an open Prisma transaction.
    * Only the payment row is touched here; releasing the order is left to the
    * enclosing CreateTransaction, which is about to bind a fresh transaction to
-   * that same still-PENDING_PAYMENT order.
+   * that same still-PENDING_PAYMENT order. From PENDING only, like every other
+   * path that cancels an unperformed payment.
    */
   private async expireInTx(
     tx: Prisma.TransactionClient,
     payment: Payment,
   ): Promise<void> {
-    await tx.payment.update({
-      where: { id: payment.id },
+    await tx.payment.updateMany({
+      where: { id: payment.id, status: PaymentStatus.PENDING },
       data: {
         status: PaymentStatus.CANCELLED,
         providerState: PaymeState.CANCELLED,

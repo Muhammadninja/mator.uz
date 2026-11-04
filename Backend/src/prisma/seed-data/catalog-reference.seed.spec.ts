@@ -5,6 +5,8 @@
 // TYPE and cannot be attached to a single category, and every category the
 // supplied list does not describe.
 
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import {
   CATEGORY_FISCAL_DATA,
   fiscalDataFor,
@@ -15,6 +17,8 @@ import {
 import {
   MXIK_PATTERN,
   PACKAGE_CODE_PATTERN,
+  REPRESENTATIVE_ONLY_MXIK,
+  categoryFiscalReadiness,
   isCategoryFiscallyConfigured,
 } from '../../common/fiscal.util';
 import { isFiscalizedByOilType } from '../../catalog/categories/category-map';
@@ -51,6 +55,51 @@ const PARENT_IDS = new Set<string>([
   ...SEED_CATEGORIES.map((c) => c.parentId),
   ...SEED_OTHER_CATEGORIES.map(() => 'other'),
 ]);
+
+describe('the seed and what an operator has configured', () => {
+  // seed.ts runs on import and the seed also runs on live databases, so it is read
+  // here rather than executed.
+  const seedSource = readFileSync(join(__dirname, '..', 'seed.ts'), 'utf8');
+
+  it('writes no fiscal column on a row that exists', () => {
+    const upserts = seedSource.split('prisma.partCategory.upsert(').slice(1);
+
+    expect(upserts.length).toBeGreaterThanOrEqual(4);
+    for (const call of upserts) {
+      const update = call.indexOf('update:');
+      const create = call.indexOf('create:');
+      expect(update).toBeGreaterThan(-1);
+      expect(create).toBeGreaterThan(update);
+      expect(call.slice(update, create)).not.toMatch(
+        /fiscalDataFor|mxik|packageCode|fiscalConfirmedCodes/,
+      );
+    }
+  });
+
+  it('never writes a confirmation: only an operator can say a code was checked', () => {
+    expect(seedSource).not.toContain('fiscalConfirmedCodes');
+  });
+
+  it('on a live database it leaves the category tree alone unless told otherwise', () => {
+    expect(seedSource).toMatch(
+      /\(await databaseIsLive\(\)\) &&\s+!process\.argv\.includes\('--reconcile-categories'\)/,
+    );
+  });
+
+  it('the subcategory seeder writes no fiscal column at all', () => {
+    const seeder = readFileSync(
+      join(__dirname, '..', '..', '..', 'prisma', 'seed-categories.ts'),
+      'utf8',
+    );
+    expect(seeder).not.toMatch(/mxik|packageCode|fiscalConfirmedCodes/);
+  });
+
+  it('the one-product codes it writes on a new database are the ones the rule stops', () => {
+    for (const [id, mxik] of Object.entries(REPRESENTATIVE_ONLY_MXIK)) {
+      expect(CATEGORY_FISCAL_DATA[id].mxik).toBe(mxik);
+    }
+  });
+});
 
 describe('CATEGORY_FISCAL_DATA', () => {
   const entries = Object.entries(CATEGORY_FISCAL_DATA);
@@ -122,17 +171,39 @@ describe('CATEGORY_FISCAL_DATA', () => {
     expect(fiscalDataFor('motorcycle-oil')).toEqual({});
   });
 
-  it('still counts the oil categories as fiscally COMPLETE', () => {
-    // Empty columns are not a gap here: every listing of these categories is
-    // fiscalized from its oil type, so the console must not report them as
-    // unconfigured or prompt for codes that would be ignored.
+  it('does not count the oil parent or the "Другое" children as oil-type fiscalized', () => {
+    // Neither names a composition. An industrial oil is not motor oil whatever oil
+    // type its seller stated, so it needs a code of its own.
     expect(isFiscalizedByOilType({ id: 'motor-oil', parentId: null })).toBe(
-      true,
+      false,
     );
     for (const child of SEED_OTHER_CATEGORIES) {
       expect(isFiscalizedByOilType({ id: child.id, parentId: 'other' })).toBe(
-        true,
+        false,
       );
+    }
+  });
+
+  it('confirms nothing: on a new database no seeded code reaches a receipt', () => {
+    // A comment naming the product a code was supplied for is no confirmation. A fresh
+    // database must not be able to reach a receipt until an operator has looked, and
+    // the four that describe one product of a broad category cannot be confirmed.
+    for (const [id, fiscal] of entries) {
+      const { status } = categoryFiscalReadiness({
+        id,
+        parentId: 'any-parent',
+        mxik: fiscal.mxik,
+        packageCodeSingle: fiscal.packageCodeSingle,
+        packageCodeSet: fiscal.packageCodeSet ?? null,
+        fiscalConfirmedCodes: null,
+        _count: { children: 0 },
+      });
+      expect({ id, status }).toEqual({
+        id,
+        status: Object.keys(REPRESENTATIVE_ONLY_MXIK).includes(id)
+          ? 'NOT_SELLABLE'
+          : 'NEEDS_CONFIRMATION',
+      });
     }
   });
 

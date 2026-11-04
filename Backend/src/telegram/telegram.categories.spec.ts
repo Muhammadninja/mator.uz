@@ -498,7 +498,10 @@ describe('commit: draft category IDs → Product', () => {
   });
 
   const prismaStub = () => ({
-    product: { upsert: jest.fn().mockResolvedValue({ id: 10 }) },
+    product: {
+      findUnique: jest.fn().mockResolvedValue(null),
+      upsert: jest.fn().mockResolvedValue({ id: 10 }),
+    },
     productImage: {
       deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
       createMany: jest.fn().mockResolvedValue({ count: 1 }),

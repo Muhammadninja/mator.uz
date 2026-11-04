@@ -33,7 +33,10 @@ import { classifyPart } from '../ai/part-classifier';
 import { PrismaService } from '../prisma/prisma.service';
 import { SellersService } from '../sellers/sellers.service';
 import { CloudinaryService } from '../cloudinary/cloudinary.service';
-import { CatalogProjectionService } from '../catalog/projection/catalog-projection.service';
+import {
+  CatalogProjectionService,
+  ProjectionOptions,
+} from '../catalog/projection/catalog-projection.service';
 import { QueueService } from '../queue/queue.service';
 import { DraftLock } from '../redis/draft-lock.service';
 import { RedisKeys } from '../redis/redis.keys';
@@ -3831,6 +3834,15 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       // classified field (region, part brand) still applies.
       const kindFields = this.buildKindFields(session);
 
+      // What the product said before this overwrites it. Going through the wizard
+      // again is the only way a seller can change a price or photos, so answering the
+      // same way is no reclassification, and must not undo an operator's move of this
+      // part onto a subcategory: bulk-move writes the part, not the shared product.
+      const previous = await this.prisma.product.findUnique({
+        where: { gmNumber: gmKey },
+        select: { categoryId: true, kind: true, oilType: true },
+      });
+
       const product = await this.prisma.product.upsert({
         where: { gmNumber: gmKey },
         update: {
@@ -3879,8 +3891,15 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       // CatalogPart immediately, so no manual backfill is needed. Projection is
       // best-effort — the supply-side write already succeeded, so a projection
       // failure must not fail the seller's confirmation; it is logged and the
-      // next update (or a backfill) will reconcile.
-      await this.projectToCatalog(stock.id);
+      // next update (or a backfill) will reconcile. A new part is classified whatever
+      // this says: keepClassification only speaks for a part that already exists.
+      await this.projectToCatalog(stock.id, {
+        keepClassification:
+          previous !== null &&
+          previous.categoryId === validatedCategoryId &&
+          previous.kind === kindFields.kind &&
+          previous.oilType === kindFields.oilType,
+      });
 
       // The product write succeeded, so close the claim: COMMITTING → PUBLISHED (so
       // the TTL sweep never touches it — critical because the sweep covers COMMITTING
@@ -3987,9 +4006,12 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
    * and swallowed rather than surfaced to the seller — the next Stock change or
    * a backfill run will reconcile the missing CatalogPart.
    */
-  private async projectToCatalog(stockId: number): Promise<void> {
+  private async projectToCatalog(
+    stockId: number,
+    opts: ProjectionOptions = {},
+  ): Promise<void> {
     try {
-      await this.catalogProjection.projectStock(stockId);
+      await this.catalogProjection.projectStock(stockId, opts);
     } catch (err) {
       this.logger.error(
         `Catalog projection failed for stock #${stockId}: ${err instanceof Error ? err.message : String(err)}`,

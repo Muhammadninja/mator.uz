@@ -9,6 +9,7 @@ import {
   ParseUUIDPipe,
   Patch,
   Query,
+  Req,
   UseGuards,
 } from '@nestjs/common';
 import {
@@ -22,10 +23,13 @@ import {
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 import { AdminRole } from '@prisma/client';
+import type { Request } from 'express';
 import { Roles } from '../admin/auth/decorators/roles.decorator';
 import { AdminJwtGuard } from '../admin/auth/guards/admin-jwt.guard';
 import { AdminRoleGuard } from '../admin/auth/guards/admin-role.guard';
+import { AuthenticatedAdmin } from '../admin/auth/strategies/admin-jwt.strategy';
 import { SourcingService } from './sourcing.service';
+import { ClassifySourcingOfferDto } from './dto/classify-sourcing-offer.dto';
 import { QuerySourcingTicketsDto } from './dto/query-sourcing-tickets.dto';
 import { UpdateTicketStatusDto } from './dto/update-ticket-status.dto';
 
@@ -57,6 +61,31 @@ export class AdminSourcingController {
   @ApiBadRequestResponse({ description: 'Invalid query parameter.' })
   list(@Query() query: QuerySourcingTicketsDto) {
     return this.sourcing.findAllForAdmin(query);
+  }
+
+  @Patch('offers/:offerId/classification')
+  @Roles(AdminRole.SUPER_ADMIN, AdminRole.MANAGER)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Say what a sourcing offer is, so it can be paid for online',
+    description:
+      'A seller’s offer has no category, so it has no MXIK, and Payme checkout ' +
+      'refuses it until an operator sets one here. The reply lists anything the ' +
+      'receipt would still lack. Replaces the classification as a whole.',
+  })
+  @ApiOkResponse({ description: 'The classification and what is still missing.' })
+  @ApiNotFoundResponse({ description: 'No such offer or category.' })
+  @ApiBadRequestResponse({ description: 'Invalid body.' })
+  classifyOffer(
+    @Param('offerId') offerId: string,
+    @Body() dto: ClassifySourcingOfferDto,
+    @Req() req: Request & { user: AuthenticatedAdmin },
+  ) {
+    return this.sourcing.classifyOffer(offerId, dto, {
+      actor: { id: req.user.id, email: req.user.email, name: req.user.name },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
   }
 
   @Patch(':id/status')

@@ -5,12 +5,14 @@
 // English. Guards the localized names on the wire, the select that feeds them,
 // and the derived stock status.
 
-import { Prisma } from '@prisma/client';
+import { OilType, Prisma, ProductKind } from '@prisma/client';
 import {
   ADMIN_INVENTORY_ROW_SELECT,
   deriveStockStatus,
   presentInventoryRow,
 } from './admin-inventory.presenter';
+import { FISCAL_CODES_UNCONFIRMED } from '../../common/fiscal.util';
+import { confirmedCategory } from '../../../test/utils/harness';
 
 function row(over: Record<string, unknown> = {}) {
   return {
@@ -23,17 +25,84 @@ function row(over: Record<string, unknown> = {}) {
     purchasePriceUzs: new Prisma.Decimal('120000'),
     priceUzs: new Prisma.Decimal('185000'),
     cashbackPct: new Prisma.Decimal('2.5'),
+    kind: ProductKind.SPARE_PART,
+    oilType: null,
+    packageForm: null,
     brand: { id: 'brand_1', name: 'Bosch' },
     category: {
-      id: 'brake-pads',
+      ...confirmedCategory({ id: 'brake-pads' }),
       name: 'Brake Pads',
       nameRu: 'Тормозные колодки',
       nameUz: 'Tormoz kolodkalari',
       nameEn: 'Brake Pads',
     },
+    seller: { tin: '301234567', vatPercent: new Prisma.Decimal(0) },
     ...over,
   } as Parameters<typeof presentInventoryRow>[0];
 }
+
+// The row's verdict comes from the same rule Payme checkout runs, so the console can
+// never call a part ready that checkout would refuse.
+describe('presentInventoryRow — fiscal readiness', () => {
+  it('is ready when the category is confirmed and the dealer has its tax data', () => {
+    expect(presentInventoryRow(row()).fiscal).toEqual({
+      ready: true,
+      gaps: [],
+    });
+  });
+
+  it('names what stops a part: an unconfirmed category and a dealer with no TIN', () => {
+    const { fiscal } = presentInventoryRow(
+      row({
+        category: {
+          ...row().category,
+          fiscalConfirmedCodes: null,
+        },
+        seller: { tin: null, vatPercent: new Prisma.Decimal(0) },
+      }),
+    );
+    expect(fiscal.ready).toBe(false);
+    expect(fiscal.gaps).toEqual([FISCAL_CODES_UNCONFIRMED, 'dealer has no TIN']);
+  });
+
+  it('a spare part filed on a composition is refused, whatever its category says', () => {
+    const { fiscal } = presentInventoryRow(
+      row({
+        category: {
+          ...row().category,
+          ...confirmedCategory({
+            id: 'synthetic-motor-oil',
+            parentId: 'motor-oil',
+            mxik: null,
+            packageCodeSingle: null,
+            packageCodeSet: null,
+          }),
+        },
+      }),
+    );
+    expect(fiscal.ready).toBe(false);
+  });
+
+  it('a motor oil on its own composition is ready', () => {
+    const { fiscal } = presentInventoryRow(
+      row({
+        kind: ProductKind.MOTOR_OIL,
+        oilType: OilType.SYNTHETIC,
+        category: {
+          ...row().category,
+          ...confirmedCategory({
+            id: 'synthetic-motor-oil',
+            parentId: 'motor-oil',
+            mxik: null,
+            packageCodeSingle: null,
+            packageCodeSet: null,
+          }),
+        },
+      }),
+    );
+    expect(fiscal).toEqual({ ready: true, gaps: [] });
+  });
+});
 
 describe('presentInventoryRow — localized category', () => {
   it('carries all three localized names so the console can label the row', () => {

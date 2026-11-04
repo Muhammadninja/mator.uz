@@ -10,32 +10,54 @@
 // — per ITEM, so one order spanning several dealers settles each line with its
 // own dealer's tax data.
 
+import { Logger } from '@nestjs/common';
 import { OilType, PackageForm, Prisma, ProductKind } from '@prisma/client';
 import {
+  DELIVERY_TITLE,
   FiscalDataIncompleteException,
   PaymeFiscalService,
+  SERVICE_FEE_TITLE,
 } from './payme-fiscal.service';
-import { buildFiscalItem, receiptTotalTiyin } from './payme-fiscal.util';
-import { OIL_TYPE_FISCAL, OIL_TYPE_REQUIRED } from '../../common/fiscal.util';
+import {
+  buildFiscalItem,
+  orderLineType,
+  receiptTotalTiyin,
+} from './payme-fiscal.util';
+import {
+  FISCAL_CODES_UNCONFIRMED,
+  OIL_TYPE_FISCAL,
+  OIL_TYPE_REQUIRED,
+  REPRESENTATIVE_ONLY_MXIK,
+} from '../../common/fiscal.util';
 import { CATEGORY_FISCAL_DATA } from '../../prisma/seed-data/catalog-reference.seed';
 import {
+  confirmedCategory,
   createPrismaMock,
   fakeConfig,
+  FISCAL_TEST_ENV,
   PrismaMock,
 } from '../../../test/utils/harness';
 
-/** Brakes: MXIK plus both package codes (Штука / Комплект). */
-const BRAKES = {
-  mxik: '08708005011000000',
-  packageCodeSingle: '1417722',
-  packageCodeSet: '1417723',
-};
+/** Brakes: MXIK plus both package codes (Штука / Комплект), confirmed. */
+const BRAKES = confirmedCategory();
 /** Filters: one package code, so its sellers are never asked the question. */
-const FILTERS = {
+const FILTERS = confirmedCategory({
+  id: 'filters',
+  parentId: 'maintenance-and-fluids',
   mxik: '08421002001000000',
   packageCodeSingle: '1499205',
   packageCodeSet: null,
-};
+});
+/** A leaf with no codes, the state every unconfigured subcategory is in. */
+const bareCategory = (id = 'brake-discs') => ({
+  id,
+  parentId: 'brake-system',
+  mxik: null,
+  packageCodeSingle: null,
+  packageCodeSet: null,
+  fiscalConfirmedCodes: null,
+  _count: { children: 0 },
+});
 
 const DEALER_A = { tin: '301234567', vatPercent: new Prisma.Decimal(0) };
 const DEALER_B = { tin: '209876543', vatPercent: new Prisma.Decimal(12) };
@@ -140,14 +162,14 @@ describe('PaymeFiscalService.buildOrderDetail', () => {
 
   it('takes vat_percent and commission_info.tin from the item’s DEALER', async () => {
     stub([orderItem()], [catalogPart({ seller: DEALER_B })]);
-    const [item] = (await svc.buildOrderDetail('ord_1'))!.items;
+    const [item] = (await svc.buildOrderDetail('ord_1')).items;
     expect(item.vat_percent).toBe(12);
     expect(item.commission_info).toEqual({ tin: '209876543' });
   });
 
   it('never sends `units`', async () => {
     stub([orderItem()], [catalogPart()]);
-    const [item] = (await svc.buildOrderDetail('ord_1'))!.items;
+    const [item] = (await svc.buildOrderDetail('ord_1')).items;
     expect(Object.keys(item).sort()).toEqual([
       'code',
       'commission_info',
@@ -165,7 +187,7 @@ describe('PaymeFiscalService.buildOrderDetail', () => {
       [orderItem({ quantity: 3, priceUzs: new Prisma.Decimal(150000) })],
       [catalogPart()],
     );
-    const [item] = (await svc.buildOrderDetail('ord_1'))!.items;
+    const [item] = (await svc.buildOrderDetail('ord_1')).items;
     expect(item.price).toBe(15_000_000);
     expect(item.count).toBe(3);
   });
@@ -222,7 +244,7 @@ describe('PaymeFiscalService.buildOrderDetail', () => {
         catalogPart({ id: 'part_b', seller: DEALER_B }),
       ],
     );
-    const items = (await svc.buildOrderDetail('ord_1'))!.items;
+    const items = (await svc.buildOrderDetail('ord_1')).items;
     expect(items.map((i) => i.vat_percent)).toEqual([0, 12]);
     expect(items.map((i) => i.commission_info?.tin)).toEqual([
       '301234567',
@@ -268,21 +290,37 @@ describe('PaymeFiscalService.buildOrderDetail', () => {
   });
 
   it('refuses an order whose category is not fiscally configured', async () => {
-    stub(
-      [orderItem()],
-      [
-        catalogPart({
-          category: {
-            mxik: null,
-            packageCodeSingle: null,
-            packageCodeSet: null,
-          },
-        }),
-      ],
-    );
+    stub([orderItem()], [catalogPart({ category: bareCategory() })]);
     await expect(svc.buildOrderDetail('ord_1')).rejects.toBeInstanceOf(
       FiscalDataIncompleteException,
     );
+  });
+
+  it('refuses a category whose code nobody has confirmed against Tasnif', async () => {
+    stub(
+      [orderItem()],
+      [catalogPart({ category: { ...BRAKES, fiscalConfirmedCodes: null } })],
+    );
+    await expect(svc.buildOrderDetail('ord_1')).rejects.toMatchObject({
+      gaps: [expect.stringContaining(FISCAL_CODES_UNCONFIRMED)],
+    });
+  });
+
+  it('refuses an unclassified part: the bucket every new import position starts in', async () => {
+    stub(
+      [orderItem()],
+      [catalogPart({ category: bareCategory('cat_uncategorized') })],
+    );
+    await expect(svc.buildOrderDetail('ord_1')).rejects.toMatchObject({
+      gaps: [expect.stringContaining('not classified')],
+    });
+  });
+
+  it('gives a client a code to tell this refusal apart from any other 400', async () => {
+    stub([orderItem()], [catalogPart({ category: bareCategory() })]);
+    await expect(svc.buildOrderDetail('ord_1')).rejects.toMatchObject({
+      response: { code: 'FISCAL_DATA_INCOMPLETE' },
+    });
   });
 
   it('refuses (never silently drops) a line whose catalog part is gone', async () => {
@@ -302,27 +340,540 @@ describe('PaymeFiscalService.buildOrderDetail', () => {
     );
   });
 
-  it('returns no receipt for an order with no product lines (services only)', async () => {
-    stub([], []);
-    await expect(svc.buildOrderDetail('ord_1')).resolves.toBeNull();
-    // …and the checkout gate lets such an order through unchanged.
-    await expect(svc.assertFiscalizable('ord_1')).resolves.toBeUndefined();
-  });
-
-  it('reads only PRODUCT lines of the order', async () => {
-    stub([], []);
+  it('reads EVERY line of the order: an absent part proves nothing', async () => {
+    stub([orderItem()], [catalogPart()]);
     await svc.buildOrderDetail('ord_9');
     expect(prisma.orderItem.findMany.mock.calls[0][0].where).toEqual({
       orderId: 'ord_9',
-      partId: { not: null },
+    });
+  });
+
+  it('refuses an order with no lines, and the checkout gate refuses it too', async () => {
+    stub([], []);
+    await expect(svc.buildOrderDetail('ord_1')).rejects.toBeInstanceOf(
+      FiscalDataIncompleteException,
+    );
+    await expect(svc.assertFiscalizable('ord_1')).rejects.toBeInstanceOf(
+      FiscalDataIncompleteException,
+    );
+  });
+
+  it('refuses an order that does not exist instead of calling it nothing to fiscalize', async () => {
+    prisma.order.findUnique.mockResolvedValue(null);
+    await expect(svc.buildOrderDetail('nope')).rejects.toBeInstanceOf(
+      FiscalDataIncompleteException,
+    );
+  });
+});
+
+// ── What a line states ───────────────────────────────────────────────────────
+describe('orderLineType', () => {
+  it.each([
+    [{ partId: 'p' }, 'PRODUCT'],
+    [{ partId: 'p', serviceId: 's' }, 'PRODUCT'],
+    [{ offerId: 'o' }, 'SOURCING_OFFER'],
+    [{ serviceId: 's' }, 'SERVICE'],
+    [{ partId: null, offerId: null, serviceId: null }, 'UNKNOWN'],
+    [{}, 'UNKNOWN'],
+  ])('%j → %s', (line, type) => {
+    expect(orderLineType(line)).toBe(type);
+  });
+});
+
+describe('order lines that are no catalog part', () => {
+  let prisma: PrismaMock;
+
+  beforeEach(() => {
+    prisma = createPrismaMock();
+  });
+
+  const fiscal = (env: Record<string, string> = {}) =>
+    new PaymeFiscalService(prisma, fakeConfig({ ...FISCAL_TEST_ENV, ...env }));
+
+  /** An accepted offer's order line: goods with no part. */
+  const offerLine = (over: Record<string, unknown> = {}) => ({
+    id: 'oi_1',
+    partId: null,
+    serviceId: null,
+    offerId: 'soff_1',
+    offerSellerTgId: '555',
+    title: 'Стартер',
+    quantity: 1,
+    priceUzs: new Prisma.Decimal(150000),
+    lineTotalUzs: new Prisma.Decimal(150000),
+    ...over,
+  });
+
+  const serviceLine = {
+    id: 'oi_2',
+    partId: null,
+    serviceId: 'svc_1',
+    offerId: null,
+    offerSellerTgId: null,
+    title: 'Замена масла',
+    quantity: 1,
+    priceUzs: new Prisma.Decimal(100000),
+    lineTotalUzs: new Prisma.Decimal(100000),
+  };
+
+  const stubOrder = (totalUzs: number, deliveryUzs = 0, serviceFeeUzs = 0) =>
+    prisma.order.findUnique.mockResolvedValue({
+      id: 'ord_1',
+      totalUzs: new Prisma.Decimal(totalUzs),
+      deliveryUzs: new Prisma.Decimal(deliveryUzs),
+      serviceFeeUzs: new Prisma.Decimal(serviceFeeUzs),
+      discountUzs: new Prisma.Decimal(0),
+    });
+
+  /** The offer's classification, and the storefront behind the seller who made it. */
+  const stubOffer = ({
+    category = BRAKES as unknown,
+    packageForm = null as PackageForm | null,
+    dealer = DEALER_A as unknown,
+  } = {}) => {
+    prisma.sourcingOffer.findMany.mockResolvedValue([
+      { id: 'soff_1', packageForm, category },
+    ]);
+    prisma.seller.findMany.mockResolvedValue([
+      { id: 7, tgId: BigInt(555), catalogSellerId: null },
+    ]);
+    prisma.catalogSeller.findMany.mockResolvedValue(
+      dealer ? [{ id: 'seller_7', ...(dealer as object) }] : [],
+    );
+  };
+
+  it('fiscalizes an offer from its category and its seller’s dealer, with every charge', async () => {
+    stubOrder(180000, 25000, 5000);
+    prisma.orderItem.findMany.mockResolvedValue([offerLine()]);
+    stubOffer({ packageForm: PackageForm.SET });
+
+    const detail = await fiscal().buildOrderDetail('ord_1');
+
+    expect(detail.items.map((i) => i.title)).toEqual([
+      'Стартер',
+      'Доставка',
+      'Сервисный сбор',
+    ]);
+    expect(detail.items[0]).toEqual({
+      title: 'Стартер',
+      price: 15_000_000,
+      count: 1,
+      code: BRAKES.mxik,
+      package_code: BRAKES.packageCodeSet,
+      vat_percent: 0,
+      commission_info: { tin: DEALER_A.tin },
+    });
+    // Delivery and the fee are not lost, and the receipt is the charge to the tiyin.
+    expect(receiptTotalTiyin(detail.items)).toBe(18_000_000);
+    expect(prisma.seller.findMany.mock.calls[0][0].where).toEqual({
+      tgId: { in: [BigInt(555)] },
+    });
+  });
+
+  it('takes a dealer linked to a curated storefront through that link', async () => {
+    stubOrder(150000);
+    prisma.orderItem.findMany.mockResolvedValue([offerLine()]);
+    stubOffer();
+    prisma.seller.findMany.mockResolvedValue([
+      { id: 7, tgId: BigInt(555), catalogSellerId: 'drivers-village' },
+    ]);
+    prisma.catalogSeller.findMany.mockResolvedValue([
+      { id: 'drivers-village', ...DEALER_B },
+    ]);
+
+    const [item] = (await fiscal().buildOrderDetail('ord_1')).items;
+
+    expect(item.commission_info).toEqual({ tin: DEALER_B.tin });
+    expect(item.vat_percent).toBe(12);
+  });
+
+  it('an offer nobody has classified is refused, not given a made-up code', async () => {
+    stubOrder(150000);
+    prisma.orderItem.findMany.mockResolvedValue([offerLine()]);
+    stubOffer({ category: null });
+
+    await expect(fiscal().buildOrderDetail('ord_1')).rejects.toMatchObject({
+      gaps: [
+        'item oi_1 (sourcing offer soff_1): category fiscal data is unavailable',
+      ],
+    });
+  });
+
+  it('an offer whose category is not confirmed is refused', async () => {
+    stubOrder(150000);
+    prisma.orderItem.findMany.mockResolvedValue([offerLine()]);
+    stubOffer({ category: { ...BRAKES, fiscalConfirmedCodes: null } });
+
+    await expect(fiscal().buildOrderDetail('ord_1')).rejects.toMatchObject({
+      gaps: [expect.stringContaining(FISCAL_CODES_UNCONFIRMED)],
+    });
+  });
+
+  it.each([
+    ['the seller has no storefront yet', {}],
+    ['the seller id is not a Telegram id', { offerSellerTgId: 'abc' }],
+    ['the line names no seller at all', { offerSellerTgId: null }],
+  ])('refuses when %s: no tax id is invented', async (_, line) => {
+    stubOrder(150000);
+    prisma.orderItem.findMany.mockResolvedValue([offerLine(line)]);
+    stubOffer({ dealer: null });
+
+    await expect(fiscal().buildOrderDetail('ord_1')).rejects.toMatchObject({
+      gaps: [expect.stringContaining('dealer is unavailable')],
+    });
+  });
+
+  it('refuses a dealer whose tax data is not entered', async () => {
+    stubOrder(150000);
+    prisma.orderItem.findMany.mockResolvedValue([offerLine()]);
+    stubOffer({ dealer: { tin: null, vatPercent: null } });
+
+    await expect(fiscal().buildOrderDetail('ord_1')).rejects.toMatchObject({
+      gaps: [
+        expect.stringContaining('dealer has no TIN'),
+        expect.stringContaining('dealer has no VAT percentage'),
+      ],
+    });
+  });
+
+  it('fiscalizes a part and an offer in one order, each with its own dealer, in order', async () => {
+    stubOrder(300000);
+    prisma.orderItem.findMany.mockResolvedValue([
+      offerLine({ id: 'oi_a' }),
+      {
+        ...orderItem({ id: 'oi_b', title: 'Колодки' }),
+        lineTotalUzs: new Prisma.Decimal(150000),
+      },
+    ]);
+    stubOffer({ dealer: DEALER_B });
+    prisma.catalogPart.findMany.mockResolvedValue([catalogPart()]);
+
+    const { items } = (await fiscal().buildOrderDetail('ord_1'))!;
+
+    expect(items.map((i) => [i.title, i.commission_info?.tin])).toEqual([
+      ['Стартер', DEALER_B.tin],
+      ['Колодки', DEALER_A.tin],
+    ]);
+    expect(receiptTotalTiyin(items)).toBe(30_000_000);
+  });
+
+  it('a line from before the link existed states nothing, and is refused', async () => {
+    // An offer line written before offer_id: no part, offer or service. It used to
+    // read as "services only" and be paid for with no receipt at all.
+    stubOrder(180000, 25000, 5000);
+    prisma.orderItem.findMany.mockResolvedValue([
+      offerLine({ offerId: null, offerSellerTgId: null }),
+    ]);
+
+    await expect(fiscal().buildOrderDetail('ord_1')).rejects.toMatchObject({
+      gaps: expect.arrayContaining([
+        'item oi_1: the line states no part, offer or service',
+      ]),
+    });
+  });
+
+  /** A service an operator has classified, and its provider's tax data. */
+  const SERVICE_CATEGORY = confirmedCategory({
+    id: 'oil-change-service',
+    parentId: 'services',
+    mxik: '10101010101010101',
+    packageCodeSingle: '1000002',
+    packageCodeSet: null,
+  });
+  const PROVIDER = { tin: '301234567', vatPercent: new Prisma.Decimal(12) };
+  const stubService = (over: Record<string, unknown> = {}) =>
+    prisma.providerServiceOffering.findMany.mockResolvedValue([
+      { id: 'svc_1', category: SERVICE_CATEGORY, provider: PROVIDER, ...over },
+    ]);
+  const ALLOWED = { PAYME_ALLOW_SERVICE_ONLY_ORDERS: 'true' };
+
+  describe('an order made up of services only', () => {
+    beforeEach(() => {
+      stubOrder(130000, 25000, 5000);
+      prisma.orderItem.findMany.mockResolvedValue([serviceLine]);
+      stubService();
+    });
+
+    it.each([
+      ['absent', {}],
+      ['false', { PAYME_ALLOW_SERVICE_ONLY_ORDERS: 'false' }],
+      ['blank', { PAYME_ALLOW_SERVICE_ONLY_ORDERS: '' }],
+      ['TRUE, which is not true', { PAYME_ALLOW_SERVICE_ONLY_ORDERS: 'TRUE' }],
+      ['1, which is not true', { PAYME_ALLOW_SERVICE_ONLY_ORDERS: '1' }],
+    ])('is refused with the variable %s, however complete it is', async (_, env) => {
+      await expect(fiscal(env).buildOrderDetail('ord_1')).rejects.toMatchObject({
+        gaps: [expect.stringContaining('PAYME_ALLOW_SERVICE_ONLY_ORDERS')],
+      });
+    });
+
+    it('with it true, fully classified lines get a full receipt, never none', async () => {
+      const detail = await fiscal(ALLOWED).buildOrderDetail('ord_1');
+
+      expect(detail.items[0]).toEqual({
+        title: 'Замена масла',
+        price: 10_000_000,
+        count: 1,
+        code: '10101010101010101',
+        package_code: '1000002',
+        vat_percent: 12,
+        commission_info: { tin: '301234567' },
+      });
+      // Delivery and the service fee are on it too, and it adds up to the charge.
+      expect(detail.items.map((i) => i.title)).toEqual([
+        'Замена масла',
+        DELIVERY_TITLE,
+        SERVICE_FEE_TITLE,
+      ]);
+      expect(detail.items.reduce((n, i) => n + i.price * i.count, 0)).toBe(
+        13_000_000,
+      );
+    });
+
+    it.each<[string, Record<string, unknown>, string]>([
+      ['no category', { category: null }, 'category fiscal data is unavailable'],
+      [
+        'a category nobody confirmed',
+        { category: { ...SERVICE_CATEGORY, fiscalConfirmedCodes: null } },
+        FISCAL_CODES_UNCONFIRMED,
+      ],
+      [
+        'a category with no MXIK',
+        {
+          category: {
+            ...SERVICE_CATEGORY,
+            mxik: null,
+            packageCodeSingle: null,
+            fiscalConfirmedCodes: null,
+          },
+        },
+        'category has no MXIK',
+      ],
+      [
+        'a category whose package code was changed',
+        { category: { ...SERVICE_CATEGORY, packageCodeSingle: '1000003' } },
+        FISCAL_CODES_UNCONFIRMED,
+      ],
+      [
+        'a parent category',
+        { category: { ...SERVICE_CATEGORY, _count: { children: 2 } } },
+        'has subcategories',
+      ],
+      [
+        'a provider with no tax id',
+        { provider: { ...PROVIDER, tin: null } },
+        'dealer has no TIN',
+      ],
+      [
+        'a provider with no VAT rate',
+        { provider: { ...PROVIDER, vatPercent: null } },
+        'dealer has no VAT percentage',
+      ],
+    ])('with it true, %s is still refused', async (_, over, gap) => {
+      stubService(over);
+      await expect(
+        fiscal(ALLOWED).buildOrderDetail('ord_1'),
+      ).rejects.toMatchObject({
+        gaps: expect.arrayContaining([expect.stringContaining(gap)]),
+      });
+    });
+
+    it('with it true, a service that no longer exists is still refused', async () => {
+      prisma.providerServiceOffering.findMany.mockResolvedValue([]);
+      await expect(
+        fiscal(ALLOWED).buildOrderDetail('ord_1'),
+      ).rejects.toMatchObject({
+        gaps: expect.arrayContaining([
+          expect.stringContaining('category fiscal data is unavailable'),
+          expect.stringContaining('dealer is unavailable'),
+        ]),
+      });
+    });
+
+    it('with it true, services have nothing to deliver: no cost is needed for them', async () => {
+      stubOrder(100000);
+      prisma.order.findUnique.mockResolvedValue({
+        id: 'ord_1',
+        deliveryMethod: 'COURIER',
+        totalUzs: new Prisma.Decimal(100000),
+        deliveryUzs: new Prisma.Decimal(0),
+        serviceFeeUzs: new Prisma.Decimal(0),
+        discountUzs: new Prisma.Decimal(0),
+      });
+
+      const detail = await fiscal(ALLOWED).buildOrderDetail('ord_1');
+
+      expect(detail.items.map((i) => i.title)).toEqual(['Замена масла']);
+    });
+
+    it('with it true, a charge with no codes is still refused', async () => {
+      await expect(
+        new PaymeFiscalService(
+          prisma,
+          fakeConfig({ ...ALLOWED }),
+        ).buildOrderDetail('ord_1'),
+      ).rejects.toMatchObject({
+        gaps: expect.arrayContaining([
+          expect.stringContaining('service fee'),
+        ]),
+      });
+    });
+
+    it('with it true, a receipt that does not add up is still refused', async () => {
+      stubOrder(999999, 25000, 5000);
+      await expect(
+        fiscal(ALLOWED).buildOrderDetail('ord_1'),
+      ).rejects.toMatchObject({
+        gaps: [expect.stringContaining('does not match the charged')],
+      });
+    });
+  });
+
+  it.each([
+    ['absent', {}],
+    ['false', { PAYME_ALLOW_SERVICE_ONLY_ORDERS: 'false' }],
+    ['true', ALLOWED],
+  ])('a line stating nothing is refused with the variable %s', async (_, env) => {
+    stubOrder(100000);
+    prisma.orderItem.findMany.mockResolvedValue([
+      { ...serviceLine, serviceId: null },
+    ]);
+    await expect(fiscal(env).buildOrderDetail('ord_1')).rejects.toMatchObject({
+      gaps: expect.arrayContaining([
+        'item oi_2: the line states no part, offer or service',
+      ]),
+    });
+  });
+
+  describe('a service line beside goods', () => {
+    beforeEach(() => {
+      stubOrder(250000);
+      prisma.orderItem.findMany.mockResolvedValue([
+        serviceLine,
+        {
+          ...orderItem({ id: 'oi_1' }),
+          lineTotalUzs: new Prisma.Decimal(150000),
+        },
+      ]);
+      prisma.catalogPart.findMany.mockResolvedValue([catalogPart()]);
+    });
+
+    it.each([
+      ['absent', {}],
+      ['true', ALLOWED],
+    ])('classified, it is on the receipt with the variable %s', async (_, env) => {
+      stubService();
+      const detail = await fiscal(env).buildOrderDetail('ord_1');
+      expect(detail.items.map((i) => i.code)).toEqual([
+        '10101010101010101',
+        BRAKES.mxik,
+      ]);
+    });
+
+    it.each([
+      ['absent', {}],
+      ['true', ALLOWED],
+    ])('unclassified, it is refused with the variable %s', async (_, env) => {
+      stubService({ category: null });
+      await expect(fiscal(env).buildOrderDetail('ord_1')).rejects.toMatchObject({
+        gaps: expect.arrayContaining([
+          'item oi_2 (service svc_1): category fiscal data is unavailable',
+        ]),
+      });
     });
   });
 });
 
-// ── Motor oil ────────────────────────────────────────────────────────────────
-// Oil is classified by BASE COMPOSITION, not by category: one category, three
-// MXIKs. The codes therefore come from the seller's OIL_TYPE answer, which is
-// already projected onto the catalog row.
+// The rule a manually distributed catalog depends on: a product takes the MXIK of the
+// exact category it is filed on, and the node above it has no say.
+describe('a product and the category above it', () => {
+  let prisma: PrismaMock;
+  beforeEach(() => {
+    prisma = createPrismaMock();
+    prisma.order.findUnique.mockResolvedValue({
+      id: 'ord_1',
+      totalUzs: new Prisma.Decimal(150000),
+      deliveryUzs: new Prisma.Decimal(0),
+      serviceFeeUzs: new Prisma.Decimal(0),
+      discountUzs: new Prisma.Decimal(0),
+    });
+    prisma.orderItem.findMany.mockResolvedValue([orderItem()]);
+  });
+  const receipt = () =>
+    new PaymeFiscalService(prisma, fakeConfig({})).buildOrderDetail('ord_1');
+  const SUB_MXIK = '09999999999999901';
+
+  it('the query reads the category itself: a parent is never even fetched', async () => {
+    prisma.catalogPart.findMany.mockResolvedValue([
+      catalogPart({
+        category: confirmedCategory({
+          id: 'sub',
+          parentId: 'lighting',
+          mxik: SUB_MXIK,
+          packageCodeSet: null,
+        }),
+      }),
+    ]);
+    await receipt();
+    const { select } = prisma.catalogPart.findMany.mock.calls[0][0];
+    expect(select.category.select).not.toHaveProperty('parent');
+  });
+
+  describe.each(Object.entries(REPRESENTATIVE_ONLY_MXIK))(
+    'under %s',
+    (parentId, parentMxik) => {
+      it('a product on a subcategory carries the subcategory’s MXIK', async () => {
+        prisma.catalogPart.findMany.mockResolvedValue([
+          catalogPart({
+            category: confirmedCategory({
+              id: `${parentId}-sub`,
+              parentId,
+              mxik: SUB_MXIK,
+              packageCodeSingle: '1000009',
+              packageCodeSet: null,
+            }),
+          }),
+        ]);
+
+        const [item] = (await receipt()).items;
+
+        expect(item.code).toBe(SUB_MXIK);
+        expect(item.code).not.toBe(parentMxik);
+        expect(item.package_code).toBe('1000009');
+      });
+
+      it('a subcategory with no code of its own is refused, not given the parent’s', async () => {
+        prisma.catalogPart.findMany.mockResolvedValue([
+          catalogPart({ category: bareCategory(`${parentId}-sub`) }),
+        ]);
+        await expect(receipt()).rejects.toMatchObject({
+          gaps: expect.arrayContaining([
+            expect.stringContaining('category has no MXIK'),
+          ]),
+        });
+      });
+
+      it('a product left on the node itself is refused', async () => {
+        prisma.catalogPart.findMany.mockResolvedValue([
+          catalogPart({
+            category: {
+              ...bareCategory(parentId),
+              mxik: parentMxik,
+              packageCodeSingle: '1350563',
+              // Even a confirmation already stored against it does not count.
+              fiscalConfirmedCodes: `${parentMxik}:1350563:`,
+            },
+          }),
+        ]);
+        await expect(receipt()).rejects.toMatchObject({
+          gaps: expect.arrayContaining([
+            expect.stringContaining('describes one product of what it holds'),
+          ]),
+        });
+      });
+    },
+  );
+});
+
 describe('motor-oil fiscal resolution', () => {
   let prisma: PrismaMock;
   let svc: PaymeFiscalService;
@@ -332,13 +883,30 @@ describe('motor-oil fiscal resolution', () => {
     svc = new PaymeFiscalService(prisma, fakeConfig({}));
   });
 
-  /** An oil listing under the oil category, which carries NO codes of its own. */
+  const COMPOSITION_OF: Record<OilType, string> = {
+    [OilType.SYNTHETIC]: 'synthetic-motor-oil',
+    [OilType.SEMI_SYNTHETIC]: 'semi-synthetic-motor-oil',
+    [OilType.MINERAL]: 'mineral-motor-oil',
+  };
+
+  /** A composition category: confirmed, and carrying NO codes of its own. */
+  const composition = (type: OilType, over: Record<string, unknown> = {}) =>
+    confirmedCategory({
+      id: COMPOSITION_OF[type],
+      parentId: 'motor-oil',
+      mxik: null,
+      packageCodeSingle: null,
+      packageCodeSet: null,
+      ...over,
+    });
+
+  /** An oil listing on its composition (the synthetic one when it states no type). */
   const oilPart = (oilType: OilType | null) => ({
     id: 'part_1',
     packageForm: null,
     kind: ProductKind.MOTOR_OIL,
     oilType,
-    category: { mxik: null, packageCodeSingle: null, packageCodeSet: null },
+    category: composition(oilType ?? OilType.SYNTHETIC),
     seller: DEALER_B,
   });
 
@@ -370,7 +938,7 @@ describe('motor-oil fiscal resolution', () => {
     'resolves %s to its own MXIK and package code',
     async (type, mxik, pkg) => {
       stubOil(type);
-      const [item] = (await svc.buildOrderDetail('ord_1'))!.items;
+      const [item] = (await svc.buildOrderDetail('ord_1')).items;
       expect(item.code).toBe(mxik);
       expect(item.package_code).toBe(pkg);
     },
@@ -384,7 +952,7 @@ describe('motor-oil fiscal resolution', () => {
 
   it('still takes VAT and TIN from the DEALER, like any other item', async () => {
     stubOil(OilType.SYNTHETIC);
-    const [item] = (await svc.buildOrderDetail('ord_1'))!.items;
+    const [item] = (await svc.buildOrderDetail('ord_1')).items;
     expect(item.vat_percent).toBe(12);
     expect(item.commission_info).toEqual({ tin: '209876543' });
   });
@@ -399,9 +967,7 @@ describe('motor-oil fiscal resolution', () => {
     });
   });
 
-  it('ignores the category’s codes entirely for an oil listing', async () => {
-    // Even a category that HAS codes must not fiscalize an oil: the three oil
-    // types would all collapse onto one MXIK.
+  it('a code an operator entered on a composition is the one used, not the table’s', async () => {
     prisma.order.findUnique.mockResolvedValue({
       id: 'ord_1',
       totalUzs: new Prisma.Decimal(450000),
@@ -419,12 +985,36 @@ describe('motor-oil fiscal resolution', () => {
       },
     ]);
     prisma.catalogPart.findMany.mockResolvedValue([
+      {
+        ...oilPart(OilType.MINERAL),
+        category: composition(OilType.MINERAL, {
+          mxik: '02710005999000000',
+          packageCodeSingle: '1282999',
+        }),
+      },
+    ]);
+
+    const [item] = (await svc.buildOrderDetail('ord_1')).items;
+    expect(item.code).toBe('02710005999000000');
+    expect(item.package_code).toBe('1282999');
+  });
+
+  it('an oil listing on a brake category is refused, oil type or not', async () => {
+    prisma.order.findUnique.mockResolvedValue({
+      id: 'ord_1',
+      totalUzs: new Prisma.Decimal(150000),
+      deliveryUzs: new Prisma.Decimal(0),
+      serviceFeeUzs: new Prisma.Decimal(0),
+      discountUzs: new Prisma.Decimal(0),
+    });
+    prisma.orderItem.findMany.mockResolvedValue([orderItem()]);
+    prisma.catalogPart.findMany.mockResolvedValue([
       { ...oilPart(OilType.MINERAL), category: BRAKES },
     ]);
 
-    const [item] = (await svc.buildOrderDetail('ord_1'))!.items;
-    expect(item.code).toBe('02710005003000000');
-    expect(item.package_code).toBe('1282581');
+    await expect(svc.buildOrderDetail('ord_1')).rejects.toBeInstanceOf(
+      FiscalDataIncompleteException,
+    );
   });
 
   it('leaves a NON-oil listing on the category path', async () => {
@@ -456,7 +1046,7 @@ describe('motor-oil fiscal resolution', () => {
       },
     ]);
 
-    const [item] = (await svc.buildOrderDetail('ord_1'))!.items;
+    const [item] = (await svc.buildOrderDetail('ord_1')).items;
     expect(item.code).toBe('08708005011000000');
   });
 });
@@ -472,8 +1062,7 @@ describe('platform charge lines', () => {
     new PaymeFiscalService(
       prisma,
       fakeConfig({
-        SERVICE_FEE_MXIK: '10307001001000000',
-        SERVICE_FEE_PACKAGE_CODE: '1000001',
+        ...FISCAL_TEST_ENV,
         ...env,
       }),
     );
@@ -491,10 +1080,14 @@ describe('platform charge lines', () => {
     serviceFeeUzs: number;
     discountUzs?: number;
     totalUzs?: number;
+    deliveryMethod?: string;
   }) => {
     const discount = charges.discountUzs ?? 0;
     prisma.order.findUnique.mockResolvedValue({
       id: 'ord_1',
+      deliveryMethod:
+        charges.deliveryMethod ??
+        (charges.deliveryUzs > 0 ? 'COURIER' : 'PICKUP'),
       totalUzs: new Prisma.Decimal(
         charges.totalUzs ??
           150000 + charges.deliveryUzs + charges.serviceFeeUzs - discount,
@@ -520,41 +1113,310 @@ describe('platform charge lines', () => {
     prisma = createPrismaMock();
   });
 
-  it('appends a delivery line with the default courier codes', async () => {
+  it('an order with goods and delivery has two separate lines', async () => {
     stubOrder({ deliveryUzs: 25000, serviceFeeUzs: 0 });
     const detail = await withCodes().buildOrderDetail('ord_1');
 
-    expect(detail!.items).toHaveLength(2);
-    expect(detail!.items[1]).toEqual({
-      title: 'Услуга доставки',
+    expect(detail.items).toHaveLength(2);
+    expect(detail.items[0].title).toBe('Колодки');
+    expect(detail.items[1]).toEqual({
+      title: 'Доставка',
       price: 2_500_000,
       count: 1,
-      code: '05320001001000000',
-      package_code: '1000000',
+      code: '10112006002000000',
+      package_code: '1542432',
       vat_percent: 0,
+    });
+  });
+
+  it.each([
+    [25000, 2_500_000],
+    [18000.5, 1_800_050],
+    [1, 100],
+  ])(
+    'the delivery line is the order’s own charge of %d, once',
+    async (deliveryUzs, tiyin) => {
+      stubOrder({ deliveryUzs, serviceFeeUzs: 0 });
+      const detail = await withCodes().buildOrderDetail('ord_1');
+
+      expect(detail.items[1]).toMatchObject({ price: tiyin, count: 1 });
+      expect(receiptTotalTiyin(detail.items)).toBe(15_000_000 + tiyin);
+    },
+  );
+
+  it('no environment can change delivery’s codes, the old ones included', async () => {
+    stubOrder({ deliveryUzs: 25000, serviceFeeUzs: 0 });
+    const detail = await withCodes({
+      DELIVERY_MXIK: '05320001001000000',
+      DELIVERY_PACKAGE_CODE: '1000000',
+    }).buildOrderDetail('ord_1');
+
+    expect(detail.items[1]).toMatchObject({
+      code: '10112006002000000',
+      package_code: '1542432',
+    });
+  });
+
+  it('delivery’s code asks for no category and no confirmation', async () => {
+    stubOrder({ deliveryUzs: 25000, serviceFeeUzs: 0 });
+    await withCodes().buildOrderDetail('ord_1');
+    expect(prisma.partCategory.findUnique).not.toHaveBeenCalled();
+    expect(prisma.partCategory.findMany).not.toHaveBeenCalled();
+  });
+
+  it('the goods keep their own MXIK and their own confirmation', async () => {
+    stubOrder({ deliveryUzs: 25000, serviceFeeUzs: 0 });
+    prisma.catalogPart.findMany.mockResolvedValue([
+      {
+        id: 'part_1',
+        packageForm: null,
+        kind: ProductKind.SPARE_PART,
+        oilType: null,
+        category: { ...BRAKES, fiscalConfirmedCodes: null },
+        seller: DEALER_A,
+      },
+    ]);
+    await expect(withCodes().buildOrderDetail('ord_1')).rejects.toMatchObject({
+      gaps: [expect.stringContaining(FISCAL_CODES_UNCONFIRMED)],
+    });
+  });
+
+  describe('a line already coded as delivery', () => {
+    const DELIVERY_SERVICE = confirmedCategory({
+      id: 'courier-service',
+      parentId: 'services',
+      mxik: '10112006002000000',
+      packageCodeSingle: '1542432',
+      packageCodeSet: null,
+    });
+    const stubDeliveryLine = (totalUzs: number) => {
+      stubOrder({ deliveryUzs: 25000, serviceFeeUzs: 0, totalUzs });
+      prisma.orderItem.findMany.mockResolvedValue([
+        product,
+        {
+          id: 'oi_2',
+          partId: null,
+          serviceId: 'svc_1',
+          title: 'Доставка',
+          quantity: 1,
+          priceUzs: new Prisma.Decimal(25000),
+          lineTotalUzs: new Prisma.Decimal(25000),
+        },
+      ]);
+      prisma.providerServiceOffering.findMany.mockResolvedValue([
+        {
+          id: 'svc_1',
+          category: DELIVERY_SERVICE,
+          provider: { tin: '301234567', vatPercent: new Prisma.Decimal(0) },
+        },
+      ]);
+    };
+
+    it('is the charge: delivery is not added a second time', async () => {
+      stubDeliveryLine(175000);
+      const detail = await withCodes().buildOrderDetail('ord_1');
+
+      expect(
+        detail.items.filter((item) => item.code === '10112006002000000'),
+      ).toHaveLength(1);
+      expect(receiptTotalTiyin(detail.items)).toBe(17_500_000);
+    });
+
+    it('an order charging for it on top of that is refused', async () => {
+      stubDeliveryLine(200000);
+      await expect(withCodes().buildOrderDetail('ord_1')).rejects.toMatchObject({
+        gaps: [expect.stringContaining('does not match the charged')],
+      });
+    });
+  });
+
+  describe('the delivery cost stored on the order', () => {
+    const REFUSAL = { code: 'DELIVERY_COST_UNAVAILABLE' };
+
+    it.each<[string, unknown]>([
+      ['absent', null],
+      ['not a number', Number.NaN],
+      ['negative', -1000],
+    ])('%s: refused, with nothing put in its place', async (_, deliveryUzs) => {
+      stubOrder({ deliveryUzs: 0, serviceFeeUzs: 0 });
+      prisma.order.findUnique.mockResolvedValue({
+        id: 'ord_1',
+        deliveryMethod: 'COURIER',
+        totalUzs: new Prisma.Decimal(150000),
+        deliveryUzs,
+        serviceFeeUzs: new Prisma.Decimal(0),
+        discountUzs: new Prisma.Decimal(0),
+      });
+
+      await expect(withCodes().buildOrderDetail('ord_1')).rejects.toMatchObject({
+        gaps: ['the delivery cost stored on the order is invalid'],
+        response: REFUSAL,
+      });
+    });
+
+    it('goods by courier with no cost: refused, however it came to be stored', async () => {
+      stubOrder({ deliveryUzs: 0, serviceFeeUzs: 0, deliveryMethod: 'COURIER' });
+
+      await expect(withCodes().buildOrderDetail('ord_1')).rejects.toMatchObject({
+        gaps: ['the order is for courier delivery and holds no delivery cost'],
+        response: REFUSAL,
+      });
+      await expect(
+        withCodes().assertFiscalizable('ord_1'),
+      ).rejects.toBeInstanceOf(FiscalDataIncompleteException);
+    });
+
+    it('pickup with a cost contradicts itself: refused', async () => {
+      stubOrder({
+        deliveryUzs: 25000,
+        serviceFeeUzs: 0,
+        deliveryMethod: 'PICKUP',
+      });
+
+      await expect(withCodes().buildOrderDetail('ord_1')).rejects.toMatchObject({
+        gaps: ['the order is for pickup and holds a delivery cost'],
+        response: REFUSAL,
+      });
+    });
+
+    it('pickup with none needs no delivery line, and no delivery VAT rate either', async () => {
+      stubOrder({ deliveryUzs: 0, serviceFeeUzs: 0, deliveryMethod: 'PICKUP' });
+
+      const detail = await new PaymeFiscalService(
+        prisma,
+        fakeConfig({}),
+      ).buildOrderDetail('ord_1');
+
+      expect(detail.items.map((i) => i.title)).toEqual(['Колодки']);
+    });
+
+    it('what is stored is what is on the line, whatever the environment still says', async () => {
+      stubOrder({ deliveryUzs: 37500, serviceFeeUzs: 0 });
+
+      const detail = await withCodes({
+        DELIVERY_COURIER_UZS: '25000',
+        SERVICE_FEE_UZS: '5000',
+      }).buildOrderDetail('ord_1');
+
+      expect(detail.items).toHaveLength(2);
+      expect(detail.items[1]).toMatchObject({ price: 3_750_000, count: 1 });
+    });
+
+    it('every read of an order gives the same line: nothing fetches a newer cost', async () => {
+      stubOrder({ deliveryUzs: 37500, serviceFeeUzs: 0 });
+      const service = withCodes();
+
+      const atCheck = await service.buildOrderDetail('ord_1');
+      const atCreate = await service.buildOrderDetail('ord_1');
+
+      expect(atCreate).toEqual(atCheck);
+      expect(prisma.order.update).not.toHaveBeenCalled();
+      expect(prisma.order.updateMany).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('delivery’s VAT rate', () => {
+    it.each<[string, Record<string, string | undefined>]>([
+      ['absent', { DELIVERY_VAT_PERCENT: undefined }],
+      ['blank', { DELIVERY_VAT_PERCENT: '' }],
+      ['not a number', { DELIVERY_VAT_PERCENT: 'abc' }],
+      ['written with a sign', { DELIVERY_VAT_PERCENT: '12%' }],
+      ['out of range', { DELIVERY_VAT_PERCENT: '101' }],
+    ])('%s: refused, naming the setting, rather than sent as 0', async (_, env) => {
+      stubOrder({ deliveryUzs: 25000, serviceFeeUzs: 0 });
+
+      await expect(
+        withCodes(env as Record<string, string>).buildOrderDetail('ord_1'),
+      ).rejects.toMatchObject({
+        gaps: [
+          'delivery fee (set DELIVERY_VAT_PERCENT): no valid VAT percentage is configured',
+        ],
+      });
+    });
+
+    it.each([
+      ['0', 0],
+      ['7', 7],
+    ])('stated as %s, the line carries exactly that', async (value, expected) => {
+      stubOrder({ deliveryUzs: 25000, serviceFeeUzs: 0 });
+
+      const detail = await withCodes({
+        DELIVERY_VAT_PERCENT: value,
+      }).buildOrderDetail('ord_1');
+
+      expect(detail.items[1].vat_percent).toBe(expected);
+    });
+
+    it('its absence is said at boot, before a customer is refused', () => {
+      const warn = jest
+        .spyOn(Logger.prototype, 'warn')
+        .mockImplementation(() => undefined);
+
+      new PaymeFiscalService(prisma, fakeConfig({})).onModuleInit();
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('DELIVERY_VAT_PERCENT'),
+      );
+
+      warn.mockClear();
+      withCodes().onModuleInit();
+      expect(warn).not.toHaveBeenCalled();
+      warn.mockRestore();
+    });
+  });
+
+  it('delivery’s name goes in the required title field, exactly as approved', async () => {
+    stubOrder({ deliveryUzs: 25000, serviceFeeUzs: 0 });
+    const detail = await withCodes().buildOrderDetail('ord_1');
+    expect(DELIVERY_TITLE).toBe('Доставка');
+    expect(detail.items[1].title).toBe('Доставка');
+  });
+
+  describe('delivery and PAYME_ALLOW_SERVICE_ONLY_ORDERS', () => {
+    it.each([
+      ['absent', {}],
+      ['false', { PAYME_ALLOW_SERVICE_ONLY_ORDERS: 'false' }],
+    ])(
+      'goods with delivery are not service-only, with the variable %s',
+      async (_, env) => {
+        stubOrder({ deliveryUzs: 25000, serviceFeeUzs: 0 });
+        const detail = await withCodes(env).buildOrderDetail('ord_1');
+        expect(detail.items).toHaveLength(2);
+      },
+    );
+
+    it('a delivery charge does not make an order of services payable', async () => {
+      stubOrder({ deliveryUzs: 25000, serviceFeeUzs: 0, totalUzs: 125000 });
+      prisma.orderItem.findMany.mockResolvedValue([
+        {
+          id: 'oi_2',
+          partId: null,
+          serviceId: 'svc_1',
+          title: 'Замена масла',
+          quantity: 1,
+          priceUzs: new Prisma.Decimal(100000),
+          lineTotalUzs: new Prisma.Decimal(100000),
+        },
+      ]);
+      await expect(withCodes().buildOrderDetail('ord_1')).rejects.toMatchObject({
+        gaps: [expect.stringContaining('PAYME_ALLOW_SERVICE_ONLY_ORDERS')],
+      });
     });
   });
 
   it('adds NO delivery line when there is no delivery fee (pickup)', async () => {
     stubOrder({ deliveryUzs: 0, serviceFeeUzs: 0 });
     const detail = await withCodes().buildOrderDetail('ord_1');
-    expect(detail!.items).toHaveLength(1);
-    expect(detail!.items.map((i) => i.title)).toEqual(['Колодки']);
+    expect(detail.items).toHaveLength(1);
+    expect(detail.items.map((i) => i.title)).toEqual(['Колодки']);
   });
 
-  it('takes the delivery codes and VAT from configuration', async () => {
+  it('takes delivery’s VAT rate from configuration', async () => {
     stubOrder({ deliveryUzs: 25000, serviceFeeUzs: 0 });
     const detail = await withCodes({
-      DELIVERY_MXIK: '05320001002000000',
-      DELIVERY_PACKAGE_CODE: '1500000',
       DELIVERY_VAT_PERCENT: '12',
     }).buildOrderDetail('ord_1');
 
-    expect(detail!.items[1]).toMatchObject({
-      code: '05320001002000000',
-      package_code: '1500000',
-      vat_percent: 12,
-    });
+    expect(detail.items[1]).toMatchObject({ vat_percent: 12 });
   });
 
   it('attributes platform lines to the MARKETPLACE tin when configured', async () => {
@@ -563,27 +1425,27 @@ describe('platform charge lines', () => {
       MARKETPLACE_TIN: '123456789',
     }).buildOrderDetail('ord_1');
 
-    expect(detail!.items[1].commission_info).toEqual({ tin: '123456789' });
+    expect(detail.items[1].commission_info).toEqual({ tin: '123456789' });
     // The product line still settles to its own DEALER.
-    expect(detail!.items[0].commission_info).toEqual({ tin: '301234567' });
+    expect(detail.items[0].commission_info).toEqual({ tin: '301234567' });
   });
 
   it('omits commission_info on a platform line when no marketplace tin is set', async () => {
     stubOrder({ deliveryUzs: 25000, serviceFeeUzs: 0 });
     const detail = await withCodes().buildOrderDetail('ord_1');
-    expect(detail!.items[1]).not.toHaveProperty('commission_info');
+    expect(detail.items[1]).not.toHaveProperty('commission_info');
   });
 
   it('adds a service-fee line when the order carries one', async () => {
     stubOrder({ deliveryUzs: 25000, serviceFeeUzs: 5000 });
     const detail = await withCodes().buildOrderDetail('ord_1');
 
-    expect(detail!.items.map((i) => i.title)).toEqual([
+    expect(detail.items.map((i) => i.title)).toEqual([
       'Колодки',
-      'Услуга доставки',
+      'Доставка',
       'Сервисный сбор',
     ]);
-    expect(detail!.items[2]).toMatchObject({
+    expect(detail.items[2]).toMatchObject({
       price: 500_000,
       count: 1,
       code: '10307001001000000',
@@ -593,14 +1455,18 @@ describe('platform charge lines', () => {
 
   it('refuses a service fee whose codes are not configured, naming the keys', async () => {
     stubOrder({ deliveryUzs: 25000, serviceFeeUzs: 5000 });
-    const unconfigured = new PaymeFiscalService(prisma, fakeConfig({}));
+    const unconfigured = new PaymeFiscalService(
+      prisma,
+      fakeConfig({ DELIVERY_VAT_PERCENT: '0' }),
+    );
 
-    // Both halves of the missing pair are reported, each naming the env key an
-    // operator has to set — one round trip, not two.
+    // Every missing part is reported, each naming the env key an operator has to
+    // set — one round trip, not several.
     await expect(unconfigured.buildOrderDetail('ord_1')).rejects.toMatchObject({
       gaps: [
         expect.stringContaining('SERVICE_FEE_MXIK'),
         expect.stringContaining('SERVICE_FEE_PACKAGE_CODE'),
+        expect.stringContaining('SERVICE_FEE_VAT_PERCENT'),
       ],
     });
   });
@@ -610,7 +1476,7 @@ describe('platform charge lines', () => {
     stubOrder({ deliveryUzs: 25000, serviceFeeUzs: 5000 });
     const detail = await withCodes().buildOrderDetail('ord_1');
 
-    const receipt = receiptTotalTiyin(detail!.items);
+    const receipt = receiptTotalTiyin(detail.items);
     expect(receipt).toBe(18_000_000); // 150 000 + 25 000 + 5 000 UZS
     // …which is exactly the amount the checkout link and the webhook use.
     expect(receipt).toBe(Math.round((150000 + 25000 + 5000) * 100));
@@ -637,7 +1503,7 @@ describe('platform charge lines', () => {
     ]);
 
     const detail = await withCodes().buildOrderDetail('ord_1');
-    expect(receiptTotalTiyin(detail!.items)).toBe(47_500_000);
+    expect(receiptTotalTiyin(detail.items)).toBe(47_500_000);
   });
 
   it('refuses a receipt that does not add up to the charge', async () => {
@@ -676,23 +1542,33 @@ describe('platform charge lines', () => {
     ]);
 
     const detail = await withCodes().buildOrderDetail('ord_1');
-    expect(receiptTotalTiyin(detail!.items)).toBe(16_000_000);
+    expect(receiptTotalTiyin(detail.items)).toBe(16_000_000);
   });
 
-  it('leaves a services-only order unfiscalized rather than sending fees alone', async () => {
-    // No product lines: the order predates fiscalization's reach, and a receipt
-    // containing only a delivery fee would be neither complete nor reconcilable.
-    prisma.order.findUnique.mockResolvedValue({
-      id: 'ord_1',
-      totalUzs: new Prisma.Decimal(25000),
-      deliveryUzs: new Prisma.Decimal(25000),
-      serviceFeeUzs: new Prisma.Decimal(0),
-      discountUzs: new Prisma.Decimal(0),
-    });
-    prisma.orderItem.findMany.mockResolvedValue([]);
+  it.each([
+    ['absent', {}],
+    ['false', { PAYME_ALLOW_SERVICE_ONLY_ORDERS: 'false' }],
+    ['true', { PAYME_ALLOW_SERVICE_ONLY_ORDERS: 'true' }],
+  ])(
+    'never sends fees alone: no lines is refused with the variable %s',
+    async (_, env) => {
+      // A receipt containing only a delivery fee would be neither complete nor
+      // reconcilable, and having no lines says nothing about what was sold. The
+      // variable is about orders of services, and an order of nothing is not one.
+      prisma.order.findUnique.mockResolvedValue({
+        id: 'ord_1',
+        totalUzs: new Prisma.Decimal(25000),
+        deliveryUzs: new Prisma.Decimal(25000),
+        serviceFeeUzs: new Prisma.Decimal(0),
+        discountUzs: new Prisma.Decimal(0),
+      });
+      prisma.orderItem.findMany.mockResolvedValue([]);
 
-    await expect(withCodes().buildOrderDetail('ord_1')).resolves.toBeNull();
-  });
+      await expect(withCodes(env).buildOrderDetail('ord_1')).rejects.toMatchObject(
+        { gaps: ['the order has no lines'] },
+      );
+    },
+  );
 });
 
 describe('buildFiscalItem (pure mapping)', () => {
@@ -712,7 +1588,7 @@ describe('buildFiscalItem (pure mapping)', () => {
   it('reports every missing fact at once, naming the line', () => {
     const result = buildFiscalItem(
       line({
-        category: { mxik: null, packageCodeSingle: null, packageCodeSet: null },
+        category: bareCategory(),
         dealer: { tin: null, vatPercent: null },
       }) as never,
     );
@@ -741,11 +1617,13 @@ describe('buildFiscalItem (pure mapping)', () => {
   describe("ANTIFREEZE keeps its own category's IKPU", () => {
     // The REAL operator-supplied codes of the `antifreeze` category, taken from
     // the seed's own table so this test and the configuration cannot drift.
-    const ANTIFREEZE_CATEGORY = {
+    const ANTIFREEZE_CATEGORY = confirmedCategory({
+      id: 'antifreeze',
+      parentId: 'maintenance-and-fluids',
       mxik: CATEGORY_FISCAL_DATA.antifreeze.mxik,
       packageCodeSingle: CATEGORY_FISCAL_DATA.antifreeze.packageCodeSingle,
       packageCodeSet: null,
-    };
+    });
 
     it("resolves to the antifreeze category's own configured codes", () => {
       // Pinned literally here, derived from the seed above — so a change to
@@ -777,9 +1655,8 @@ describe('buildFiscalItem (pure mapping)', () => {
     });
 
     it('is NOT diverted onto an oil code by a stray oilType', () => {
-      // The defensive "a row carrying an oil type is an oil" clause applies to
-      // SPARE_PART only — a kind with its own fiscal taxonomy must never be
-      // pulled onto the oil table by a leftover column value.
+      // A kind with its own fiscal taxonomy must never be pulled onto the oil table
+      // by a leftover column value.
       const result = buildFiscalItem(
         line({
           kind: ProductKind.ANTIFREEZE,
@@ -797,11 +1674,7 @@ describe('buildFiscalItem (pure mapping)', () => {
       const result = buildFiscalItem(
         line({
           kind: ProductKind.ANTIFREEZE,
-          category: {
-            mxik: null,
-            packageCodeSingle: null,
-            packageCodeSet: null,
-          },
+          category: bareCategory('antifreeze'),
         }) as never,
       );
       expect(result.ok).toBe(false);
@@ -812,16 +1685,14 @@ describe('buildFiscalItem (pure mapping)', () => {
       ]);
     });
 
-    it('leaves a SPARE_PART carrying an oil type on the oil path (unchanged)', () => {
+    it('a SPARE_PART carrying an oil type stays on its category: a column is no proof', () => {
       const result = buildFiscalItem(
         line({
           kind: ProductKind.SPARE_PART,
           oilType: OilType.MINERAL,
         }) as never,
       );
-      expect(result.ok && result.items[0].code).toBe(
-        OIL_TYPE_FISCAL[OilType.MINERAL].mxik,
-      );
+      expect(result.ok && result.items[0].code).toBe(BRAKES.mxik);
     });
   });
 });

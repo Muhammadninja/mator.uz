@@ -183,10 +183,8 @@ async function seedCategories() {
         parentId: null,
         level: 0,
         isActive: true,
-        // Known MXIK / package codes for the childless roots a seller can pick
-        // directly (transmission, heating-and-cooling). Absent for every other
-        // root, which therefore keeps whatever an admin configured.
-        ...fiscalDataFor(c.id),
+        // No fiscal columns: a row that exists keeps what an operator configured.
+        // The seed also runs on live databases (legal documents publish through it).
       },
       create: {
         id: c.id,
@@ -198,6 +196,8 @@ async function seedCategories() {
         sortOrder: c.sortOrder,
         level: 0,
         isActive: true,
+        // Candidate codes on a fresh database, unconfirmed until an operator
+        // confirms them (see CATEGORY_FISCAL_DATA).
         ...fiscalDataFor(c.id),
       },
     });
@@ -217,9 +217,7 @@ async function seedCategories() {
         parentId: c.parentId,
         level: c.level,
         isActive: true,
-        // The leaf categories carry the fiscal data — this is where a seller's
-        // listing actually lands (see CATEGORY_FISCAL_DATA).
-        ...fiscalDataFor(c.id),
+        // No fiscal columns: a row that exists keeps what an operator configured.
       },
       create: {
         id: c.id,

@@ -338,10 +338,14 @@ export class CatalogProjectionService {
       ops.push(
         this.prisma.catalogPart.updateMany({
           where: { id: partId, categoryId: opts.category.expected },
-          data: CatalogProjectionService.classificationOf(
-            product,
-            await this.categoryParents(),
-          ),
+          data: {
+            ...CatalogProjectionService.classificationOf(
+              product,
+              await this.categoryParents(),
+            ),
+            kind: product.kind,
+            oilType: product.oilType,
+          },
         }),
       );
     const fitRows = this.buildFitRows(partId, product.partModels);
@@ -631,12 +635,10 @@ export class CatalogProjectionService {
       isOem: product.isOem,
       isGm: product.isGm,
       isUniversal: product.isUniversal,
-      // Listing kind + its kind-specific attributes, projected verbatim so the
-      // buyer side can render an oil card without joining back to the supply
-      // domain. Non-oil kinds project nulls, which is what they hold.
-      kind: product.kind,
+      // Kind-specific attributes, projected verbatim so the buyer side can render
+      // an oil card without joining back to the supply domain. Non-oil kinds
+      // project nulls, which is what they hold.
       oilViscosity: product.oilViscosity,
-      oilType: product.oilType,
       oilVolumeMl: product.oilVolumeMl,
       antifreezeWeightG: product.antifreezeWeightG,
       // The listing's sale form, projected verbatim like every attribute above.
@@ -666,6 +668,11 @@ export class CatalogProjectionService {
     // its seller re-picks the category in the bot, and the update carries it —
     // unless the caller re-projects for an edit that is not a classification
     // (`keepClassification`), which must not undo an operator's bulk-move.
+    //
+    // The kind and oil type travel with the classification: a composition category
+    // states its oil type, and a move rewrites it on the part alone, so restoring it
+    // from the product would contradict the category the part stayed on.
+    const listingType = { kind: product.kind, oilType: product.oilType };
     ops.push(
       this.prisma.catalogPart.upsert({
         where: { id: partId },
@@ -674,13 +681,14 @@ export class CatalogProjectionService {
           ...(opts.keepPriceAndStock ? {} : priceAndStock),
           ...(stock.sourceSystem || opts.keepClassification
             ? {}
-            : classification),
+            : { ...classification, ...listingType }),
         },
         create: {
           id: partId,
           ...partData,
           ...priceAndStock,
           ...classification,
+          ...listingType,
         },
       }),
     );

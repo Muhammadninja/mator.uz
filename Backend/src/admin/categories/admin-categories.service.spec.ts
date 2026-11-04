@@ -8,6 +8,11 @@ import {
   ConflictException,
   NotFoundException,
 } from '@nestjs/common';
+import { AdminAuditAction, AdminAuditEntity } from '@prisma/client';
+import { listingTypeForCategory } from '../../catalog/categories/category-map';
+import { REPRESENTATIVE_ONLY_MXIK } from '../../common/fiscal.util';
+import { buildFiscalItem } from '../../orders/webhooks/payme-fiscal.util';
+import { presentAdminCategoryNode } from './admin-categories.presenter';
 import {
   AdminCategoriesService,
   CategoryDeleteConflict,
@@ -463,6 +468,8 @@ describe('fiscal configuration', () => {
     packageCodeSingle: '1417722',
     packageCodeSet: '1417723',
   };
+  /** What an operator confirms for FISCAL: the exact codes, as one string. */
+  const CODES = '08708005011000000:1417722:1417723';
 
   it('creates a category with one package code', async () => {
     const { service, prisma } = makeService();
@@ -623,19 +630,331 @@ describe('fiscal configuration', () => {
     const { service, prisma } = makeService();
     prisma.partCategory.findUnique.mockResolvedValue(node(FISCAL));
     const { data } = await service.findOne('brakes');
+    // A code nobody confirmed is not yet a category checkout will accept.
     expect(data).toMatchObject({
       mxik: FISCAL.mxik,
       packageCodeSingle: FISCAL.packageCodeSingle,
       packageCodeSet: FISCAL.packageCodeSet,
-      fiscalConfigured: true,
+      fiscalConfigured: false,
+      fiscalStatus: 'NEEDS_CONFIRMATION',
+      fiscalCodesToConfirm: CODES,
       offersPackageChoice: true,
+    });
+
+    prisma.partCategory.findUnique.mockResolvedValue(
+      node({ ...FISCAL, fiscalConfirmedCodes: CODES }),
+    );
+    const confirmed = await service.findOne('brakes');
+    expect(confirmed.data).toMatchObject({
+      fiscalConfigured: true,
+      fiscalStatus: 'READY',
+      fiscalGaps: [],
     });
 
     prisma.partCategory.findUnique.mockResolvedValue(node());
     const unconfigured = await service.findOne('brakes');
     expect(unconfigured.data).toMatchObject({
       fiscalConfigured: false,
+      fiscalStatus: 'NEEDS_CODES',
+      fiscalCodesToConfirm: null,
       offersPackageChoice: false,
+    });
+  });
+
+  it('offers nothing to confirm on a parent, which a confirmation would refuse', async () => {
+    const { service, prisma } = makeService();
+    prisma.partCategory.findUnique.mockResolvedValue(
+      node({ ...FISCAL, _count: { ...node()._count, children: 2 } }),
+    );
+    const { data } = await service.findOne('transmission');
+    expect(data).toMatchObject({
+      mxik: FISCAL.mxik,
+      fiscalStatus: 'NOT_SELLABLE',
+      fiscalCodesToConfirm: null,
+    });
+  });
+
+  it('filters the list by what still needs doing', async () => {
+    const { service, prisma } = makeService();
+    prisma.partCategory.findMany.mockResolvedValue([
+      node({ id: 'a' }),
+      node({ id: 'b', ...FISCAL }),
+      node({ id: 'c', ...FISCAL, fiscalConfirmedCodes: CODES }),
+    ]);
+
+    const toConfirm = await service.list({
+      fiscalStatus: 'NEEDS_CONFIRMATION',
+    });
+    const toFill = await service.list({ fiscalStatus: 'NEEDS_CODES' });
+
+    expect(toConfirm.data.map((n) => n.id)).toEqual(['b']);
+    expect(toConfirm.meta.total).toBe(1);
+    expect(toFill.data.map((n) => n.id)).toEqual(['a']);
+  });
+
+  // ── the confirmation ───────────────────────────────────────────────────────
+  describe('PATCH /:id/fiscal-confirmation', () => {
+    const ctx = { actor: { id: 'adm_1', email: 'a@b.c', name: 'A' } };
+    const childCounts = (children: number) => ({
+      parts: 0,
+      products: 0,
+      productsVehicle: 0,
+      drafts: 0,
+      draftsVehicle: 0,
+      children,
+    });
+
+    it('stores the exact codes that were checked, and audits who confirmed them', async () => {
+      const { service, prisma, audit } = makeService();
+      prisma.partCategory.findUnique.mockResolvedValue(node(FISCAL));
+
+      await service.setFiscalConfirmation(
+        'brakes',
+        { confirmed: true, codes: CODES },
+        ctx,
+      );
+
+      expect(prisma.partCategory.update.mock.calls[0][0]).toMatchObject({
+        where: { id: 'brakes' },
+        data: { fiscalConfirmedCodes: CODES },
+      });
+      expect(audit.record.mock.calls[0][0]).toMatchObject({
+        action: AdminAuditAction.CATEGORY_FISCAL_CONFIRMED,
+        target: { entity: AdminAuditEntity.CATEGORY, id: 'brakes' },
+        newValues: { fiscalConfirmedCodes: CODES },
+      });
+    });
+
+    it('confirms a composition’s codes from the oil table: its columns are empty', async () => {
+      const { service, prisma } = makeService();
+      prisma.partCategory.findUnique.mockResolvedValue(
+        node({ id: 'synthetic-motor-oil', parentId: 'motor-oil' }),
+      );
+      const codes = '02710005001000000:1282037:';
+
+      await service.setFiscalConfirmation('synthetic-motor-oil', {
+        confirmed: true,
+        codes,
+      });
+
+      expect(
+        prisma.partCategory.update.mock.calls[0][0].data.fiscalConfirmedCodes,
+      ).toBe(codes);
+    });
+
+    const refused = async (row: unknown, dto: never) => {
+      const { service, prisma, audit } = makeService();
+      prisma.partCategory.findUnique.mockResolvedValue(row);
+      const error = await service
+        .setFiscalConfirmation('brakes', dto)
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ConflictException);
+      expect(prisma.partCategory.update).not.toHaveBeenCalled();
+      expect(audit.record).not.toHaveBeenCalled();
+      return (error as ConflictException).getResponse();
+    };
+
+    it('refuses codes that changed since they were checked', async () => {
+      await expect(
+        refused(node(FISCAL), {
+          confirmed: true,
+          codes: '08708005011000000:1417722:',
+        } as never),
+      ).resolves.toMatchObject({ code: 'FISCAL_CODES_CHANGED' });
+    });
+
+    it('refuses a category with nothing to confirm', async () => {
+      await expect(
+        refused(node(), { confirmed: true, codes: CODES } as never),
+      ).resolves.toMatchObject({ code: 'FISCAL_CODES_MISSING' });
+    });
+
+    it('refuses a parent: its code would not describe what is under it', async () => {
+      await expect(
+        refused(node({ ...FISCAL, _count: childCounts(3) }), {
+          confirmed: true,
+          codes: CODES,
+        } as never),
+      ).resolves.toMatchObject({ code: 'CATEGORY_NOT_SELLABLE' });
+    });
+
+    it('withdrawing needs no codes and is audited', async () => {
+      const { service, prisma, audit } = makeService();
+      prisma.partCategory.findUnique.mockResolvedValue(
+        node({ ...FISCAL, fiscalConfirmedCodes: CODES }),
+      );
+
+      await service.setFiscalConfirmation('brakes', { confirmed: false }, ctx);
+
+      expect(
+        prisma.partCategory.update.mock.calls[0][0].data.fiscalConfirmedCodes,
+      ).toBeNull();
+      expect(audit.record.mock.calls[0][0]).toMatchObject({
+        action: AdminAuditAction.CATEGORY_FISCAL_UNCONFIRMED,
+        previousValues: { fiscalConfirmedCodes: CODES },
+      });
+    });
+
+    it.each([
+      ['the MXIK', { mxik: '08708005011999999' }],
+      ['the single package code', { packageCodeSingle: '1417799' }],
+      ['the set package code', { packageCodeSet: '1417799' }],
+      ['the set package code, by removing it', { packageCodeSet: null }],
+    ])('changing %s ends the confirmation for good', async (_, change) => {
+      const { service, prisma } = makeService();
+      prisma.partCategory.findUnique.mockResolvedValue(
+        node({ ...FISCAL, fiscalConfirmedCodes: CODES }),
+      );
+
+      await service.update('brakes', change);
+
+      const { data } = prisma.partCategory.update.mock.calls[0][0];
+      expect(data).toMatchObject({ ...change, fiscalConfirmedCodes: null });
+    });
+
+    it('a PATCH that changes no code leaves a confirmation alone', async () => {
+      const { service, prisma } = makeService();
+      prisma.partCategory.findUnique.mockResolvedValue(
+        node({ ...FISCAL, fiscalConfirmedCodes: CODES }),
+      );
+
+      await service.update('brakes', { name: 'Тормоза' });
+      await service.update('brakes', { mxik: FISCAL.mxik });
+
+      for (const [{ data }] of prisma.partCategory.update.mock.calls) {
+        expect(data).not.toHaveProperty('fiscalConfirmedCodes');
+      }
+    });
+
+    it('a code changed by any other route no longer counts as confirmed', async () => {
+      const { service, prisma } = makeService();
+      prisma.partCategory.findUnique.mockResolvedValue(
+        node({
+          ...FISCAL,
+          mxik: '08708005011999999',
+          fiscalConfirmedCodes: CODES,
+        }),
+      );
+      expect((await service.findOne('brakes')).data.fiscalStatus).toBe(
+        'NEEDS_CONFIRMATION',
+      );
+    });
+
+    it.each(Object.entries(REPRESENTATIVE_ONLY_MXIK))(
+      '%s cannot be confirmed while it holds its one-product code',
+      async (id, mxik) => {
+        const { service, prisma } = makeService();
+        prisma.partCategory.findUnique.mockResolvedValue(
+          node({ id, mxik, packageCodeSingle: '1350563' }),
+        );
+
+        await expect(
+          service.setFiscalConfirmation(id, {
+            confirmed: true,
+            codes: `${mxik}:1350563:`,
+          }),
+        ).rejects.toMatchObject({
+          response: { code: 'CATEGORY_NOT_SELLABLE' },
+        });
+        expect(prisma.partCategory.update).not.toHaveBeenCalled();
+      },
+    );
+
+    it('a different code on one of those is an ordinary confirmation', async () => {
+      const { service, prisma } = makeService();
+      const row = node({
+        id: 'lighting',
+        mxik: '08512001999000000',
+        packageCodeSingle: '1350743',
+      });
+      prisma.partCategory.findUnique.mockResolvedValue(row);
+      prisma.partCategory.update.mockResolvedValue(row);
+
+      await service.setFiscalConfirmation('lighting', {
+        confirmed: true,
+        codes: '08512001999000000:1350743:',
+      });
+
+      expect(prisma.partCategory.update.mock.calls[0][0].data).toEqual({
+        fiscalConfirmedCodes: '08512001999000000:1350743:',
+      });
+    });
+  });
+
+  // The console's flag and the receipt must give one answer: reporting a category
+  // ready that checkout then refuses is exactly what this rule exists to prevent.
+  describe('the console and the receipt agree', () => {
+    const TRANSMISSION = {
+      mxik: '02710005005000000',
+      packageCodeSingle: '1282593',
+      packageCodeSet: null,
+    };
+    const TRANSMISSION_CODES = '02710005005000000:1282593:';
+
+    it.each([
+      ['a confirmed leaf', node({ ...FISCAL, fiscalConfirmedCodes: CODES })],
+      ['an unconfirmed leaf', node(FISCAL)],
+      ['a leaf with no codes', node()],
+      [
+        'a confirmation of other codes',
+        node({ ...FISCAL, fiscalConfirmedCodes: 'other:codes:' }),
+      ],
+      [
+        'a confirmed parent',
+        node({
+          ...FISCAL,
+          fiscalConfirmedCodes: CODES,
+          _count: { ...node()._count, children: 2 },
+        }),
+      ],
+      [
+        'transmission oil, confirmed',
+        node({
+          id: 'transmission-oil',
+          parentId: 'motor-oil',
+          ...TRANSMISSION,
+          fiscalConfirmedCodes: TRANSMISSION_CODES,
+        }),
+      ],
+      [
+        'transmission oil, unconfirmed',
+        node({
+          id: 'transmission-oil',
+          parentId: 'motor-oil',
+          ...TRANSMISSION,
+        }),
+      ],
+      [
+        'a composition, confirmed',
+        node({
+          id: 'synthetic-motor-oil',
+          parentId: 'motor-oil',
+          fiscalConfirmedCodes: '02710005001000000:1282037:',
+        }),
+      ],
+      [
+        'a composition, unconfirmed',
+        node({ id: 'synthetic-motor-oil', parentId: 'motor-oil' }),
+      ],
+      ['the oil parent', node({ id: 'motor-oil', parentId: null })],
+      ['a "Другое" child', node({ id: 'industrial-oil', parentId: 'other' })],
+      [
+        'the fallback bucket',
+        node({ id: 'cat_uncategorized', parentId: null }),
+      ],
+    ])('%s', (_, row) => {
+      const console = presentAdminCategoryNode(row as never);
+      const receipt = buildFiscalItem({
+        reference: 'item',
+        title: 'x',
+        quantity: 1,
+        priceUzs: 1,
+        packageForm: null,
+        category: row as never,
+        ...listingTypeForCategory(row.id),
+        dealer: { tin: '301234567', vatPercent: 0 },
+      });
+      expect(console.fiscalConfigured).toBe(receipt.ok);
     });
   });
 });

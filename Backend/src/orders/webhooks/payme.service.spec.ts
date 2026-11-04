@@ -15,11 +15,14 @@ import {
   PAYME_TIMEOUT_REASON,
 } from './payme.service';
 import {
+  confirmedCategory,
   createPrismaMock,
   fakeConfig,
   fakeFiscal,
+  FISCAL_TEST_ENV,
   buildOrder,
   PrismaMock,
+  stubFiscalizableOrderLines,
 } from '../../../test/utils/harness';
 import { SettlementService } from './settlement.service';
 import { OrderStatusService } from '../order-status.service';
@@ -83,8 +86,11 @@ describe('PaymeService (Merchant API)', () => {
       prisma,
       CONFIG as any,
       settlement as any,
-      fakeFiscal(prisma),
+      fakeFiscal(prisma, FISCAL_TEST_ENV),
     );
+    // A fully fiscalizable order unless a test says otherwise, so each protocol test
+    // is about the protocol.
+    stubFiscalizableOrderLines(prisma);
   });
 
   // Any test that freezes the clock must not leak fake timers into the next one.
@@ -160,7 +166,7 @@ describe('PaymeService (Merchant API)', () => {
           params: { account: { order_id: 'ord_1' }, amount: 21_500_000 },
         }),
       );
-      expect(res.result).toEqual({ allow: true });
+      expect(res.result.allow).toBe(true);
       expect(res.id).toBe(7);
     });
   });
@@ -175,8 +181,49 @@ describe('PaymeService (Merchant API)', () => {
         account: { order_id: 'ord_1' },
         amount: 21_500_000,
       });
-      expect(res.result).toEqual({ allow: true });
+      expect(res.result.allow).toBe(true);
+      expect(res.result.detail.items).toHaveLength(3);
     });
+
+    it.each([
+      ['no lines at all', []],
+      [
+        'a line stating no part, offer or service',
+        [{ id: 'oi_1', title: 'Запчасть', quantity: 1, priceUzs: 185000 }],
+      ],
+      [
+        'a sourcing offer nobody has classified',
+        [
+          {
+            id: 'oi_1',
+            offerId: 'soff_1',
+            offerSellerTgId: '555',
+            title: 'Стартер',
+            quantity: 1,
+            priceUzs: 185000,
+          },
+        ],
+      ],
+    ])(
+      'never allows an order with %s, with or without a detail',
+      async (_, lines) => {
+        prisma.order.findUnique.mockResolvedValue(
+          buildOrder({ id: 'ord_1', totalUzs: 215000 }),
+        );
+        prisma.orderItem.findMany.mockResolvedValue(lines);
+        prisma.sourcingOffer.findMany.mockResolvedValue([
+          { id: 'soff_1', packageForm: null, category: null },
+        ]);
+
+        const res = await call('CheckPerformTransaction', {
+          account: { order_id: 'ord_1' },
+          amount: 21_500_000,
+        });
+
+        expect(res.error.code).toBe(-31008);
+        expect(res.result).toBeUndefined();
+      },
+    );
 
     it('rejects a wrong amount with -31001', async () => {
       prisma.order.findUnique.mockResolvedValue(
@@ -228,10 +275,7 @@ describe('PaymeService (Merchant API)', () => {
         prisma,
         CONFIG as any,
         settlement as any,
-        fakeFiscal(prisma, {
-          SERVICE_FEE_MXIK: '10307001001000000',
-          SERVICE_FEE_PACKAGE_CODE: '1000001',
-        }),
+        fakeFiscal(prisma, FISCAL_TEST_ENV),
       );
       prisma.order.findUnique.mockResolvedValue(
         buildOrder({ id: 'ord_1', totalUzs: 215000 }),
@@ -251,11 +295,7 @@ describe('PaymeService (Merchant API)', () => {
           packageForm: 'SET',
           kind: 'SPARE_PART',
           oilType: null,
-          category: {
-            mxik: '08708005011000000',
-            packageCodeSingle: '1417722',
-            packageCodeSet: '1417723',
-          },
+          category: confirmedCategory(),
           inStock: true,
           seller: { status: 'ACTIVE', tin: '301234567', vatPercent: 0 },
         },
@@ -282,11 +322,11 @@ describe('PaymeService (Merchant API)', () => {
               commission_info: { tin: '301234567' },
             },
             {
-              title: 'Услуга доставки',
+              title: 'Доставка',
               price: 2_500_000,
               count: 1,
-              code: '05320001001000000',
-              package_code: '1000000',
+              code: '10112006002000000',
+              package_code: '1542432',
               vat_percent: 0,
             },
             {
@@ -327,11 +367,7 @@ describe('PaymeService (Merchant API)', () => {
         {
           id: 'part_1',
           packageForm: null,
-          category: {
-            mxik: '08708005011000000',
-            packageCodeSingle: '1417722',
-            packageCodeSet: null,
-          },
+          category: confirmedCategory({ packageCodeSet: null }),
           inStock: true,
           seller: { status: 'ACTIVE', tin: null, vatPercent: null },
         },
@@ -382,6 +418,22 @@ describe('PaymeService (Merchant API)', () => {
           }),
         }),
       );
+    });
+
+    it('opens no transaction for an order that cannot be fiscalized', async () => {
+      // The last gate before funds are held: Check may have run a while ago, or the
+      // data may have changed since.
+      prisma.payment.findUnique.mockResolvedValue(null);
+      prisma.order.findUnique.mockResolvedValue(
+        buildOrder({ id: 'ord_1', totalUzs: 215000 }),
+      );
+      prisma.orderItem.findMany.mockResolvedValue([]);
+
+      const res = await call('CreateTransaction', params);
+
+      expect(res.error.code).toBe(-31008);
+      expect(prisma.payment.create).not.toHaveBeenCalled();
+      expect(prisma.payment.update).not.toHaveBeenCalled();
     });
 
     it('binds an existing unbound invoice row instead of creating a second payment', async () => {
@@ -553,10 +605,10 @@ describe('PaymeService (Merchant API)', () => {
 
       const res = await call('CreateTransaction', params);
       expect(res.result.state).toBe(1);
-      // The stale row is cancelled with the timeout reason.
-      expect(prisma.payment.update).toHaveBeenCalledWith(
+      // The stale row is cancelled with the timeout reason, from PENDING only.
+      expect(prisma.payment.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { id: 'pay_stale' },
+          where: { id: 'pay_stale', status: 'PENDING' },
           data: expect.objectContaining({
             providerState: -1,
             cancelReason: PAYME_TIMEOUT_REASON,
@@ -607,6 +659,29 @@ describe('PaymeService (Merchant API)', () => {
         'pay_1',
         expect.any(Number),
       );
+    });
+
+    it('builds no receipt and reads no price: the stored order is what was agreed', async () => {
+      const fiscal = { buildOrderDetail: jest.fn() };
+      const performing = new PaymeService(
+        prisma,
+        CONFIG as any,
+        settlement as any,
+        fiscal as any,
+      );
+      prisma.payment.findUnique
+        .mockResolvedValueOnce(buildPayment())
+        .mockResolvedValueOnce(buildPayment({ providerState: 2 }));
+
+      await performing.handle(AUTH, {
+        id: 1,
+        method: 'PerformTransaction',
+        params: { id: 'pmt-xyz' },
+      });
+
+      expect(settlement.markPaid).toHaveBeenCalled();
+      expect(fiscal.buildOrderDetail).not.toHaveBeenCalled();
+      expect(prisma.order.update).not.toHaveBeenCalled();
     });
 
     it('is idempotent: a repeat returns the STORED perform_time and does not re-settle', async () => {
@@ -748,29 +823,50 @@ describe('PaymeService (Merchant API)', () => {
       expect(settlement.markCancelled).toHaveBeenCalledWith('pay_1', 5, true);
     });
 
-    it('refuses to refund a delivered order with -31007', async () => {
+    it('answers -31007 when settlement finds the goods handed over', async () => {
       prisma.payment.findUnique.mockResolvedValue(
         buildPayment({ providerState: 2 }),
       );
-      prisma.order.findUnique.mockResolvedValue(
-        buildOrder({ id: 'ord_1', status: 'DELIVERED' }),
-      );
+      settlement.markCancelled.mockResolvedValue('not_refundable');
 
       const res = await call('CancelTransaction', { id: 'pmt-xyz', reason: 5 });
       expect(res.error.code).toBe(-31007);
-      expect(settlement.markCancelled).not.toHaveBeenCalled();
+      expect(settlement.markCancelled).toHaveBeenCalledWith('pay_1', 5, true);
     });
 
-    it('refuses to refund a shipped order with -31007', async () => {
-      prisma.payment.findUnique.mockResolvedValue(
-        buildPayment({ providerState: 2 }),
-      );
-      prisma.order.findUnique.mockResolvedValue(
-        buildOrder({ id: 'ord_1', status: 'SHIPPED' }),
-      );
+    it('handles as a refund a Perform that committed after the read', async () => {
+      prisma.payment.findUnique
+        .mockResolvedValueOnce(buildPayment())
+        .mockResolvedValueOnce(
+          buildPayment({
+            providerState: -2,
+            providerCancelTime: BigInt(1_700_000_333_000),
+          }),
+        );
+      settlement.markCancelled
+        .mockResolvedValueOnce('paid_meanwhile')
+        .mockResolvedValueOnce('refunded');
 
-      const res = await call('CancelTransaction', { id: 'pmt-xyz', reason: 5 });
-      expect(res.error.code).toBe(-31007);
+      const res = await call('CancelTransaction', { id: 'pmt-xyz', reason: 3 });
+
+      expect(res.result).toEqual({
+        transaction: 'pay_1',
+        cancel_time: 1_700_000_333_000,
+        state: -2,
+      });
+      expect(settlement.markCancelled.mock.calls).toEqual([
+        ['pay_1', 3, false],
+        ['pay_1', 3, true],
+      ]);
+    });
+
+    it('answers -31008 for a payment no branch can cancel, never a cancelled state', async () => {
+      prisma.payment.findUnique.mockResolvedValue(buildPayment());
+      settlement.markCancelled.mockResolvedValue('not_cancellable');
+
+      const res = await call('CancelTransaction', { id: 'pmt-xyz', reason: 3 });
+
+      expect(res.error.code).toBe(-31008);
     });
 
     it('is idempotent: a repeat returns the STORED cancel_time without re-cancelling', async () => {
@@ -916,8 +1012,9 @@ describe('PaymeService — request validation, order state, active transaction',
       prisma,
       CONFIG,
       settlement as any,
-      fakeFiscal(prisma),
+      fakeFiscal(prisma, FISCAL_TEST_ENV),
     );
+    stubFiscalizableOrderLines(prisma);
   });
 
   const call = (method: string, params: unknown) =>
@@ -1014,6 +1111,8 @@ describe('PaymeService — request validation, order state, active transaction',
     it('refuses when the order was cancelled between the first read and the lock', async () => {
       prisma.payment.findUnique.mockResolvedValue(null);
       prisma.order.findUnique
+        .mockResolvedValueOnce(buildOrder({ id: 'ord_1', totalUzs: 215000 }))
+        // The fiscal gate's read, still before the lock.
         .mockResolvedValueOnce(buildOrder({ id: 'ord_1', totalUzs: 215000 }))
         .mockResolvedValueOnce({ status: 'CANCELLED' });
       prisma.payment.findFirst.mockResolvedValue(null);
@@ -1142,5 +1241,314 @@ describe('PaymeService.PerformTransaction end-to-end (in-memory store)', () => {
     expect(
       store.history().filter((h) => h.status === OrderStatus.PAID),
     ).toHaveLength(1);
+  });
+});
+
+/**
+ * Perform and Cancel on one transaction: PaymeService with the REAL settlement over
+ * the in-memory store. It serialises transactions and re-checks a conditional write
+ * against the current row, which is what these tests rely on. It is not PostgreSQL,
+ * so they prove the logic of the conditional writes, not behaviour under real load.
+ */
+describe('PaymeService — Perform and Cancel on one transaction (in-memory store)', () => {
+  function build(paymentOver = {}, orderStatus = OrderStatus.PENDING_PAYMENT) {
+    const store = settlementStore({
+      payments: [
+        pendingPaymePayment({
+          amountTiyin: BigInt(21_500_000),
+          providerCancelTime: null,
+          cancelReason: null,
+          ...paymentOver,
+        }),
+      ],
+      orders: [order(orderStatus)],
+    });
+    const notifications = { emit: jest.fn().mockResolvedValue(undefined) };
+    const settlementSvc = new SettlementService(
+      store.prisma as any,
+      notifications as any,
+      { emit: jest.fn() } as any,
+      new OrderStatusService(store.prisma as any),
+      CONFIG,
+    );
+    const payme = new PaymeService(
+      store.prisma as any,
+      CONFIG,
+      settlementSvc,
+      {} as any,
+    );
+    const rpc = (method: string, params: Record<string, unknown>) =>
+      payme.handle(AUTH, { id: 1, method, params }) as Promise<any>;
+    return {
+      store,
+      notifications,
+      perform: () => rpc('PerformTransaction', { id: 'pmt-xyz' }),
+      cancel: (reason = 3) =>
+        rpc('CancelTransaction', { id: 'pmt-xyz', reason }),
+    };
+  }
+
+  /**
+   * Run `between` right after the next payment read, before the reader sees the
+   * result: the reader goes on holding a row that is already out of date, which is
+   * the window a read-then-write would race in.
+   */
+  function staleNextRead(
+    store: ReturnType<typeof settlementStore>,
+    between: () => Promise<unknown>,
+  ) {
+    const db = store.prisma as any;
+    const read = db.payment.findUnique;
+    let fired = false;
+    db.payment.findUnique = async (args: unknown) => {
+      const row = await read(args);
+      if (!fired) {
+        fired = true;
+        await between();
+      }
+      return row;
+    };
+  }
+
+  const refundRows = (store: ReturnType<typeof settlementStore>) =>
+    store.history().filter((h) => h.status === OrderStatus.REFUNDED);
+
+  describe('A — Perform wins', () => {
+    const expectRefunded = (
+      store: ReturnType<typeof settlementStore>,
+      res: any,
+    ) => {
+      expect(res.result.state).toBe(-2);
+      expect(store.payment('pay_1')).toMatchObject({
+        status: 'REFUNDED',
+        providerState: -2,
+        cancelReason: 3,
+      });
+      expect(store.order('ord_1').status).toBe(OrderStatus.REFUNDED);
+      expect(store.refunds()).toHaveLength(1);
+      expect(Number(store.refunds()[0].amountUzs)).toBe(215000);
+      expect(refundRows(store)).toHaveLength(1);
+    };
+
+    it('a Cancel arriving after the Perform refunds: state -2, never -1', async () => {
+      const { store, perform, cancel } = build();
+      expect((await perform()).result.state).toBe(2);
+      expectRefunded(store, await cancel());
+    });
+
+    it('a Cancel that read state 1 just before the Perform committed refunds too', async () => {
+      // The audit's sequence. The old claim turned this row CANCELLED / -1 and left
+      // the order PAID: goods shipped with the money handed back.
+      const { store, perform, cancel } = build();
+      staleNextRead(store, perform);
+
+      const res = await cancel();
+
+      expect(store.payment('pay_1').status).not.toBe('CANCELLED');
+      expectRefunded(store, res);
+    });
+
+    it('once the goods are handed over the same Cancel gets -31007 and nothing moves', async () => {
+      const { store, perform, cancel } = build();
+      await perform();
+      await (store.prisma as any).order.updateMany({
+        where: { id: 'ord_1' },
+        data: { status: OrderStatus.SHIPPED },
+      });
+
+      const res = await cancel();
+
+      expect(res.error.code).toBe(-31007);
+      expect(store.payment('pay_1')).toMatchObject({
+        status: 'PAID',
+        providerState: 2,
+      });
+      expect(store.order('ord_1').status).toBe(OrderStatus.SHIPPED);
+      expect(store.refunds()).toEqual([]);
+    });
+
+    it('an order shipped between the read and the write stops the refund the same way', async () => {
+      const { store, perform, cancel } = build();
+      await perform();
+      staleNextRead(store, () =>
+        (store.prisma as any).order.updateMany({
+          where: { id: 'ord_1' },
+          data: { status: OrderStatus.SHIPPED },
+        }),
+      );
+
+      const res = await cancel();
+
+      expect(res.error.code).toBe(-31007);
+      expect(store.payment('pay_1').status).toBe('PAID');
+      expect(store.order('ord_1').status).toBe(OrderStatus.SHIPPED);
+      expect(store.refunds()).toEqual([]);
+    });
+  });
+
+  describe('B — Cancel wins', () => {
+    const expectCancelled = (store: ReturnType<typeof settlementStore>) => {
+      expect(store.payment('pay_1')).toMatchObject({
+        status: 'CANCELLED',
+        providerState: -1,
+      });
+      expect(store.order('ord_1').status).toBe(OrderStatus.PENDING_PAYMENT);
+      expect(
+        store.history().filter((h) => h.status === OrderStatus.PAID),
+      ).toEqual([]);
+      expect(store.refunds()).toEqual([]);
+    };
+
+    it('a Perform after the Cancel is refused and settles nothing', async () => {
+      const { store, perform, cancel, notifications } = build();
+      expect((await cancel()).result.state).toBe(-1);
+
+      const res = await perform();
+
+      expect(res.error.code).toBe(-31008);
+      expectCancelled(store);
+      expect(notifications.emit).not.toHaveBeenCalled();
+    });
+
+    it('a Perform that read state 1 just before the Cancel committed is refused too', async () => {
+      const { store, perform, cancel, notifications } = build();
+      staleNextRead(store, cancel);
+
+      const res = await perform();
+
+      expect(res.error.code).toBe(-31008);
+      expectCancelled(store);
+      expect(notifications.emit).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('C — repeats', () => {
+    it('a repeated Perform pays once', async () => {
+      const { store, perform, notifications } = build();
+      const first = await perform();
+      const second = await perform();
+      expect(second.result).toEqual(first.result);
+      expect(
+        store.history().filter((h) => h.status === OrderStatus.PAID),
+      ).toHaveLength(1);
+      expect(notifications.emit).toHaveBeenCalledTimes(1);
+    });
+
+    it('a repeated Cancel before payment replays the stored outcome', async () => {
+      const { store, cancel } = build();
+      const first = await cancel();
+      const second = await cancel();
+      expect(second.result).toEqual(first.result);
+      expect(store.refunds()).toEqual([]);
+    });
+
+    it('a repeated Cancel after payment refunds once', async () => {
+      const { store, perform, cancel } = build();
+      await perform();
+      const first = await cancel();
+      const second = await cancel();
+      expect(second.result).toEqual(first.result);
+      expect(store.refunds()).toHaveLength(1);
+      expect(refundRows(store)).toHaveLength(1);
+    });
+
+    it('a Perform after a refund is refused', async () => {
+      const { store, perform, cancel } = build();
+      await perform();
+      await cancel();
+      expect((await perform()).error.code).toBe(-31008);
+      expect(store.payment('pay_1').status).toBe('REFUNDED');
+    });
+  });
+
+  describe('D — at the same time', () => {
+    it('two Performs: one settlement, the same perform_time for both', async () => {
+      const { store, perform } = build();
+      const [a, b] = await Promise.all([perform(), perform()]);
+      expect(a.result).toEqual(b.result);
+      expect(a.result.state).toBe(2);
+      expect(
+        store.history().filter((h) => h.status === OrderStatus.PAID),
+      ).toHaveLength(1);
+    });
+
+    it('two Cancels before payment: the same outcome for both', async () => {
+      const { store, cancel } = build();
+      const [a, b] = await Promise.all([cancel(), cancel()]);
+      expect(a.result).toEqual(b.result);
+      expect(a.result.state).toBe(-1);
+      expect(store.payment('pay_1').status).toBe('CANCELLED');
+    });
+
+    it('two Cancels after payment: one refund, the same outcome for both', async () => {
+      const { store, perform, cancel } = build();
+      await perform();
+      const [a, b] = await Promise.all([cancel(), cancel()]);
+      expect(a.result).toEqual(b.result);
+      expect(a.result.state).toBe(-2);
+      expect(store.refunds()).toHaveLength(1);
+      expect(refundRows(store)).toHaveLength(1);
+    });
+
+    it.each([
+      ['Perform first', true],
+      ['Cancel first', false],
+    ])(
+      'Perform and Cancel together (%s): payment and order end up agreeing',
+      async (_, performFirst) => {
+        const { store, perform, cancel } = build();
+        const runs = performFirst
+          ? [perform(), cancel()]
+          : [cancel(), perform()];
+        await Promise.all(runs);
+
+        const payment = store.payment('pay_1');
+        const orderStatus = store.order('ord_1').status;
+        // Only two ends are consistent. CANCELLED with a PAID order is the one the
+        // old claim produced.
+        if (payment.status === 'CANCELLED') {
+          expect(payment.providerState).toBe(-1);
+          expect(orderStatus).toBe(OrderStatus.PENDING_PAYMENT);
+          expect(store.refunds()).toEqual([]);
+        } else {
+          expect(payment.status).toBe('REFUNDED');
+          expect(payment.providerState).toBe(-2);
+          expect(orderStatus).toBe(OrderStatus.REFUNDED);
+          expect(store.refunds()).toHaveLength(1);
+        }
+      },
+    );
+  });
+
+  it('a timed-out Perform that finds the payment settled reports that, not a timeout', async () => {
+    const { store, perform } = build({
+      providerCreateTime: BigInt(Date.now() - PAYME_TRANSACTION_TIMEOUT_MS - 1),
+    });
+    const db = store.prisma as any;
+    // Another Perform, read before the window closed, settles first.
+    staleNextRead(store, () =>
+      db.$transaction(async (tx: any) => {
+        await tx.payment.updateMany({
+          where: { id: 'pay_1' },
+          data: {
+            status: 'PAID',
+            providerState: 2,
+            providerPerformTime: BigInt(1_700_000_111_000),
+          },
+        });
+        await tx.order.updateMany({
+          where: { id: 'ord_1' },
+          data: { status: OrderStatus.PAID },
+        });
+      }),
+    );
+
+    const res = await perform();
+
+    expect(res.result).toMatchObject({
+      state: 2,
+      perform_time: 1_700_000_111_000,
+    });
+    expect(store.payment('pay_1').status).toBe('PAID');
   });
 });

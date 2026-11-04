@@ -1,6 +1,8 @@
 import { DraftStatus, Prisma, PartMainCategory } from '@prisma/client';
 import {
-  isCategoryFiscallyConfigured,
+  categoryFiscalReadiness,
+  CategoryFiscalStatus,
+  confirmableFiscalCodes,
   offersPackageChoice,
 } from '../../common/fiscal.util';
 import {
@@ -46,9 +48,11 @@ export const ADMIN_CATEGORY_NODE_SELECT = {
   mxik: true,
   packageCodeSingle: true,
   packageCodeSet: true,
+  fiscalConfirmedCodes: true,
   // Parts (buyer catalog) plus the supply-side listings and live drafts that
   // point here, through either column. The same set the delete guard checks, so
-  // what the console reports up front is what the server will answer.
+  // what the console reports up front is what the server will answer. `children`
+  // is the fiscal resolver's: active children are what make a node a parent.
   _count: {
     select: {
       parts: true,
@@ -56,6 +60,7 @@ export const ADMIN_CATEGORY_NODE_SELECT = {
       productsVehicle: true,
       drafts: { where: { status: { in: LIVE_DRAFT_STATUSES } } },
       draftsVehicle: { where: { status: { in: LIVE_DRAFT_STATUSES } } },
+      children: { where: { isActive: true } },
     },
   },
 } satisfies Prisma.PartCategorySelect;
@@ -92,15 +97,23 @@ export interface AdminCategoryTreeNode {
   /** Tasnif package code for "Комплект / набор"; null when the category is sold
    *  in one form only — the seller is then never asked. */
   packageCodeSet: string | null;
-  /** Derived: whether products of this category can be fiscalized at all —
-   *  either its own codes are set (mxik + single package code) or its listings
-   *  take theirs from the oil type. The console renders the "not configured"
-   *  warning off this rather than re-deriving the rule client-side. */
+  /** Derived: whether products of this category can reach a receipt, by the same
+   *  resolver Payme checkout runs. False until an operator has confirmed the codes.
+   *  The console renders the warning off this rather than re-deriving the rule. */
   fiscalConfigured: boolean;
-  /** Derived: this category's products are fiscalized from their OIL TYPE, so
-   *  the code fields below are legitimately empty and the console should say so
-   *  instead of prompting for values that would be ignored. */
+  /** Derived: this category's products are fiscalized from the oil table, so the
+   *  code fields above are legitimately empty. True only on a composition category
+   *  with no MXIK of its own: a code entered there is the one that gets used. */
   fiscalByOilType: boolean;
+  /** Derived: what this category still needs, for working through the backlog. */
+  fiscalStatus: CategoryFiscalStatus;
+  /** Derived: every reason the resolver refuses this category; empty when ready. */
+  fiscalGaps: string[];
+  /** Derived: the codes a listing here would carry (from the oil table on a
+   *  composition category). What to check in Tasnif, and what to send back to
+   *  confirm them; null when there is nothing to confirm, or on a node that cannot
+   *  be confirmed because nothing should be sold from it. */
+  fiscalCodesToConfirm: string | null;
   /** Derived: whether the seller bot asks "Штука или комплект?" here. */
   offersPackageChoice: boolean;
   /** Buyer-catalog parts linked directly to this node. */
@@ -116,7 +129,7 @@ export interface AdminCategoryTreeNode {
 export function presentAdminCategoryNode(
   row: AdminCategoryNodeRow,
 ): Omit<AdminCategoryTreeNode, 'children'> {
-  const byOilType = isFiscalizedByOilType(row);
+  const readiness = categoryFiscalReadiness(row);
   return {
     id: row.id,
     name: row.name,
@@ -134,12 +147,14 @@ export function presentAdminCategoryNode(
     mxik: row.mxik,
     packageCodeSingle: row.packageCodeSingle,
     packageCodeSet: row.packageCodeSet,
-    // All three flags come from the shared rules, so the console, the seller
-    // bot and the Payme builder can never disagree about what "configured"
-    // means. An oil category counts as configured with no codes of its own:
-    // its listings resolve theirs from the oil type the seller chose.
-    fiscalConfigured: byOilType || isCategoryFiscallyConfigured(row),
-    fiscalByOilType: byOilType,
+    // Every flag comes from the shared rules, so the console, the seller bot and
+    // the Payme builder can never disagree about what "configured" means.
+    fiscalConfigured: readiness.status === 'READY',
+    fiscalByOilType: isFiscalizedByOilType(row),
+    fiscalStatus: readiness.status,
+    fiscalGaps: readiness.gaps,
+    fiscalCodesToConfirm:
+      readiness.status === 'NOT_SELLABLE' ? null : confirmableFiscalCodes(row),
     offersPackageChoice: offersPackageChoice(row),
     productsCount: row._count.parts,
     // The larger of the two columns, not their sum: a listing filed on a childless

@@ -170,20 +170,27 @@ export const SEED_OTHER_CATEGORIES: SeedOtherCategory[] = [
 
 // ── Category fiscal data (MXIK / ИКПУ + Tasnif package codes) ────────────────
 /**
- * The KNOWN fiscal configuration, keyed by stable category id. Mirrors the
- * UPDATE block in migrations/20260811000000_add_fiscal_data exactly, so a
- * freshly seeded database and a migrated one converge — the same contract the
- * category tree itself already follows.
+ * CANDIDATE fiscal codes, keyed by stable category id: what the supplied list
+ * said, NOT a confirmed classification. Mirrors the UPDATE block in
+ * migrations/20260811000000_add_fiscal_data exactly, so a freshly seeded database
+ * and a migrated one converge — the same contract the category tree itself already
+ * follows.
+ *
+ * Every entry needs checking against Tasnif. The list names representative products,
+ * so several entries describe ONE product of a broad category: a starter on
+ * `electrical-parts`, a headlight on `lighting`, a spark plug on `ignition`, rubber
+ * hoses on `belts-and-hoses`. Those four can never reach a receipt, and cannot be
+ * confirmed, for as long as a node holds them (REPRESENTATIVE_ONLY_MXIK). Nothing else
+ * here reaches a receipt until an operator confirms that the code is true of everything
+ * filed on the node (PATCH /v1/admin/categories/:id/fiscal-confirmation), and the
+ * comments below are not that confirmation.
  *
  * Two rules governed every entry, and nothing else:
  *
- * 1. MATCHED BY TREE POSITION, NOT BY NAME. A listing always lands on a LEAF
- *    (the wizard keeps a root only when that root has no children), so the codes
- *    are attached to the leaf the supplied entry describes. That is why "Brake
- *    system" configures `brakes` — the sole leaf under the `brake-system` root —
- *    while "Transmission" and "A/C" configure the childless roots `transmission`
- *    and `heating-and-cooling` directly. Configuring a parent that has children
- *    would leave its codes unreachable by every product.
+ * 1. MATCHED BY TREE POSITION, NOT BY NAME. The codes are attached to the node the
+ *    supplied entry describes. `transmission` and `heating-and-cooling` have gained
+ *    subcategories since, so their codes reach only a listing filed on the root
+ *    itself, and the resolver refuses that too: a parent's code is never inherited.
  *
  * 2. NOTHING IS INVENTED. A category the supplied list does not describe stays
  *    unconfigured until an admin enters real values; no code is reused, guessed
@@ -191,22 +198,17 @@ export const SEED_OTHER_CATEGORIES: SeedOtherCategory[] = [
  *
  * NOT HERE — the motor-oil codes, on purpose. The supplied list carries three
  * of them, one per oil TYPE (synthetic / semi-synthetic / mineral), because the
- * registry classifies oil by base composition. That is an ATTRIBUTE of a
- * listing here (Product.oilType, asked by the wizard), not a category, and a
- * single node cannot hold three MXIKs — so the oil codes live in
- * OIL_TYPE_FISCAL (common/fiscal.util.ts) and are resolved per listing.
+ * registry classifies oil by base composition. They live in OIL_TYPE_FISCAL
+ * (common/fiscal.util.ts) and apply on the three composition categories only, for as
+ * long as an operator has entered no code of their own there: `isFiscalizedByOilType`
+ * is what tells the admin console those need none.
  *
  * ANTIFREEZE is NOT one of those: it is classified as an ordinary category (one
  * MXIK for the whole leaf, not one per attribute), so its codes live here with
  * every other category's — which is what keeps an antifreeze listing off the
- * motor-oil codes.
- *
- * The oil categories therefore stay EMPTY here and are still fiscally complete:
- * `isFiscalizedByOilType` (catalog/categories/category-map.ts) is what tells the
- * admin console not to report them as unconfigured. Note the exception —
- * 'oil-and-fluids' is a SPARE_PART leaf under maintenance-and-fluids whose
- * listings never answer the oil question, so it is on the ordinary category
- * path and simply has no codes in the supplied list.
+ * motor-oil codes. Neither is 'oil-and-fluids', a SPARE_PART leaf whose listings
+ * never answer the oil question: it is on the ordinary category path and simply has
+ * no codes in the supplied list.
  */
 export const CATEGORY_FISCAL_DATA: Readonly<
   Record<
@@ -251,7 +253,7 @@ export const CATEGORY_FISCAL_DATA: Readonly<
   batteries: { mxik: '08507001009000000', packageCodeSingle: '1431941' },
   // "Spark Plug" → the ignition leaf; "Starter" → the electrical-parts leaf.
   // Both supplied codes are 8511 (ignition/starting equipment) and each names
-  // the flagship part of the leaf it is attached to.
+  // ONE part of the leaf it is attached to, not everything filed there.
   ignition: { mxik: '08511001002000000', packageCodeSingle: '1350138' },
   'electrical-parts': {
     mxik: '08511001001000000',
@@ -265,7 +267,7 @@ export const CATEGORY_FISCAL_DATA: Readonly<
     mxik: '04009001012000000',
     packageCodeSingle: '1342595',
   },
-  // "A/C" → the childless heating-and-cooling root (8415 = air conditioning).
+  // "A/C" → the heating-and-cooling root (8415 = air conditioning).
   'heating-and-cooling': {
     mxik: '08415001012000000',
     packageCodeSingle: '1462732',
@@ -274,12 +276,10 @@ export const CATEGORY_FISCAL_DATA: Readonly<
 };
 
 /**
- * The fiscal columns to write for a category, or `{}` when none are known.
- *
- * Returning nothing for an unknown category is what keeps the seed from
- * CLEARING fiscal data an operator entered by hand: an absent key is not
- * written, so a re-run leaves it untouched (unlike name/color, which the seed
- * owns and restores).
+ * The candidate fiscal columns of a category being CREATED, or `{}` when none are
+ * known. The seed never writes these onto a row that already exists: fiscal data is
+ * the operator's (unlike name/color, which the seed owns and restores), and a re-run
+ * must not undo a correction.
  */
 export function fiscalDataFor(categoryId: string): {
   mxik?: string;

@@ -7,6 +7,7 @@
 import { OrderStatus, PaymentStatus } from '@prisma/client';
 import { SettlementService } from './settlement.service';
 import { OrderStatusService } from '../order-status.service';
+import { PROVIDER_REFUNDABLE_ORDER_STATUSES } from '../order-transitions';
 import {
   order,
   pendingPaymePayment,
@@ -141,16 +142,14 @@ describe('SettlementService', () => {
       });
       prisma.order.updateMany.mockResolvedValue({ count: 1 });
 
-      await svc.markCancelled('pay_1', 4, false);
+      await expect(svc.markCancelled('pay_1', 4, false)).resolves.toBe(
+        'cancelled',
+      );
 
       expect(prisma.payment.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: {
-            id: 'pay_1',
-            status: {
-              notIn: [PaymentStatus.CANCELLED, PaymentStatus.REFUNDED],
-            },
-          },
+          // From PENDING only: this is what keeps it off a row a Perform has paid.
+          where: { id: 'pay_1', status: PaymentStatus.PENDING },
           data: expect.objectContaining({
             status: PaymentStatus.CANCELLED,
             providerState: -1,
@@ -198,9 +197,9 @@ describe('SettlementService', () => {
       });
       prisma.order.updateMany.mockResolvedValue({ count: 0 });
 
-      await expect(
-        svc.markCancelled('pay_1', 4, false),
-      ).resolves.toBeUndefined();
+      await expect(svc.markCancelled('pay_1', 4, false)).resolves.toBe(
+        'cancelled',
+      );
       expect(prisma.order.update).not.toHaveBeenCalled();
     });
 
@@ -213,19 +212,27 @@ describe('SettlementService', () => {
         providerTransactionId: 'pmt-xyz',
       });
 
-      await svc.markCancelled('pay_1', 5, true);
+      await expect(svc.markCancelled('pay_1', 5, true)).resolves.toBe(
+        'refunded',
+      );
 
       expect(prisma.payment.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
+          // From PAID only.
+          where: { id: 'pay_1', status: PaymentStatus.PAID },
           data: expect.objectContaining({
             status: PaymentStatus.REFUNDED,
             providerState: -2,
           }),
         }),
       );
-      expect(prisma.order.update).toHaveBeenCalledWith(
-        expect.objectContaining({ data: { status: OrderStatus.REFUNDED } }),
-      );
+      expect(prisma.order.updateMany).toHaveBeenCalledWith({
+        where: {
+          id: 'ord_1',
+          status: { in: [...PROVIDER_REFUNDABLE_ORDER_STATUSES] },
+        },
+        data: { status: OrderStatus.REFUNDED },
+      });
     });
 
     it('releases the order on a 12h timeout without expiring it', async () => {
@@ -482,6 +489,160 @@ describe('SettlementService.markCancelled — the refund registry (in-memory sto
     await svc.markCancelled('pay_1', 4, false);
 
     expect(store.refunds()).toEqual([]);
+  });
+});
+
+/**
+ * The conditional claims against the store, one branch at a time. These prove the
+ * guards do what they say under the store's semantics; whether PostgreSQL behaves the
+ * same under load is for a real-database test, which this is not.
+ */
+describe('SettlementService.markCancelled — each branch leaves one status only', () => {
+  function build(paymentStatus: PaymentStatus, orderStatus: OrderStatus) {
+    const store = settlementStore({
+      payments: [pendingPaymePayment({ status: paymentStatus })],
+      orders: [order(orderStatus)],
+    });
+    const svc = new SettlementService(
+      store.prisma as any,
+      { emit: jest.fn().mockResolvedValue(undefined) } as any,
+      { emit: jest.fn() } as any,
+      new OrderStatusService(store.prisma as any),
+      fakeConfig({ ORDER_TTL_MIN: '30' }),
+    );
+    return { store, svc };
+  }
+
+  it('the cancel branch cannot overwrite a payment a Perform has paid', async () => {
+    const { store, svc } = build(PaymentStatus.PAID, OrderStatus.PAID);
+
+    await expect(svc.markCancelled('pay_1', 3, false)).resolves.toBe(
+      'paid_meanwhile',
+    );
+
+    expect(store.payment('pay_1').status).toBe(PaymentStatus.PAID);
+    expect(store.order('ord_1').status).toBe(OrderStatus.PAID);
+    expect(store.refunds()).toEqual([]);
+  });
+
+  it('the refund branch cannot refund a payment nobody performed', async () => {
+    const { store, svc } = build(
+      PaymentStatus.PENDING,
+      OrderStatus.PENDING_PAYMENT,
+    );
+
+    await expect(svc.markCancelled('pay_1', 5, true)).resolves.toBe(
+      'not_cancellable',
+    );
+
+    expect(store.payment('pay_1').status).toBe(PaymentStatus.PENDING);
+    expect(store.order('ord_1').status).toBe(OrderStatus.PENDING_PAYMENT);
+    expect(store.refunds()).toEqual([]);
+  });
+
+  it.each([OrderStatus.SHIPPED, OrderStatus.DELIVERED])(
+    'a refund of an order already %s is rolled back whole',
+    async (status) => {
+      const { store, svc } = build(PaymentStatus.PAID, status);
+
+      await expect(svc.markCancelled('pay_1', 5, true)).resolves.toBe(
+        'not_refundable',
+      );
+
+      // The payment claim went back with it: money, order and registry still agree.
+      expect(store.payment('pay_1')).toMatchObject({
+        status: PaymentStatus.PAID,
+        providerState: 1,
+      });
+      expect(store.order('ord_1').status).toBe(status);
+      expect(store.refunds()).toEqual([]);
+      expect(store.history()).toEqual([]);
+    },
+  );
+
+  it.each([OrderStatus.PAID, OrderStatus.PROCESSING, OrderStatus.CANCELLED])(
+    'a refund moves an order from %s to REFUNDED with its registry entry',
+    async (status) => {
+      const { store, svc } = build(PaymentStatus.PAID, status);
+
+      await expect(svc.markCancelled('pay_1', 5, true)).resolves.toBe(
+        'refunded',
+      );
+
+      expect(store.payment('pay_1')).toMatchObject({
+        status: PaymentStatus.REFUNDED,
+        providerState: -2,
+        cancelReason: 5,
+      });
+      expect(store.order('ord_1').status).toBe(OrderStatus.REFUNDED);
+      expect(store.refunds()).toHaveLength(1);
+      expect(
+        store.history().filter((h) => h.status === OrderStatus.REFUNDED),
+      ).toHaveLength(1);
+    },
+  );
+
+  it('a refund of an order already REFUNDED writes no second history row', async () => {
+    const { store, svc } = build(PaymentStatus.PAID, OrderStatus.REFUNDED);
+
+    await expect(svc.markCancelled('pay_1', 5, true)).resolves.toBe('refunded');
+
+    expect(store.order('ord_1').status).toBe(OrderStatus.REFUNDED);
+    expect(store.history()).toEqual([]);
+    expect(store.refunds()).toHaveLength(1);
+  });
+
+  it('a repeated refund reports it was done and enters the money once', async () => {
+    const { store, svc } = build(PaymentStatus.PAID, OrderStatus.PAID);
+
+    await svc.markCancelled('pay_1', 5, true);
+    await expect(svc.markCancelled('pay_1', 5, true)).resolves.toBe(
+      'already_cancelled',
+    );
+
+    expect(store.refunds()).toHaveLength(1);
+  });
+
+  it('losing the claim to another cancel reads as done, not as a failure', async () => {
+    const { svc, store } = build(
+      PaymentStatus.PENDING,
+      OrderStatus.PENDING_PAYMENT,
+    );
+
+    const outcomes = await Promise.all([
+      svc.markCancelled('pay_1', 3, false),
+      svc.markCancelled('pay_1', 3, false),
+    ]);
+
+    expect([...outcomes].sort()).toEqual(['already_cancelled', 'cancelled']);
+    expect(store.payment('pay_1').status).toBe(PaymentStatus.CANCELLED);
+  });
+
+  it('reports an unknown payment', async () => {
+    const { svc } = build(PaymentStatus.PENDING, OrderStatus.PENDING_PAYMENT);
+    await expect(svc.markCancelled('nope', 3, false)).resolves.toBe(
+      'not_found',
+    );
+  });
+});
+
+describe('settlement store sanity — it really exposes the old cancel race', () => {
+  it('the PRE-FIX claim (excluding only cancelled and refunded) overwrites a PAID row', async () => {
+    const store = settlementStore({
+      payments: [pendingPaymePayment({ status: PaymentStatus.PAID })],
+      orders: [order(OrderStatus.PAID)],
+    });
+    // Verbatim shape of the old claim in SettlementService.markCancelled.
+    const claim = await (store.prisma as any).payment.updateMany({
+      where: {
+        id: 'pay_1',
+        status: { notIn: [PaymentStatus.CANCELLED, PaymentStatus.REFUNDED] },
+      },
+      data: { status: PaymentStatus.CANCELLED, providerState: -1 },
+    });
+    expect(claim.count).toBe(1);
+    expect(store.payment('pay_1').status).toBe(PaymentStatus.CANCELLED);
+    expect(store.order('ord_1').status).toBe(OrderStatus.PAID);
   });
 });
 

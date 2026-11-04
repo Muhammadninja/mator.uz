@@ -1,11 +1,9 @@
 import { OilType, PackageForm, ProductKind } from '@prisma/client';
 import {
-  CategoryFiscalData,
-  OIL_TYPE_REQUIRED,
-  resolveOilFiscalCodes,
-  resolvePackageCode,
+  dealerFiscalGaps,
+  FiscalCategorySource,
+  resolveFiscalClassification,
 } from '../../common/fiscal.util';
-import { fiscalizedByOilType } from '../../common/product-kind';
 import { splitEvenLines } from '../promo-allocation.util';
 
 /**
@@ -17,14 +15,36 @@ import { splitEvenLines } from '../promo-allocation.util';
  *
  *   OrderItem ─┬─→ title, count, price (tiyin)
  *              ↓
- *          CatalogPart ─┬─→ category ──→ code         (MXIK / ИКПУ)
- *                       │            └─→ package_code (Tasnif, by sale form)
+ *          CatalogPart ─┬─→ resolveFiscalClassification ─┬─→ code (MXIK / ИКПУ)
+ *                       │                                └─→ package_code
  *                       └─→ seller (dealer) ─┬─→ vat_percent
  *                                            └─→ commission_info.tin
+ *
+ * A sourcing-offer line reaches the same two boxes through its offer: the category
+ * an operator gave it, and the dealer behind the seller who made it. A service line
+ * reaches them through its offering: the category an operator gave it, and its provider.
  *
  * Per ITEM, never per order: one order may carry products from several dealers,
  * so each line is fiscalized with ITS OWN dealer's TIN and VAT rate.
  */
+
+/**
+ * What an order line IS, from what it states rather than from what it lacks. A line
+ * with no part is not thereby a service: a sourcing offer is goods with no part, and
+ * a line stating nothing at all is UNKNOWN, which checkout refuses.
+ */
+export type OrderLineType = 'PRODUCT' | 'SOURCING_OFFER' | 'SERVICE' | 'UNKNOWN';
+
+export function orderLineType(line: {
+  partId?: string | null;
+  offerId?: string | null;
+  serviceId?: string | null;
+}): OrderLineType {
+  if (line.partId) return 'PRODUCT';
+  if (line.offerId) return 'SOURCING_OFFER';
+  if (line.serviceId) return 'SERVICE';
+  return 'UNKNOWN';
+}
 
 /** A line item of a Payme receipt, exactly as it goes on the wire. */
 export interface PaymeFiscalItem {
@@ -85,18 +105,12 @@ export interface FiscalLineSource {
    * is the same number for every undiscounted line.
    */
   lineTotalUzs?: number;
-  /** The item's category fiscal data, or null when the part is gone. */
-  category: CategoryFiscalData | null;
+  /** The category the item is filed on, or null when that is unknown. */
+  category: FiscalCategorySource | null;
   /** The sale form chosen for the listing; null ⇒ the single package code. */
   packageForm: PackageForm | null;
-  /**
-   * The listing's kind. It decides WHERE the codes come from: a kind whose
-   * capability entry says `fiscalizedByOilType` (motor oil) reads `oilType`,
-   * because the registry classifies oil by base composition; every other kind —
-   * ANTIFREEZE included — reads its own category's columns.
-   */
+  /** The listing's kind and oil type, for resolveFiscalClassification. */
   kind: ProductKind;
-  /** Base composition of a motor oil; null for every other kind. */
   oilType: OilType | null;
   /** The dealer's tax data, or null when the part is gone. */
   dealer: { tin: string | null; vatPercent: number | null } | null;
@@ -109,9 +123,10 @@ export interface FiscalFeeSource {
   title: string;
   /** The charge in UZS. */
   amountUzs: number;
-  /** The platform's codes for this charge (see readPaymeFiscalConfig). */
+  /** The platform's codes for this charge (see PaymeFiscalConfig). */
   codes: { mxik: string | null; packageCode: string | null };
-  vatPercent: number;
+  /** Null when no valid rate is configured, which refuses the line. */
+  vatPercent: number | null;
   /** The MARKETPLACE's tax id, or null to omit commission_info entirely. */
   marketplaceTin: string | null;
 }
@@ -130,60 +145,25 @@ export type FiscalLineResult =
 /**
  * Map one order line to its fiscal item, or report exactly what is missing.
  *
- * A line is only fiscalizable when all four facts are present: MXIK, a package
- * code, the dealer's TIN and the dealer's VAT rate. Missing data is reported —
- * never substituted — because every plausible default here is a lie to the tax
- * authority: an absent VAT rate is not 0%, and an absent MXIK has no stand-in.
+ * A line is only fiscalizable when the classification resolves (a confirmed MXIK and
+ * package code of its own) and the dealer's TIN and VAT rate are present. Missing
+ * data is reported — never substituted — because every plausible default here is a
+ * lie to the tax authority: an absent VAT rate is not 0%, and an absent MXIK has no
+ * stand-in.
  */
 export function buildFiscalItem(line: FiscalLineSource): FiscalLineResult {
-  const gaps: string[] = [];
+  const classification = resolveFiscalClassification(line);
+  const gaps = [
+    ...(classification.ok ? [] : classification.gaps),
+    ...dealerFiscalGaps(line.dealer),
+  ];
 
-  // WHERE the codes come from is decided by the listing, not by the caller:
-  // motor oil is classified by base composition (three MXIKs under one
-  // category), everything else by its category. The rule is read from the kind
-  // capability table, so it is stated once and shared with the wizard and the
-  // admin console rather than re-derived here as a `kind === MOTOR_OIL` check.
-  //
-  // The second clause is the long-standing defensive one: a SPARE_PART carrying
-  // an oil type is an oil however it was classified, and fiscalizing it off an
-  // unrelated category's code would be wrong. (`!= null`, so an absent field
-  // reads like a null one instead of sending every product down the oil path.)
-  // It is deliberately NOT extended to a kind that has its own fiscal taxonomy:
-  // ANTIFREEZE must keep its OWN category's IKPU, and a stray oilType on such a
-  // row must never divert it onto a motor-oil code.
-  const byOilType =
-    fiscalizedByOilType(line.kind) ||
-    (line.kind === ProductKind.SPARE_PART && line.oilType != null);
-
-  let mxik: string | null;
-  let packageCode: string | null;
-  if (byOilType) {
-    const oil = resolveOilFiscalCodes(line.oilType);
-    mxik = oil?.mxik ?? null;
-    packageCode = oil?.packageCode ?? null;
-    if (!oil) gaps.push(OIL_TYPE_REQUIRED);
-  } else {
-    mxik = line.category?.mxik ?? null;
-    packageCode = line.category
-      ? resolvePackageCode(line.category, line.packageForm)
-      : null;
-    if (!line.category) gaps.push('category fiscal data is unavailable');
-    if (!mxik) gaps.push('category has no MXIK');
-    if (!packageCode) gaps.push('category has no package code');
-  }
-
-  const tin = line.dealer?.tin ?? null;
-  const vatPercent = line.dealer?.vatPercent ?? null;
-
-  if (!line.dealer) gaps.push('dealer is unavailable');
-  else {
-    if (!tin) gaps.push('dealer has no TIN');
-    if (vatPercent === null) gaps.push('dealer has no VAT percentage');
-  }
-
-  if (gaps.length > 0) {
+  if (!classification.ok || gaps.length > 0) {
     return { ok: false, gaps: gaps.map((g) => `${line.reference}: ${g}`) };
   }
+  const { mxik, packageCode } = classification;
+  const tin = line.dealer?.tin;
+  const vatPercent = line.dealer?.vatPercent;
 
   // Tiyin, rounded the same way the payable amount is (Math.round on UZS × 100),
   // so a receipt line can never disagree with the charge. The LINE TOTAL is what
@@ -199,8 +179,8 @@ export function buildFiscalItem(line: FiscalLineSource): FiscalLineResult {
       title: line.title,
       price: split.unitPriceTiyin,
       count: split.count,
-      code: mxik as string,
-      package_code: packageCode as string,
+      code: mxik,
+      package_code: packageCode,
       vat_percent: vatPercent as number,
       commission_info: { tin: tin as string },
     })),
@@ -213,18 +193,22 @@ export function buildFiscalItem(line: FiscalLineSource): FiscalLineResult {
  * Payme reconciles a receipt against the amount actually charged, so every
  * component of the order total needs a line — a receipt listing only the goods
  * is short by exactly the fees. These lines are the PLATFORM's, not a dealer's:
- * their codes come from configuration and their `commission_info` is the
- * marketplace's TIN, omitted entirely when none is configured.
+ * delivery has a fixed system code, the service fee's comes from configuration, and
+ * their `commission_info` is the marketplace's TIN, omitted entirely when none is
+ * configured.
  *
- * Reports a gap instead of guessing when the codes are unset — a charge
- * fiscalized under a code that describes something else is worse than a refused
- * checkout, and the operator only has to set two environment variables.
+ * Reports a gap instead of guessing when a code or the VAT rate is unset: a charge
+ * fiscalized under a code that describes something else, or a rate nobody stated, is
+ * worse than a refused checkout.
  */
 export function buildFeeItem(fee: FiscalFeeSource): FiscalLineResult {
   const gaps: string[] = [];
   if (!fee.codes.mxik) gaps.push(`${fee.reference}: no MXIK is configured`);
   if (!fee.codes.packageCode) {
     gaps.push(`${fee.reference}: no package code is configured`);
+  }
+  if (fee.vatPercent === null) {
+    gaps.push(`${fee.reference}: no valid VAT percentage is configured`);
   }
   if (gaps.length > 0) return { ok: false, gaps };
 
@@ -239,7 +223,7 @@ export function buildFeeItem(fee: FiscalFeeSource): FiscalLineResult {
       count: 1,
       code: fee.codes.mxik as string,
       package_code: fee.codes.packageCode as string,
-      vat_percent: fee.vatPercent,
+      vat_percent: fee.vatPercent as number,
       // Omitted (not blanked) when the platform has no TIN configured: Payme
       // then attributes the line to the merchant account itself.
       ...(fee.marketplaceTin

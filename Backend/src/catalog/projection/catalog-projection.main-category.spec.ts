@@ -172,6 +172,20 @@ describe('CatalogProjectionService — mainCategory from the category tree', () 
     });
     expect(update).not.toHaveProperty('mainCategory');
     expect(update).not.toHaveProperty('categoryId');
+    // The kind and oil type go with it: a composition category states the oil type,
+    // so restoring the product's would contradict the category the part stayed on.
+    expect(update).not.toHaveProperty('kind');
+    expect(update).not.toHaveProperty('oilType');
+  });
+
+  it('a re-listed Telegram part takes its kind and oil type with its category', async () => {
+    const { create, update } = await project({
+      categoryId: 'spark-plugs',
+      mainCategory: null,
+      sourceSystem: null,
+    });
+    expect(update).toMatchObject({ kind: 'SPARE_PART', oilType: null });
+    expect(create).toMatchObject({ kind: 'SPARE_PART', oilType: null });
   });
 
   it('the classification import writes the derived bucket with its compare-and-set', async () => {
@@ -191,6 +205,8 @@ describe('CatalogProjectionService — mainCategory from the category tree', () 
         categoryId: 'front-brake-pads',
         mainCategory: B.BRAKES,
         vehicleCategory: null,
+        kind: 'SPARE_PART',
+        oilType: null,
       },
     });
   });
