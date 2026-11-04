@@ -8,11 +8,14 @@
 // end to end through the real CategoriesService / PartsService predicates —
 // that the part then counts and lists under the tile of its new category.
 
-import { NotFoundException } from '@nestjs/common';
+import { ConflictException, NotFoundException } from '@nestjs/common';
 import {
+  AdminAuditAction,
   DealerStatus,
+  OilType,
   PartMainCategory as B,
   PartVehicleCategory as V,
+  ProductKind,
 } from '@prisma/client';
 import { AdminCategoriesService } from './admin-categories.service';
 import { CategoriesService } from '../../catalog/categories/categories.service';
@@ -30,6 +33,8 @@ type PartRow = {
   categoryId: string;
   mainCategory: B | null;
   vehicleCategory: V | null;
+  kind: ProductKind;
+  oilType: OilType | null;
   priceUzs: number;
   stockQty: number;
   inStock: boolean;
@@ -51,6 +56,8 @@ const part = (
   categoryId,
   mainCategory,
   vehicleCategory,
+  kind: ProductKind.SPARE_PART,
+  oilType: null,
   priceUzs: 185_000,
   stockQty: 4,
   inStock: true,
@@ -80,8 +87,11 @@ function adminWorld(rows: PartRow[], tree: readonly TreeRow[] = LIVE_TREE) {
     productDraft: { count: jest.fn().mockResolvedValue(0) },
     sale: { findMany: jest.fn().mockResolvedValue([]) },
     catalogPart: {
+      // Copies, as Prisma returns: what was read must not change under the reader.
       findMany: jest.fn(({ where }: { where: unknown }) =>
-        Promise.resolve(rows.filter((r) => matchesWhere(r, where))),
+        Promise.resolve(
+          rows.filter((r) => matchesWhere(r, where)).map((r) => ({ ...r })),
+        ),
       ),
       count: jest.fn(({ where }: { where: unknown }) =>
         Promise.resolve(rows.filter((r) => matchesWhere(r, where)).length),
@@ -104,15 +114,16 @@ function adminWorld(rows: PartRow[], tree: readonly TreeRow[] = LIVE_TREE) {
     ),
   };
   const categories = { invalidate: jest.fn().mockResolvedValue(undefined) };
+  const audit = {
+    record: jest.fn().mockResolvedValue(undefined),
+    recordMany: jest.fn().mockResolvedValue(undefined),
+  };
   const service = new AdminCategoriesService(
     prisma as never,
     categories as never,
-    {
-      record: jest.fn().mockResolvedValue(undefined),
-      recordMany: jest.fn().mockResolvedValue(undefined),
-    } as never,
+    audit as never,
   );
-  return { service, prisma };
+  return { service, prisma, audit };
 }
 
 /** The 12 home-grid rows, as categories.service.ts selects them. */
@@ -221,7 +232,6 @@ describe('bulk-move — the filing a move writes', () => {
     ['tire-pressure-sensors', B.ELECTRICAL_PARTS, V.ELECTRICAL_AND_LIGHTING],
     // filed under "Другое" in production: a bucket, but no vehicle system
     ['wiper-blades', B.WIPERS, null],
-    ['synthetic-motor-oil', B.OIL_AND_FLUIDS, null],
     // no home bucket among the 12: on no tile, still its system
     ['clutch-kits', null, V.TRANSMISSION],
     ['fuel-and-oil-pumps', null, V.ENGINE],
@@ -308,6 +318,175 @@ describe('bulk-move — the filing a move writes', () => {
     expect(prisma.catalogPart.updateMany).not.toHaveBeenCalled();
     expect(prisma.$transaction).not.toHaveBeenCalled();
     expect(rows[0]).toEqual(before);
+  });
+});
+
+// A move decides what a part's receipt says: its category supplies the code. So it
+// may not leave a contradiction behind, and may not change a kind unless told to.
+describe('bulk-move — kind and oil type', () => {
+  const oil = (id: string, categoryId: string, oilType: OilType | null) => ({
+    ...part(id, categoryId, B.OIL_AND_FLUIDS, null),
+    kind: ProductKind.MOTOR_OIL,
+    oilType,
+  });
+
+  it('a motor oil re-filed between compositions takes the new type, on its new tile', async () => {
+    const rows = [oil('p1', 'mineral-motor-oil', OilType.MINERAL)];
+    const { service, audit } = adminWorld(rows);
+
+    const res = await service.bulkMoveProducts({
+      productIds: ['p1'],
+      targetCategoryId: 'synthetic-motor-oil',
+    });
+
+    expect(rows[0]).toMatchObject({
+      categoryId: 'synthetic-motor-oil',
+      mainCategory: B.OIL_AND_FLUIDS,
+      vehicleCategory: null,
+      kind: ProductKind.MOTOR_OIL,
+      oilType: OilType.SYNTHETIC,
+    });
+    expect(res.data.moved).toBe(1);
+    // On the record, or nobody could later tell why its MXIK changed.
+    expect(audit.recordMany.mock.calls[0][0][0]).toMatchObject({
+      action: AdminAuditAction.CATALOG_PART_MOVED,
+      previousValues: {
+        categoryId: 'mineral-motor-oil',
+        oilType: OilType.MINERAL,
+      },
+      newValues: {
+        categoryId: 'synthetic-motor-oil',
+        oilType: OilType.SYNTHETIC,
+      },
+    });
+  });
+
+  it('transmission oil denotes no composition, so the old type goes', async () => {
+    const rows = [oil('p1', 'synthetic-motor-oil', OilType.SYNTHETIC)];
+    const { service } = adminWorld(rows);
+
+    await service.bulkMoveProducts({
+      productIds: ['p1'],
+      targetCategoryId: 'transmission-oil',
+    });
+
+    expect(rows[0]).toMatchObject({
+      categoryId: 'transmission-oil',
+      oilType: null,
+    });
+  });
+
+  const refused = async (
+    rows: PartRow[],
+    targetCategoryId: string,
+    code: string,
+  ) => {
+    const before = rows.map((r) => ({ ...r }));
+    const { service, prisma, audit } = adminWorld(rows);
+    const error = await service
+      .bulkMoveProducts({ productIds: rows.map((r) => r.id), targetCategoryId })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ConflictException);
+    expect((error as ConflictException).getResponse()).toMatchObject({ code });
+    expect(prisma.catalogPart.updateMany).not.toHaveBeenCalled();
+    expect(audit.recordMany).not.toHaveBeenCalled();
+    expect(rows).toEqual(before);
+  };
+
+  it('a spare part cannot go onto a composition: a move never changes a kind', () =>
+    refused(
+      [part('p1', 'front-brake-pads', B.BRAKES, V.BRAKE_SYSTEM)],
+      'synthetic-motor-oil',
+      'KIND_MISMATCH',
+    ));
+
+  it('nor a motor oil onto a brake category', () =>
+    refused(
+      [oil('p1', 'mineral-motor-oil', OilType.MINERAL)],
+      'front-brake-pads',
+      'KIND_MISMATCH',
+    ));
+
+  it('a type the seller stated elsewhere stops a move onto another composition', () =>
+    refused(
+      [oil('p1', 'oil-and-fluids', OilType.MINERAL)],
+      'synthetic-motor-oil',
+      'OIL_TYPE_CONFLICT',
+    ));
+
+  it('the `motor-oil` parent cannot say which composition an oil is', () =>
+    refused(
+      [oil('p1', 'mineral-motor-oil', OilType.MINERAL)],
+      'motor-oil',
+      'OIL_COMPOSITION_REQUIRED',
+    ));
+
+  it('one part that cannot go stops the batch: no half-done move', () =>
+    refused(
+      [
+        oil('p1', 'mineral-motor-oil', OilType.MINERAL),
+        part('p2', 'front-brake-pads', B.BRAKES, V.BRAKE_SYSTEM),
+      ],
+      'synthetic-motor-oil',
+      'KIND_MISMATCH',
+    ));
+
+  describe('with the kind stated explicitly', () => {
+    it('types a mis-typed oil, and the audit trail says so', async () => {
+      // A Driver’s Village oil filed by hand before typing existed: only an operator
+      // can say what it really is, and this is where they say it.
+      const rows = [part('p1', 'oil-and-fluids', B.OIL_AND_FLUIDS, null)];
+      const { service, audit } = adminWorld(rows);
+
+      await service.bulkMoveProducts({
+        productIds: ['p1'],
+        targetCategoryId: 'synthetic-motor-oil',
+        kind: ProductKind.MOTOR_OIL,
+      });
+
+      expect(rows[0]).toMatchObject({
+        categoryId: 'synthetic-motor-oil',
+        kind: ProductKind.MOTOR_OIL,
+        oilType: OilType.SYNTHETIC,
+      });
+      expect(audit.recordMany.mock.calls[0][0][0]).toMatchObject({
+        previousValues: { kind: ProductKind.SPARE_PART, oilType: null },
+        newValues: {
+          kind: ProductKind.MOTOR_OIL,
+          oilType: OilType.SYNTHETIC,
+        },
+      });
+    });
+
+    it('calling an oil a spare part drops its oil type', async () => {
+      const rows = [oil('p1', 'mineral-motor-oil', OilType.MINERAL)];
+      const { service } = adminWorld(rows);
+
+      await service.bulkMoveProducts({
+        productIds: ['p1'],
+        targetCategoryId: 'front-brake-pads',
+        kind: ProductKind.SPARE_PART,
+      });
+
+      expect(rows[0]).toMatchObject({
+        categoryId: 'front-brake-pads',
+        kind: ProductKind.SPARE_PART,
+        oilType: null,
+      });
+    });
+
+    it('a stated kind still has to fit the target', async () => {
+      const rows = [part('p1', 'front-brake-pads', B.BRAKES, V.BRAKE_SYSTEM)];
+      const { service } = adminWorld(rows);
+
+      await expect(
+        service.bulkMoveProducts({
+          productIds: ['p1'],
+          targetCategoryId: 'air-filters',
+          kind: ProductKind.MOTOR_OIL,
+        }),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
   });
 });
 

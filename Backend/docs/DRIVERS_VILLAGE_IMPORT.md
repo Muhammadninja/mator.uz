@@ -531,5 +531,18 @@ Rules (`drivers-village-classification.rules.ts`):
   vehicles (`universal_cleared`). `fitment_bindings` (Fitment Studio) are
   never written; a part that has them is flagged `curated_fitment_present`
   (buyer fitment uses the bindings first).
+- **Kind.** 1C does not say what a position is, so the sync imports every position as
+  `SPARE_PART` and neither job types one from its name ("oil seal" is no oil). The one
+  thing that states it is the file filing the position on an oil category that decides
+  it: a motor-oil composition makes it `MOTOR_OIL` with that `oil_type`, and
+  `transmission-oil` makes it `MOTOR_OIL` with none (`kind_set_from_category` in the
+  report). A position already on such a category is typed without moving it (action
+  `retype`). The `motor-oil` parent names no composition, so it leaves the kind alone.
+  A position whose category the import keeps (`manual_category_preserved`) is typed
+  from the admin console instead: `PATCH /v1/admin/products/bulk-move` with `kind`.
 - Never written: prices, stock, names, numbers, photos, rating, catalog
   settings. Applying the same file again writes nothing.
+
+A classified position still cannot be paid for online until its category's fiscal
+codes are confirmed against Tasnif, see `docs/CATEGORY_ARCHITECTURE.md` §9. A position
+left on `cat_uncategorized` is refused at checkout.

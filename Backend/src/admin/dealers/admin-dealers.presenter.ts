@@ -1,4 +1,5 @@
 import { DealerStatus, Prisma } from '@prisma/client';
+import { dealerFiscalGaps } from '../../common/fiscal.util';
 
 /**
  * Prisma `select` for an admin dealer row — only the columns the projection
@@ -103,7 +104,11 @@ export function presentAdminDealerDetail(d: AdminDealerDetail) {
     tin: d.tin ?? null,
     vatPercent: d.vatPercent == null ? null : Number(d.vatPercent),
     /** Derived: whether this dealer's products can be paid for through Payme. */
-    fiscalConfigured: d.tin != null && d.vatPercent != null,
+    fiscalConfigured:
+      dealerFiscalGaps({
+        tin: d.tin ?? null,
+        vatPercent: d.vatPercent ?? null,
+      }).length === 0,
     // Only meaningful while suspended; cleared on reactivation, so a stale
     // reason never trails an active dealer.
     suspendedReason:

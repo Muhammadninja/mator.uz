@@ -17,12 +17,17 @@ import {
   CATEGORY_ID_TO_KIND,
   CategoryAnchor,
   categoryParentMap,
-  isFiscalizedByOilType,
+  decideListingMove,
   mainCategoryForCategory,
+  oilTypeDictatedBy,
   vehicleCategoryForCategory,
 } from '../../catalog/categories/category-map';
 import { PartCategoryService } from '../../catalog/categories/part-category.service';
-import { isCategoryFiscallyConfigured } from '../../common/fiscal.util';
+import {
+  categoryFiscalReadiness,
+  confirmableFiscalCodes,
+  FISCAL_CATEGORY_SELECT,
+} from '../../common/fiscal.util';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AdminAuditService } from '../auth/admin-audit.service';
 import { AdminAuditContext } from '../auth/admin-auth.service';
@@ -31,17 +36,13 @@ import { writeCategoryTree } from './category-tree-lock';
 import { TransferCategoryDto } from './dto/transfer-category.dto';
 
 const TARGET_SELECT = {
-  id: true,
+  ...FISCAL_CATEGORY_SELECT,
   name: true,
   nameRu: true,
   nameUz: true,
   nameEn: true,
-  parentId: true,
   level: true,
   isActive: true,
-  mxik: true,
-  packageCodeSingle: true,
-  packageCodeSet: true,
 } satisfies Prisma.PartCategorySelect;
 
 type CategoryRow = Prisma.PartCategoryGetPayload<{
@@ -73,6 +74,9 @@ export interface TransferIssue {
  *   • product_drafts — the same, for drafts that can still become a listing. Finished
  *     drafts are history. A sale form answered for the old category is cleared, as the
  *     wizard clears it whenever the chosen category changes.
+ *   • oil_type — the composition the target states, on all three, when it states one:
+ *     a composition category and an oil type saying different things is exactly what
+ *     checkout refuses. A kind is never changed: a listing of another kind blocks.
  *
  * Prices, stock, photos, fitment and fiscal codes are not written. Fiscal codes live
  * on the category, so moving a listing changes which ones apply: the plan reports
@@ -239,12 +243,12 @@ export class AdminCategoryTransferService {
       client.catalogPart.count({ where: onNode }),
       client.product.count({ where: onNode }),
       client.product.groupBy({
-        by: ['kind'],
+        by: ['kind', 'oilType'],
         where: onNode,
         _count: { _all: true },
       }),
       client.catalogPart.groupBy({
-        by: ['kind'],
+        by: ['kind', 'oilType'],
         where: onNode,
         _count: { _all: true },
       }),
@@ -346,10 +350,43 @@ export class AdminCategoryTransferService {
       }
     }
 
+    // ── an oil's type has to agree with the category it ends up on ──────────
+    const oilGroups = [...listingKinds, ...partKinds].filter(
+      (g) => g.kind === ProductKind.MOTOR_OIL,
+    );
+    const oilRefusals = oilGroups
+      .map((g) => ({
+        decision: decideListingMove({ ...g, categoryId: source.id }, target),
+        items: g._count._all,
+      }))
+      .flatMap(({ decision, items }) =>
+        decision.ok ? [] : [{ ...decision, items }],
+      );
+    for (const code of new Set(oilRefusals.map((r) => r.code))) {
+      const hit = oilRefusals.filter((r) => r.code === code);
+      blockers.push({
+        code,
+        message: `${hit.reduce((n, r) => n + r.items, 0)} item(s) cannot move. ${hit[0].message}`,
+      });
+    }
+    const dictated = oilTypeDictatedBy(target.id);
+    const retyped = dictated
+      ? oilGroups
+          .filter((g) => g.oilType !== dictated.oilType)
+          .reduce((n, g) => n + g._count._all, 0)
+      : 0;
+    if (retyped > 0 && oilRefusals.length === 0) {
+      warnings.push({
+        code: 'OIL_TYPE_CHANGES',
+        message: `${retyped} item(s) take the oil type "${target.name}" states, and with it the fiscal codes of that type.`,
+      });
+    }
+
     // ── fiscal codes come from the category, so moving changes which apply ──
-    const fiscallyReady = (c: CategoryRow) =>
-      isFiscalizedByOilType(c) || isCategoryFiscallyConfigured(c);
-    if (fiscallyReady(source) && !fiscallyReady(target)) {
+    const hasCodes = (c: CategoryRow) => confirmableFiscalCodes(c) !== null;
+    const isReady = (c: CategoryRow) =>
+      categoryFiscalReadiness(c).status === 'READY';
+    if (hasCodes(source) && !hasCodes(target)) {
       blockers.push({
         code: 'TARGET_NOT_FISCALIZED',
         message:
@@ -363,6 +400,13 @@ export class AdminCategoryTransferService {
         code: 'FISCAL_CODES_CHANGE',
         message:
           'Moved products will be fiscalized with the target category’s codes from now on.',
+      });
+    }
+    if (isReady(source) && !isReady(target)) {
+      warnings.push({
+        code: 'TARGET_NOT_READY',
+        message:
+          'Products here can be paid for online today and could not be after the move: the target is not confirmed against Tasnif yet.',
       });
     }
     if (soldAsSet > 0 && !target.packageCodeSet) {
@@ -444,6 +488,9 @@ export class AdminCategoryTransferService {
     const main = mainCategoryForCategory(target.id, parentOf);
     const vehicle = vehicleCategoryForCategory(target.id, parentOf);
     const root = targetRootId!;
+    // Only a target that states an oil type writes one. The plan has refused anything
+    // but an oil on such a target, so this reaches no other kind of row.
+    const oilType = oilTypeDictatedBy(target.id) ?? {};
 
     const parts = await tx.catalogPart.updateMany({
       where: { categoryId: source.id },
@@ -451,6 +498,7 @@ export class AdminCategoryTransferService {
         categoryId: target.id,
         mainCategory: main,
         vehicleCategory: vehicle,
+        ...oilType,
       },
     });
 
@@ -465,7 +513,7 @@ export class AdminCategoryTransferService {
     });
     const otherKinds = await tx.product.updateMany({
       where: { categoryId: source.id, kind: { not: ProductKind.SPARE_PART } },
-      data: { categoryId: target.id, vehicleCategoryId: root },
+      data: { categoryId: target.id, vehicleCategoryId: root, ...oilType },
     });
 
     const liveDraft = {
@@ -495,6 +543,7 @@ export class AdminCategoryTransferService {
         categoryId: target.id,
         vehicleCategoryId: root,
         packageForm: null,
+        ...oilType,
       },
     });
 

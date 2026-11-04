@@ -12,6 +12,8 @@
  * bootstrap instead of serving an open webhook.
  */
 
+import { MAX_VAT_PERCENT, MIN_VAT_PERCENT } from '../../common/fiscal.util';
+
 /** Official Payme checkout host — used when PAYME_CHECKOUT_URL is not set. */
 export const DEFAULT_PAYME_CHECKOUT_URL = 'https://checkout.paycom.uz';
 
@@ -123,50 +125,63 @@ export function validatePaymeEnv(
  * Fiscal codes for the PLATFORM's own charges — the lines a receipt needs
  * beyond the goods, so its total matches what the customer is charged.
  *
- * Read from configuration rather than hardcoded because they are the
- * marketplace's own classification, not a category's: an operator registers the
- * business's services in Tasnif and puts the resulting codes here. Delivery
- * ships with the courier-service defaults below; the service fee ships with
- * NONE, so an order carrying one is refused with a message naming these keys
- * rather than fiscalized under a code that describes delivery.
+ * They are the marketplace's own classification, not a category's, so the console's
+ * confirmation does not apply to them. Delivery's are fixed in DELIVERY_FISCAL_CODES.
+ * The service fee's are read from configuration, because an operator registers that
+ * service in Tasnif and puts the resulting codes here; it ships with NONE, so an order
+ * carrying one is refused with a message naming these keys rather than fiscalized
+ * under a code that describes delivery.
  *
- * Names are unprefixed to sit beside the charges they describe
- * (DELIVERY_COURIER_UZS, SERVICE_FEE_UZS), which is where an operator will look.
+ * A rate is never assumed: with no valid one configured, `vatPercent` is null and the
+ * line that needs it is refused.
  */
 export interface PaymeFiscalConfig {
   delivery: PlatformChargeFiscal;
   serviceFee: PlatformChargeFiscal;
   /** The marketplace's own ИНН, attached to platform lines. Null ⇒ omitted. */
   marketplaceTin: string | null;
+  /**
+   * Whether an order made up ONLY of service lines may be paid online at all. Off
+   * unless the variable is exactly `true`. Turning it on lifts only that refusal: every
+   * line still needs a confirmed classification and its provider's tax data, exactly
+   * like goods, so it is no way around any fiscal requirement.
+   */
+  allowServiceOnlyOrders: boolean;
 }
 
 export interface PlatformChargeFiscal {
   mxik: string | null;
   packageCode: string | null;
-  vatPercent: number;
+  /** The rate an operator stated. Null when there is none, or it is no percentage. */
+  vatPercent: number | null;
 }
 
-/** Courier/delivery services. Overridable per deployment. */
-export const DEFAULT_DELIVERY_MXIK = '05320001001000000';
-export const DEFAULT_DELIVERY_PACKAGE_CODE = '1000000';
+/**
+ * Delivery on a receipt, by business decision: the customer pays for it through Payme
+ * as part of the order, so it is a line of its own under this system code. It is
+ * neither a category's, so nothing in the console confirms it, nor configuration, so
+ * no environment can put another code on a receipt. The unit is «услуга (сум)», which
+ * the Payme contract carries by its code alone.
+ */
+export const DELIVERY_FISCAL_CODES = {
+  mxik: '10112006002000000',
+  packageCode: '1542432',
+} as const;
 
 export function readPaymeFiscalConfig(
   get: (key: string) => string | undefined,
 ): PaymeFiscalConfig {
-  const percent = (key: string): number => {
+  const percent = (key: string): number | null => {
     const raw = asTrimmedString(get(key));
     const parsed = Number(raw);
-    // An unset or unparseable rate is 0, never a guess: the platform's own
-    // services are VAT-exempt unless an operator states otherwise.
-    return raw && Number.isFinite(parsed) ? parsed : 0;
+    return raw && parsed >= MIN_VAT_PERCENT && parsed <= MAX_VAT_PERCENT
+      ? parsed
+      : null;
   };
 
   return {
     delivery: {
-      mxik: asTrimmedString(get('DELIVERY_MXIK')) || DEFAULT_DELIVERY_MXIK,
-      packageCode:
-        asTrimmedString(get('DELIVERY_PACKAGE_CODE')) ||
-        DEFAULT_DELIVERY_PACKAGE_CODE,
+      ...DELIVERY_FISCAL_CODES,
       vatPercent: percent('DELIVERY_VAT_PERCENT'),
     },
     serviceFee: {
@@ -177,6 +192,8 @@ export function readPaymeFiscalConfig(
       vatPercent: percent('SERVICE_FEE_VAT_PERCENT'),
     },
     marketplaceTin: asTrimmedString(get('MARKETPLACE_TIN')) || null,
+    allowServiceOnlyOrders:
+      asTrimmedString(get('PAYME_ALLOW_SERVICE_ONLY_ORDERS')) === 'true',
   };
 }
 

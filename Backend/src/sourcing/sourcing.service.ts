@@ -1,7 +1,21 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma, SourcingTicket, SourcingTicketStatus } from '@prisma/client';
+import {
+  AdminAuditAction,
+  AdminAuditEntity,
+  Prisma,
+  SourcingTicket,
+  SourcingTicketStatus,
+} from '@prisma/client';
+import { AdminAuditService } from '../admin/auth/admin-audit.service';
+import { AdminAuditContext } from '../admin/auth/admin-auth.service';
+import { listingTypeForCategory } from '../catalog/categories/category-map';
+import {
+  FISCAL_CATEGORY_SELECT,
+  resolveFiscalClassification,
+} from '../common/fiscal.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { clampLimit } from '../common/pagination.util';
+import { ClassifySourcingOfferDto } from './dto/classify-sourcing-offer.dto';
 import { QuerySourcingTicketsDto } from './dto/query-sourcing-tickets.dto';
 import { noticeForStatus } from './sourcing-notice.copy';
 
@@ -15,7 +29,84 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
  */
 @Injectable()
 export class SourcingService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly audit: AdminAuditService,
+  ) {}
+
+  /**
+   * Say what an offer IS, so it can reach a receipt: the category supplying its MXIK
+   * and the sale form picking its package code. A seller's offer carries neither, and
+   * the part name the customer typed is no classification, so an operator decides.
+   * Until then checkout refuses the offer. The reply reports what the resolver would
+   * still refuse, so the operator sees at once whether it is payable now.
+   */
+  async classifyOffer(
+    offerId: string,
+    dto: ClassifySourcingOfferDto,
+    ctx: AdminAuditContext = {},
+  ) {
+    return this.prisma.$transaction(async (tx) => {
+      const offer = await tx.sourcingOffer.findUnique({
+        where: { id: offerId },
+        select: { id: true, categoryId: true, packageForm: true },
+      });
+      if (!offer) throw new NotFoundException('Sourcing offer not found');
+
+      const category = dto.categoryId
+        ? await tx.partCategory.findUnique({
+            where: { id: dto.categoryId },
+            select: { ...FISCAL_CATEGORY_SELECT, name: true },
+          })
+        : null;
+      if (dto.categoryId && !category) {
+        throw new NotFoundException('Category not found');
+      }
+
+      const packageForm = dto.packageForm ?? null;
+      await tx.sourcingOffer.update({
+        where: { id: offerId },
+        data: { categoryId: category?.id ?? null, packageForm },
+      });
+      await this.audit.record(
+        {
+          action: AdminAuditAction.SOURCING_OFFER_CLASSIFIED,
+          actor: ctx.actor,
+          actorLabel: ctx.actorLabel,
+          target: {
+            entity: AdminAuditEntity.SOURCING_OFFER,
+            id: offerId,
+            name: category?.name ?? offerId,
+          },
+          previousValues: {
+            categoryId: offer.categoryId,
+            packageForm: offer.packageForm,
+          },
+          newValues: { categoryId: category?.id ?? null, packageForm },
+          ip: ctx.ip,
+          userAgent: ctx.userAgent,
+        },
+        tx,
+      );
+
+      const classification = category
+        ? resolveFiscalClassification({
+            ...listingTypeForCategory(category.id),
+            packageForm,
+            category,
+          })
+        : { ok: false as const, gaps: ['the offer has no category'] };
+      return {
+        success: true,
+        data: {
+          id: offerId,
+          categoryId: category?.id ?? null,
+          packageForm,
+          fiscalGaps: classification.ok ? [] : classification.gaps,
+        },
+      };
+    });
+  }
 
   /**
    * A customer's still-open ticket for the same part on the same car, so asking
@@ -79,6 +170,8 @@ export class SourcingService {
               sellerName: true,
               sellerUsername: true,
               declineReason: true,
+              categoryId: true,
+              packageForm: true,
               createdAt: true,
             },
           },

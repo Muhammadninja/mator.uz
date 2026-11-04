@@ -88,8 +88,11 @@ does not need to send it.
 | `mxik` | `string \| null` | MXIK / ИКПУ, exactly 17 digits. `null` = not configured. |
 | `packageCodeSingle` | `string \| null` | Tasnif package code for "Штука" (a single item). |
 | `packageCodeSet` | `string \| null` | Tasnif package code for "Комплект / набор" (a set). Optional even on a configured category — see [1.7](#17-the-fiscal-fields). |
-| `fiscalConfigured` | `boolean` | **Derived.** Whether products in this category can be fiscalized (and therefore sold through Payme) at all. |
-| `fiscalByOilType` | `boolean` | **Derived.** `true` when this category's products are fiscalized from their own `oilType`, not from the category's codes — see [1.7](#17-the-fiscal-fields). |
+| `fiscalConfigured` | `boolean` | **Derived.** Whether products in this category can reach a receipt (and therefore be sold through Payme). `false` until the codes are confirmed — see [1.7](#17-the-fiscal-fields). |
+| `fiscalByOilType` | `boolean` | **Derived.** `true` on a motor-oil composition category with no MXIK of its own, whose codes come from a table rather than from the columns above — see [1.7](#17-the-fiscal-fields). |
+| `fiscalStatus` | `string` | **Derived.** `READY`, `NEEDS_CONFIRMATION`, `NEEDS_CODES` or `NOT_SELLABLE` (a parent, the fallback bucket, or a node still holding a code for one product of many). |
+| `fiscalGaps` | `string[]` | **Derived.** Every reason checkout refuses this category; empty when ready. For operators, not customers. |
+| `fiscalCodesToConfirm` | `string \| null` | **Derived.** The codes a listing here would carry, as `mxik:single:set`. What to check in Tasnif, and what to send back to confirm them. `null` when there is nothing to confirm, or when `fiscalStatus` is `NOT_SELLABLE`. |
 
 ### 1.3 The three localized names
 
@@ -178,6 +181,7 @@ All under `@Controller('v1/admin/categories')` unless noted.
 | 8 | `PATCH` | `/v1/admin/categories/:id/move` | Re-parent + reorder |
 | 9 | `DELETE` | `/v1/admin/categories/:id` | Hard delete (guarded) |
 | 10 | `PATCH` | `/v1/admin/products/bulk-move` | Reassign many buyer parts to one category |
+| 11 | `PATCH` | `/v1/admin/categories/:id/fiscal-confirmation` | Confirm the fiscal codes against Tasnif, or withdraw that (manager or super admin) |
 
 **#10 lives on a different controller** (`/v1/admin/products`, not
 `/v1/admin/categories`) — Nest allows exactly one controller per base path,
@@ -192,6 +196,8 @@ Query (`ListCategoriesQueryDto`), all optional, AND-combined:
   it applies no parent filter at all. (These are different!)
 - `level` — integer ≥ 0.
 - `isActive` — `true` / `false` (string or boolean both accepted).
+- `fiscalStatus` — one of the values in [1.2](#12-fields): what still needs codes
+  entered, or confirming.
 
 Ordered by `level`, then `sortOrder`, then `name`.
 
@@ -327,14 +333,41 @@ Body (`BulkMoveProductsDto`):
 |---|---|---|
 | `productIds` | ✅ | 1–1000 unique part ids. |
 | `targetCategoryId` | ✅ | Must exist. |
+| `kind` | ❌ | `SPARE_PART`, `MOTOR_OIL` or `ANTIFREEZE`: what the operator states these parts **are**, when the move has to change it. Recorded in the audit trail. A move never changes a kind without it. |
 
 **Response** — `200 { success: true, data: { moved: <n> } }`.
 
 **Errors:** `400` invalid body (empty/oversized/duplicate `productIds`) ·
-`404` no such target category.
+`404` no such target category · `409` when any part cannot go there, in which case
+nothing moves. Its `code` says why:
+
+| `code` | Meaning | What the operator can do |
+|---|---|---|
+| `KIND_MISMATCH` | The part's kind does not belong on the target, e.g. a spare part on a motor-oil composition. | Pick another category, or state `kind` if the part really is of that kind. |
+| `OIL_COMPOSITION_REQUIRED` | The target is the `motor-oil` parent, which names no composition. | Pick a composition or transmission oil. |
+| `OIL_TYPE_CONFLICT` | The part states an oil type that contradicts the target composition. | Move it to the category of its own composition. |
+
+A motor oil moved onto a composition takes that composition's `oilType`, and onto
+transmission oil loses it, so its fiscal codes follow the category.
 
 Use this for a "move N selected products to category X" bulk action in the
 product list — it is **not** for reorganizing the category tree itself.
+
+#### 11 — `PATCH /v1/admin/categories/:id/fiscal-confirmation`
+
+Body (`ConfirmCategoryFiscalDto`):
+
+| Field | Required | Notes |
+|---|---|---|
+| `confirmed` | ✅ | `true` to confirm, `false` to withdraw. |
+| `codes` | when confirming | The `fiscalCodesToConfirm` value the operator checked. |
+
+**Response** — `200 { success: true, data: <category node> }`.
+
+**Errors:** `400` invalid body · `403` an operator role · `404` no such category ·
+`409` with `code`: `FISCAL_CODES_CHANGED` (they changed since they were checked: show
+the new ones), `FISCAL_CODES_MISSING`, or `CATEGORY_NOT_SELLABLE` (a parent, or the
+fallback bucket).
 
 ### 1.5 Reordering
 
@@ -359,6 +392,17 @@ code. A category that has neither cannot have its products sold through
 Payme at all — checkout is refused for them, not silently allowed with a
 missing code.
 
+**Having a code is not enough.** A code entered for one product says nothing about
+everything else filed on the same category, so checkout also requires an operator
+to have confirmed the codes against Tasnif as true of **every** listing on that
+node (endpoint #11). Until then a configured category reads
+`fiscalStatus: NEEDS_CONFIRMATION` and `fiscalConfigured: false`. Editing a code
+ends the confirmation, and changing it back needs a new one. Codes are never
+inherited: a subcategory with none is refused whatever its parent has, and a node
+with active children is refused as too broad (`NOT_SELLABLE`). So is a node still
+holding a code supplied for one product of many (`electrical-parts`, `lighting`,
+`ignition`, `belts-and-hoses`), until an operator enters a different one.
+
 **The three legal states of a category**, enforced by the server on every
 create/update — a request that doesn't match one of these is rejected with
 `400`, never silently stored half-done:
@@ -381,22 +425,20 @@ three rows above.
 - An empty input should be sent as `null` (clear), not `""` — the server
   treats a blank string the same as `null` for these three fields, but sending
   `null` explicitly is what the DTOs document and is unambiguous.
-- Show `fiscalConfigured` as a status badge ("Ready for Payme" / "Not
-  configured") rather than re-deriving the rule client-side — it is exactly
-  `mxik && packageCodeSingle` (with one exception below), computed the same
-  way for the console, the seller bot, and the receipt builder, so re-deriving
-  it risks disagreeing with the backend.
+- Show `fiscalStatus` as a status badge rather than re-deriving the rule
+  client-side: it is the verdict of the same resolver the receipt builder runs,
+  so re-deriving it risks disagreeing with the backend.
 
-**The oil exception — `fiscalByOilType`.** Motor-oil categories are
-classified by the product's own **base composition** (synthetic /
-semi-synthetic / mineral), not by category. A category where
-`fiscalByOilType: true` will show `mxik`/`packageCodeSingle`/`packageCodeSet`
-all `null` **and still be legitimately configured** — its `fiscalConfigured`
-is `true` even though the three code fields are empty, because its products
-resolve their codes from `oilType` instead. **Do not show the "not
-configured" warning for these categories, and do not let an operator type
-codes into fields that would be ignored.** Detect this case from
-`fiscalByOilType`, not by category name or id.
+**The oil exception — `fiscalByOilType`.** The three motor-oil composition
+categories (synthetic / semi-synthetic / mineral) take their codes from a table
+for as long as they have no MXIK of their own. A category where
+`fiscalByOilType: true` will show `mxik`/`packageCodeSingle`/`packageCodeSet` all
+`null` **without that being a gap**: its `fiscalCodesToConfirm` shows the table's
+codes, and it still needs confirming like any other. A code an operator enters
+there replaces the table's, and `fiscalByOilType` turns `false`. Detect this case
+from `fiscalByOilType`, not by category name or id. Nothing else qualifies: the
+`motor-oil` parent names no composition, and transmission oil and the "Другое"
+children need codes of their own.
 
 ### 1.8 What happens on edit / move / activate — and caching
 
@@ -404,7 +446,8 @@ codes into fields that would be ignored.** Detect this case from
 |---|---|
 | Rename | Display name changes everywhere. **Safe** — nothing keys on names. |
 | Change slug | Changes `slug`, **not** the `id` of an existing row. Existing listings keep pointing at the same `id`. |
-| Edit fiscal fields | Every existing product in the category becomes payable (or unpayable) at once — no product row is touched. |
+| Edit fiscal fields | Ends any confirmation, so every existing product in the category becomes unpayable at once until the new codes are confirmed, even if they are later changed back. No product row is touched. |
+| Confirm fiscal codes | Every existing product in the category that has nothing else missing becomes payable at once. |
 | Move to another parent | Re-parents, re-derives `level` for the node and its whole subtree. Cycle-guarded. |
 | Reorder | `sortOrder` changes button/grid order. |
 | Deactivate | Disappears from bot and buyer immediately on next read. Existing listings keep their `categoryId`. |

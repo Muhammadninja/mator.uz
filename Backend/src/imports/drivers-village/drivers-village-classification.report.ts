@@ -218,6 +218,7 @@ export function emptyClassificationReport(
       category: {
         assign: 0,
         refine: 0,
+        retype: 0,
         unchanged: 0,
         preserved: 0,
         invalid: 0,

@@ -11,7 +11,10 @@ import { NotificationsService } from '../../notifications/notifications.service'
 import { RealtimeGateway } from '../../realtime/realtime.gateway';
 import { recordProviderRefund } from '../financial-refund.ledger';
 import { OrderStatusService } from '../order-status.service';
-import { PAYABLE_ORDER_STATUSES } from '../order-transitions';
+import {
+  PAYABLE_ORDER_STATUSES,
+  PROVIDER_REFUNDABLE_ORDER_STATUSES,
+} from '../order-transitions';
 
 /**
  * What a settlement attempt did. Callers (the Payme / Click webhooks) map these
@@ -32,11 +35,44 @@ export type MarkPaidOutcome =
   | 'order_not_payable'
   | 'not_found';
 
+/**
+ * What a cancellation attempt did. Callers map these onto their protocol replies;
+ * only `cancelled` and `refunded` changed anything.
+ *   cancelled         — THIS call moved an unperformed payment PENDING → CANCELLED
+ *   refunded          — THIS call moved a performed payment PAID → REFUNDED, with
+ *                       the order and the refund registry in the same transaction
+ *   already_cancelled — the payment was already cancelled or refunded (a repeat, or
+ *                       a concurrent call won); nothing written
+ *   paid_meanwhile    — asked to cancel an unperformed payment that is PAID by now:
+ *                       a Perform committed after the caller read it. Nothing
+ *                       written; the caller decides again, on the refund branch
+ *   not_refundable    — the goods were handed over; the claim was rolled back
+ *   not_cancellable   — the payment is in no state this branch can leave
+ *   not_found         — no such payment
+ */
+export type MarkCancelledOutcome =
+  | 'cancelled'
+  | 'refunded'
+  | 'already_cancelled'
+  | 'paid_meanwhile'
+  | 'not_refundable'
+  | 'not_cancellable'
+  | 'not_found';
+
 /** The only payment status a successful provider callback may settle from. */
 const SETTLEABLE_PAYMENT_STATUSES: PaymentStatus[] = [PaymentStatus.PENDING];
 
+/** Payment statuses a cancellation has already reached. */
+const CANCELLED_PAYMENT_STATUSES: PaymentStatus[] = [
+  PaymentStatus.CANCELLED,
+  PaymentStatus.REFUNDED,
+];
+
 /** Thrown inside the settlement transaction to roll back the payment claim. */
 class OrderNotPayableError extends Error {}
+
+/** Thrown inside the cancellation transaction to roll back the payment claim. */
+class OrderNotRefundableError extends Error {}
 
 /**
  * Final state transitions shared by the Payme and Click webhooks. Idempotent:
@@ -182,64 +218,111 @@ export class SettlementService {
     }
   }
 
+  /**
+   * Cancel an unperformed payment, or refund a performed one (`performedBefore`).
+   *
+   * `performedBefore` is only what the caller read a moment ago, so it is never
+   * trusted on its own: each branch claims the payment with a conditional update
+   * from the ONE status it may leave (PENDING to cancel, PAID to refund). Of a
+   * Perform and a Cancel racing on one row, the database re-checks the guard after
+   * the winner commits, so a PAID row can never be overwritten by the cancel branch.
+   * A caller that lost that race gets `paid_meanwhile` and asks again on the refund
+   * branch. An early read is a shortcut, not the guard: only the UPDATE decides.
+   */
   async markCancelled(
     paymentId: string,
     reason?: number,
     performedBefore = false,
-  ): Promise<void> {
+  ): Promise<MarkCancelledOutcome> {
     const payment = await this.prisma.payment.findUnique({
       where: { id: paymentId },
     });
-    if (!payment) return;
+    if (!payment) return 'not_found';
     // Idempotent: a repeated cancel/refund webhook must not write a second
     // CANCELLED history row.
-    if (
-      payment.status === PaymentStatus.CANCELLED ||
-      payment.status === PaymentStatus.REFUNDED
-    ) {
-      return;
+    if (CANCELLED_PAYMENT_STATUSES.includes(payment.status)) {
+      return 'already_cancelled';
     }
-    await this.prisma.$transaction(async (tx) => {
-      // Conditional claim (same pattern as markPaid): of two concurrent cancel
-      // callbacks only one matches, so the order history gets one row.
-      const claim = await tx.payment.updateMany({
-        where: {
-          id: paymentId,
-          status: {
-            notIn: [PaymentStatus.CANCELLED, PaymentStatus.REFUNDED],
+
+    let claimed: boolean;
+    try {
+      claimed = await this.prisma.$transaction(async (tx) => {
+        const claim = await tx.payment.updateMany({
+          where: {
+            id: paymentId,
+            status: performedBefore
+              ? PaymentStatus.PAID
+              : PaymentStatus.PENDING,
           },
-        },
-        data: {
-          status: performedBefore
-            ? PaymentStatus.REFUNDED
-            : PaymentStatus.CANCELLED,
-          providerState: performedBefore ? -2 : -1,
-          providerCancelTime: BigInt(Date.now()),
-          cancelReason: reason,
-        },
+          data: {
+            status: performedBefore
+              ? PaymentStatus.REFUNDED
+              : PaymentStatus.CANCELLED,
+            providerState: performedBefore ? -2 : -1,
+            providerCancelTime: BigInt(Date.now()),
+            cancelReason: reason,
+          },
+        });
+        if (claim.count === 0) return false;
+        if (performedBefore) {
+          await this.refundOrder(tx, payment.orderId);
+          await recordProviderRefund(tx, payment);
+        } else {
+          // Cancelling an UNPERFORMED transaction must not kill the order: the
+          // customer never paid, so the order stays payable and they can retry —
+          // with Click, or with a fresh Payme transaction. Only the reservation is
+          // released.
+          await this.releaseOrder(tx, payment.orderId, reason);
+        }
+        return true;
       });
-      if (claim.count === 0) return;
-      if (performedBefore) {
-        // The money was already taken, so this is a refund — the order follows
-        // into REFUNDED (never CANCELLED, which would lose the fact that a
-        // payment was made and reversed).
-        await this.orderStatus.transition(
-          payment.orderId,
-          OrderStatus.REFUNDED,
-          {
-            tx,
-            note: 'Refunded via payment provider',
-          },
+    } catch (err) {
+      if (err instanceof OrderNotRefundableError) {
+        this.logger.warn(
+          `Payment ${paymentId} NOT refunded: order ${payment.orderId} has been handed over`,
         );
-        await recordProviderRefund(tx, payment);
-      } else {
-        // Cancelling an UNPERFORMED transaction must not kill the order: the
-        // customer never paid, so the order stays payable and they can retry —
-        // with Click, or with a fresh Payme transaction. Only the reservation is
-        // released.
-        await this.releaseOrder(tx, payment.orderId, reason);
+        return 'not_refundable';
       }
+      throw err;
+    }
+    if (claimed) return performedBefore ? 'refunded' : 'cancelled';
+
+    const now = await this.prisma.payment.findUnique({
+      where: { id: paymentId },
+      select: { status: true },
     });
+    if (now && CANCELLED_PAYMENT_STATUSES.includes(now.status)) {
+      return 'already_cancelled';
+    }
+    return now?.status === PaymentStatus.PAID && !performedBefore
+      ? 'paid_meanwhile'
+      : 'not_cancellable';
+  }
+
+  /**
+   * The money was already taken, so this is a refund: the order follows into REFUNDED
+   * (never CANCELLED, which would lose the fact that a payment was made and reversed).
+   * Conditional, so an order shipped meanwhile stops the refund instead of being
+   * overwritten. An order already REFUNDED just stays there.
+   */
+  private async refundOrder(
+    tx: Prisma.TransactionClient,
+    orderId: string,
+  ): Promise<void> {
+    const moved = await this.orderStatus.transitionIf(
+      orderId,
+      PROVIDER_REFUNDABLE_ORDER_STATUSES,
+      OrderStatus.REFUNDED,
+      { tx, note: 'Refunded via payment provider' },
+    );
+    if (moved) return;
+    const order = await tx.order.findUnique({
+      where: { id: orderId },
+      select: { status: true },
+    });
+    if (order?.status !== OrderStatus.REFUNDED) {
+      throw new OrderNotRefundableError();
+    }
   }
 
   /**

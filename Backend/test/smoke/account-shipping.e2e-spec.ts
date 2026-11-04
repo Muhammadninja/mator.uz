@@ -60,20 +60,16 @@ describe('Account + Shipping smoke', () => {
   });
 
   describe('Shipping', () => {
-    it('returns pickup (free) + courier options with config-driven price', () => {
-      const svc = new ShippingService(fakeConfig({ DELIVERY_COURIER_UZS: '30000' }));
-      const res: any = svc.quote({} as any);
+    it('offers pickup, free', () => {
+      const res: any = new ShippingService().quote({} as any);
       const pickup = res.options.find((o: any) => o.type === 'pickup');
-      const courier = res.options.find((o: any) => o.type === 'courier');
       expect(pickup.price_uzs).toBe(0);
-      expect(courier.price_uzs).toBe(30000);
       expect(res.currency).toBe('UZS');
     });
 
-    it('falls back to the default courier price when unconfigured', () => {
-      const svc = new ShippingService(fakeConfig());
-      const courier = (svc.quote({} as any) as any).options.find((o: any) => o.type === 'courier');
-      expect(courier.price_uzs).toBe(25000);
+    it('quotes no courier price: there is no real tariff to quote yet', () => {
+      const res: any = new ShippingService().quote({} as any);
+      expect(res.options.map((o: any) => o.type)).toEqual(['pickup']);
     });
   });
 });

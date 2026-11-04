@@ -361,7 +361,7 @@ describe("Driver's Village photo update over Telegram", () => {
     expect(t.world.state.products).toHaveLength(2);
     expect(t.world.state.stocks).toHaveLength(2);
     expect(t.drafts.drafts.get(draftId)!.status).toBe('PUBLISHED');
-    expect(t.svc.catalogProjection.projectStock).toHaveBeenCalledWith(500);
+    expect(t.svc.catalogProjection.projectStock).toHaveBeenCalledWith(500, {});
     // Only the draft's intermediate ORIGINALS are deleted on publish.
     expect(t.svc.cloudinary.deleteAssets).toHaveBeenCalledWith([
       'orig_a1',
@@ -803,7 +803,7 @@ describe("Driver's Village photo update → buyer catalog: only READY photos lis
 
     await t.tap(`dvph:ok:${draftId}`);
 
-    expect(t.svc.catalogProjection.projectStock).toHaveBeenCalledWith(501);
+    expect(t.svc.catalogProjection.projectStock).toHaveBeenCalledWith(501, {});
     expect(projectedImages(t.world, 501)).toEqual([
       'https://cdn/proc/p1.jpg',
       'https://cdn/proc/p2.jpg',

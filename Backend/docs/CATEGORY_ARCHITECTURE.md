@@ -219,10 +219,58 @@ missing (read the dry-run first: a missing row may be one an operator removed on
 
 ## 9. Open items
 
-- **Payme MXIK/ИКПУ codes** on 8 of 10 roots (only Transmissions, Heating & Cooling,
-  Моторные масла configured). Official TASNIF codes — operator-supplied. Fiscal fields:
-  `mxik`, `packageCodeSingle`, `packageCodeSet` (a category is fiscally configured when
-  `mxik && packageCodeSingle`, see `common/fiscal.util.ts`).
+- **Payme MXIK/ИКПУ codes need entering and confirming against Tasnif.** Fiscal fields:
+  `mxik`, `packageCodeSingle`, `packageCodeSet`, `fiscalConfirmedCodes`. What a listing's
+  receipt may carry is decided in one place, `resolveFiscalClassification` in
+  `common/fiscal.util.ts`, which the Payme receipt and every console flag share:
+  - A code must be the category's **own**. There is no inheritance, and a node with active
+    children is refused: it is too broad to classify what sits on it. So are
+    `transmission` and `heating-and-cooling`, whose seeded codes predate their
+    subcategories.
+  - A non-empty `mxik` is not enough. An operator must confirm the exact codes as true of
+    **every** listing on the node (`PATCH /v1/admin/categories/:id/fiscal-confirmation`,
+    manager or super admin). Editing a code ends the confirmation, and changing it back
+    needs a new one.
+  - The seeded codes in `CATEGORY_FISCAL_DATA` are candidates, none of them confirmed. Four
+    name one product of a broad bucket: a starter on `electrical-parts`, a headlight on
+    `lighting`, a spark plug on `ignition`, rubber hoses on `belts-and-hoses`. None of those
+    nodes has children in the seeded tree (the subcategories for those goods are their
+    siblings), and new listings can land on them through `classificationOf`, so a node still
+    holding its code is treated like a parent: `NOT_SELLABLE`, and it cannot be confirmed
+    (`REPRESENTATIVE_ONLY_MXIK`). A different code entered by an operator lifts that.
+  - `OIL_TYPE_FISCAL` supplies the codes of a composition category only while it has no MXIK
+    of its own, and needs confirming on each one. An operator's code there wins over the
+    table, and a position imported as `SPARE_PART` may sit on it; the table itself is for
+    `MOTOR_OIL` only.
+  - Until then checkout refuses the listing. `GET /v1/admin/categories?fiscalStatus=NEEDS_CODES`
+    and `=NEEDS_CONFIRMATION` list what is left to do.
+- **Who owns a part's filing.** `bulk-move` writes `CatalogPart` alone, because a `Product` can
+  be shared between sellers. A later projection keeps that filing unless the seller, going
+  through the wizard again, gives a different category, kind or oil type than the product
+  had. These manual scripts do overwrite it, so do not run them on a filed catalog:
+  `npm run backfill:catalog`, `npm run reclassify:subcategories -- --apply`.
+- **Delivery.** Part of what the customer pays through Payme, so a line of its own, titled
+  `Доставка`, whenever the order's stored `deliveryUzs` is above zero.
+  - Its codes are a system constant (`DELIVERY_FISCAL_CODES`): MXIK `10112006002000000`, unit
+    «услуга (сум)» `1542432`. They belong to no category, so nothing confirms them, and no
+    environment variable can change them.
+  - Its price is what the order stores, written once at creation. No flat price exists: the
+    real one is to come per order from the delivery provider, so until then nothing is
+    quoted for a courier, and a courier order is refused if it is to be paid online.
+    `Order.deliveryMethod = COURIER` with goods and a cost of 0 means "no cost known", which
+    every Payme step refuses. Nothing may change the stored cost once payment has started,
+    or fetch a new one between Check and Perform.
+  - Its VAT rate comes from `DELIVERY_VAT_PERCENT`, as stated. Unset or not a percentage, the
+    line is refused rather than sent as 0, and the boot log says so.
+  - Its tax id, `commission_info.tin`, is `MARKETPLACE_TIN`, omitted when that is unset. No
+    legal scheme has been confirmed, so no other party's tax id is ever put there.
+- **Service fee.** Removed: new orders hold none, and `SERVICE_FEE_UZS` is no longer read. An
+  order placed earlier still has it in its total, so it needs its line, or is refused.
+- **Services.** A service line takes its codes from `ProviderServiceOffering.categoryId`, under
+  the same resolver and confirmation, and its tax data from `ServiceProvider.tin` /
+  `vatPercent`. Nothing writes those columns yet, so every service line is refused.
+  `PAYME_ALLOW_SERVICE_ONLY_ORDERS=true` lifts only the refusal of an order made up of
+  services alone; it is no way around any of this. Keep it off until services are classified.
 - Admin panel: the three localized name inputs are specified in
   `docs/frontend/ADMIN_FRONTEND_SPEC.md` §1.3 and served by the API; the console
   UI itself lives in the separate admin-panel repo.

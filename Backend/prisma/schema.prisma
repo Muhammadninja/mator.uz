@@ -1130,6 +1130,10 @@ model ServiceProvider {
   contactTelegram  String?      @map("contact_telegram") @db.VarChar(80)
   contactWebsite   String?      @map("contact_website")
   isActive         Boolean      @default(true) @map("is_active")
+  // What a receipt line for one of this provider's services needs, the same two
+  // columns a dealer has. Null until entered: such a line is refused, never defaulted.
+  tin              String?      @db.VarChar(14)
+  vatPercent       Decimal?     @map("vat_percent") @db.Decimal(5, 2)
   createdAt        DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt        DateTime     @updatedAt @map("updated_at") @db.Timestamptz(3)
 
@@ -1174,9 +1178,14 @@ model ProviderServiceOffering {
   durationMin Int?            @map("duration_min")
   priceUzs    Decimal         @map("price_uzs") @db.Decimal(14, 2)
   serviceType String?         @map("service_type") @db.VarChar(60)
+  // The category supplying this service's MXIK and package code, under the same
+  // confirmation as goods. Null until classified: such a line is refused.
+  categoryId  String?         @map("category_id") @db.VarChar(64)
   provider    ServiceProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  category    PartCategory?   @relation(fields: [categoryId], references: [id], onDelete: SetNull)
 
   @@index([providerId])
+  @@index([categoryId])
   @@map("provider_service_offerings")
 }
 
@@ -1321,11 +1330,22 @@ model PartCategory {
   mxik              String?           @db.VarChar(17)
   packageCodeSingle String?           @map("package_code_single") @db.VarChar(20)
   packageCodeSet    String?           @map("package_code_set") @db.VarChar(20)
+  // The codes an operator CONFIRMED against Tasnif as true of EVERY listing filed
+  // on this node, stored as the exact "mxik:single:set" that was confirmed rather
+  // than as a flag. Having a code and having a confirmed one are different facts:
+  // seeded codes were supplied per representative product (a starter's code on all
+  // electrical parts), so a non-empty `mxik` proves nothing about a given listing.
+  // Null, or any value that no longer equals the current codes, means unconfirmed,
+  // and Payme checkout refuses the listing. Written only by the admin confirmation
+  // endpoint; see resolveFiscalClassification() in common/fiscal.util.ts.
+  fiscalConfirmedCodes String?        @map("fiscal_confirmed_codes") @db.VarChar(60)
   createdAt         DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt         DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
   parent            PartCategory?     @relation("PartCategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
   children          PartCategory[]    @relation("PartCategoryTree")
   parts             CatalogPart[]
+  sourcingOffers    SourcingOffer[]
+  serviceOfferings  ProviderServiceOffering[]
   // Supply-side (seller bot) listings classified into this tree. Two relations
   // each: the root vehicle category and the precise selected node.
   products          Product[]         @relation("ProductCategory")
@@ -1760,6 +1780,12 @@ model OrderItem {
   partId       String?   @map("part_id") @db.VarChar(64)
   serviceId    String?   @map("service_id") @db.VarChar(64)
   providerId   String?   @map("provider_id") @db.VarChar(64)
+  // An accepted sourcing offer and the seller who made it (SourcingOffer.sellerTgId).
+  // Physical goods with no catalog part: these two are what keep such a line from
+  // reading as a service, and name whose tax data its receipt line needs. Plain
+  // ids, like partId: the ticket and its offers can be deleted, the order cannot.
+  offerId         String? @map("offer_id") @db.VarChar(64)
+  offerSellerTgId String? @map("offer_seller_tg_id")
   title        String    @db.VarChar(255)
   quantity     Int       @default(1)
   priceUzs     Decimal   @map("price_uzs") @db.Decimal(14, 2)
@@ -2053,6 +2079,12 @@ enum AdminAuditAction {
   ADMIN_PROFILE_UPDATED
   REFUND_RECORDED
   REFUND_VOIDED
+  // What reaches a tax receipt: an operator confirming (or withdrawing) a category's
+  // fiscal codes against Tasnif, and classifying a sourcing offer so it can be
+  // fiscalized. newValues carries the exact codes or category.
+  CATEGORY_FISCAL_CONFIRMED
+  CATEGORY_FISCAL_UNCONFIRMED
+  SOURCING_OFFER_CLASSIFIED
 }
 
 // What kind of thing an audit entry is about, for entries whose target is not
@@ -2065,6 +2097,7 @@ enum AdminAuditEntity {
   ORDER
   BRAND
   VEHICLE_MODEL
+  SOURCING_OFFER
 }
 
 model AppAdmin {
@@ -2487,6 +2520,13 @@ model SourcingOffer {
   status                SourcingOfferStatus         @default(SENT)
   declineReason         SourcingOfferDeclineReason? @map("decline_reason")
   declineNote           String?                     @map("decline_note") @db.Text
+  // What the part IS, for its receipt line: the category that supplies its MXIK and
+  // the sale form that picks its package code. A seller's offer carries neither and
+  // a part name is no classification, so an operator sets them in the sourcing
+  // console; until then the offer cannot be paid for online. See
+  // PaymeFiscalService.
+  categoryId            String?                     @map("category_id") @db.VarChar(64)
+  packageForm           PackageForm?                @map("package_form")
   createdAt             DateTime                    @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt             DateTime                    @updatedAt @map("updated_at") @db.Timestamptz(3)
   // NULL on offers from before expiry existed: those are left alone.
@@ -2494,12 +2534,14 @@ model SourcingOffer {
   // In-app delivery still owed to the customer, retried until it lands.
   customerNotifyPending Boolean                     @default(false) @map("customer_notify_pending")
   ticket                SourcingTicket              @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  category              PartCategory?               @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   cartItems             CartItem[]
 
   @@index([ticketId])
   @@index([status])
   @@index([customerNotifyPending])
   @@index([status, expiresAt])
+  @@index([categoryId])
   @@map("sourcing_offers")
 }
 

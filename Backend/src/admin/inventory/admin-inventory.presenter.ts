@@ -1,4 +1,8 @@
 import { Prisma } from '@prisma/client';
+import {
+  FISCAL_CATEGORY_SELECT,
+  listingFiscalGaps,
+} from '../../common/fiscal.util';
 
 /** Derived stock status of a part, from stockQty vs. its lowStockThreshold. */
 export type InventoryStockStatus = 'in_stock' | 'low_stock' | 'out_of_stock';
@@ -12,6 +16,9 @@ export type InventoryStockStatus = 'in_stock' | 'low_stock' | 'out_of_stock';
  * `part_categories`), so the console can label the row in whatever language the
  * operator has selected without a second request per row. `name` comes along
  * for wire compatibility only — see {@link presentInventoryRow}.
+ *
+ * Kind, oil type, sale form, the category's fiscal columns and the dealer's tax data
+ * are read for the row's `fiscal` verdict, the same one Payme checkout reaches.
  */
 export const ADMIN_INVENTORY_ROW_SELECT = {
   id: true,
@@ -23,10 +30,20 @@ export const ADMIN_INVENTORY_ROW_SELECT = {
   purchasePriceUzs: true,
   priceUzs: true,
   cashbackPct: true,
+  kind: true,
+  oilType: true,
+  packageForm: true,
   brand: { select: { id: true, name: true } },
   category: {
-    select: { id: true, name: true, nameRu: true, nameUz: true, nameEn: true },
+    select: {
+      ...FISCAL_CATEGORY_SELECT,
+      name: true,
+      nameRu: true,
+      nameUz: true,
+      nameEn: true,
+    },
   },
+  seller: { select: { tin: true, vatPercent: true } },
 } satisfies Prisma.CatalogPartSelect;
 
 export type AdminInventoryRow = Prisma.CatalogPartGetPayload<{
@@ -54,6 +71,13 @@ export function deriveStockStatus(
  * is not localized and is English for every seeded bucket.
  */
 export function presentInventoryRow(row: AdminInventoryRow) {
+  const fiscalGaps = listingFiscalGaps({
+    kind: row.kind,
+    oilType: row.oilType,
+    packageForm: row.packageForm,
+    category: row.category,
+    dealer: row.seller,
+  });
   return {
     id: row.id,
     sku: row.id,
@@ -74,5 +98,7 @@ export function presentInventoryRow(row: AdminInventoryRow) {
     retailPrice: Number(row.priceUzs),
     cashbackPct: Number(row.cashbackPct),
     stockStatus: deriveStockStatus(row.stockQty, row.lowStockThreshold),
+    // Whether this part could reach a receipt today, and what stops it if not.
+    fiscal: { ready: fiscalGaps.length === 0, gaps: fiscalGaps },
   };
 }

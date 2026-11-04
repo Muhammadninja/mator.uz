@@ -1,9 +1,12 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ProductKind } from '@prisma/client';
 import {
   ArrayMaxSize,
   ArrayMinSize,
   ArrayUnique,
   IsArray,
+  IsEnum,
+  IsOptional,
   IsString,
   MaxLength,
 } from 'class-validator';
@@ -36,4 +39,15 @@ export class BulkMoveProductsDto {
   @IsString()
   @MaxLength(64)
   targetCategoryId!: string;
+
+  @ApiPropertyOptional({
+    description:
+      'The kind the operator states these parts ARE, when the move changes it: ' +
+      'a spare part filed by mistake that is really a motor oil. A move never ' +
+      'changes a kind unless this says so, and it is recorded in the audit trail.',
+    enum: ProductKind,
+  })
+  @IsOptional()
+  @IsEnum(ProductKind)
+  kind?: ProductKind;
 }

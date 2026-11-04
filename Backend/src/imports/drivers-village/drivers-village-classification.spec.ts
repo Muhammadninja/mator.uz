@@ -32,6 +32,9 @@ const TREE = [
   { id: 'brake-system', parentId: null, isActive: true },
   { id: 'brake-discs', parentId: 'brake-system', isActive: true },
   { id: 'old-brakes', parentId: 'brake-system', isActive: false },
+  { id: 'motor-oil', parentId: null, isActive: true },
+  { id: 'synthetic-motor-oil', parentId: 'motor-oil', isActive: true },
+  { id: 'transmission-oil', parentId: 'motor-oil', isActive: true },
 ];
 
 const HEADER = [
@@ -76,6 +79,113 @@ async function stored(...positions: Cells[]) {
   await h.run(positions.length ? positions : [{ code: '42792442' }]);
   return h;
 }
+
+// 1C says nothing about what a position is, and a name is no evidence. The one thing
+// that states it is an operator filing the position on an oil category.
+describe('Driver’s Village classification — kind', () => {
+  it('stays a spare part on an ordinary category, whatever its name says', async () => {
+    const h = await stored({
+      code: 'OIL-SEAL',
+      name: 'Масляный сальник oil seal',
+    });
+
+    await h.classify(
+      file({
+        code: 'OIL-SEAL',
+        cat: 'engine-system',
+        sub: 'gaskets-and-seals',
+      }),
+    );
+
+    expect(h.productOf('OIL-SEAL')).toMatchObject({
+      categoryId: 'gaskets-and-seals',
+      kind: 'SPARE_PART',
+    });
+    expect(h.productOf('OIL-SEAL')!.oilType ?? null).toBeNull();
+  });
+
+  it('an oil composition makes it that motor oil, on the product and the part, and says so', async () => {
+    const h = await stored({ code: 'OIL-1', name: 'Масло 5W-30 4L' });
+
+    const report = await h.classify(
+      file({ code: 'OIL-1', cat: 'motor-oil', sub: 'synthetic-motor-oil' }),
+    );
+
+    expect(h.productOf('OIL-1')).toMatchObject({
+      categoryId: 'synthetic-motor-oil',
+      kind: 'MOTOR_OIL',
+      oilType: 'SYNTHETIC',
+    });
+    expect(h.partOf('OIL-1')).toMatchObject({
+      categoryId: 'synthetic-motor-oil',
+      kind: 'MOTOR_OIL',
+      oilType: 'SYNTHETIC',
+    });
+    expect(report.positions[0].issues.map((i) => i.code)).toContain(
+      'kind_set_from_category',
+    );
+  });
+
+  it('transmission oil becomes a motor-oil listing with no oil type', async () => {
+    const h = await stored({ code: 'ATF-1', name: 'ATF Dexron' });
+
+    await h.classify(
+      file({ code: 'ATF-1', cat: 'motor-oil', sub: 'transmission-oil' }),
+    );
+
+    expect(h.partOf('ATF-1')).toMatchObject({
+      categoryId: 'transmission-oil',
+      kind: 'MOTOR_OIL',
+      oilType: null,
+    });
+  });
+
+  it('the `motor-oil` parent names no composition: the kind is left as it is', async () => {
+    const h = await stored({ code: 'OIL-2', name: 'Масло' });
+
+    await h.classify(file({ code: 'OIL-2', cat: 'motor-oil', sub: '' }));
+
+    expect(h.productOf('OIL-2')).toMatchObject({
+      categoryId: 'motor-oil',
+      kind: 'SPARE_PART',
+    });
+  });
+
+  it('a position already filed on a composition is typed without moving it', async () => {
+    // What a run before this rule left behind: on the composition, still SPARE_PART.
+    const h = await stored({ code: 'OIL-3', name: 'Масло' });
+    h.partOf('OIL-3')!.categoryId = 'synthetic-motor-oil';
+
+    const report = await h.classify(
+      file({ code: 'OIL-3', cat: 'motor-oil', sub: 'synthetic-motor-oil' }),
+    );
+
+    expect(report.positions[0].category.action).toBe('retype');
+    expect(h.partOf('OIL-3')).toMatchObject({
+      categoryId: 'synthetic-motor-oil',
+      kind: 'MOTOR_OIL',
+      oilType: 'SYNTHETIC',
+    });
+
+    // Typed once: the same file again finds nothing to do.
+    const again = await h.classify(
+      file({ code: 'OIL-3', cat: 'motor-oil', sub: 'synthetic-motor-oil' }),
+    );
+    expect(again.positions[0].category.action).toBe('unchanged');
+  });
+
+  it('a category set in Mator stays, so nothing is typed from a file it ignores', async () => {
+    const h = await stored({ code: 'OIL-4', name: 'Масло' });
+    h.partOf('OIL-4')!.categoryId = 'brake-discs';
+
+    const report = await h.classify(
+      file({ code: 'OIL-4', cat: 'motor-oil', sub: 'synthetic-motor-oil' }),
+    );
+
+    expect(report.positions[0].category.action).toBe('preserved');
+    expect(h.productOf('OIL-4')).toMatchObject({ kind: 'SPARE_PART' });
+  });
+});
 
 describe('Driver’s Village classification — categories', () => {
   it('a position in the fallback bucket gets the prepared category through the projection; price, stock, photos and catalog settings stay', async () => {

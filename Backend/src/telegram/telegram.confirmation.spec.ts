@@ -56,10 +56,13 @@ interface AnyService {
 // here we only assert the Telegram commit fires it with the written stock id.
 function makeProjection() {
   const projected: number[] = [];
+  const options: unknown[] = [];
   return {
     projected,
-    projectStock: async (stockId: number) => {
+    options,
+    projectStock: async (stockId: number, opts?: unknown) => {
       projected.push(stockId);
+      options.push(opts);
       return `part_stock_${stockId}`;
     },
   };
@@ -246,7 +249,11 @@ function makePrisma() {
     args,
     brand: { upsert: upsert('brand', { id: 1 }) },
     carModel: { upsert: upsert('carModel', { id: 2 }) },
-    product: { upsert: upsert('product', { id: 100 }) },
+    product: {
+      // Not recorded in `calls` (it is a read). Null: nothing listed under this number.
+      findUnique: (() => Promise.resolve(null)) as (arg: unknown) => Promise<unknown>,
+      upsert: upsert('product', { id: 100 }),
+    },
     productImage: {
       deleteMany: upsert('productImage.deleteMany', { count: 0 }),
       createMany: upsert('productImage.createMany', { count: 1 }),
@@ -635,6 +642,62 @@ describe('TelegramService — confirmation session', () => {
     // The just-upserted Stock (stub returns { id: 500 }) is projected exactly
     // once, so the CatalogPart exists immediately — no manual backfill needed.
     expect(projection.projected).toEqual([500]);
+  });
+
+  // Going through the wizard again is the only way a seller can change a price, and
+  // bulk-move writes the part alone. So this must not put a part back where the
+  // product says it was, undoing an operator's filing onto a subcategory.
+  describe('a re-listing and an operator’s filing', () => {
+    const commit = async (
+      before: Record<string, unknown> | null,
+      session: Record<string, unknown>,
+    ) => {
+      const prisma = makePrisma();
+      prisma.product.findUnique = () => Promise.resolve(before);
+      const projection = makeProjection();
+      const svc = makeService(prisma, makeCloudinary(), projection, {
+        categories: {
+          validateCategorySelection: jest.fn().mockResolvedValue(undefined),
+        },
+      });
+      svc.storePending(
+        draft(1, undefined, {
+          vehicleCategoryId: 'electrical-and-lighting',
+          categoryId: 'lighting',
+          ...session,
+        }),
+      );
+      await svc.commitPending(makeCtx(), 1);
+      return projection.options[0];
+    };
+    const SAME = {
+      categoryId: 'lighting',
+      kind: ProductKind.SPARE_PART,
+      oilType: null,
+    };
+
+    it('answering as before keeps it: only the price or photos changed', async () => {
+      expect(await commit(SAME, {})).toEqual({ keepClassification: true });
+    });
+
+    it('a different category is the seller reclassifying, and carries', async () => {
+      expect(await commit({ ...SAME, categoryId: 'batteries' }, {})).toEqual({
+        keepClassification: false,
+      });
+    });
+
+    it('a different kind or oil type carries too', async () => {
+      expect(
+        await commit({ ...SAME, kind: ProductKind.MOTOR_OIL }, {}),
+      ).toEqual({ keepClassification: false });
+      expect(await commit({ ...SAME, oilType: 'MINERAL' }, {})).toEqual({
+        keepClassification: false,
+      });
+    });
+
+    it('a product listed for the first time has nothing to keep', async () => {
+      expect(await commit(null, {})).toEqual({ keepClassification: false });
+    });
   });
 
   it('a catalog-projection failure does not fail the commit (best-effort)', async () => {

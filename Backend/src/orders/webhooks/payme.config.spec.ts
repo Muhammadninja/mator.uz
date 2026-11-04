@@ -2,9 +2,14 @@ import {
   collectPaymeConfigErrors,
   validatePaymeEnv,
   readPaymeConfig,
+  readPaymeFiscalConfig,
+  DELIVERY_FISCAL_CODES,
   DEFAULT_PAYME_CHECKOUT_URL,
   DEFAULT_PAYME_ACCOUNT_FIELD,
 } from './payme.config';
+import { readdirSync, readFileSync } from 'fs';
+import { join, relative } from 'path';
+import { MXIK_PATTERN, PACKAGE_CODE_PATTERN } from '../../common/fiscal.util';
 
 /**
  * The webhook's only defence is the merchant key, so a deploy that loses it must
@@ -106,5 +111,125 @@ describe('Payme configuration validation', () => {
       checkoutUrl: DEFAULT_PAYME_CHECKOUT_URL,
       accountField: DEFAULT_PAYME_ACCOUNT_FIELD,
     });
+  });
+});
+
+describe('PAYME_ALLOW_SERVICE_ONLY_ORDERS', () => {
+  const read = (value?: string) =>
+    readPaymeFiscalConfig((key) =>
+      key === 'PAYME_ALLOW_SERVICE_ONLY_ORDERS' ? value : undefined,
+    ).allowServiceOnlyOrders;
+
+  it('is off when the variable is absent', () => {
+    expect(read()).toBe(false);
+  });
+
+  it.each(['false', '', ' ', 'TRUE', 'True', '1', 'yes', 'on'])(
+    'is off for %j: only the exact word turns it on',
+    (value) => {
+      expect(read(value)).toBe(false);
+    },
+  );
+
+  it('is on for exactly `true`', () => {
+    expect(read('true')).toBe(true);
+    expect(read(' true ')).toBe(true);
+  });
+});
+
+describe('a platform charge’s VAT rate', () => {
+  const rate = (value?: string) =>
+    readPaymeFiscalConfig((key) =>
+      key === 'DELIVERY_VAT_PERCENT' ? value : undefined,
+    ).delivery.vatPercent;
+
+  it('is nothing at all when it is not configured: never an assumed 0', () => {
+    expect(rate()).toBeNull();
+  });
+
+  it.each(['', ' ', 'abc', '12%', '-1', '101', 'NaN', 'Infinity'])(
+    'is nothing at all for %j: not a percentage',
+    (value) => {
+      expect(rate(value)).toBeNull();
+    },
+  );
+
+  it.each([
+    ['0', 0],
+    ['6', 6],
+    ['12', 12],
+    ['12.5', 12.5],
+    ['100', 100],
+  ])('is exactly what was stated: %s', (value, expected) => {
+    expect(rate(value)).toBe(expected);
+  });
+});
+
+describe('delivery’s fiscal codes', () => {
+  it('are the ones the business decided on, in a form a receipt can carry', () => {
+    expect(DELIVERY_FISCAL_CODES).toEqual({
+      mxik: '10112006002000000',
+      packageCode: '1542432',
+    });
+    expect(DELIVERY_FISCAL_CODES.mxik).toMatch(MXIK_PATTERN);
+    expect(DELIVERY_FISCAL_CODES.packageCode).toMatch(PACKAGE_CODE_PATTERN);
+  });
+
+  it('are not configuration: whatever the environment says, they stay', () => {
+    const { delivery } = readPaymeFiscalConfig((key) =>
+      key === 'DELIVERY_MXIK'
+        ? '05320001001000000'
+        : key === 'DELIVERY_PACKAGE_CODE'
+          ? '1000000'
+          : undefined,
+    );
+    expect(delivery).toMatchObject({
+      mxik: '10112006002000000',
+      packageCode: '1542432',
+    });
+  });
+
+  const backend = join(__dirname, '..', '..', '..');
+  const walk = (dir: string): string[] =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
+      entry.isDirectory()
+        ? walk(join(dir, entry.name))
+        : [join(dir, entry.name)],
+    );
+  const filesMatching = (pattern: RegExp, dirs: string[]) =>
+    dirs
+      .flatMap((dir) => walk(join(backend, dir)))
+      .filter((file) => /\.(ts|sql)$/.test(file))
+      .filter((file) => !/\.spec\.ts$/.test(file))
+      .filter((file) => pattern.test(readFileSync(file, 'utf8')))
+      .map((file) => relative(backend, file));
+
+  it('the old code and the keys that could set it are gone from the code', () => {
+    expect(
+      filesMatching(
+        /05320001001000000|DELIVERY_MXIK|DELIVERY_PACKAGE_CODE|DEFAULT_DELIVERY_MXIK/,
+        ['src', 'scripts', 'prisma'],
+      ),
+    ).toEqual([]);
+  });
+
+  it('nothing reads a flat delivery price or a service fee from the environment', () => {
+    expect(
+      filesMatching(
+        /DELIVERY_COURIER_UZS|DEFAULT_COURIER_UZS|SERVICE_FEE_UZS/,
+        ['src', 'scripts'],
+      ),
+    ).toEqual([]);
+  });
+
+  it('the stored delivery cost has one writer: a new reader or writer has to be looked at', () => {
+    expect(filesMatching(/\bdeliveryUzs\b/, ['src', 'scripts']).sort()).toEqual(
+      [
+        'src/admin/orders/admin-orders.presenter.ts', // shows it
+        'src/orders/order.presenter.ts', // shows it
+        'src/orders/orders.service.ts', // the one writer, at creation
+        'src/orders/webhooks/payme-fiscal.service.ts', // reads it for the receipt
+      ],
+    );
   });
 });

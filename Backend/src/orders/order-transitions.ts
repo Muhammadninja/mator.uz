@@ -13,7 +13,7 @@ import { OrderStatus } from '@prisma/client';
  *
  * (A provider-initiated REFUND is deliberately not routed through this table:
  * the money has already moved at the provider, so the order must follow into
- * REFUNDED even from CANCELLED — see SettlementService.markCancelled.)
+ * REFUNDED even from CANCELLED — see PROVIDER_REFUNDABLE_ORDER_STATUSES.)
  */
 export const ALLOWED_TRANSITIONS: Readonly<
   Record<OrderStatus, readonly OrderStatus[]>
@@ -70,6 +70,21 @@ export const PAYABLE_ORDER_STATUSES: readonly OrderStatus[] = (
 export function isPayableOrderStatus(status: OrderStatus): boolean {
   return PAYABLE_ORDER_STATUSES.includes(status);
 }
+
+/**
+ * Statuses from which a provider's reversal of a performed payment may move an order
+ * to REFUNDED: everything but goods already handed over, and an order already there.
+ * Used as the guard of one conditional UPDATE, so an order shipped between the
+ * provider's request and this write cannot be refunded behind the courier's back.
+ */
+export const PROVIDER_REFUNDABLE_ORDER_STATUSES: readonly OrderStatus[] = (
+  Object.keys(ALLOWED_TRANSITIONS) as OrderStatus[]
+).filter(
+  (s) =>
+    s !== OrderStatus.SHIPPED &&
+    s !== OrderStatus.DELIVERED &&
+    s !== OrderStatus.REFUNDED,
+);
 
 /**
  * Orders still IN PROGRESS — every status the state machine can still move on

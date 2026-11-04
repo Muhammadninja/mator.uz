@@ -38,10 +38,10 @@ describe('Orders smoke', () => {
       buildOrder({
         id: 'ord_1',
         subtotalUzs: 370000,
-        deliveryUzs: 25000,
-        serviceFeeUzs: 5000,
+        deliveryUzs: 0,
+        serviceFeeUzs: 0,
         discountUzs: 0,
-        totalUzs: 400000,
+        totalUzs: 370000,
         items: [
           { partId: 'part_belt', serviceId: null, title: 'Timing belt', quantity: 2, priceUzs: 185000, lineTotalUzs: 370000, scheduledAt: null },
         ],
@@ -50,17 +50,17 @@ describe('Orders smoke', () => {
     prisma.cartItem.deleteMany.mockResolvedValue({ count: 1 });
     prisma.cart.update.mockResolvedValue({});
 
-    const res = await svc.createFromCart('usr_1', { cart_snapshot: { delivery_method: 'courier' } } as any);
+    const res = await svc.createFromCart('usr_1', { cart_snapshot: { delivery_method: 'pickup' } } as any);
 
     expect(prisma.order.create).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ subtotalUzs: 370000, deliveryUzs: 25000, serviceFeeUzs: 5000, totalUzs: 400000 }),
+        data: expect.objectContaining({ subtotalUzs: 370000, deliveryUzs: 0, serviceFeeUzs: 0, totalUzs: 370000 }),
       }),
     );
     expect(prisma.cartItem.deleteMany).toHaveBeenCalledWith({ where: { cartId: 'cart_1' } });
     expect(res.order_id).toBe('ord_1');
     expect(res.status).toBe('pending_payment');
-    expect(res.total_uzs).toBe(400000);
+    expect(res.total_uzs).toBe(370000);
   });
 
   it('embeds a promo discount into the ITEM prices, exact to the tiyin', async () => {
@@ -85,7 +85,7 @@ describe('Orders smoke', () => {
     prisma.cartItem.deleteMany.mockResolvedValue({ count: 2 });
     prisma.cart.update.mockResolvedValue({});
 
-    await svc.createFromCart('usr_1', { cart_snapshot: { delivery_method: 'courier' } } as any);
+    await svc.createFromCart('usr_1', { cart_snapshot: { delivery_method: 'pickup' } } as any);
 
     const { data } = prisma.order.create.mock.calls[0][0];
     const subtotal = 33333 * 3 + 100001; // 199 998
@@ -99,8 +99,8 @@ describe('Orders smoke', () => {
     const goodsTiyin = lines.reduce((s, l) => s + Math.round(l.lineTotalUzs * 100), 0);
     expect(goodsTiyin).toBe(Math.round((subtotal - discount) * 100));
 
-    // …and the order's own total is the same goods plus the untouched fees.
-    expect(Math.round(data.totalUzs * 100)).toBe(goodsTiyin + Math.round(30000 * 100));
+    // …and the order's own total is those same goods.
+    expect(Math.round(data.totalUzs * 100)).toBe(goodsTiyin);
   });
 
   it('rejects checkout on an empty cart', async () => {

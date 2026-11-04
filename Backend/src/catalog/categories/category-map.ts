@@ -153,33 +153,178 @@ export const CATEGORY_ID_TO_KIND: Readonly<Record<string, ProductKind>> = {
 };
 
 /**
- * Whether listings of this category are fiscalized from their OIL TYPE rather
- * than from the category's own MXIK / package codes.
+ * Whether a motor oil filed on this category takes its codes from OIL_TYPE_FISCAL
+ * rather than from the category's own columns: a composition category an operator
+ * has given no MXIK of its own, whose empty columns are therefore not a gap. A code
+ * the operator did enter there wins over the table: it is the one they confirm.
  *
- * These are exactly the categories whose listings come out as MOTOR_OIL, and
- * the two ways that happens are already encoded in the wizard: the `motor-oil`
- * anchor (CATEGORY_ID_TO_KIND) and any child of the "Другое" root, where
- * `selectOtherCategory` defaults every child to the oil questionnaire. The rule
- * is stated once here so the admin console, the seed and the receipt builder
- * agree on which categories are legitimately left without codes.
- *
- * Such a category is fiscally COMPLETE with no columns filled in: its products'
- * codes come from OIL_TYPE_FISCAL (see common/fiscal.util.ts), which is why an
- * empty `mxik` there is not a configuration gap.
+ * Nothing else qualifies. The `motor-oil` parent names no composition, TRANSMISSION
+ * oil denotes none, and a "Другое" child (industrial, motorcycle, agricultural …) is
+ * not motor oil at all, whatever oil type its listing states: each needs its own
+ * MXIK and is reported as a gap until it has one.
  */
 export function isFiscalizedByOilType(category: {
   id: string;
-  parentId: string | null;
+  parentId?: string | null;
+  mxik?: string | null;
 }): boolean {
-  return (
-    category.id === CategoryAnchor.MOTOR_OIL ||
-    category.parentId === CategoryAnchor.OTHER ||
-    // The three composition categories: their listings' codes come from the
-    // oilType this table derives, so empty fiscal columns are correct there.
-    // TRANSMISSION_OIL is deliberately excluded — it denotes no composition, so
-    // it must carry its OWN MXIK and is reported as a gap until it has one.
-    oilTypeForCategory(category.id) !== null
-  );
+  return oilTypeForCategory(category.id) !== null && !category.mxik;
+}
+
+/**
+ * The fallback bucket a part sits in until something classifies it. It says nothing
+ * about what the part is, so it can never supply a receipt line's code.
+ */
+export const UNCATEGORIZED_CATEGORY_ID = 'cat_uncategorized';
+
+/**
+ * The kind a category itself states, or null when it states none: the oil anchors
+ * (CATEGORY_ID_TO_KIND) and the antifreeze node. A null is not "spare part" here,
+ * because a "Другое" child can hold either oils or spare parts.
+ */
+export function declaredKindForCategory(
+  categoryId: string,
+): ProductKind | null {
+  if (Object.prototype.hasOwnProperty.call(CATEGORY_ID_TO_KIND, categoryId)) {
+    return CATEGORY_ID_TO_KIND[categoryId];
+  }
+  return categoryId === CategoryAnchor.ANTIFREEZE
+    ? ProductKind.ANTIFREEZE
+    : null;
+}
+
+/**
+ * The kind and oil type of something filed on this category with no attributes of
+ * its own to say otherwise. Derived from the category, never from a name.
+ */
+export function listingTypeForCategory(categoryId: string): {
+  kind: ProductKind;
+  oilType: OilType | null;
+} {
+  return {
+    kind: declaredKindForCategory(categoryId) ?? ProductKind.SPARE_PART,
+    oilType: oilTypeForCategory(categoryId),
+  };
+}
+
+/**
+ * May a listing of this kind be filed on this category and be fiscalized from it?
+ * Refuses only the pairs that would put the wrong code on a receipt:
+ *   • anything but a motor oil on a composition category, which has codes for motor
+ *     oil and nothing else;
+ *   • a motor oil outside the oil categories: a brake category's MXIK does not
+ *     describe it. An oil node's own subcategories count as oil categories, and the
+ *     `oil-and-fluids` bucket stays allowed, because a motor oil listed before the
+ *     category tree existed was projected onto it;
+ *   • antifreeze anywhere but its own node and the subcategories under it.
+ */
+export function kindFitsCategory(
+  kind: ProductKind,
+  category: { id: string; parentId: string | null },
+): boolean {
+  if (oilTypeForCategory(category.id) !== null) {
+    return kind === ProductKind.MOTOR_OIL;
+  }
+  const parentKind = category.parentId
+    ? declaredKindForCategory(category.parentId)
+    : null;
+  if (kind === ProductKind.MOTOR_OIL) {
+    const fluids = MAIN_CATEGORY_TO_SLUG[PartMainCategory.OIL_AND_FLUIDS];
+    return (
+      declaredKindForCategory(category.id) === ProductKind.MOTOR_OIL ||
+      parentKind === ProductKind.MOTOR_OIL ||
+      category.parentId === CategoryAnchor.OTHER ||
+      category.id === fluids ||
+      category.parentId === fluids
+    );
+  }
+  if (kind === ProductKind.ANTIFREEZE) {
+    return (
+      category.id === CategoryAnchor.ANTIFREEZE ||
+      parentKind === ProductKind.ANTIFREEZE
+    );
+  }
+  return true;
+}
+
+/**
+ * The oil type a motor oil must carry once filed on this category, or null when the
+ * category does not decide it. A composition states its type; transmission oil
+ * states that there is none.
+ */
+export function oilTypeDictatedBy(
+  categoryId: string,
+): { oilType: OilType | null } | null {
+  const composition = oilTypeForCategory(categoryId);
+  if (composition) return { oilType: composition };
+  return categoryId === CategoryAnchor.TRANSMISSION_OIL
+    ? { oilType: null }
+    : null;
+}
+
+/** Why a listing may not move onto a category, as the machine-readable `code`. */
+export type ListingMoveRefusal =
+  'KIND_MISMATCH' | 'OIL_COMPOSITION_REQUIRED' | 'OIL_TYPE_CONFLICT';
+
+export type ListingMoveDecision =
+  | { ok: true; oilType: OilType | null }
+  | { ok: false; code: ListingMoveRefusal; message: string };
+
+/**
+ * What moving one listing onto `target` means for its kind and oil type: the single
+ * rule shared by every operator move, so none can leave a contradiction behind. A
+ * move never changes a kind by itself.
+ *
+ * The oil type follows the target when the target decides it. The one thing a move
+ * cannot resolve is a type the seller STATED that contradicts the target, as when a
+ * bucket holding mineral and synthetic oils is moved onto one composition. A type
+ * read off the composition the listing was filed on is different: it was only ever
+ * derived, so re-filing the listing is what corrects it.
+ */
+export function decideListingMove(
+  listing: {
+    kind: ProductKind;
+    oilType: OilType | null;
+    categoryId: string | null;
+  },
+  target: { id: string; parentId: string | null },
+): ListingMoveDecision {
+  if (!kindFitsCategory(listing.kind, target)) {
+    return {
+      ok: false,
+      code: 'KIND_MISMATCH',
+      message: `A ${listing.kind} listing cannot be filed on "${target.id}". A move does not change a listing's kind.`,
+    };
+  }
+  if (listing.kind !== ProductKind.MOTOR_OIL) {
+    return { ok: true, oilType: listing.oilType };
+  }
+  if (target.id === CategoryAnchor.MOTOR_OIL) {
+    return {
+      ok: false,
+      code: 'OIL_COMPOSITION_REQUIRED',
+      message: `"${target.id}" names no base composition. Move the oil onto a composition, or onto transmission oil.`,
+    };
+  }
+  const dictated = oilTypeDictatedBy(target.id);
+  if (!dictated) return { ok: true, oilType: listing.oilType };
+
+  const derivedFromFiling =
+    listing.categoryId !== null &&
+    oilTypeForCategory(listing.categoryId) !== null;
+  if (
+    dictated.oilType !== null &&
+    listing.oilType !== null &&
+    listing.oilType !== dictated.oilType &&
+    !derivedFromFiling
+  ) {
+    return {
+      ok: false,
+      code: 'OIL_TYPE_CONFLICT',
+      message: `A listing states oil type ${listing.oilType}, which contradicts "${target.id}". Move it to the category of its own composition.`,
+    };
+  }
+  return { ok: true, oilType: dictated.oilType };
 }
 
 /**
@@ -224,7 +369,7 @@ export const ANTIFREEZE_ROOT_ID: string =
  * tree stays hard-deletable once nothing references it.
  */
 export const LOAD_BEARING_CATEGORY_IDS: ReadonlySet<string> = new Set([
-  'cat_uncategorized',
+  UNCATEGORIZED_CATEGORY_ID,
   ANTIFREEZE_ROOT_ID,
   ...Object.values(CategoryAnchor),
   ...Object.values(MAIN_CATEGORY_TO_SLUG),

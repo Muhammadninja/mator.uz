@@ -144,6 +144,164 @@ describe('availability at each step', () => {
     expect(prisma.order.create).not.toHaveBeenCalled();
   });
 
+  const orders = (env: Record<string, string> = {}) =>
+    new OrdersService(
+      prisma,
+      fakeConfig(env),
+      fakeNotifications(),
+      fakeRealtime(),
+      new OrderStatusService(prisma),
+      fakeDiscounts(),
+      { record: jest.fn() } as never,
+    );
+
+  it('order creation keeps what an accepted offer sold and who sold it', async () => {
+    prisma.cart.findUnique.mockResolvedValue(
+      buildCart({
+        id: 'cart_1',
+        userId: 'usr_1',
+        items: [
+          buildCartItem({
+            partId: null,
+            offerId: 'soff_1',
+            offer: { sellerTgId: '555' },
+            title: 'Стартер',
+          }),
+        ],
+      }),
+    );
+    prisma.order.create.mockResolvedValue(buildOrder({ id: 'ord_1' }));
+
+    await orders().createFromCart('usr_1', {
+      cart_snapshot: { delivery_method: 'pickup' },
+    });
+
+    expect(prisma.order.create.mock.calls[0][0].data.items.create).toEqual([
+      expect.objectContaining({
+        partId: null,
+        offerId: 'soff_1',
+        offerSellerTgId: '555',
+        title: 'Стартер',
+      }),
+    ]);
+  });
+
+  describe('what an order charges beyond its goods', () => {
+    // Whatever an old deployment still has in its environment.
+    const LEFTOVER = { DELIVERY_COURIER_UZS: '25000', SERVICE_FEE_UZS: '5000' };
+    const goodsCart = () =>
+      prisma.cart.findUnique.mockResolvedValue(
+        buildCart({
+          id: 'cart_1',
+          userId: 'usr_1',
+          items: [
+            buildCartItem({
+              partId: null,
+              offerId: 'soff_1',
+              offer: { sellerTgId: '555' },
+              priceUzsSnapshot: 185000,
+            }),
+          ],
+        }),
+      );
+    const chargesOf = () => {
+      const { deliveryUzs, serviceFeeUzs, totalUzs, subtotalUzs } =
+        prisma.order.create.mock.calls[0][0].data;
+      return { deliveryUzs, serviceFeeUzs, totalUzs, subtotalUzs };
+    };
+    const GOODS_ONLY = {
+      deliveryUzs: 0,
+      serviceFeeUzs: 0,
+      totalUzs: 185000,
+      subtotalUzs: 185000,
+    };
+
+    beforeEach(() => {
+      goodsCart();
+      prisma.order.create.mockResolvedValue(buildOrder({ id: 'ord_1' }));
+    });
+
+    it.each<[string, Record<string, unknown>]>([
+      ['courier, paid through Payme', { payment_type: 'payme' }],
+      ['courier, payment not stated', {}],
+      [
+        'courier stated outright',
+        { cart_snapshot: { delivery_method: 'courier' } },
+      ],
+    ])('%s: refused while the customer still has the cart', async (_, dto) => {
+      await expect(
+        orders(LEFTOVER).createFromCart('usr_1', dto),
+      ).rejects.toMatchObject({
+        response: { code: 'DELIVERY_COST_UNAVAILABLE' },
+      });
+      expect(prisma.order.create).not.toHaveBeenCalled();
+      expect(prisma.cartItem.deleteMany).not.toHaveBeenCalled();
+    });
+
+    it('pickup holds only the goods, whatever the environment still says', async () => {
+      await orders(LEFTOVER).createFromCart('usr_1', {
+        payment_type: 'payme',
+        cart_snapshot: { delivery_method: 'pickup' },
+      });
+      expect(chargesOf()).toEqual(GOODS_ONLY);
+    });
+
+    it.each(['cash', 'terminal'] as const)(
+      'courier paid by %s goes ahead, with no made-up delivery cost',
+      async (payment_type) => {
+        await orders(LEFTOVER).createFromCart('usr_1', { payment_type });
+        expect(chargesOf()).toEqual(GOODS_ONLY);
+      },
+    );
+
+    it('a cart of services alone has nothing to deliver, so no cost is needed', async () => {
+      prisma.cart.findUnique.mockResolvedValue(
+        buildCart({
+          id: 'cart_1',
+          userId: 'usr_1',
+          items: [
+            buildCartItem({
+              partId: null,
+              serviceId: 'svc_1',
+              priceUzsSnapshot: 100000,
+            }),
+          ],
+        }),
+      );
+
+      await orders(LEFTOVER).createFromCart('usr_1', {});
+
+      expect(chargesOf()).toEqual({
+        deliveryUzs: 0,
+        serviceFeeUzs: 0,
+        totalUzs: 100000,
+        subtotalUzs: 100000,
+      });
+    });
+  });
+
+  it('a cart line naming no part, offer or service stops the order: its offer is gone', async () => {
+    prisma.cart.findUnique.mockResolvedValue(
+      buildCart({
+        id: 'cart_1',
+        userId: 'usr_1',
+        items: [
+          buildCartItem({
+            partId: null,
+            offerId: null,
+            serviceId: null,
+            title: 'Стартер',
+          }),
+        ],
+      }),
+    );
+
+    await expect(orders().createFromCart('usr_1', {})).rejects.toThrow(
+      /Стартер \(no_source\)/,
+    );
+    expect(prisma.order.create).not.toHaveBeenCalled();
+  });
+
   it('Payme invoice: refused (409) when a part went out of stock after ordering', async () => {
     prisma.order.findUnique.mockResolvedValue(
       buildOrder({ id: 'ord_1', userId: 'usr_1' }),

@@ -87,6 +87,7 @@ function makeCtx() {
 function makePrismaStub() {
   return {
     product: {
+      findUnique: jest.fn().mockResolvedValue(null),
       upsert: jest.fn().mockResolvedValue({ id: 10 }),
     },
     productImage: {

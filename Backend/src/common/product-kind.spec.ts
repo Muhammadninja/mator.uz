@@ -16,7 +16,6 @@ import {
   hasVehicleCategory,
   isUniversalFor,
   unitOf,
-  fiscalizedByOilType,
 } from './product-kind';
 
 describe('ProductKind capability table', () => {
@@ -26,9 +25,8 @@ describe('ProductKind capability table', () => {
       hasPartNumbers: true,
       hasVehicleCategory: true,
       requiredFields: ['brand', 'model', 'categoryId'],
-      // Sold by the piece, and fiscalized from its category's own codes.
+      // Sold by the piece.
       unit: 'PCS',
-      fiscalizedByOilType: false,
     });
   });
 
@@ -42,8 +40,6 @@ describe('ProductKind capability table', () => {
       // TYPE first, then viscosity, then volume — the order the wizard asks in.
       requiredFields: ['oilViscosity', 'oilType', 'oilVolumeMl'],
       unit: 'L',
-      // The ONLY kind whose codes come from an attribute instead of a category.
-      fiscalizedByOilType: true,
     });
   });
 
@@ -57,8 +53,6 @@ describe('ProductKind capability table', () => {
       requiredFields: ['antifreezeWeightG'],
       // THE point of the kind: never "шт".
       unit: 'KG',
-      // It keeps its own category's IKPU — never a motor oil's.
-      fiscalizedByOilType: false,
     });
   });
 });
@@ -71,16 +65,6 @@ describe('units are a property of the KIND, not of a listing', () => {
     // The regression this guards: an antifreeze listing quantified in pieces.
     expect(unitOf(ProductKind.ANTIFREEZE)).toBe('KG');
     expect(unitOf(ProductKind.ANTIFREEZE)).not.toBe('PCS');
-  });
-});
-
-describe('only motor oil is fiscalized from its oil type', () => {
-  it('leaves every other kind on its category\'s own IKPU', () => {
-    // The rule that keeps antifreeze (and any future kind) from silently
-    // borrowing one of the three motor-oil MXIKs.
-    for (const kind of Object.values(ProductKind)) {
-      expect(fiscalizedByOilType(kind)).toBe(kind === ProductKind.MOTOR_OIL);
-    }
   });
 });
 
