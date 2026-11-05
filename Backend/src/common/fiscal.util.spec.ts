@@ -21,6 +21,9 @@ import {
   resolveFiscalClassification,
   resolveOilFiscalCodes,
   resolvePackageCode,
+  offeredPackageForms,
+  PACKAGE_CODE_COLUMN,
+  PACKAGE_FORM_NOT_STATED,
   MXIK_PATTERN,
   OIL_TYPE_FISCAL,
   PACKAGE_CODE_PATTERN,
@@ -38,6 +41,7 @@ const BOTH = {
   mxik: '08708005011000000',
   packageCodeSingle: '1417722',
   packageCodeSet: '1417723',
+  packageCodeBox: null,
 };
 
 /** Filters, as supplied: one package code only. */
@@ -45,12 +49,22 @@ const SINGLE_ONLY = {
   mxik: '08421002001000000',
   packageCodeSingle: '1499205',
   packageCodeSet: null,
+  packageCodeBox: null,
 };
 
 const UNCONFIGURED = {
   mxik: null,
   packageCodeSingle: null,
   packageCodeSet: null,
+  packageCodeBox: null,
+};
+
+/** The steering mechanism, as Tasnif lists it on 2026-11-04: all three forms. */
+const STEERING = {
+  mxik: '08708001133000000',
+  packageCodeSingle: '1417728',
+  packageCodeSet: '1417729',
+  packageCodeBox: '1533557',
 };
 
 describe('isCategoryFiscallyConfigured', () => {
@@ -78,6 +92,17 @@ describe('isCategoryFiscallyConfigured', () => {
         mxik: BOTH.mxik,
         packageCodeSingle: null,
         packageCodeSet: BOTH.packageCodeSet,
+        packageCodeBox: null,
+      }),
+    ).toBe(false);
+  });
+
+  it('does not let the OPTIONAL box code configure a category on its own', () => {
+    expect(
+      isCategoryFiscallyConfigured({
+        ...STEERING,
+        packageCodeSingle: null,
+        packageCodeSet: null,
       }),
     ).toBe(false);
   });
@@ -88,10 +113,43 @@ describe('isCategoryFiscallyConfigured', () => {
 });
 
 describe('offersPackageChoice', () => {
-  it('is true only when BOTH codes are present', () => {
+  it('is true only when more than one code is present', () => {
     expect(offersPackageChoice(BOTH)).toBe(true);
+    expect(offersPackageChoice(STEERING)).toBe(true);
+    expect(
+      offersPackageChoice({ ...SINGLE_ONLY, packageCodeBox: '1493357' }),
+    ).toBe(true);
     expect(offersPackageChoice(SINGLE_ONLY)).toBe(false);
     expect(offersPackageChoice(UNCONFIGURED)).toBe(false);
+  });
+});
+
+describe('offeredPackageForms', () => {
+  it('lists exactly the forms the category holds a code for, in asking order', () => {
+    expect(offeredPackageForms(STEERING)).toEqual([
+      PackageForm.SINGLE,
+      PackageForm.SET,
+      PackageForm.BOX,
+    ]);
+    expect(offeredPackageForms(BOTH)).toEqual([
+      PackageForm.SINGLE,
+      PackageForm.SET,
+    ]);
+    expect(
+      offeredPackageForms({ ...SINGLE_ONLY, packageCodeBox: '1493357' }),
+    ).toEqual([PackageForm.SINGLE, PackageForm.BOX]);
+    expect(offeredPackageForms(UNCONFIGURED)).toEqual([]);
+  });
+});
+
+describe('PACKAGE_CODE_COLUMN', () => {
+  it('names a column for every sale form, so a new form cannot go unmapped', () => {
+    expect(Object.keys(PACKAGE_CODE_COLUMN).sort()).toEqual(
+      Object.values(PackageForm).sort(),
+    );
+    expect(new Set(Object.values(PACKAGE_CODE_COLUMN)).size).toBe(
+      Object.values(PackageForm).length,
+    );
   });
 });
 
@@ -104,9 +162,29 @@ describe('resolvePackageCode', () => {
     expect(resolvePackageCode(BOTH, PackageForm.SINGLE)).toBe('1417722');
   });
 
-  it('uses the single code when the question was never asked (null form)', () => {
+  it('uses the BOX code when the listing is sold in a consumer box', () => {
+    expect(resolvePackageCode(STEERING, PackageForm.BOX)).toBe('1533557');
+  });
+
+  it('gives each form of the steering mechanism its own classifier code', () => {
+    expect(resolvePackageCode(STEERING, PackageForm.SINGLE)).toBe('1417728');
+    expect(resolvePackageCode(STEERING, PackageForm.SET)).toBe('1417729');
+    expect(resolvePackageCode(STEERING, PackageForm.BOX)).toBe('1533557');
+  });
+
+  it('answers an unstated form only where the category holds one code', () => {
+    // The operator who confirmed that one code said it is true of everything there.
     expect(resolvePackageCode(SINGLE_ONLY, null)).toBe('1499205');
-    expect(resolvePackageCode(BOTH, null)).toBe('1417722');
+    expect(resolvePackageCode(SINGLE_ONLY, undefined)).toBe('1499205');
+  });
+
+  it.each([
+    ['a set code', BOTH],
+    ['a box code', { ...SINGLE_ONLY, packageCodeBox: '1493357' }],
+    ['all three codes', STEERING],
+  ])('never assumes a piece for an unstated form next to %s', (_, category) => {
+    expect(resolvePackageCode(category, null)).toBeNull();
+    expect(resolvePackageCode(category, undefined)).toBeNull();
   });
 
   it('never picks the code by ORDER — the two forms are named, not positional', () => {
@@ -115,14 +193,18 @@ describe('resolvePackageCode', () => {
     const swapped = {
       packageCodeSingle: '1417723',
       packageCodeSet: '1417722',
+      packageCodeBox: null,
     };
     expect(resolvePackageCode(swapped, PackageForm.SET)).toBe('1417722');
     expect(resolvePackageCode(swapped, PackageForm.SINGLE)).toBe('1417723');
   });
 
-  it('falls back to the single code when a SET choice outlives its code', () => {
-    // An admin removed the set code after the seller answered "Комплект".
-    expect(resolvePackageCode(SINGLE_ONLY, PackageForm.SET)).toBe('1499205');
+  it('never swaps in a piece when a stated form has no code', () => {
+    // An admin removed the set code after the seller answered "Комплект", or the
+    // listing moved to a category without one. Either way it is not a piece.
+    expect(resolvePackageCode(SINGLE_ONLY, PackageForm.SET)).toBeNull();
+    expect(resolvePackageCode(SINGLE_ONLY, PackageForm.BOX)).toBeNull();
+    expect(resolvePackageCode(BOTH, PackageForm.BOX)).toBeNull();
   });
 
   it('returns null when the category carries no usable code at all', () => {
@@ -181,6 +263,7 @@ const bareCategory = (id: string, parentId: string | null = 'any-parent') => ({
   mxik: null,
   packageCodeSingle: null,
   packageCodeSet: null,
+  packageCodeBox: null,
   fiscalConfirmedCodes: null,
   _count: { children: 0 },
 });
@@ -206,13 +289,15 @@ describe('resolveFiscalClassification — the MXIK has to be the right one', () 
   });
 
   it('gives a confirmed leaf its own codes, by the sale form', () => {
-    expect(resolveFiscalClassification(sparePart(confirmedCategory()))).toEqual(
-      {
-        ok: true,
-        mxik: '08708005011000000',
-        packageCode: '1417722',
-      },
-    );
+    expect(
+      resolveFiscalClassification(
+        sparePart(confirmedCategory(), { packageForm: PackageForm.SINGLE }),
+      ),
+    ).toEqual({
+      ok: true,
+      mxik: '08708005011000000',
+      packageCode: '1417722',
+    });
     expect(
       resolveFiscalClassification(
         sparePart(confirmedCategory(), { packageForm: PackageForm.SET }),
@@ -224,11 +309,115 @@ describe('resolveFiscalClassification — the MXIK has to be the right one', () 
     });
   });
 
+  describe('how the listing is sold', () => {
+    const steering = confirmedCategory({ id: 'steering', ...STEERING });
+
+    it.each([
+      [PackageForm.SINGLE, '1417728'],
+      [PackageForm.SET, '1417729'],
+      [PackageForm.BOX, '1533557'],
+    ])('%s reaches the receipt under its own code', (packageForm, code) => {
+      expect(
+        resolveFiscalClassification(sparePart(steering, { packageForm })),
+      ).toEqual({ ok: true, mxik: STEERING.mxik, packageCode: code });
+    });
+
+    it('refuses a listing that states nothing where several forms are possible', () => {
+      expect(resolveFiscalClassification(sparePart(steering))).toEqual({
+        ok: false,
+        gaps: [PACKAGE_FORM_NOT_STATED],
+      });
+      expect(
+        resolveFiscalClassification(sparePart(confirmedCategory())),
+      ).toEqual({ ok: false, gaps: [PACKAGE_FORM_NOT_STATED] });
+    });
+
+    it('takes the one code of a confirmed single-form category for an unstated listing', () => {
+      expect(
+        resolveFiscalClassification(
+          sparePart(confirmedCategory({ packageCodeSet: null })),
+        ),
+      ).toEqual({
+        ok: true,
+        mxik: '08708005011000000',
+        packageCode: '1417722',
+      });
+    });
+
+    it.each([PackageForm.SET, PackageForm.BOX])(
+      'refuses a %s listing on a category with no code for it, not a piece instead',
+      (packageForm) => {
+        const result = resolveFiscalClassification(
+          sparePart(confirmedCategory({ packageCodeSet: null }), {
+            packageForm,
+          }),
+        );
+        expect(result.ok).toBe(false);
+        expect((result as { gaps: string[] }).gaps[0]).toContain(
+          `no package code for a listing sold as ${packageForm}`,
+        );
+      },
+    );
+
+    it('checks the code of the form sold, not only the single one', () => {
+      const result = resolveFiscalClassification(
+        sparePart(
+          confirmedCategory({ packageCodeBox: 'one-box' }),
+          { packageForm: PackageForm.BOX },
+        ),
+      );
+      expect(result).toEqual({
+        ok: false,
+        gaps: ['category package code "one-box" is malformed'],
+      });
+    });
+
+    it('editing the box code voids the confirmation with no further write', () => {
+      expect(
+        resolveFiscalClassification(
+          sparePart(
+            { ...steering, packageCodeBox: '1533558' },
+            { packageForm: PackageForm.SINGLE },
+          ),
+        ),
+      ).toEqual({ ok: false, gaps: [FISCAL_CODES_UNCONFIRMED] });
+    });
+
+    it.each([PackageForm.SET, PackageForm.BOX])(
+      'the oil table holds no code for oil sold as %s',
+      (packageForm) => {
+        const composition = {
+          ...bareCategory(SYNTHETIC_CATEGORY),
+          fiscalConfirmedCodes: confirmableFiscalCodes(
+            bareCategory(SYNTHETIC_CATEGORY),
+          ),
+        };
+        const result = resolveFiscalClassification({
+          kind: ProductKind.MOTOR_OIL,
+          oilType: OilType.SYNTHETIC,
+          packageForm,
+          category: composition as never,
+        });
+        expect(result.ok).toBe(false);
+        expect((result as { gaps: string[] }).gaps[0]).toContain(
+          `no package code for a listing sold as ${packageForm}`,
+        );
+      },
+    );
+
+    it('the readiness of a category does not depend on any one listing', () => {
+      expect(categoryFiscalReadiness(steering).status).toBe('READY');
+    });
+  });
+
   it('a code nobody confirmed does not reach a receipt, however plausible', () => {
     // The seed’s representative-product codes are exactly this state.
     expect(
       resolveFiscalClassification(
-        sparePart({ ...confirmedCategory(), fiscalConfirmedCodes: null }),
+        sparePart(
+          { ...confirmedCategory(), fiscalConfirmedCodes: null },
+          { packageForm: PackageForm.SINGLE },
+        ),
       ),
     ).toEqual({ ok: false, gaps: [FISCAL_CODES_UNCONFIRMED] });
   });
@@ -240,7 +429,10 @@ describe('resolveFiscalClassification — the MXIK has to be the right one', () 
   ])('editing %s voids the confirmation with no further write', (_, change) => {
     expect(
       resolveFiscalClassification(
-        sparePart({ ...confirmedCategory(), ...change }),
+        sparePart(
+          { ...confirmedCategory(), ...change },
+          { packageForm: PackageForm.SINGLE },
+        ),
       ),
     ).toEqual({ ok: false, gaps: [FISCAL_CODES_UNCONFIRMED] });
   });
@@ -435,7 +627,7 @@ describe('resolveFiscalClassification — oils', () => {
         kind: ProductKind.SPARE_PART,
         oilType: OilType.MINERAL,
         packageForm: null,
-        category: confirmedCategory(),
+        category: confirmedCategory({ packageCodeSet: null }),
       }),
     ).toMatchObject({ ok: true, mxik: '08708005011000000' });
     // …and on a composition, which only holds motor oil, it is refused outright.

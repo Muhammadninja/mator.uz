@@ -8,6 +8,10 @@
  * resolver and the admin category console, so a confirmation made through the API has
  * to be what the receipt then reads. Prisma is mocked and keeps its rows in memory.
  *
+ * What Check hands Payme is the receipt frozen on the invoice, so `check` does what a
+ * customer does first: it starts the payment. That is where a refusal now happens, and
+ * with no invoice Check refuses too. `checkAgain` leaves the invoice as it is.
+ *
  * That also bounds what this shows. It says nothing about PostgreSQL: no query here
  * reached a database, and no race can happen in a single process. It is not evidence
  * that production is ready, nor that any real code here is correct: every MXIK below
@@ -15,6 +19,7 @@
  */
 import {
   ExecutionContext,
+  HttpException,
   INestApplication,
   ValidationPipe,
 } from '@nestjs/common';
@@ -33,7 +38,9 @@ import {
   OIL_TYPE_FISCAL,
 } from '../../src/common/fiscal.util';
 import { HttpExceptionFilter } from '../../src/common/http-exception.filter';
+import { PaymentsService } from '../../src/orders/payments.service';
 import { ClickService } from '../../src/orders/webhooks/click.service';
+import { PaymeFiscalReceiptService } from '../../src/orders/webhooks/payme-fiscal-receipt.service';
 import { PaymeFiscalService } from '../../src/orders/webhooks/payme-fiscal.service';
 import {
   PAYME_WEBHOOK_PATH,
@@ -56,6 +63,7 @@ const FAKE_KEY = 'smoke-test-merchant-key-not-a-secret';
 const AUTH = 'Basic ' + Buffer.from(`Paycom:${FAKE_KEY}`).toString('base64');
 const BASE_ENV = {
   PAYME_MERCHANT_KEY: FAKE_KEY,
+  PAYME_MERCHANT_ID: 'smoke-merchant',
   PAYME_ACCOUNT_FIELD: 'order_id',
   SERVICE_FEE_MXIK: '09900000000000002',
   SERVICE_FEE_PACKAGE_CODE: '1000002',
@@ -86,6 +94,9 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
   let offers: Map<string, any>;
   let order: any;
   let lines: any[];
+  let invoices: any[];
+  let receipts: Map<string, any>;
+  let payments: PaymentsService;
 
   const counted = (row: any) => ({
     ...row,
@@ -111,6 +122,8 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
     offerings = new Map();
     offers = new Map();
     lines = [];
+    invoices = [];
+    receipts = new Map();
     order = null;
     env = { ...BASE_ENV };
     admin = { role: 'SUPER_ADMIN' };
@@ -161,6 +174,74 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
           })),
       ),
     );
+    // The payments table, for as far as an invoice goes: the rows a transaction can take.
+    prisma.payment.findFirst.mockImplementation(({ where }: any) =>
+      Promise.resolve(
+        where.providerTransactionId === null
+          ? ([...invoices]
+              .reverse()
+              .find((row) => row.providerTransactionId === null) ?? null)
+          : (invoices.find(
+              (row) => row.providerState === where.providerState,
+            ) ?? null),
+      ),
+    );
+    prisma.payment.findUnique.mockImplementation(({ where }: any) =>
+      Promise.resolve(
+        invoices.find(
+          (row) =>
+            where.provider_providerTransactionId &&
+            row.providerTransactionId ===
+              where.provider_providerTransactionId.providerTransactionId,
+        ) ?? null,
+      ),
+    );
+    prisma.payment.create.mockImplementation(({ data }: any) => {
+      const { fiscalSnapshot, ...row } = data;
+      const invoice = {
+        providerTransactionId: null,
+        providerState: null,
+        ...row,
+        // As a jsonb column gives it back: a copy, not the object that was written.
+        fiscalSnapshot: {
+          ...fiscalSnapshot.create,
+          detail: JSON.parse(JSON.stringify(fiscalSnapshot.create.detail)),
+        },
+      };
+      invoices.push(invoice);
+      return Promise.resolve(invoice);
+    });
+    prisma.payment.update.mockImplementation(({ where, data }: any) => {
+      const row = invoices.find((invoice) => invoice.id === where.id);
+      Object.assign(row, data);
+      return Promise.resolve(row);
+    });
+    const receiptKey = (key: any) => `${key.paymentId}:${key.type}`;
+    prisma.paymeFiscalReceipt.findUnique.mockImplementation(({ where }: any) =>
+      Promise.resolve(receipts.get(receiptKey(where.paymentId_type)) ?? null),
+    );
+    prisma.paymeFiscalReceipt.create.mockImplementation(({ data }: any) => {
+      const row = { conflictCount: 0, ...data };
+      receipts.set(receiptKey(data), row);
+      return Promise.resolve(row);
+    });
+    prisma.paymeFiscalReceipt.updateMany.mockImplementation(
+      ({ where, data }: any) => {
+        const row = receipts.get(receiptKey(where));
+        if (!row || row.statusCode === 0) return Promise.resolve({ count: 0 });
+        Object.assign(row, data);
+        return Promise.resolve({ count: 1 });
+      },
+    );
+    prisma.paymeFiscalReceipt.update.mockImplementation(
+      ({ where, data }: any) => {
+        const row = receipts.get(receiptKey(where.paymentId_type));
+        Object.assign(row, data, {
+          conflictCount: row.conflictCount + data.conflictCount.increment,
+        });
+        return Promise.resolve(row);
+      },
+    );
     prisma.seller.findMany.mockResolvedValue([
       { id: 7, tgId: BigInt(555), catalogSellerId: 'dealer-1' },
     ]);
@@ -173,6 +254,8 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
       providers: [
         PaymeService,
         PaymeFiscalService,
+        PaymeFiscalReceiptService,
+        PaymentsService,
         AdminCategoriesService,
         { provide: PrismaService, useValue: prisma },
         {
@@ -204,6 +287,7 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
       })
       .compile();
 
+    payments = moduleRef.get(PaymentsService);
     app = moduleRef.createNestApplication();
     app.use(PAYME_WEBHOOK_PATH, paymeRawBodyMiddleware);
     app.useGlobalPipes(
@@ -331,11 +415,26 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
     expect(res.status).toBe(200);
     return res.body;
   };
-  const check = (amount: number) =>
+  /** The customer starts the payment. A refusal leaves no invoice, nothing more. */
+  const startPayment = async () => {
+    await payments
+      .createPaymeInvoice(order.userId, { order_id: order.id })
+      .catch((err: unknown) => {
+        if (!(err instanceof HttpException)) throw err;
+      });
+  };
+  /** What Payme is told about the invoice as it stands. */
+  const checkAgain = (amount: number) =>
     rpc('CheckPerformTransaction', {
       account: { order_id: 'ord_1' },
       amount,
     });
+  /** A payment started from the data as it is now, then Payme's Check of it. */
+  const check = async (amount: number) => {
+    invoices.length = 0;
+    await startPayment();
+    return checkAgain(amount);
+  };
   const refusedCode = (body: any) => body.error?.code;
   const sumOf = (items: any[]) =>
     items.reduce((sum, item) => sum + item.price * item.count, 0);
@@ -776,7 +875,7 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
 
         const first = (await check(amount)).result.detail;
         env.DELIVERY_COURIER_UZS = '99000';
-        const second = (await check(amount)).result.detail;
+        const second = (await checkAgain(amount)).result.detail;
 
         expect(second).toEqual(first);
         expect(prisma.order.update).not.toHaveBeenCalled();
@@ -1079,6 +1178,233 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
       await console_()
         .get('/v1/admin/categories?fiscalStatus=MAYBE')
         .expect(400);
+    });
+  });
+  describe('the receipt is frozen on the invoice', () => {
+    const payable = () => {
+      confirmed(subcategory('brake-discs', 'brake-system'));
+      part('p1', 'brake-discs');
+      return orderOf([partLine('p1')]);
+    };
+    const createTransaction = (amount: number, id = 'pmt-1') =>
+      rpc('CreateTransaction', {
+        id,
+        time: Date.now(),
+        amount,
+        account: { order_id: 'ord_1' },
+      });
+
+    it('a code an operator changes after the invoice does not reach Check', async () => {
+      const amount = payable();
+      const agreed = (await check(amount)).result.detail;
+
+      // Through the console, as an operator would: a new code ends the confirmation,
+      // which would refuse a receipt built from the catalog now.
+      await console_()
+        .patch('/v1/admin/categories/brake-discs')
+        .send({ mxik: '09922222222222222' })
+        .expect(200);
+
+      const body = await checkAgain(amount);
+      expect(body.result.allow).toBe(true);
+      expect(body.result.detail).toEqual(agreed);
+      expect(body.result.detail.items[0].code).toBe(SUB_MXIK);
+    });
+
+    it('a dealer’s new VAT rate and tax id do not reach it either', async () => {
+      const amount = payable();
+      const agreed = (await check(amount)).result.detail;
+
+      parts.get('p1').seller = { status: 'ACTIVE', tin: '999999999', vatPercent: 0 };
+
+      expect((await checkAgain(amount)).result.detail).toEqual(agreed);
+    });
+
+    it('nor a product re-filed on another category', async () => {
+      const amount = payable();
+      const agreed = (await check(amount)).result.detail;
+
+      confirmed(
+        subcategory('other-discs', 'brake-system', { mxik: '09933333333333333' }),
+      );
+      parts.get('p1').categoryId = 'other-discs';
+
+      expect((await checkAgain(amount)).result.detail).toEqual(agreed);
+    });
+
+    it('a second tap on Pay keeps the invoice and the receipt, whatever changed', async () => {
+      const amount = payable();
+      await startPayment();
+      const [invoice] = invoices;
+      const agreed = invoice.fiscalSnapshot;
+      parts.get('p1').seller = { status: 'ACTIVE', tin: '999999999', vatPercent: 0 };
+
+      await startPayment();
+
+      expect(invoices).toHaveLength(1);
+      expect(invoices[0].fiscalSnapshot).toBe(agreed);
+    });
+
+    it('the transaction takes the invoice Check described, and the receipt with it', async () => {
+      const amount = payable();
+      const agreed = (await check(amount)).result.detail;
+
+      const created = await createTransaction(amount);
+
+      expect(created.result.transaction).toBe(invoices[0].id);
+      expect(invoices).toHaveLength(1);
+      expect(invoices[0].providerTransactionId).toBe('pmt-1');
+      expect(invoices[0].fiscalSnapshot.detail).toEqual(agreed);
+    });
+
+    it('with the invoice taken, the next payment gets a receipt of its own, from the data by then', async () => {
+      const amount = payable();
+      await check(amount);
+      await createTransaction(amount);
+      invoices[0].providerState = -1; // Payme cancelled that attempt.
+      invoices[0].status = 'CANCELLED';
+      const first = invoices[0].fiscalSnapshot.detail;
+
+      parts.get('p1').seller = { status: 'ACTIVE', tin: '999999999', vatPercent: 0 };
+      await startPayment();
+
+      expect(invoices).toHaveLength(2);
+      expect(invoices[1].fiscalSnapshot.detail.items[0].commission_info).toEqual({
+        tin: '999999999',
+      });
+      expect(first.items[0].commission_info).toEqual({ tin: DEALER.tin });
+    });
+
+    it('Check and Create refuse with no invoice: a link left over from a cancelled attempt', async () => {
+      const amount = payable();
+      expect(refusedCode(await checkAgain(amount))).toBe(REFUSED);
+      expect(refusedCode(await createTransaction(amount))).toBe(REFUSED);
+    });
+
+    it('a refused payment leaves no invoice behind for Check to find', async () => {
+      subcategory('brake-discs', 'brake-system');
+      part('p1', 'brake-discs');
+      const amount = orderOf([partLine('p1')]);
+
+      await startPayment();
+
+      expect(invoices).toEqual([]);
+      expect(refusedCode(await checkAgain(amount))).toBe(REFUSED);
+    });
+  });
+
+  describe('SetFiscalData', () => {
+    /** Payme's own sample, from its documentation. */
+    const FISCAL_DATA = {
+      receipt_id: 121,
+      status_code: 0,
+      message: 'accepted',
+      terminal_id: 'EP000000000025',
+      fiscal_sign: '800031554082',
+      qr_code_url: 'fiscal receipt url',
+      date: '20220706221021',
+    };
+    const setFiscalData = (
+      type: string,
+      data: any = FISCAL_DATA,
+      id = 'pmt-1',
+    ) => rpc('SetFiscalData', { id, type, fiscal_data: data });
+
+    beforeEach(async () => {
+      confirmed(subcategory('brake-discs', 'brake-system'));
+      part('p1', 'brake-discs');
+      const amount = orderOf([partLine('p1')]);
+      await check(amount);
+      await rpc('CreateTransaction', {
+        id: 'pmt-1',
+        time: Date.now(),
+        amount,
+        account: { order_id: 'ord_1' },
+      });
+      invoices[0].providerState = 2;
+    });
+    const stored = (type: string) =>
+      receipts.get(`${invoices[0].id}:${type}`);
+
+    it('takes the documented call and answers what the documentation says', async () => {
+      const body = await setFiscalData('PERFORM');
+
+      expect(body.error).toBeUndefined();
+      expect(body.result).toEqual({ success: true });
+      expect(stored('PERFORM')).toMatchObject({
+        receiptId: '121',
+        statusCode: 0,
+        terminalId: 'EP000000000025',
+        fiscalSign: '800031554082',
+        qrCodeUrl: 'fiscal receipt url',
+        fiscalDate: '20220706221021',
+        rawData: FISCAL_DATA,
+      });
+    });
+
+    it('keeps the receipts of a sale and of its cancellation apart', async () => {
+      await setFiscalData('PERFORM');
+      invoices[0].providerState = -2;
+      await setFiscalData('CANCEL', {
+        ...FISCAL_DATA,
+        receipt_id: 123,
+        fiscal_sign: '900031555055',
+        date: '20220706231125',
+      });
+
+      expect(receipts.size).toBe(2);
+      expect(stored('PERFORM').fiscalSign).toBe('800031554082');
+      expect(stored('CANCEL').fiscalSign).toBe('900031555055');
+    });
+
+    it('a repeated callback changes nothing and still succeeds', async () => {
+      await setFiscalData('PERFORM');
+      const body = await setFiscalData('PERFORM');
+
+      expect(body.result).toEqual({ success: true });
+      expect(receipts.size).toBe(1);
+      expect(prisma.paymeFiscalReceipt.create).toHaveBeenCalledTimes(1);
+      expect(prisma.paymeFiscalReceipt.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('answers -32001 with a plain message for a check we do not know', async () => {
+      const body = await setFiscalData('PERFORM', FISCAL_DATA, 'pmt-unknown');
+      expect(body.error).toEqual({
+        code: -32001,
+        message: 'Чек с таким id не найден',
+      });
+    });
+
+    it.each([
+      ['type', { id: 'pmt-1', type: 'REFUND', fiscal_data: FISCAL_DATA }],
+      ['id', { type: 'PERFORM', fiscal_data: FISCAL_DATA }],
+      ['fiscal_data', { id: 'pmt-1', type: 'PERFORM' }],
+      [
+        'fiscal_data.status_code',
+        {
+          id: 'pmt-1',
+          type: 'PERFORM',
+          fiscal_data: { ...FISCAL_DATA, status_code: 'accepted' },
+        },
+      ],
+    ])('answers -32602 naming %s in the message', async (field, params) => {
+      const body = await rpc('SetFiscalData', params);
+      expect(body.error).toEqual({ code: -32602, message: field });
+      expect(receipts.size).toBe(0);
+    });
+
+    it('answers -32504 without the merchant key, and stores nothing', async () => {
+      const res = await request(app.getHttpServer())
+        .post(PAYME_WEBHOOK_PATH)
+        .set('Authorization', 'Basic d3Jvbmc6d3Jvbmc=')
+        .send({
+          id: 1,
+          method: 'SetFiscalData',
+          params: { id: 'pmt-1', type: 'PERFORM', fiscal_data: FISCAL_DATA },
+        });
+      expect(res.status).toBe(200);
+      expect(res.body.error.code).toBe(-32504);
+      expect(receipts.size).toBe(0);
     });
   });
 });

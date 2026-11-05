@@ -180,4 +180,17 @@ export class CreateCategoryDto {
     message: 'packageCodeSet must be 1–20 digits',
   })
   packageCodeSet?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Tasnif package code for a consumer box ("Потребительская коробка"). The one ' +
+      'listed for this MXIK: Tasnif issues package codes per MXIK.',
+    example: '1533557',
+  })
+  @IsOptional()
+  @IsString()
+  @Matches(PACKAGE_CODE_PATTERN, {
+    message: 'packageCodeBox must be 1–20 digits',
+  })
+  packageCodeBox?: string;
 }

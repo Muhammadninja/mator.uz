@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { ProductKind } from '@prisma/client';
+import { PackageForm, ProductKind } from '@prisma/client';
 import {
   ArrayMaxSize,
   ArrayMinSize,
@@ -50,4 +50,17 @@ export class BulkMoveProductsDto {
   @IsOptional()
   @IsEnum(ProductKind)
   kind?: ProductKind;
+
+  @ApiPropertyOptional({
+    description:
+      'How these parts are sold, when the operator states it. A part that states no ' +
+      'form cannot be paid for online on a category holding more than one package ' +
+      'code, so this is how existing parts get one: send their current category as ' +
+      'the target to change nothing else. Refused when the target has no code for ' +
+      'this form. Recorded in the audit trail.',
+    enum: PackageForm,
+  })
+  @IsOptional()
+  @IsEnum(PackageForm)
+  packageForm?: PackageForm;
 }

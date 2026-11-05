@@ -1,6 +1,6 @@
 // Tests for the SALE-FORM step of the product wizard ("Как продаётся товар?" —
-// Штука / Комплект / набор), which exists only for a category configured with
-// BOTH Tasnif package codes.
+// Штука / Комплект / набор / Потребительская коробка), which exists only for a
+// category configured with more than one Tasnif package code.
 //
 // What is pinned here: the question appears exactly when the chosen category
 // offers a choice and never otherwise; each answer stores the matching form;
@@ -29,6 +29,7 @@ import {
   stepPrompt,
   packageFormKeyboard,
   PACKAGE_FORM_LABELS,
+  PACKAGE_FORM_BY_PAYLOAD,
   WIZ_PACKAGE_FORM_ACTION,
   buildAction,
 } from './product-wizard';
@@ -36,11 +37,35 @@ import { buildSessionFromDraft } from './telegram.service';
 import { WIZARD_BRANDS } from './wizard-catalog';
 
 /** Brakes, as supplied: sold as a single item AND as a set. */
-const BOTH_CODES = { packageCodeSingle: '1417722', packageCodeSet: '1417723' };
+const BOTH_CODES = {
+  packageCodeSingle: '1417722',
+  packageCodeSet: '1417723',
+  packageCodeBox: null,
+};
+/** The steering mechanism, as Tasnif lists it: all three forms. */
+const ALL_CODES = {
+  packageCodeSingle: '1417728',
+  packageCodeSet: '1417729',
+  packageCodeBox: '1533557',
+};
+/** Filters, with the consumer box Tasnif lists for them and no set. */
+const SINGLE_AND_BOX = {
+  packageCodeSingle: '1499205',
+  packageCodeSet: null,
+  packageCodeBox: '1493357',
+};
 /** Filters, as supplied: one form only. */
-const SINGLE_CODE = { packageCodeSingle: '1499205', packageCodeSet: null };
+const SINGLE_CODE = {
+  packageCodeSingle: '1499205',
+  packageCodeSet: null,
+  packageCodeBox: null,
+};
 /** A category an admin has not configured yet. */
-const NO_CODES = { packageCodeSingle: null, packageCodeSet: null };
+const NO_CODES = {
+  packageCodeSingle: null,
+  packageCodeSet: null,
+  packageCodeBox: null,
+};
 
 const BRAKE_SYSTEM = { id: 'brake-system', name: 'Тормозная система' };
 const BRAKES = { id: 'brakes', name: 'Тормоза' };
@@ -58,7 +83,7 @@ function sessionAtCategory(): WizardSession {
 
 /** Pick a LEAF root category (no children) carrying `fiscal`. */
 function pickLeafCategory(
-  fiscal: { packageCodeSingle: string | null; packageCodeSet: string | null },
+  fiscal: typeof BOTH_CODES | typeof ALL_CODES | typeof SINGLE_CODE | typeof NO_CODES | typeof SINGLE_AND_BOX,
   option = BRAKE_SYSTEM,
 ): WizardSession {
   const s = sessionAtCategory();
@@ -120,6 +145,87 @@ describe('when the sale-form question is asked', () => {
 
     // Straight into the oil questionnaire, exactly as before this step existed.
     expect(s.step).toBe(WizardStep.OIL_VISCOSITY);
+  });
+});
+
+describe('the forms offered', () => {
+  const labels = (s: WizardSession) =>
+    packageFormKeyboard(s)
+      .reply_markup.inline_keyboard.flat()
+      .map((b) => b.text);
+  const payloads = (s: WizardSession) =>
+    packageFormKeyboard(s)
+      .reply_markup.inline_keyboard.flat()
+      .map((b) => ('callback_data' in b ? b.callback_data : ''));
+
+  it('offers all three on a category holding all three codes', () => {
+    const s = pickLeafCategory(ALL_CODES);
+    expect(s.step).toBe(WizardStep.PACKAGE_FORM);
+    expect(s.packageFormOptions).toEqual([
+      PackageForm.SINGLE,
+      PackageForm.SET,
+      PackageForm.BOX,
+    ]);
+    expect(labels(s)).toEqual(
+      expect.arrayContaining([
+        PACKAGE_FORM_LABELS[PackageForm.SINGLE],
+        PACKAGE_FORM_LABELS[PackageForm.SET],
+        PACKAGE_FORM_LABELS[PackageForm.BOX],
+      ]),
+    );
+    expect(payloads(s)).toEqual(
+      expect.arrayContaining([
+        buildAction('pf', 'single'),
+        buildAction('pf', 'set'),
+        buildAction('pf', 'box'),
+      ]),
+    );
+  });
+
+  it('does not offer a form the category holds no code for', () => {
+    const s = pickLeafCategory(BOTH_CODES);
+    expect(labels(s)).not.toContain(PACKAGE_FORM_LABELS[PackageForm.BOX]);
+    expect(payloads(s)).not.toContain(buildAction('pf', 'box'));
+  });
+
+  it('asks on a category holding a single and a box code, with no set', () => {
+    const s = pickLeafCategory(SINGLE_AND_BOX);
+    expect(s.step).toBe(WizardStep.PACKAGE_FORM);
+    expect(s.packageFormOptions).toEqual([PackageForm.SINGLE, PackageForm.BOX]);
+    expect(labels(s)).not.toContain(PACKAGE_FORM_LABELS[PackageForm.SET]);
+  });
+
+  it('stores the BOX form', () => {
+    const s = pickLeafCategory(ALL_CODES);
+    expect(selectPackageForm(s, PackageForm.BOX).status).toBe('ok');
+    expect(s.packageForm).toBe(PackageForm.BOX);
+    expect(s.step).toBe(WizardStep.TITLE);
+  });
+
+  it('refuses a tap on a form the category does not offer, and asks again', () => {
+    const s = pickLeafCategory(BOTH_CODES);
+    expect(selectPackageForm(s, PackageForm.BOX).status).toBe('stale');
+    expect(s.packageForm).toBeNull();
+    expect(s.step).toBe(WizardStep.PACKAGE_FORM);
+  });
+
+  it('changing category replaces the forms on offer', () => {
+    const s = pickLeafCategory(ALL_CODES);
+    goBack(s);
+    s.categoryOptions = [BRAKE_SYSTEM, FILTERS];
+    selectCategory(s, FILTERS.id, [], SINGLE_CODE);
+    expect(s.packageFormOptions).toEqual([PackageForm.SINGLE]);
+    expect(s.packageChoiceRequired).toBe(false);
+  });
+
+  it('every payload the keyboard sends is one the bot understands', () => {
+    for (const payload of payloads(pickLeafCategory(ALL_CODES)).filter((p) =>
+      p.includes(':pf:'),
+    )) {
+      const match = WIZ_PACKAGE_FORM_ACTION.exec(payload);
+      expect(match).not.toBeNull();
+      expect(PACKAGE_FORM_BY_PAYLOAD[match![1]]).toBeDefined();
+    }
   });
 });
 
@@ -195,6 +301,7 @@ describe('changing the category', () => {
     selectCategory(s, FILTERS.id, [], {
       packageCodeSingle: '1417580',
       packageCodeSet: '1417581',
+      packageCodeBox: null,
     });
 
     expect(s.packageForm).toBeNull();
@@ -298,6 +405,9 @@ describe('resuming a draft', () => {
     const s = buildSessionFromDraft(draft() as never, WizardStep.PACKAGE_FORM);
     expect(s.step).toBe(WizardStep.PACKAGE_FORM);
     expect(s.packageChoiceRequired).toBe(true);
+    // The buttons are read from the live tree when the step renders, not stored.
+    expect(s.packageFormOptions).toEqual([]);
+    s.packageFormOptions = [PackageForm.SINGLE, PackageForm.SET];
     // Answering advances into the shared tail rather than ending the flow.
     selectPackageForm(s, PackageForm.SINGLE);
     expect(s.step).toBe(WizardStep.TITLE);

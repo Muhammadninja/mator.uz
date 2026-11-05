@@ -146,6 +146,29 @@ export class MetricsService {
     this.safe(() => this.metrics.draftsExpiredTotal.inc());
   }
 
+  /**
+   * A request went out to UzMaps. Both labels come from closed sets in the code, never from
+   * what the provider said. Cached answers never reach this, so it tracks what is billed.
+   */
+  recordUzmapsRequest(
+    product: 'routing' | 'search' | 'geocoding',
+    outcome: 'success' | 'empty' | 'refused' | 'rate_limited' | 'failed',
+  ): void {
+    this.safe(() => this.metrics.uzmapsRequestsTotal.inc({ product, outcome }));
+  }
+
+  /** UzMaps' own figures for one key's monthly allowance. */
+  setUzmapsQuota(
+    keyRole: 'routing' | 'search',
+    limit: number,
+    used: number,
+  ): void {
+    this.safe(() => {
+      this.metrics.uzmapsQuotaLimit.set({ key_role: keyRole }, limit);
+      this.metrics.uzmapsQuotaUsed.set({ key_role: keyRole }, used);
+    });
+  }
+
   /** A provider accepted an SMS. */
   recordSmsSent(provider: string, template?: string | null): void {
     this.safe(() =>

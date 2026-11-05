@@ -144,6 +144,7 @@ describe('CATEGORY_FISCAL_DATA', () => {
           mxik: fiscal.mxik,
           packageCodeSingle: fiscal.packageCodeSingle,
           packageCodeSet: fiscal.packageCodeSet ?? null,
+          packageCodeBox: null,
         }),
       ).toBe(true);
     }
@@ -195,6 +196,7 @@ describe('CATEGORY_FISCAL_DATA', () => {
         mxik: fiscal.mxik,
         packageCodeSingle: fiscal.packageCodeSingle,
         packageCodeSet: fiscal.packageCodeSet ?? null,
+        packageCodeBox: null,
         fiscalConfirmedCodes: null,
         _count: { children: 0 },
       });

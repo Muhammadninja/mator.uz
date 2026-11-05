@@ -4,13 +4,19 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { OrderStatus, PaymentProvider, PaymentStatus } from '@prisma/client';
+import {
+  OrderStatus,
+  PaymentProvider,
+  PaymentStatus,
+  Prisma,
+} from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { prefixedId, IdPrefix } from '../common/ulid.util';
 import { CreateInvoiceDto } from './dto/create-invoice.dto';
 import { readPaymeConfig } from './webhooks/payme.config';
 import { buildPaymeCheckoutUrl } from './webhooks/payme-checkout.util';
 import { PaymeFiscalService } from './webhooks/payme-fiscal.service';
+import { findOpenPaymeInvoice } from './webhooks/payme-invoice.util';
 import { isPayableOrderStatus } from './order-transitions';
 import { isClickEnabled } from './webhooks/click.config';
 import { assertAllAvailable, findUnavailableParts } from './order-availability';
@@ -41,7 +47,7 @@ export class PaymentsService {
     // must never reach Payme, and the customer should learn that here — while
     // paying is still just a button — rather than after being handed a link
     // that the webhook would then reject.
-    await this.fiscal.assertFiscalizable(order.id);
+    const detail = await this.fiscal.buildOrderDetail(order.id);
     const amountUzs = Number(order.totalUzs);
     const tiyin = Math.round(amountUzs * 100);
     const payme = readPaymeConfig((key) => this.config.get<string>(key));
@@ -58,18 +64,39 @@ export class PaymentsService {
     const deepLink = checkoutUrl;
     const httpsFallback = checkoutUrl;
 
-    const payment = await this.prisma.payment.create({
-      data: {
-        id: prefixedId(IdPrefix.PAYMENT),
-        orderId: order.id,
-        provider: PaymentProvider.PAYME,
-        status: PaymentStatus.PENDING,
-        amountUzs,
-        amountTiyin: BigInt(tiyin),
-        deepLink,
-        httpsFallback,
-        expiresAt: order.expiresAt,
-      },
+    // The receipt is frozen here, because CheckPerformTransaction carries no transaction
+    // id to hang it on. One open invoice per order, under the same lock CreateTransaction
+    // takes: paying twice from two tapped buttons, or binding a transaction at this very
+    // moment, cannot leave Payme holding one receipt and us another. A repeat tap reuses
+    // the receipt already agreed and only refreshes the link, whose return_url may differ.
+    const payment = await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM orders WHERE id = ${order.id} FOR UPDATE`;
+      const open = await findOpenPaymeInvoice(tx, order.id);
+      if (open) {
+        return tx.payment.update({
+          where: { id: open.id },
+          data: { deepLink, httpsFallback },
+        });
+      }
+      return tx.payment.create({
+        data: {
+          id: prefixedId(IdPrefix.PAYMENT),
+          orderId: order.id,
+          provider: PaymentProvider.PAYME,
+          status: PaymentStatus.PENDING,
+          amountUzs,
+          amountTiyin: BigInt(tiyin),
+          deepLink,
+          httpsFallback,
+          expiresAt: order.expiresAt,
+          fiscalSnapshot: {
+            create: {
+              detail: detail as unknown as Prisma.InputJsonObject,
+              totalTiyin: BigInt(tiyin),
+            },
+          },
+        },
+      });
     });
 
     return {
@@ -79,7 +106,7 @@ export class PaymentsService {
       amount_uzs: amountUzs,
       deep_link: deepLink,
       https_fallback: httpsFallback,
-      expires_at: order.expiresAt ? order.expiresAt.toISOString() : null,
+      expires_at: payment.expiresAt ? payment.expiresAt.toISOString() : null,
     };
   }
 

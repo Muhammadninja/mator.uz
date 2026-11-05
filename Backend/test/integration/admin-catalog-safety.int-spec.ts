@@ -55,6 +55,7 @@ describeWithDb('catalog safety (real PostgreSQL)', () => {
     statuses,
     new DiscountService(prisma as never),
     audit,
+    {} as never,
   );
 
   let dealerId: string;
@@ -510,8 +511,14 @@ describeWithDb('catalog safety (real PostgreSQL)', () => {
       ]);
 
       const results = await Promise.all([
-        orders.createFromCart(a.id, { payment_type: 'cash' } as never),
-        orders.createFromCart(b.id, { payment_type: 'cash' } as never),
+        orders.createFromCart(a.id, {
+          payment_type: 'cash',
+          cart_snapshot: { delivery_method: 'pickup' },
+        } as never),
+        orders.createFromCart(b.id, {
+          payment_type: 'cash',
+          cart_snapshot: { delivery_method: 'pickup' },
+        } as never),
       ]);
 
       expect(results.map((r) => r.status)).toEqual([

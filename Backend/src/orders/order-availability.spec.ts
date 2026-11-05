@@ -12,6 +12,7 @@ import { OrdersService } from './orders.service';
 import { OrderStatusService } from './order-status.service';
 import { PaymentsService } from './payments.service';
 import { PaymeService } from './webhooks/payme.service';
+import { PaymeFiscalReceiptService } from './webhooks/payme-fiscal-receipt.service';
 import { CartService } from '../cart/cart.service';
 import {
   buildCart,
@@ -19,6 +20,7 @@ import {
   buildOrder,
   createPrismaMock,
   fakeConfig,
+  fakeDeliveryQuotes,
   fakeDiscounts,
   fakeFiscal,
   fakeNotifications,
@@ -137,6 +139,7 @@ describe('availability at each step', () => {
       new OrderStatusService(prisma),
       fakeDiscounts(),
       { record: jest.fn() } as never,
+      fakeDeliveryQuotes(),
     );
     await expect(svc.createFromCart('usr_1', {})).rejects.toThrow(
       /Brake pads \(out_of_stock\)/,
@@ -153,6 +156,7 @@ describe('availability at each step', () => {
       new OrderStatusService(prisma),
       fakeDiscounts(),
       { record: jest.fn() } as never,
+      fakeDeliveryQuotes(),
     );
 
   it('order creation keeps what an accepted offer sold and who sold it', async () => {
@@ -223,10 +227,16 @@ describe('availability at each step', () => {
 
     it.each<[string, Record<string, unknown>]>([
       ['courier, paid through Payme', { payment_type: 'payme' }],
+      ['courier, paid in cash', { payment_type: 'cash' }],
+      ['courier, paid by terminal', { payment_type: 'terminal' }],
       ['courier, payment not stated', {}],
       [
         'courier stated outright',
         { cart_snapshot: { delivery_method: 'courier' } },
+      ],
+      [
+        'courier stated outright, paid in cash',
+        { payment_type: 'cash', cart_snapshot: { delivery_method: 'courier' } },
       ],
     ])('%s: refused while the customer still has the cart', async (_, dto) => {
       await expect(
@@ -238,21 +248,29 @@ describe('availability at each step', () => {
       expect(prisma.cartItem.deleteMany).not.toHaveBeenCalled();
     });
 
-    it('pickup holds only the goods, whatever the environment still says', async () => {
-      await orders(LEFTOVER).createFromCart('usr_1', {
-        payment_type: 'payme',
-        cart_snapshot: { delivery_method: 'pickup' },
-      });
-      expect(chargesOf()).toEqual(GOODS_ONLY);
-    });
-
-    it.each(['cash', 'terminal'] as const)(
-      'courier paid by %s goes ahead, with no made-up delivery cost',
+    it.each(['payme', 'cash', 'terminal', undefined] as const)(
+      'pickup paid by %s holds only the goods, whatever the environment still says',
       async (payment_type) => {
-        await orders(LEFTOVER).createFromCart('usr_1', { payment_type });
+        await orders(LEFTOVER).createFromCart('usr_1', {
+          payment_type,
+          cart_snapshot: { delivery_method: 'pickup' },
+        });
         expect(chargesOf()).toEqual(GOODS_ONLY);
+        expect(prisma.order.create.mock.calls[0][0].data.deliveryMethod).toBe(
+          'PICKUP',
+        );
       },
     );
+
+    it('reads the method the way the app sends it, in any case', async () => {
+      await orders(LEFTOVER).createFromCart('usr_1', {
+        payment_type: 'cash',
+        cart_snapshot: { delivery_method: 'PICKUP' },
+      });
+      expect(prisma.order.create.mock.calls[0][0].data.deliveryMethod).toBe(
+        'PICKUP',
+      );
+    });
 
     it('a cart of services alone has nothing to deliver, so no cost is needed', async () => {
       prisma.cart.findUnique.mockResolvedValue(
@@ -331,7 +349,7 @@ describe('availability at each step', () => {
         PAYME_ACCOUNT_FIELD: 'order_id',
       }),
       { markPaid: jest.fn(), markCancelled: jest.fn() } as never,
-      fakeFiscal(prisma),
+      new PaymeFiscalReceiptService(prisma),
     );
     prisma.order.findUnique.mockResolvedValue(
       buildOrder({ id: 'ord_1', totalUzs: 215000 }),

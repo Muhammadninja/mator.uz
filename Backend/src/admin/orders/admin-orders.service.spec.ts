@@ -450,6 +450,94 @@ describe('AdminOrdersService', () => {
       ]);
     });
 
+    describe('where the courier goes', () => {
+      const CONFIRMED = {
+        addressId: 'addr_1',
+        lat: 41.311081234,
+        lng: 69.240562987,
+        label: 'Work',
+        fullText: 'What it said when ordered',
+        regionCode: 'UZ-TK',
+        district: 'Chilonzor',
+        street: 'Bunyodkor 1',
+        landmark: 'Blue gate',
+      };
+      const AS_CONFIRMED = {
+        city: 'UZ-TK',
+        district: 'Chilonzor',
+        addressLine: 'What it said when ordered',
+        landmark: 'Blue gate',
+        location: { lat: 41.311081234, lng: 69.240562987 },
+      };
+
+      it('is the destination confirmed on the order, not what the address row says now', async () => {
+        prisma.order.findUnique.mockResolvedValue(
+          detailRow({ deliveryDestination: CONFIRMED }),
+        );
+
+        const { data } = await service.getOne('ord_1');
+
+        expect(data.shippingAddress).toEqual(AS_CONFIRMED);
+      });
+
+      it('survives the buyer deleting the address after ordering', async () => {
+        prisma.order.findUnique.mockResolvedValue(
+          detailRow({ deliveryAddress: null, deliveryDestination: CONFIRMED }),
+        );
+
+        const { data } = await service.getOne('ord_1');
+
+        expect(data.shippingAddress).toEqual(AS_CONFIRMED);
+      });
+
+      it('shows a pin with no words at all, by its exact point', async () => {
+        prisma.order.findUnique.mockResolvedValue(
+          detailRow({
+            deliveryDestination: {
+              ...CONFIRMED,
+              fullText: '41.311081234, 69.240562987',
+              regionCode: null,
+              district: null,
+              street: null,
+              landmark: null,
+            },
+          }),
+        );
+
+        const { data } = await service.getOne('ord_1');
+
+        expect(data.shippingAddress).toEqual({
+          city: null,
+          district: null,
+          addressLine: '41.311081234, 69.240562987',
+          landmark: null,
+          location: { lat: 41.311081234, lng: 69.240562987 },
+        });
+      });
+
+      it.each([
+        ['an order from before the snapshot', null],
+        ['a snapshot with no point', { fullText: 'Somewhere' }],
+      ])(
+        'falls back on the address row for %s',
+        async (_, deliveryDestination) => {
+          prisma.order.findUnique.mockResolvedValue(
+            detailRow({ deliveryDestination }),
+          );
+
+          const { data } = await service.getOne('ord_1');
+
+          expect(data.shippingAddress?.location).toEqual({
+            lat: 41.31,
+            lng: 69.27,
+          });
+          expect(data.shippingAddress?.addressLine).toBe(
+            'Amir Temur 12, Yunusabad, Tashkent',
+          );
+        },
+      );
+    });
+
     it('returns shippingAddress null for a pickup order (no address)', async () => {
       prisma.order.findUnique.mockResolvedValue(
         detailRow({ deliveryAddress: null }),

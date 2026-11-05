@@ -17,6 +17,7 @@ import { QueueService } from '../../src/queue/queue.service';
 
 const MODEL_METHODS = [
   'findUnique',
+  'findUniqueOrThrow',
   'findFirst',
   'findMany',
   'create',
@@ -89,6 +90,23 @@ export function fakeAudit(): any {
 }
 
 /** Minimal ConfigService double backed by a plain map. */
+/**
+ * A delivery area for tests to run couriers in, wide enough for their fixture points. It says
+ * nothing about where Mator delivers: production has no default, and needs its own.
+ */
+export const TEST_DELIVERY_COVERAGE = JSON.stringify({
+  type: 'Polygon',
+  coordinates: [
+    [
+      [55, 37],
+      [74, 37],
+      [74, 46],
+      [55, 46],
+      [55, 37],
+    ],
+  ],
+});
+
 export function fakeConfig(map: Record<string, string | undefined> = {}): any {
   return { get: (key: string) => map[key] };
 }
@@ -141,6 +159,15 @@ export function fakeNotifications(): any {
 }
 export function fakeRealtime(): any {
   return { emit: jest.fn() };
+}
+/** Refuses unless a test states a quote, so nothing can be charged by accident. */
+export function fakeDeliveryQuotes(): any {
+  return {
+    quote: jest.fn().mockRejectedValue(new Error('no delivery quote stated')),
+    quoteCart: jest
+      .fn()
+      .mockRejectedValue(new Error('no delivery quote stated')),
+  };
 }
 
 /**
@@ -259,6 +286,7 @@ export function confirmedCategory(over: Partial<any> = {}): any {
     mxik: '08708005011000000',
     packageCodeSingle: '1417722',
     packageCodeSet: '1417723',
+    packageCodeBox: null,
     _count: { children: 0 },
     ...over,
   };
@@ -287,7 +315,7 @@ export function stubFiscalizableOrderLines(prisma: PrismaMock): void {
   prisma.catalogPart.findMany.mockResolvedValue([
     {
       id: 'part_1',
-      packageForm: null,
+      packageForm: 'SINGLE',
       kind: 'SPARE_PART',
       oilType: null,
       inStock: true,
@@ -295,6 +323,74 @@ export function stubFiscalizableOrderLines(prisma: PrismaMock): void {
       seller: { status: 'ACTIVE', tin: '301234567', vatPercent: 0 },
     },
   ]);
+}
+
+/** The receipt `openPaymeInvoice` holds: what `buildOrder()` adds up to. */
+export const FROZEN_RECEIPT = {
+  receipt_type: 0,
+  items: [
+    {
+      title: 'Колодки',
+      price: 18_500_000,
+      count: 1,
+      code: '08708005011000000',
+      package_code: '1417722',
+      vat_percent: 0,
+      commission_info: { tin: '301234567' },
+    },
+    {
+      title: 'Доставка',
+      price: 2_500_000,
+      count: 1,
+      code: '10112006002000000',
+      package_code: '1542432',
+      vat_percent: 0,
+    },
+    {
+      title: 'Сервисный сбор',
+      price: 500_000,
+      count: 1,
+      code: '10307001001000000',
+      package_code: '1000001',
+      vat_percent: 0,
+    },
+  ],
+};
+
+/** A Payme invoice nothing has taken yet, with its receipt frozen. */
+export function openPaymeInvoice(over: Partial<any> = {}): any {
+  const id = over.id ?? 'pay_invoice';
+  return {
+    id,
+    orderId: 'ord_1',
+    provider: 'PAYME',
+    status: 'PENDING',
+    amountUzs: 215000,
+    amountTiyin: BigInt(21_500_000),
+    providerTransactionId: null,
+    providerState: null,
+    expiresAt: null,
+    fiscalSnapshot: {
+      paymentId: id,
+      detail: FROZEN_RECEIPT,
+      totalTiyin: BigInt(21_500_000),
+    },
+    ...over,
+  };
+}
+
+/**
+ * Answer the invoice lookup with this invoice and every other findFirst with nothing:
+ * an order with a receipt on file and no transaction in progress.
+ */
+export function stubOpenPaymeInvoice(
+  prisma: PrismaMock,
+  invoice: any = openPaymeInvoice(),
+): void {
+  prisma.payment.findFirst.mockImplementation(
+    ({ where }: { where: { providerTransactionId?: null } }) =>
+      Promise.resolve(where.providerTransactionId === null ? invoice : null),
+  );
 }
 
 let seq = 0;

@@ -12,7 +12,7 @@
 //     with 409 before anything is written.
 
 import { ConflictException, NotFoundException } from '@nestjs/common';
-import { OrderStatus, PaymentProvider } from '@prisma/client';
+import { OrderStatus, PaymentProvider, Prisma } from '@prisma/client';
 import {
   ACCOUNT_HAS_ACTIVE_ORDERS,
   AccountDeletionService,
@@ -89,7 +89,12 @@ describe('AccountDeletionService', () => {
     // Buyer phone + delivery address are detached from the retained rows.
     expect(prisma.order.updateMany).toHaveBeenCalledWith({
       where: { userId: USER_ID },
-      data: { contactPhoneE164: null, deliveryAddressId: null },
+      data: {
+        contactPhoneE164: null,
+        deliveryAddressId: null,
+        deliveryShipments: Prisma.DbNull,
+        deliveryDestination: Prisma.DbNull,
+      },
     });
   });
 
@@ -311,7 +316,12 @@ describe('AccountDeletionService — an order in progress blocks deletion', () =
 
     expect(prisma.order.updateMany).toHaveBeenCalledWith({
       where: { userId: USER_ID },
-      data: { contactPhoneE164: null, deliveryAddressId: null },
+      data: {
+        contactPhoneE164: null,
+        deliveryAddressId: null,
+        deliveryShipments: Prisma.DbNull,
+        deliveryDestination: Prisma.DbNull,
+      },
     });
     expect(tokens.revokeAllSessions).toHaveBeenCalled();
     expect(prisma.appUser.update).toHaveBeenCalled();

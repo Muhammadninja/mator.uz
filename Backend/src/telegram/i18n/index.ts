@@ -49,11 +49,15 @@ export function t(
   );
 }
 
+const PACKAGE_FORM_LABEL_KEYS: Record<PackageForm, BotStringKey> = {
+  [PackageForm.SINGLE]: 'packageForm.single',
+  [PackageForm.SET]: 'packageForm.set',
+  [PackageForm.BOX]: 'packageForm.box',
+};
+
 /** The seller-facing label of a sale form, localized. */
 export function packageFormLabel(form: PackageForm, lang: AppLang): string {
-  return form === PackageForm.SET
-    ? t(lang, 'packageForm.set')
-    : t(lang, 'packageForm.single');
+  return t(lang, PACKAGE_FORM_LABEL_KEYS[form]);
 }
 
 /** The seller-facing label of an oil type, localized. */

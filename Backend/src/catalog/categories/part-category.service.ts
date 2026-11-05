@@ -367,6 +367,7 @@ const CATEGORY_SELECT = {
   mxik: true,
   packageCodeSingle: true,
   packageCodeSet: true,
+  packageCodeBox: true,
 } as const;
 
 export interface CategoryRow {
@@ -383,6 +384,7 @@ export interface CategoryRow {
   mxik: string | null;
   packageCodeSingle: string | null;
   packageCodeSet: string | null;
+  packageCodeBox: string | null;
 }
 
 /** The public (reference-API / bot) shape of one category. */

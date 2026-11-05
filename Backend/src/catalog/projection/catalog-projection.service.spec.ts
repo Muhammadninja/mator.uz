@@ -674,6 +674,37 @@ describe('CatalogProjectionService — imported dealer positions (Driver\'s Vill
     });
   });
 
+  describe('the sale form', () => {
+    const withForm = (over = {}) =>
+      buildStock({
+        ...over,
+        product: { ...buildStock().product, packageForm: 'SET' },
+      });
+
+    it('follows a seller who answers again, like the rest of the classification', () => {
+      svc.buildProjectionOps(withForm());
+      const part = upsertArg(prisma, 'catalogPart');
+      expect(part.update).toMatchObject({ packageForm: 'SET' });
+      expect(part.create).toMatchObject({ packageForm: 'SET' });
+    });
+
+    it('survives an edit that is no classification, because an operator can state it', () => {
+      svc.buildProjectionOps(withForm(), new Map(), {
+        keepClassification: true,
+      });
+      const part = upsertArg(prisma, 'catalogPart');
+      expect(part.update).not.toHaveProperty('packageForm');
+      expect(part.create).toMatchObject({ packageForm: 'SET' });
+    });
+
+    it('survives every later projection of an imported position, which has none', () => {
+      svc.buildProjectionOps(withForm({ sourceSystem: 'DRIVERS_VILLAGE_1C' }));
+      expect(upsertArg(prisma, 'catalogPart').update).not.toHaveProperty(
+        'packageForm',
+      );
+    });
+  });
+
   it('keepPriceAndStock leaves an operator-edited price and stock on an existing part', () => {
     svc.buildProjectionOps(buildStock(), new Map(), {
       keepClassification: true,

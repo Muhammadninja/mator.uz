@@ -8,16 +8,13 @@ import {
   Prisma,
 } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
-import { prefixedId, IdPrefix } from '../../common/ulid.util';
 import { MarkCancelledOutcome, SettlementService } from './settlement.service';
 import { readPaymeConfig } from './payme.config';
 import { isPayableOrderStatus } from '../order-transitions';
 import { findUnavailableParts } from '../order-availability';
-import {
-  FiscalDataIncompleteException,
-  PaymeFiscalService,
-} from './payme-fiscal.service';
-import type { PaymeReceiptDetail } from './payme-fiscal.util';
+import { parseSetFiscalData } from './payme-fiscal-receipt.util';
+import { PaymeFiscalReceiptService } from './payme-fiscal-receipt.service';
+import { findOpenPaymeInvoice } from './payme-invoice.util';
 
 /** Constant-time string equality (hash to a fixed length first so unequal
  * lengths don't short-circuit and leak timing). */
@@ -33,6 +30,8 @@ class PaymeError extends Error {
     public code: number,
     message: string,
     public data?: unknown,
+    /** Send `message` as a plain string, as SetFiscalData's contract shows it. */
+    public plainMessage = false,
   ) {
     super(message);
   }
@@ -164,7 +163,7 @@ export class PaymeService {
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
     private readonly settlement: SettlementService,
-    private readonly fiscal: PaymeFiscalService,
+    private readonly fiscalReceipts: PaymeFiscalReceiptService,
   ) {
     const payme = readPaymeConfig((key) => this.config.get<string>(key));
     this.accountField = payme.accountField;
@@ -213,7 +212,11 @@ export class PaymeService {
         return {
           jsonrpc: '2.0',
           id: body.id ?? null,
-          error: { code: err.code, message: L(err.message), data: err.data },
+          error: {
+            code: err.code,
+            message: err.plainMessage ? err.message : L(err.message),
+            data: err.data,
+          },
         };
       }
       // Never let an internal message reach Payme: log it, answer -32400.
@@ -262,10 +265,13 @@ export class PaymeService {
       'CancelTransaction',
       'CheckTransaction',
       'GetStatement',
+      'SetFiscalData',
     ];
     if (!method || !known.includes(method)) {
       throw new PaymeError(-32601, 'Method not found');
     }
+    // Validated on its own terms: this method answers -32602, naming the field.
+    if (method === 'SetFiscalData') return this.setFiscalData(raw);
     const params = assertParams(method, raw);
     switch (method) {
       case 'CheckPerformTransaction':
@@ -329,30 +335,65 @@ export class PaymeService {
       throw new PaymeError(-31008, 'Order items are no longer available');
     }
 
-    // Fiscalization. Payme takes the receipt from THIS reply, so the items are
-    // built here — per item, each with its own dealer's TIN and VAT rate, so an
-    // order spanning several dealers settles correctly.
-    const detail = await this.receiptOrRefuse(order.id);
+    // Fiscalization. Payme takes the receipt from THIS reply, and it is the one frozen
+    // when the invoice was created, so a change to the catalog since then cannot alter
+    // what was agreed. Every Check for the invoice gives the same answer.
+    const invoice = await this.invoiceOrRefuse(
+      this.prisma,
+      order.id,
+      BigInt(params.amount),
+    );
 
-    return { allow: true, detail };
+    return { allow: true, detail: invoice.fiscalSnapshot.detail };
   }
 
   /**
-   * The receipt for an order, or a refusal. An order whose fiscal data is incomplete
-   * is REFUSED rather than allowed with a partial receipt: sending malformed fiscal
-   * data is worse than a failed payment. The checkout path already rejects such an
-   * order before it ever gets here (see PaymentsService.createPaymeInvoice), so in
-   * practice this is the backstop for data that changed in between.
+   * The open invoice a payment of this order would settle, or a refusal. There is no
+   * receipt without one, and a receipt is never built here for Payme to hold: no
+   * invoice (a link already used and cancelled, or one past its window) means the
+   * customer starts the payment again, which re-checks the fiscal data and freezes a
+   * receipt from what it says by then. A receipt that no longer adds up to the amount
+   * is refused rather than sent: sending malformed fiscal data is worse than a failed
+   * payment.
    */
-  private async receiptOrRefuse(orderId: string): Promise<PaymeReceiptDetail> {
-    try {
-      return await this.fiscal.buildOrderDetail(orderId);
-    } catch (err) {
-      if (err instanceof FiscalDataIncompleteException) {
-        throw new PaymeError(-31008, 'Order cannot be fiscalized');
-      }
-      throw err;
+  private async invoiceOrRefuse(
+    client: Pick<Prisma.TransactionClient, 'payment'>,
+    orderId: string,
+    amountTiyin: bigint,
+  ) {
+    const invoice = await findOpenPaymeInvoice(client, orderId);
+    const receipt = invoice?.fiscalSnapshot;
+    if (!invoice || !receipt) {
+      this.logger.warn(
+        `Order ${orderId} has no open Payme invoice: the customer has to start the payment again`,
+      );
+      throw new PaymeError(-31008, 'Order cannot be fiscalized');
     }
+    if (receipt.totalTiyin !== amountTiyin) {
+      this.logger.error(
+        `Invoice ${invoice.id} holds a receipt of ${receipt.totalTiyin} tiyin, and Payme asked about ${amountTiyin}`,
+      );
+      throw new PaymeError(-31008, 'Order cannot be fiscalized');
+    }
+    return { ...invoice, fiscalSnapshot: receipt };
+  }
+
+  /**
+   * Payme reporting a fiscal receipt it registered. Authorized like every other method.
+   * A malformed call is refused, naming the field; anything well-formed about a known
+   * transaction is success, including a repeat and a conflict, because the conflict is
+   * ours to reconcile and answering an error would only have Payme try again.
+   */
+  private async setFiscalData(raw: unknown) {
+    const parsed = parseSetFiscalData(raw);
+    if (!parsed.ok) {
+      throw new PaymeError(-32602, parsed.invalid, undefined, true);
+    }
+    const outcome = await this.fiscalReceipts.record(parsed.callback);
+    if (outcome === 'not_found') {
+      throw new PaymeError(-32001, 'Чек с таким id не найден', undefined, true);
+    }
+    return { success: true };
   }
 
   /**
@@ -379,9 +420,6 @@ export class PaymeService {
     if (!isPayableOrderStatus(order.status)) {
       throw new PaymeError(-31008, 'Order is not awaiting payment');
     }
-    // The last gate before funds are held: Check may have run a while ago, or not at
-    // all, and an order that cannot be fiscalized must not get a transaction.
-    await this.receiptOrRefuse(order.id);
 
     // Payme supplies the authoritative creation time; fall back to ours only if
     // the field is absent, so `create_time` echoes what Payme recorded.
@@ -448,35 +486,20 @@ export class PaymeService {
           }
         }
 
-        const data = {
-          providerTransactionId: paymeId,
-          providerState: PaymeState.CREATED,
-          providerCreateTime: BigInt(createTime),
-          amountTiyin,
-        };
-        // Reuse the invoice row the customer created (POST /payme/invoices) when
-        // one is still unbound, so an order keeps a single payment row.
-        const bindable = await tx.payment.findFirst({
-          where: {
-            orderId: order.id,
-            provider: PaymentProvider.PAYME,
-            providerTransactionId: null,
-            status: PaymentStatus.PENDING,
+        // The last gate before funds are held. The transaction takes the invoice whose
+        // receipt Check handed over, under the lock a new invoice needs too, so that
+        // receipt is what it stays bound to. With no such invoice it is refused: a
+        // transaction with no receipt on file could never be reconciled.
+        const invoice = await this.invoiceOrRefuse(tx, order.id, amountTiyin);
+        return tx.payment.update({
+          where: { id: invoice.id },
+          data: {
+            providerTransactionId: paymeId,
+            providerState: PaymeState.CREATED,
+            providerCreateTime: BigInt(createTime),
+            amountTiyin,
           },
-          orderBy: { createdAt: 'desc' },
         });
-        return bindable
-          ? tx.payment.update({ where: { id: bindable.id }, data })
-          : tx.payment.create({
-              data: {
-                id: prefixedId(IdPrefix.PAYMENT),
-                orderId: order.id,
-                provider: PaymentProvider.PAYME,
-                status: PaymentStatus.PENDING,
-                amountUzs: order.totalUzs,
-                ...data,
-              },
-            });
       });
 
       // Report the PERSISTED create time, not our local `createTime`: when the

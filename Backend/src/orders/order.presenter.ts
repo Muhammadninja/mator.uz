@@ -16,6 +16,9 @@ export function presentOrder(order: OrderWithItems) {
     vehicle_id: order.vehicleId,
     delivery_address_id: order.deliveryAddressId,
     delivery_method: order.deliveryMethod ? order.deliveryMethod.toLowerCase() : null,
+    // Lets the app tell an order waiting for online payment from a cash or terminal one,
+    // which waits in the same status for an operator.
+    payment_type: order.paymentType ? order.paymentType.toLowerCase() : null,
     items: order.items.map((it) => ({
       part_id: it.partId,
       service_id: it.serviceId,

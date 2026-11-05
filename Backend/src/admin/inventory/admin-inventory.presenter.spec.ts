@@ -5,13 +5,16 @@
 // English. Guards the localized names on the wire, the select that feeds them,
 // and the derived stock status.
 
-import { OilType, Prisma, ProductKind } from '@prisma/client';
+import { OilType, PackageForm, Prisma, ProductKind } from '@prisma/client';
 import {
   ADMIN_INVENTORY_ROW_SELECT,
   deriveStockStatus,
   presentInventoryRow,
 } from './admin-inventory.presenter';
-import { FISCAL_CODES_UNCONFIRMED } from '../../common/fiscal.util';
+import {
+  FISCAL_CODES_UNCONFIRMED,
+  PACKAGE_FORM_NOT_STATED,
+} from '../../common/fiscal.util';
 import { confirmedCategory } from '../../../test/utils/harness';
 
 function row(over: Record<string, unknown> = {}) {
@@ -27,7 +30,7 @@ function row(over: Record<string, unknown> = {}) {
     cashbackPct: new Prisma.Decimal('2.5'),
     kind: ProductKind.SPARE_PART,
     oilType: null,
-    packageForm: null,
+    packageForm: PackageForm.SINGLE as PackageForm | null,
     brand: { id: 'brand_1', name: 'Bosch' },
     category: {
       ...confirmedCategory({ id: 'brake-pads' }),
@@ -49,6 +52,12 @@ describe('presentInventoryRow — fiscal readiness', () => {
       ready: true,
       gaps: [],
     });
+  });
+
+  it('names a part that states no sale form where its category holds several', () => {
+    const { fiscal } = presentInventoryRow(row({ packageForm: null }));
+    expect(fiscal.ready).toBe(false);
+    expect(fiscal.gaps).toEqual([PACKAGE_FORM_NOT_STATED]);
   });
 
   it('names what stops a part: an unconfirmed category and a dealer with no TIN', () => {

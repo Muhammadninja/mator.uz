@@ -1,6 +1,6 @@
 import { OrdersService } from '../../src/orders/orders.service';
 import { OrderStatusService } from '../../src/orders/order-status.service';
-import { createPrismaMock, fakeConfig, fakeNotifications, fakeRealtime, buildOrder, fakeDiscounts, PrismaMock, fakeAudit } from '../utils/harness';
+import { createPrismaMock, fakeConfig, fakeNotifications, fakeRealtime, buildOrder, fakeDiscounts, PrismaMock, fakeAudit, fakeDeliveryQuotes } from '../utils/harness';
 
 describe('Orders list smoke', () => {
   let prisma: PrismaMock;
@@ -8,7 +8,7 @@ describe('Orders list smoke', () => {
 
   beforeEach(() => {
     prisma = createPrismaMock();
-    svc = new OrdersService(prisma, fakeConfig(), fakeNotifications(), fakeRealtime(), new OrderStatusService(prisma), fakeDiscounts(), fakeAudit());
+    svc = new OrdersService(prisma, fakeConfig(), fakeNotifications(), fakeRealtime(), new OrderStatusService(prisma), fakeDiscounts(), fakeAudit(), fakeDeliveryQuotes());
   });
 
   it('lists orders scoped to the user and returns next_cursor=null when no more', async () => {

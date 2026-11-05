@@ -13,6 +13,7 @@ export function presentAddress(a: Address) {
     district: a.district,
     street: a.street,
     full_text: a.fullText,
+    landmark: a.landmark,
     lat: a.lat,
     lng: a.lng,
     is_default: a.isDefault,

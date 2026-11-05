@@ -130,6 +130,7 @@ export const UZ: BotStrings = {
   'btn.changePhotos': '🖼 Suratlarni o‘zgartirish',
   'packageForm.single': 'Dona',
   'packageForm.set': 'Komplekt / to‘plam',
+  'packageForm.box': 'Iste’mol qutisi',
 
   'step.photosFirst':
     '📸 Avval mahsulot suratlarini yuboring — bitta surat yoki 10 tagacha albom.\n' +

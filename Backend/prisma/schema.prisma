@@ -203,17 +203,20 @@ enum OilType {
   MINERAL
 }
 
-// The FORM a listing is sold in — one item ("Штука") or a set ("Комплект /
-// набор"). It selects WHICH of the category's two Tasnif package codes
-// fiscalizes the item, so the two forms are named explicitly rather than
-// implied by the order two codes were entered in.
+// The FORM a listing is sold in — one item ("Штука"), a set ("Комплект / набор") or
+// a consumer box ("Потребительская коробка"). It selects WHICH of the category's
+// Tasnif package codes fiscalizes the item, so the forms are named explicitly rather
+// than implied by the order codes were entered in.
 //
-// Only stored when the seller was actually ASKED (i.e. the category carries
-// both codes). A null means "not asked", and the category's single package
-// code applies — see resolvePackageCode() in common/fiscal.util.ts.
+// Only stored when someone was actually ASKED (i.e. the category carries more than
+// one code). A null means "not asked". The single code answers for it only on a
+// category holding nothing else; anywhere else it is refused rather than assumed to
+// be a piece. A stated form with no code of its own is refused too. See
+// resolvePackageCode() in common/fiscal.util.ts.
 enum PackageForm {
   SINGLE
   SET
+  BOX
 }
 
 enum PartVehicleCategory {
@@ -523,8 +526,8 @@ model Product {
   // The sale form the seller chose for THIS listing (see PackageForm). It is the
   // only fiscal fact a product owns: the codes themselves stay on the category,
   // so this column selects one of them rather than copying it. Null when the
-  // question was never asked (the category has a single package code) — the
-  // fiscal builder then falls back to that code.
+  // question was never asked, which the single code answers only on a category
+  // holding no other (see resolvePackageCode).
   packageForm        PackageForm?         @map("package_form")
   // ── Curated rating (admin-maintained; NOT user reviews) ───────────────────
   // There is no review subsystem: operators set these by hand in the admin
@@ -952,6 +955,9 @@ model Address {
   district   String?  @db.VarChar(120)
   street     String?
   fullText   String   @map("full_text")
+  // A readable hint for the courier. A map pin needs no street address, so this may be
+  // the only words a destination has.
+  landmark   String?  @db.VarChar(200)
   lat        Float?
   lng        Float?
   isDefault  Boolean  @default(false) @map("is_default")
@@ -1314,31 +1320,36 @@ model PartCategory {
   // every existing and future listing of that category with no product write.
   //
   // `mxik` (a.k.a. IKPU) is the 17-digit classifier code sent to Payme as
-  // `code`. `packageCodeSingle` / `packageCodeSet` are the two TASNIF PACKAGE
-  // codes — the form the item is SOLD in, "Штука" vs "Комплект / набор" — sent
-  // as `package_code`. They are NOT physical package ids and are NOT ordered:
-  // each form has its own named column precisely so nothing depends on which
-  // code an operator happened to type first.
+  // `code`. `packageCodeSingle` / `packageCodeSet` / `packageCodeBox` are TASNIF
+  // PACKAGE codes — the form the item is SOLD in, "Штука", "Комплект / набор" or
+  // "Потребительская коробка" — sent as `package_code`. Tasnif issues them PER MXIK:
+  // "штука" is 1417722 on brakes and 1417728 on the steering mechanism, so a code
+  // from one category means nothing on another. They are NOT ordered: each form has
+  // its own named column precisely so nothing depends on which code an operator
+  // happened to type first.
   //
   // All three are NULLABLE: existing rows predate fiscal configuration and a
   // category stays unconfigured until an admin enters real values (codes are
   // never guessed). The business rule — a configured category has BOTH `mxik`
   // and `packageCodeSingle` — is enforced by the admin write path, not by a DB
-  // constraint, so no existing row can become unwritable. `packageCodeSet` is
-  // optional: its presence is what makes the seller bot ask the sale-form
-  // question at all (see WizardStep.PACKAGE_FORM).
+  // constraint, so no existing row can become unwritable. `packageCodeSet` and
+  // `packageCodeBox` are optional: a second code is what makes the seller bot ask
+  // the sale-form question at all (see WizardStep.PACKAGE_FORM), and what makes a
+  // listing that states no form unpayable until someone says how it is sold.
   mxik              String?           @db.VarChar(17)
   packageCodeSingle String?           @map("package_code_single") @db.VarChar(20)
   packageCodeSet    String?           @map("package_code_set") @db.VarChar(20)
+  packageCodeBox    String?           @map("package_code_box") @db.VarChar(20)
   // The codes an operator CONFIRMED against Tasnif as true of EVERY listing filed
-  // on this node, stored as the exact "mxik:single:set" that was confirmed rather
-  // than as a flag. Having a code and having a confirmed one are different facts:
+  // on this node, stored as the exact "mxik:single:set[:box]" that was confirmed
+  // rather than as a flag. On a node holding one code, that is also the statement
+  // that everything filed there is sold in that form. Having a code and having a confirmed one are different facts:
   // seeded codes were supplied per representative product (a starter's code on all
   // electrical parts), so a non-empty `mxik` proves nothing about a given listing.
   // Null, or any value that no longer equals the current codes, means unconfirmed,
   // and Payme checkout refuses the listing. Written only by the admin confirmation
   // endpoint; see resolveFiscalClassification() in common/fiscal.util.ts.
-  fiscalConfirmedCodes String?        @map("fiscal_confirmed_codes") @db.VarChar(60)
+  fiscalConfirmedCodes String?        @map("fiscal_confirmed_codes") @db.VarChar(80)
   createdAt         DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt         DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
   parent            PartCategory?     @relation("PartCategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
@@ -1541,8 +1552,9 @@ model CatalogPart {
   // The listing's sale form, projected verbatim from the supply-side Product so
   // the Payme fiscal builder resolves `package_code` from this row's own
   // category WITHOUT joining back to the seller domain (the two contexts share
-  // no FKs). Same semantics as the source column: null = never asked ⇒ the
-  // category's single package code applies.
+  // no FKs). Same semantics as the source column: null = never asked. An operator
+  // can state it here (bulk-move), so it travels with the classification rather than
+  // with every re-projection.
   packageForm        PackageForm?         @map("package_form")
   // Curated product rating, projected verbatim from the supply-side Product so
   // the buyer catalog renders stars WITHOUT joining back to the seller domain
@@ -1686,6 +1698,17 @@ model Order {
   status            OrderStatus          @default(PENDING_PAYMENT)
   subtotalUzs       Decimal              @map("subtotal_uzs") @db.Decimal(14, 2)
   deliveryUzs       Decimal              @default(0) @map("delivery_uzs") @db.Decimal(14, 2)
+  // How deliveryUzs was arrived at, written once with it: one entry per seller the courier
+  // collects from, as { sellerId, pickup, tariffVersion, distanceMeters, billableKm,
+  // priceUzs }, where pickup is an exact { lat, lng } point. Never served to the buyer,
+  // cleared on account deletion, and null when no courier price was computed. Holds no
+  // duration or geometry.
+  deliveryShipments Json?                @map("delivery_shipments")
+  // Where the courier goes, written once with it: { addressId, lat, lng, label, fullText,
+  // regionCode, district, street, landmark } as they stood when the order was placed. The
+  // address row can change or be deleted later, and this does not. Never served to the
+  // buyer, cleared on account deletion.
+  deliveryDestination Json?              @map("delivery_destination")
   serviceFeeUzs     Decimal              @default(0) @map("service_fee_uzs") @db.Decimal(14, 2)
   discountUzs       Decimal              @default(0) @map("discount_uzs") @db.Decimal(14, 2)
   totalUzs          Decimal              @map("total_uzs") @db.Decimal(14, 2)
@@ -1843,12 +1866,77 @@ model Payment {
   updatedAt             DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
   order                 Order             @relation(fields: [orderId], references: [id], onDelete: Cascade)
   financialRefunds      FinancialRefund[]
+  fiscalSnapshot        PaymeFiscalSnapshot?
+  fiscalReceipts        PaymeFiscalReceipt[]
 
   @@unique([provider, providerTransactionId])
   @@index([orderId])
   @@index([status])
   @@index([provider, providerCreateTime])
   @@map("payments")
+}
+
+// The receipt agreed for one Payme invoice: the `detail` CheckPerformTransaction hands
+// to Payme, frozen when the invoice is created. That call carries only an amount and an
+// account, with no transaction id, so the receipt has to exist before it and belongs to
+// the invoice; CreateTransaction then binds the transaction to that same row. Once it
+// exists, a changed product, category, MXIK or VAT rate does not reach it: those apply
+// to the invoices issued afterwards.
+//
+// Immutable: a database trigger refuses every UPDATE (see the migration), and the money
+// trail's rule applies, so a payment holding one cannot be deleted.
+model PaymeFiscalSnapshot {
+  paymentId  String   @id @map("payment_id") @db.VarChar(64)
+  // Exactly what goes on the wire: receipt_type and items.
+  detail     Json     @db.JsonB
+  // What the lines add up to, compared with the amount Payme asks about.
+  totalTiyin BigInt   @map("total_tiyin")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  payment    Payment  @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+
+  @@map("payme_fiscal_snapshots")
+}
+
+// Which kind of tax receipt a SetFiscalData callback reports: the sale, or its reversal.
+// The tax authority issues them as two different receipts.
+enum PaymeFiscalReceiptType {
+  PERFORM
+  CANCEL
+}
+
+// A fiscal receipt Payme registered for a transaction, as reported by SetFiscalData. One
+// row per transaction and type, so a repeated callback has nowhere to go but the same
+// row, and the receipt for a sale and for its cancellation stay apart.
+//
+// Payme's documentation does not list the status codes. 0 ("accepted", in its samples)
+// is the only one given a meaning here, and the rest are stored as they came. An
+// accepted receipt is never overwritten: a later callback saying something else is kept
+// beside it (last_conflict_*) for reconciliation.
+model PaymeFiscalReceipt {
+  paymentId        String                 @map("payment_id") @db.VarChar(64)
+  type             PaymeFiscalReceiptType
+  // Every field stays as Payme sent it, and each may be absent, as on a registration
+  // that failed. `fiscal_date` is the raw "date": its format is not documented either,
+  // so no time zone is assumed by parsing it. `qr_code_url` is not checked to be a
+  // URL at all (Payme's sample is not one), so whatever shows it to a customer must.
+  receiptId        String?                @map("receipt_id")
+  statusCode       Int?                   @map("status_code")
+  message          String?
+  terminalId       String?                @map("terminal_id")
+  fiscalSign       String?                @map("fiscal_sign")
+  qrCodeUrl        String?                @map("qr_code_url")
+  fiscalDate       String?                @map("fiscal_date")
+  // The whole fiscal_data object these columns were read from.
+  rawData          Json                   @map("raw_data") @db.JsonB
+  conflictCount    Int                    @default(0) @map("conflict_count")
+  lastConflictData Json?                  @map("last_conflict_data") @db.JsonB
+  lastConflictAt   DateTime?              @map("last_conflict_at") @db.Timestamptz(3)
+  createdAt        DateTime               @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt        DateTime               @updatedAt @map("updated_at") @db.Timestamptz(3)
+  payment          Payment                @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+
+  @@id([paymentId, type])
+  @@map("payme_fiscal_receipts")
 }
 
 // ── Devices, push & notifications ─────────────────────────────────────────────

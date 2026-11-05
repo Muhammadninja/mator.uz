@@ -60,15 +60,18 @@ describe('Account + Shipping smoke', () => {
   });
 
   describe('Shipping', () => {
-    it('offers pickup, free', () => {
-      const res: any = new ShippingService().quote({} as any);
+    const shipping = () =>
+      new ShippingService({ quoteCart: jest.fn() } as any);
+
+    it('offers pickup, free', async () => {
+      const res: any = await shipping().quote('usr_1', {} as any);
       const pickup = res.options.find((o: any) => o.type === 'pickup');
       expect(pickup.price_uzs).toBe(0);
       expect(res.currency).toBe('UZS');
     });
 
-    it('quotes no courier price: there is no real tariff to quote yet', () => {
-      const res: any = new ShippingService().quote({} as any);
+    it('quotes no courier price to a client that does not ask for one', async () => {
+      const res: any = await shipping().quote('usr_1', {} as any);
       expect(res.options.map((o: any) => o.type)).toEqual(['pickup']);
     });
   });

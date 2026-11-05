@@ -88,11 +88,12 @@ does not need to send it.
 | `mxik` | `string \| null` | MXIK / ИКПУ, exactly 17 digits. `null` = not configured. |
 | `packageCodeSingle` | `string \| null` | Tasnif package code for "Штука" (a single item). |
 | `packageCodeSet` | `string \| null` | Tasnif package code for "Комплект / набор" (a set). Optional even on a configured category — see [1.7](#17-the-fiscal-fields). |
+| `packageCodeBox` | `string \| null` | Tasnif package code for "Потребительская коробка" (a consumer box). Optional even on a configured category — see [1.7](#17-the-fiscal-fields). |
 | `fiscalConfigured` | `boolean` | **Derived.** Whether products in this category can reach a receipt (and therefore be sold through Payme). `false` until the codes are confirmed — see [1.7](#17-the-fiscal-fields). |
 | `fiscalByOilType` | `boolean` | **Derived.** `true` on a motor-oil composition category with no MXIK of its own, whose codes come from a table rather than from the columns above — see [1.7](#17-the-fiscal-fields). |
 | `fiscalStatus` | `string` | **Derived.** `READY`, `NEEDS_CONFIRMATION`, `NEEDS_CODES` or `NOT_SELLABLE` (a parent, the fallback bucket, or a node still holding a code for one product of many). |
 | `fiscalGaps` | `string[]` | **Derived.** Every reason checkout refuses this category; empty when ready. For operators, not customers. |
-| `fiscalCodesToConfirm` | `string \| null` | **Derived.** The codes a listing here would carry, as `mxik:single:set`. What to check in Tasnif, and what to send back to confirm them. `null` when there is nothing to confirm, or when `fiscalStatus` is `NOT_SELLABLE`. |
+| `fiscalCodesToConfirm` | `string \| null` | **Derived.** The codes a listing here would carry, as `mxik:single:set`, with `:box` added when the category has a box code. What to check in Tasnif, and what to send back to confirm them. `null` when there is nothing to confirm, or when `fiscalStatus` is `NOT_SELLABLE`. |
 
 ### 1.3 The three localized names
 
@@ -153,7 +154,7 @@ Three separate text inputs, in this order:
 translation entered so far) and backfilled `name_en` from `name`. Nothing needs
 a data-entry pass before the new form ships.
 
-| `offersPackageChoice` | `boolean` | **Derived.** Whether the seller bot asks "Штука or Комплект?" for this category (`true` only when both package codes are set). |
+| `offersPackageChoice` | `boolean` | **Derived.** Whether the seller bot asks how an item is sold on this category (`true` when it holds more than one package code). A listing there that states no form cannot be paid for online. |
 | `productsCount` | `number` | Buyer-catalog parts linked **directly** to this node (not recursive). |
 | `listingsCount` | `number` | Supply-side products **+ drafts** pointing here. **This is what blocks a hard delete.** |
 | `children` | `AdminCategoryTreeNode[]` | Only on `GET /tree`. |
@@ -235,6 +236,7 @@ Request (`CreateCategoryDto`):
 | `mxik` | ❌ | Exactly 17 digits. See [1.7](#17-the-fiscal-fields) for the combination rule. |
 | `packageCodeSingle` | ❌ | 1–20 digits. |
 | `packageCodeSet` | ❌ | 1–20 digits. |
+| `packageCodeBox` | ❌ | 1–20 digits. |
 
 **There is no `level` field.** It is computed as `parent.level + 1`. Sending
 one is a `400` (not whitelisted).
@@ -270,7 +272,7 @@ POST /v1/admin/categories
 Body (`UpdateCategoryDto`), every field optional; only what you send is
 written: `nameRu`, `nameUz`, `nameEn`, `name`, `slug`, `iconKey`, `color`,
 `parentId` (`null` promotes to root), `sortOrder`, `isActive`, `mainCategory`,
-`mxik`, `packageCodeSingle`, `packageCodeSet`.
+`mxik`, `packageCodeSingle`, `packageCodeSet`, `packageCodeBox`.
 
 The three localized names may be patched one at a time, but **none of them can
 be blanked or nulled** — see [1.3](#13-the-three-localized-names).
@@ -334,6 +336,7 @@ Body (`BulkMoveProductsDto`):
 | `productIds` | ✅ | 1–1000 unique part ids. |
 | `targetCategoryId` | ✅ | Must exist. |
 | `kind` | ❌ | `SPARE_PART`, `MOTOR_OIL` or `ANTIFREEZE`: what the operator states these parts **are**, when the move has to change it. Recorded in the audit trail. A move never changes a kind without it. |
+| `packageForm` | ❌ | `SINGLE`, `SET` or `BOX`: how these parts are sold, when the operator states it. How an existing part gets a form: send its current category as the target to change nothing else. Recorded in the audit trail. |
 
 **Response** — `200 { success: true, data: { moved: <n> } }`.
 
@@ -346,6 +349,7 @@ nothing moves. Its `code` says why:
 | `KIND_MISMATCH` | The part's kind does not belong on the target, e.g. a spare part on a motor-oil composition. | Pick another category, or state `kind` if the part really is of that kind. |
 | `OIL_COMPOSITION_REQUIRED` | The target is the `motor-oil` parent, which names no composition. | Pick a composition or transmission oil. |
 | `OIL_TYPE_CONFLICT` | The part states an oil type that contradicts the target composition. | Move it to the category of its own composition. |
+| `SALE_FORM_UNAVAILABLE` | `packageForm` names a form the target holds no code for. | Enter that code on the category first, after checking it against Tasnif. |
 
 A motor oil moved onto a composition takes that composition's `oilType`, and onto
 transmission oil loses it, so its fiscal codes follow the category.
@@ -403,27 +407,39 @@ with active children is refused as too broad (`NOT_SELLABLE`). So is a node stil
 holding a code supplied for one product of many (`electrical-parts`, `lighting`,
 `ignition`, `belts-and-hoses`), until an operator enters a different one.
 
-**The three legal states of a category**, enforced by the server on every
+**The legal states of a category**, enforced by the server on every
 create/update — a request that doesn't match one of these is rejected with
 `400`, never silently stored half-done:
 
-| State | `mxik` | `packageCodeSingle` | `packageCodeSet` | Meaning |
+| State | `mxik` | `packageCodeSingle` | `packageCodeSet` / `packageCodeBox` | Meaning |
 |---|---|---|---|---|
 | Unconfigured | `null` | `null` | `null` | Products in this category cannot be paid for online yet. |
-| Configured, one form | set | set | `null` | Sold only as "Штука" (a single item) — the seller bot never asks. |
-| Configured, two forms | set | set | set | Sold as either "Штука" or "Комплект / набор" — the seller bot asks which. |
+| Configured, one form | set | set | `null` | Sold only as "Штука" (a single item) — the seller bot never asks, and confirming these codes says that everything filed here is sold that way. |
+| Configured, several forms | set | set | at least one set | Sold in each form with a code — the seller bot asks which. A listing that states no form cannot be paid for online. |
 
-Concretely: `packageCodeSet` alone (without the other two) is rejected;
-`mxik` without `packageCodeSingle` is rejected; any field can be cleared by
-sending it as explicit `null`, but the *result* must still be one of the
-three rows above.
+Concretely: `packageCodeSet` or `packageCodeBox` without the other two is
+rejected; `mxik` without `packageCodeSingle` is rejected; any field can be
+cleared by sending it as explicit `null`, but the *result* must still be one of
+the three rows above.
+
+**Package codes belong to one MXIK.** Tasnif issues them per MXIK, so "Штука" is
+`1417722` on brakes (`08708005011000000`) and `1417728` on the steering mechanism
+(`08708001133000000`). Enter the codes listed for the category's own MXIK, and never
+copy one from another category: nothing here can tell that it describes another
+product.
+
+**No form ever stands in for another.** A listing stated as a set or a box on a
+category with no code for that form is refused at checkout, not sold as a piece. Its
+`fiscal.gaps` in the inventory says so. Moving such listings warns with
+`SALE_FORM_UNAVAILABLE`, and `bulk-move` is how an operator states the form of existing
+parts.
 
 **Editing the form:**
-- Render `mxik` / `packageCodeSingle` / `packageCodeSet` as one grouped
-  control, not three independent fields, so a user can't submit a partial
+- Render `mxik` / `packageCodeSingle` / `packageCodeSet` / `packageCodeBox` as one
+  grouped control, not independent fields, so a user can't submit a partial
   combination and get a confusing `400`.
 - An empty input should be sent as `null` (clear), not `""` — the server
-  treats a blank string the same as `null` for these three fields, but sending
+  treats a blank string the same as `null` for these fields, but sending
   `null` explicitly is what the DTOs document and is unambiguous.
 - Show `fiscalStatus` as a status badge rather than re-deriving the rule
   client-side: it is the verdict of the same resolver the receipt builder runs,
@@ -781,14 +797,15 @@ GET    /v1/admin/categories?parentId=&level=&isActive=
 GET    /v1/admin/categories/tree
 GET    /v1/admin/categories/:id
 POST   /v1/admin/categories        { nameRu, nameUz, nameEn, name?, slug?, parentId?, iconKey?, color?, sortOrder?,
-                                      mainCategory?, mxik?, packageCodeSingle?, packageCodeSet? }
+                                      mainCategory?, mxik?, packageCodeSingle?, packageCodeSet?,
+                                      packageCodeBox? }
 PATCH  /v1/admin/categories/:id    { …same fields, all optional; mxik/packageCodeSingle/
-                                      packageCodeSet accept null to clear }
+                                      packageCodeSet/packageCodeBox accept null to clear }
 POST   /v1/admin/categories/:id/activate
 POST   /v1/admin/categories/:id/deactivate
 PATCH  /v1/admin/categories/:id/move    { parentId, sortOrder? }
 DELETE /v1/admin/categories/:id?reassignTo=
-PATCH  /v1/admin/products/bulk-move     { productIds[], targetCategoryId }   # different base path
+PATCH  /v1/admin/products/bulk-move     { productIds[], targetCategoryId, kind?, packageForm? }   # different base path
 
 # ── Dealers (Bearer admin token; SUPER_ADMIN | MANAGER | OPERATOR) ──
 POST   /v1/admin/dealers           { name, city?, email?, phone?, brandColor?, initial?,
@@ -806,7 +823,7 @@ POST   /v1/admin/dealers/:id/reactivate
 ```
 
 **Category node:** `id, nameRu, nameUz, nameEn, name, slug, parentId, level, sortOrder, iconKey,
-color, isActive, mainCategory, mxik, packageCodeSingle, packageCodeSet,
+color, isActive, mainCategory, mxik, packageCodeSingle, packageCodeSet, packageCodeBox,
 fiscalConfigured, fiscalByOilType, offersPackageChoice, productsCount,
 listingsCount, children[]`
 Envelope: `{ success, data, meta? }`

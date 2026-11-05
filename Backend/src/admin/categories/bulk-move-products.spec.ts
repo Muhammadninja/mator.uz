@@ -13,6 +13,7 @@ import {
   AdminAuditAction,
   DealerStatus,
   OilType,
+  PackageForm,
   PartMainCategory as B,
   PartVehicleCategory as V,
   ProductKind,
@@ -35,6 +36,7 @@ type PartRow = {
   vehicleCategory: V | null;
   kind: ProductKind;
   oilType: OilType | null;
+  packageForm?: PackageForm | null;
   priceUzs: number;
   stockQty: number;
   inStock: boolean;
@@ -487,6 +489,74 @@ describe('bulk-move — kind and oil type', () => {
         }),
       ).rejects.toBeInstanceOf(ConflictException);
     });
+  });
+});
+
+describe('bulk-move — stating how parts are sold', () => {
+  const PADS = 'front-brake-pads';
+  const withCodes = (codes: object) =>
+    LIVE_TREE.map((n) =>
+      n.id === PADS ? { ...n, mxik: '08708005011000000', ...codes } : n,
+    ) as unknown as readonly TreeRow[];
+  const SINGLE_AND_SET = withCodes({
+    packageCodeSingle: '1417722',
+    packageCodeSet: '1417723',
+    packageCodeBox: null,
+  });
+  const pads = () => part('p1', PADS, B.BRAKES, V.BRAKE_SYSTEM);
+
+  it('states the form on parts already filed there, touching nothing else', async () => {
+    const rows = [pads()];
+    const before = unrelated(rows[0]);
+    const { service, audit } = adminWorld(rows, SINGLE_AND_SET);
+
+    const res = await service.bulkMoveProducts({
+      productIds: ['p1'],
+      targetCategoryId: PADS,
+      packageForm: PackageForm.SET,
+    });
+
+    expect(res.data.moved).toBe(1);
+    expect(rows[0].categoryId).toBe(PADS);
+    expect(rows[0].packageForm).toBe(PackageForm.SET);
+    expect(unrelated(rows[0])).toEqual({
+      ...before,
+      packageForm: PackageForm.SET,
+    });
+    expect(audit.recordMany.mock.calls[0][0]).toEqual([
+      expect.objectContaining({
+        previousValues: { packageForm: undefined },
+        newValues: { packageForm: PackageForm.SET },
+      }),
+    ]);
+  });
+
+  it('refuses a form the target holds no code for, and writes nothing', async () => {
+    const rows = [pads()];
+    const { service, prisma } = adminWorld(rows, SINGLE_AND_SET);
+
+    await expect(
+      service.bulkMoveProducts({
+        productIds: ['p1'],
+        targetCategoryId: PADS,
+        packageForm: PackageForm.BOX,
+      }),
+    ).rejects.toMatchObject({
+      response: { code: 'SALE_FORM_UNAVAILABLE' },
+    });
+    expect(prisma.catalogPart.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('a move that states nothing leaves the form as it was', async () => {
+    const rows = [{ ...pads(), packageForm: PackageForm.SET }];
+    const { service } = adminWorld(rows, SINGLE_AND_SET);
+
+    await service.bulkMoveProducts({
+      productIds: ['p1'],
+      targetCategoryId: PADS,
+    });
+
+    expect(rows[0].packageForm).toBe(PackageForm.SET);
   });
 });
 

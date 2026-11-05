@@ -9,7 +9,6 @@ import {
   AdminAuditAction,
   AdminAuditEntity,
   DraftStatus,
-  PackageForm,
   ProductKind,
   Prisma,
 } from '@prisma/client';
@@ -27,6 +26,7 @@ import {
   categoryFiscalReadiness,
   confirmableFiscalCodes,
   FISCAL_CATEGORY_SELECT,
+  packageFormGap,
 } from '../../common/fiscal.util';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AdminAuditService } from '../auth/admin-audit.service';
@@ -231,7 +231,7 @@ export class AdminCategoryTransferService {
       listings,
       listingKinds,
       partKinds,
-      soldAsSet,
+      listingForms,
       rootOnlyListings,
       drafts,
       rootOnlyDrafts,
@@ -252,8 +252,10 @@ export class AdminCategoryTransferService {
         where: onNode,
         _count: { _all: true },
       }),
-      client.product.count({
-        where: { ...onNode, packageForm: PackageForm.SET },
+      client.product.groupBy({
+        by: ['packageForm'],
+        where: onNode,
+        _count: { _all: true },
       }),
       client.product.groupBy({
         by: ['categoryId'],
@@ -409,10 +411,14 @@ export class AdminCategoryTransferService {
           'Products here can be paid for online today and could not be after the move: the target is not confirmed against Tasnif yet.',
       });
     }
-    if (soldAsSet > 0 && !target.packageCodeSet) {
+    // Nothing stands in for a missing code, so such a listing is refused at payment.
+    const withoutCode = listingForms
+      .filter((group) => packageFormGap(target, group.packageForm) !== null)
+      .reduce((n, group) => n + group._count._all, 0);
+    if (withoutCode > 0) {
       warnings.push({
-        code: 'SET_FORM_FALLS_BACK',
-        message: `${soldAsSet} listing(s) sold as a set will use the target’s single package code: it has no set code.`,
+        code: 'SALE_FORM_UNAVAILABLE',
+        message: `${withoutCode} listing(s) could not be paid for online after the move: the target holds no package code for how they are sold, or holds several and they do not state which.`,
       });
     }
 

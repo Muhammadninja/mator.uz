@@ -93,6 +93,7 @@ export interface BotStrings {
   'btn.changePhotos': string;
   'packageForm.single': string;
   'packageForm.set': string;
+  'packageForm.box': string;
 
   // ── Wizard step prompts ───────────────────────────────────────────────────
   'step.photosFirst': string;

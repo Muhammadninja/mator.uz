@@ -1,0 +1,15 @@
+-- How a courier order's delivery price was arrived at: one entry per seller the courier
+-- collects from, as { sellerId, pickup, tariffVersion, distanceMeters, billableKm, priceUzs },
+-- with pickup as an exact { lat, lng } point. A single number on the order cannot explain a
+-- charge across several sellers, and neither the rates nor the roads stay the same, so it
+-- cannot be worked out again later.
+--
+-- It holds no duration or geometry and is not served to the buyer. Account deletion clears
+-- it. Where the order goes is in delivery_destination, added by the next migration.
+--
+-- Additive: one nullable column, no default, no backfill, no index. Orders placed before
+-- this stay null, as do pickup orders.
+--
+-- Deploy before the code: Prisma selects every column of a row by default, so the new code
+-- reading an order fails until this column exists.
+ALTER TABLE "orders" ADD COLUMN "delivery_shipments" JSONB;

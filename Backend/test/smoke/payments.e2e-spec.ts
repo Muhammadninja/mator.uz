@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
 import { PaymentsService } from '../../src/orders/payments.service';
+import { PaymeFiscalReceiptService } from '../../src/orders/webhooks/payme-fiscal-receipt.service';
 import { PaymeService } from '../../src/orders/webhooks/payme.service';
 import { ClickService } from '../../src/orders/webhooks/click.service';
 import {
@@ -9,8 +10,10 @@ import {
   fakeFiscal,
   FISCAL_TEST_ENV,
   buildOrder,
+  openPaymeInvoice,
   PrismaMock,
   stubFiscalizableOrderLines,
+  stubOpenPaymeInvoice,
 } from '../utils/harness';
 
 describe('Payments + webhooks smoke', () => {
@@ -188,7 +191,7 @@ describe('Payments + webhooks smoke', () => {
         prisma,
         config,
         settlement as any,
-        fakeFiscal(prisma),
+        new PaymeFiscalReceiptService(prisma as any),
       );
       const res: any = await svc.handle('Basic wrong', {
         id: 1,
@@ -203,7 +206,7 @@ describe('Payments + webhooks smoke', () => {
         prisma,
         config,
         settlement as any,
-        fakeFiscal(prisma, FISCAL_TEST_ENV),
+        new PaymeFiscalReceiptService(prisma as any),
       );
       prisma.order.findUnique.mockResolvedValue(
         buildOrder({
@@ -213,6 +216,7 @@ describe('Payments + webhooks smoke', () => {
         }),
       );
       stubFiscalizableOrderLines(prisma);
+      stubOpenPaymeInvoice(prisma);
       const res: any = await svc.handle(auth, {
         id: 1,
         method: 'CheckPerformTransaction',
@@ -227,7 +231,7 @@ describe('Payments + webhooks smoke', () => {
         prisma,
         config,
         settlement as any,
-        fakeFiscal(prisma),
+        new PaymeFiscalReceiptService(prisma as any),
       );
       prisma.order.findUnique.mockResolvedValue(
         buildOrder({
@@ -249,14 +253,14 @@ describe('Payments + webhooks smoke', () => {
         prisma,
         config,
         settlement as any,
-        fakeFiscal(prisma, FISCAL_TEST_ENV),
+        new PaymeFiscalReceiptService(prisma as any),
       );
       stubFiscalizableOrderLines(prisma);
       // CreateTransaction: no existing transaction (findUnique, keyed on the
-      // (provider, providerTransactionId) unique index), no active/bindable
-      // payment -> create fresh.
+      // (provider, providerTransactionId) unique index), nothing active, and the
+      // invoice the customer created, which the transaction takes.
       prisma.payment.findUnique.mockResolvedValue(null);
-      prisma.payment.findFirst.mockResolvedValue(null);
+      stubOpenPaymeInvoice(prisma, openPaymeInvoice({ id: 'pay_1' }));
       prisma.order.findUnique.mockResolvedValue(
         buildOrder({
           id: 'ord_1',
@@ -264,7 +268,7 @@ describe('Payments + webhooks smoke', () => {
           totalUzs: 215000,
         }),
       );
-      prisma.payment.create.mockResolvedValue({ id: 'pay_1' });
+      prisma.payment.update.mockResolvedValue({ id: 'pay_1' });
 
       const created: any = await svc.handle(auth, {
         id: 1,

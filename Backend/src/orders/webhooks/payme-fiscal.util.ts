@@ -71,10 +71,10 @@ export interface PaymeFiscalItem {
 }
 
 /**
- * `units` is DELIBERATELY absent. The integration sends the Tasnif package code
- * (`package_code`) as the unit-of-sale, which is what the current Payme fiscal
- * contract asks for; nothing in that contract requires `units` alongside it, and
- * a field is never invented here to fill a shape.
+ * `units` is DELIBERATELY absent. Payme's CheckPerformTransaction table marks
+ * `package_code` required and `units` optional, and Tasnif states the form an item is
+ * sold in through its package codes: on the MXIK codes we use, its unit fields are
+ * empty. A field is never invented here to fill a shape.
  */
 export interface PaymeReceiptDetail {
   /** 0 = sale — the only receipt type this integration produces. */
@@ -107,7 +107,7 @@ export interface FiscalLineSource {
   lineTotalUzs?: number;
   /** The category the item is filed on, or null when that is unknown. */
   category: FiscalCategorySource | null;
-  /** The sale form chosen for the listing; null ⇒ the single package code. */
+  /** The sale form stated for the listing; null when nobody was asked. */
   packageForm: PackageForm | null;
   /** The listing's kind and oil type, for resolveFiscalClassification. */
   kind: ProductKind;
