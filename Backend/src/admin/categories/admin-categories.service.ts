@@ -9,6 +9,7 @@ import {
   AdminAuditAction,
   AdminAuditEntity,
   OilType,
+  PackageForm,
   PartMainCategory,
   PartVehicleCategory,
   Prisma,
@@ -28,6 +29,7 @@ import {
   categoryFiscalReadiness,
   confirmableFiscalCodes,
   isCategoryFiscallyConfigured,
+  packageFormGap,
 } from '../../common/fiscal.util';
 import { AdminAuditService } from '../auth/admin-audit.service';
 import { AdminAuditContext } from '../auth/admin-auth.service';
@@ -229,7 +231,12 @@ export class AdminCategoriesService {
     // combination is checked against an all-null baseline, since nothing is
     // stored yet.
     const fiscal = this.resolveFiscal(
-      { mxik: null, packageCodeSingle: null, packageCodeSet: null },
+      {
+        mxik: null,
+        packageCodeSingle: null,
+        packageCodeSet: null,
+        packageCodeBox: null,
+      },
       dto,
     );
 
@@ -297,6 +304,7 @@ export class AdminCategoriesService {
           mxik: true,
           packageCodeSingle: true,
           packageCodeSet: true,
+          packageCodeBox: true,
         },
       });
       if (!category) throw new NotFoundException('Category not found');
@@ -605,7 +613,8 @@ export class AdminCategoriesService {
    * Validates the target exists; returns the number of rows moved and the
    * filing they now carry (`mainCategory: null` = on no home tile). A part that
    * cannot be filed there stops the whole batch (see moveParts). `dto.kind` is how
-   * an operator states what a mis-typed part really is, which only they can know.
+   * an operator states what a mis-typed part really is, which only they can know, and
+   * `dto.packageForm` how it is sold, likewise.
    */
   async bulkMoveProducts(
     dto: BulkMoveProductsDto,
@@ -613,9 +622,23 @@ export class AdminCategoriesService {
   ) {
     const target = await this.prisma.partCategory.findUnique({
       where: { id: dto.targetCategoryId },
-      select: { id: true, parentId: true },
+      select: {
+        id: true,
+        parentId: true,
+        mxik: true,
+        packageCodeSingle: true,
+        packageCodeSet: true,
+        packageCodeBox: true,
+      },
     });
     if (!target) throw new NotFoundException('Target category not found');
+    const formGap = dto.packageForm && packageFormGap(target, dto.packageForm);
+    if (formGap) {
+      throw new ConflictException({
+        code: 'SALE_FORM_UNAVAILABLE',
+        message: `These products cannot be stated as sold that way: ${formGap}.`,
+      });
+    }
 
     const filing = await this.filingOn(dto.targetCategoryId);
     // Within one transaction: either the whole batch moves or none does, and each
@@ -632,6 +655,7 @@ export class AdminCategoriesService {
             categoryId: true,
             kind: true,
             oilType: true,
+            packageForm: true,
           },
         });
         const moved = await this.moveParts(
@@ -640,6 +664,7 @@ export class AdminCategoriesService {
           target,
           filing,
           dto.kind,
+          dto.packageForm,
         );
         await this.audit.recordMany(
           before.flatMap((part) => {
@@ -650,6 +675,9 @@ export class AdminCategoriesService {
                 : {}),
               ...(dto.kind && dto.kind !== part.kind
                 ? { kind: part.kind }
+                : {}),
+              ...(dto.packageForm && dto.packageForm !== part.packageForm
+                ? { packageForm: part.packageForm }
                 : {}),
               ...(oilType !== undefined ? { oilType: part.oilType } : {}),
             };
@@ -669,6 +697,9 @@ export class AdminCategoriesService {
                   ? { categoryId: filing.categoryId }
                   : {}),
                 ...('kind' in previous ? { kind: dto.kind } : {}),
+                ...('packageForm' in previous
+                  ? { packageForm: dto.packageForm }
+                  : {}),
                 ...(oilType !== undefined ? { oilType } : {}),
               },
               ip: ctx.ip,
@@ -708,6 +739,7 @@ export class AdminCategoriesService {
     target: { id: string; parentId: string | null },
     filing: Prisma.CatalogPartUncheckedUpdateManyInput,
     kind?: ProductKind,
+    packageForm?: PackageForm,
   ): Promise<{ count: number; oilTypeOf: Map<string, OilType | null> }> {
     const sameType: string[] = [];
     const oilTypeOf = new Map<string, OilType | null>();
@@ -734,7 +766,10 @@ export class AdminCategoriesService {
       });
     }
 
-    const stated = kind ? { kind } : {};
+    const stated = {
+      ...(kind ? { kind } : {}),
+      ...(packageForm ? { packageForm } : {}),
+    };
     let count = 0;
     if (sameType.length > 0) {
       const res = await tx.catalogPart.updateMany({
@@ -833,9 +868,10 @@ export class AdminCategoriesService {
    *                          cannot be paid for online until an admin fills it in;
    *   • mxik + single      — configured, sold in one form ("Штука"); the seller
    *                          is never asked how the item is sold;
-   *   • mxik + single + set — configured, sold in two forms; the seller bot asks.
-   * Anything else (a set code with no single code, an MXIK with no package code,
-   * a package code with no MXIK) is a 400 — never a silently-stored partial.
+   *   • mxik + single + set and/or box — configured, sold in several forms; the seller
+   *     bot asks which.
+   * Anything else (a set or box code with no single code, an MXIK with no package
+   * code, a package code with no MXIK) is a 400 — never a silently-stored partial.
    *
    * Returns ONLY the columns the body actually names, so an update that touches
    * no fiscal field writes none of them.
@@ -845,21 +881,25 @@ export class AdminCategoriesService {
       mxik: string | null;
       packageCodeSingle: string | null;
       packageCodeSet: string | null;
+      packageCodeBox: string | null;
     },
     dto: {
       mxik?: string | null;
       packageCodeSingle?: string | null;
       packageCodeSet?: string | null;
+      packageCodeBox?: string | null;
     },
   ): {
     mxik?: string | null;
     packageCodeSingle?: string | null;
     packageCodeSet?: string | null;
+    packageCodeBox?: string | null;
   } {
     const touched =
       dto.mxik !== undefined ||
       dto.packageCodeSingle !== undefined ||
-      dto.packageCodeSet !== undefined;
+      dto.packageCodeSet !== undefined ||
+      dto.packageCodeBox !== undefined;
     if (!touched) return {};
 
     // Empty strings are treated as "clear", so a console sending a blank input
@@ -875,22 +915,22 @@ export class AdminCategoriesService {
       current.packageCodeSingle,
     );
     const packageCodeSet = pick(dto.packageCodeSet, current.packageCodeSet);
+    const packageCodeBox = pick(dto.packageCodeBox, current.packageCodeBox);
 
     const configured = isCategoryFiscallyConfigured({
       mxik,
       packageCodeSingle,
       packageCodeSet,
+      packageCodeBox,
     });
-    if (!configured && (mxik || packageCodeSingle || packageCodeSet)) {
+    if (
+      !configured &&
+      (mxik || packageCodeSingle || packageCodeSet || packageCodeBox)
+    ) {
       throw new BadRequestException(
         'Fiscal configuration is incomplete: a category needs BOTH mxik and ' +
-          'packageCodeSingle (packageCodeSet is optional). Clear all three to ' +
-          'leave the category unconfigured.',
-      );
-    }
-    if (packageCodeSet && !configured) {
-      throw new BadRequestException(
-        'packageCodeSet requires mxik and packageCodeSingle',
+          'packageCodeSingle (packageCodeSet and packageCodeBox are optional). ' +
+          'Clear them all to leave the category unconfigured.',
       );
     }
 
@@ -899,6 +939,7 @@ export class AdminCategoriesService {
       ...(dto.mxik !== undefined ? { mxik } : {}),
       ...(dto.packageCodeSingle !== undefined ? { packageCodeSingle } : {}),
       ...(dto.packageCodeSet !== undefined ? { packageCodeSet } : {}),
+      ...(dto.packageCodeBox !== undefined ? { packageCodeBox } : {}),
     };
   }
 

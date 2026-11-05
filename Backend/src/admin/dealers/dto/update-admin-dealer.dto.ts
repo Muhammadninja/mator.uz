@@ -134,6 +134,35 @@ export class UpdateAdminDealerDto {
   @Max(MAX_VAT_PERCENT)
   vatPercent?: number;
 
+  // Where couriers collect this dealer's goods, and so what courier delivery is priced
+  // from. Kept on the supply-side seller behind the dealer. Until it is set, courier
+  // delivery of the dealer's goods is refused rather than priced from a guess.
+  @ApiPropertyOptional({
+    description: 'Pickup latitude. Must be sent together with pickupLng.',
+    example: 41.31,
+    minimum: -90,
+    maximum: 90,
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(-90)
+  @Max(90)
+  pickupLat?: number;
+
+  @ApiPropertyOptional({
+    description: 'Pickup longitude. Must be sent together with pickupLat.',
+    example: 69.28,
+    minimum: -180,
+    maximum: 180,
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(-180)
+  @Max(180)
+  pickupLng?: number;
+
   @ApiPropertyOptional({
     description: 'MATOR-certified badge.',
     example: true,

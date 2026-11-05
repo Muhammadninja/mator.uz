@@ -1057,6 +1057,7 @@ describe('buildSessionFromDraft', () => {
       // path either — the category's single package code applies.
       packageForm: null,
       packageChoiceRequired: false,
+      packageFormOptions: [],
       title: 'Магнитола для Nexia 3',
       description: 'Производство Корея, новая',
       partNumberType: 'UNKNOWN',

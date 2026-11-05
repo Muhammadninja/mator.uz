@@ -125,6 +125,7 @@ export const EN: BotStrings = {
   'btn.changePhotos': '🖼 Change photos',
   'packageForm.single': 'Single item',
   'packageForm.set': 'Set / kit',
+  'packageForm.box': 'Consumer box',
 
   'step.photosFirst':
     '📸 First send photos of the product — one photo or an album of up to 10.\n' +

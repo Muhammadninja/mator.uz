@@ -115,6 +115,13 @@ async function main() {
       where: { id: TEST_ORDER_ID },
       data: { refundSettledAt: null },
     });
+    // So do the receipts agreed and registered for its payments.
+    await prisma.paymeFiscalSnapshot.deleteMany({
+      where: { payment: { orderId: TEST_ORDER_ID } },
+    });
+    await prisma.paymeFiscalReceipt.deleteMany({
+      where: { payment: { orderId: TEST_ORDER_ID } },
+    });
     const removed = await prisma.payment.deleteMany({
       where: { orderId: TEST_ORDER_ID },
     });

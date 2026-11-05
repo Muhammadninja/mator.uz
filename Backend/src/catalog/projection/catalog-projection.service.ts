@@ -641,11 +641,6 @@ export class CatalogProjectionService {
       oilViscosity: product.oilViscosity,
       oilVolumeMl: product.oilVolumeMl,
       antifreezeWeightG: product.antifreezeWeightG,
-      // The listing's sale form, projected verbatim like every attribute above.
-      // It is what lets the Payme receipt builder pick between this row's
-      // category's two package codes without reaching back into the supply
-      // domain — the codes themselves stay on the category and are NOT copied.
-      packageForm: product.packageForm,
       // Curated rating, projected verbatim like every other Product attribute
       // above. It is admin-maintained data, NOT user reviews — the buyer side
       // only ever reads it. Copying it here (rather than joining CatalogPart
@@ -672,7 +667,16 @@ export class CatalogProjectionService {
     // The kind and oil type travel with the classification: a composition category
     // states its oil type, and a move rewrites it on the part alone, so restoring it
     // from the product would contradict the category the part stayed on.
-    const listingType = { kind: product.kind, oilType: product.oilType };
+    //
+    // So does the sale form, which picks one of the category's package codes without
+    // the receipt reaching back into the supply domain (the codes stay on the category
+    // and are NOT copied). An operator can state it on the part alone, and an imported
+    // product has none, so a photo update or a rating edit must not clear it.
+    const listingType = {
+      kind: product.kind,
+      oilType: product.oilType,
+      packageForm: product.packageForm,
+    };
     ops.push(
       this.prisma.catalogPart.upsert({
         where: { id: partId },

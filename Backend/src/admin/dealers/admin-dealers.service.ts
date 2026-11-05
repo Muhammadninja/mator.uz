@@ -20,6 +20,8 @@ import {
   MAX_AVATAR_BYTES,
 } from '../../common/image.constants';
 import { generateDealerApiKey } from '../../integrations/api-key.util';
+import { supplySellerOf } from '../../shipping/delivery-quote.service';
+import { toGeoPoint } from '../../shipping/routing/routing-provider';
 import { AdminAuditContext } from '../auth/admin-auth.service';
 import { AdminAuditService } from '../auth/admin-audit.service';
 import {
@@ -287,7 +289,20 @@ export class AdminDealersService {
       select: ADMIN_DEALER_DETAIL_SELECT,
     });
     if (!dealer) throw new NotFoundException('Dealer not found');
-    return { success: true, data: presentAdminDealerDetail(dealer) };
+    const seller = await this.supplySeller(
+      this.prisma,
+      id,
+      dealer.internalSellerId,
+    );
+    return {
+      success: true,
+      data: {
+        ...presentAdminDealerDetail(dealer),
+        // Null means courier delivery of this dealer's goods is refused.
+        pickupLat: seller?.locationLat ?? null,
+        pickupLng: seller?.locationLng ?? null,
+      },
+    };
   }
 
   /**
@@ -310,7 +325,9 @@ export class AdminDealersService {
       dto.lowestPrice === undefined &&
       dto.status === undefined &&
       dto.tin === undefined &&
-      dto.vatPercent === undefined
+      dto.vatPercent === undefined &&
+      dto.pickupLat === undefined &&
+      dto.pickupLng === undefined
     ) {
       throw new BadRequestException('Nothing to update');
     }
@@ -419,6 +436,36 @@ export class AdminDealersService {
           data.vatPercent = dto.vatPercent;
           presPrev.vatPercent = current;
           presNext.vatPercent = dto.vatPercent;
+        }
+      }
+      // The pickup location lives on the supply-side seller, so it is written there, in
+      // this transaction, and audited with the rest of this edit.
+      if (dto.pickupLat !== undefined || dto.pickupLng !== undefined) {
+        const pickup = toGeoPoint(dto.pickupLat, dto.pickupLng);
+        if (!pickup) {
+          throw new BadRequestException(
+            'pickupLat and pickupLng must be sent together and name a real location',
+          );
+        }
+        const seller = await this.supplySeller(tx, id, dealer.internalSellerId);
+        if (!seller) {
+          throw new BadRequestException(
+            'This dealer has no supply-side seller linked, so it has no pickup location to set',
+          );
+        }
+        if (
+          seller.locationLat !== pickup.lat ||
+          seller.locationLng !== pickup.lng
+        ) {
+          await tx.seller.update({
+            where: { id: seller.id },
+            data: { locationLat: pickup.lat, locationLng: pickup.lng },
+          });
+          presPrev.pickup = {
+            lat: seller.locationLat,
+            lng: seller.locationLng,
+          };
+          presNext.pickup = { lat: pickup.lat, lng: pickup.lng };
         }
       }
 
@@ -665,10 +712,35 @@ export class AdminDealersService {
         // Налоговые данные, so an edit can be diffed against the stored values.
         tin: true,
         vatPercent: true,
+        // Finds the supply-side seller that holds the pickup location.
+        internalSellerId: true,
       },
     });
     if (!dealer) throw new NotFoundException('Dealer not found');
     return dealer;
+  }
+
+  /** The supply-side seller behind this dealer, which holds its pickup location. */
+  private async supplySeller(
+    client: Pick<Prisma.TransactionClient, 'seller'>,
+    dealerId: string,
+    internalSellerId: number | null,
+  ) {
+    const sellers = await client.seller.findMany({
+      where: {
+        OR: [
+          { catalogSellerId: dealerId },
+          ...(internalSellerId === null ? [] : [{ id: internalSellerId }]),
+        ],
+      },
+      select: {
+        id: true,
+        catalogSellerId: true,
+        locationLat: true,
+        locationLng: true,
+      },
+    });
+    return supplySellerOf(sellers, dealerId, internalSellerId);
   }
 
   /** One audit entry for a dealer mutation, written in the caller's tx. */

@@ -10,11 +10,12 @@ import { OtpService } from './phone/otp.service';
 const fakeConfig = (map: Record<string, string>) =>
   ({ get: (key: string) => map[key] }) as unknown as ConfigService;
 
-/** A production env that is otherwise valid (Payme credentials present). */
+/** A production env that is otherwise valid (Payme and UzMaps credentials present). */
 const PROD = {
   NODE_ENV: 'production',
   PAYME_MERCHANT_ID: 'merchant-1',
   PAYME_MERCHANT_KEY: 'merchant-secret',
+  UZMAPS_API_KEY: 'uzmaps-key',
 };
 
 describe('AUTH_DEV_MODE production guard (boot-time validateEnv)', () => {

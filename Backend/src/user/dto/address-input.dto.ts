@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsNumber, IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsNumber, IsOptional, IsString, Max, MaxLength, Min } from 'class-validator';
 
 /**
  * Inline address payload accepted by PATCH /v1/me. Upserts the caller's DEFAULT
@@ -44,13 +44,23 @@ export class AddressInputDto {
   @MaxLength(500)
   street?: string;
 
+  @ApiPropertyOptional({ example: 'Blue gate, second entrance' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  landmark?: string;
+
   @ApiPropertyOptional({ example: 41.31 })
   @IsOptional()
   @IsNumber()
+  @Min(-90)
+  @Max(90)
   lat?: number;
 
   @ApiPropertyOptional({ example: 69.28 })
   @IsOptional()
   @IsNumber()
+  @Min(-180)
+  @Max(180)
   lng?: number;
 }

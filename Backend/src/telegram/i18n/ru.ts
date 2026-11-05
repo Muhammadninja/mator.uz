@@ -126,6 +126,7 @@ export const RU: BotStrings = {
   'btn.changePhotos': '🖼 Изменить фото',
   'packageForm.single': 'Штука',
   'packageForm.set': 'Комплект / набор',
+  'packageForm.box': 'Потребительская коробка',
 
   'step.photosFirst':
     '📸 Сначала отправьте фотографии товара — одно фото или альбом до 10 фото.\n' +

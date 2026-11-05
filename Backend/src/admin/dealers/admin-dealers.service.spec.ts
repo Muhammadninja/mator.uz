@@ -31,7 +31,11 @@ function makePrismaMock() {
     create: jest.fn(),
     update: jest.fn(),
   };
-  const prisma: Record<string, unknown> = { catalogSeller };
+  const seller = {
+    findMany: jest.fn().mockResolvedValue([]),
+    update: jest.fn(),
+  };
+  const prisma: Record<string, unknown> = { catalogSeller, seller };
   // Array form runs the (already-invoked) query promises; callback form gets the
   // mock itself, so the service's `tx` IS this same mock and assertions on
   // catalogSeller.update also cover the transactional path.
@@ -41,6 +45,7 @@ function makePrismaMock() {
       : (arg as (tx: unknown) => unknown)(prisma);
   return prisma as {
     catalogSeller: typeof catalogSeller;
+    seller: typeof seller;
     $transaction: (arg: unknown) => unknown;
   };
 }
@@ -483,6 +488,106 @@ describe('AdminDealersService', () => {
     });
   });
 
+  describe('pickup location', () => {
+    const linked = (over: Record<string, unknown> = {}) => ({
+      id: 7,
+      catalogSellerId: 'd1',
+      locationLat: null,
+      locationLng: null,
+      ...over,
+    });
+    const editing = () =>
+      prisma.catalogSeller.findUnique
+        .mockResolvedValueOnce(mutableRow({ internalSellerId: null }))
+        .mockResolvedValueOnce(detailRow({ internalSellerId: null }));
+
+    it('getOne shows where it stands, null when unset', async () => {
+      prisma.catalogSeller.findUnique.mockResolvedValue(detailRow());
+      prisma.seller.findMany.mockResolvedValue([]);
+      await expect(service.getOne('d1')).resolves.toMatchObject({
+        data: { pickupLat: null, pickupLng: null },
+      });
+
+      prisma.seller.findMany.mockResolvedValue([
+        linked({ locationLat: 41.3, locationLng: 69.2 }),
+      ]);
+      await expect(service.getOne('d1')).resolves.toMatchObject({
+        data: { pickupLat: 41.3, pickupLng: 69.2 },
+      });
+    });
+
+    it('is written to the supply-side seller, audited in the same transaction', async () => {
+      editing();
+      prisma.seller.findMany.mockResolvedValue([linked()]);
+
+      await service.update('d1', { pickupLat: 41.31, pickupLng: 69.28 }, CTX);
+
+      expect(prisma.seller.update).toHaveBeenCalledWith({
+        where: { id: 7 },
+        data: { locationLat: 41.31, locationLng: 69.28 },
+      });
+      expect(audit.record).toHaveBeenCalledTimes(1);
+      expect(audit.record.mock.calls[0][0]).toMatchObject({
+        action: AdminAuditAction.DEALER_UPDATED,
+        previousValues: { pickup: { lat: null, lng: null } },
+        newValues: { pickup: { lat: 41.31, lng: 69.28 } },
+      });
+    });
+
+    it('also finds the seller a projected storefront recorded', async () => {
+      prisma.catalogSeller.findUnique
+        .mockResolvedValueOnce(mutableRow({ internalSellerId: 12 }))
+        .mockResolvedValueOnce(detailRow({ internalSellerId: 12 }));
+      prisma.seller.findMany.mockResolvedValue([linked({ id: 12, catalogSellerId: null })]);
+
+      await service.update('d1', { pickupLat: 41.31, pickupLng: 69.28 }, CTX);
+
+      expect(prisma.seller.update.mock.calls[0][0].where).toEqual({ id: 12 });
+      expect(prisma.seller.findMany.mock.calls[0][0].where).toEqual({
+        OR: [{ catalogSellerId: 'd1' }, { id: 12 }],
+      });
+    });
+
+    it('setting the value it already holds writes nothing and audits nothing', async () => {
+      editing();
+      prisma.seller.findMany.mockResolvedValue([
+        linked({ locationLat: 41.31, locationLng: 69.28 }),
+      ]);
+
+      await service.update('d1', { pickupLat: 41.31, pickupLng: 69.28 }, CTX);
+
+      expect(prisma.seller.update).not.toHaveBeenCalled();
+      expect(audit.record).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['half a pair', { pickupLat: 41.31 }],
+      ['the other half', { pickupLng: 69.28 }],
+      ['0,0, which is no place', { pickupLat: 0, pickupLng: 0 }],
+    ])('refuses %s', async (_, body) => {
+      prisma.catalogSeller.findUnique.mockResolvedValueOnce(
+        mutableRow({ internalSellerId: null }),
+      );
+
+      await expect(service.update('d1', body, CTX)).rejects.toThrow(
+        BadRequestException,
+      );
+      expect(prisma.seller.update).not.toHaveBeenCalled();
+    });
+
+    it('refuses a dealer with no supply-side seller instead of inventing one', async () => {
+      prisma.catalogSeller.findUnique.mockResolvedValueOnce(
+        mutableRow({ internalSellerId: null }),
+      );
+      prisma.seller.findMany.mockResolvedValue([]);
+
+      await expect(
+        service.update('d1', { pickupLat: 41.31, pickupLng: 69.28 }, CTX),
+      ).rejects.toThrow(/no supply-side seller/);
+      expect(audit.record).not.toHaveBeenCalled();
+    });
+  });
+
   describe('update', () => {
     it('rejects an empty body', async () => {
       await expect(service.update('d1', {}, CTX)).rejects.toThrow(
@@ -885,6 +990,8 @@ describe('UpdateAdminDealerDto', () => {
       reason: 'x',
       tin: '301234567',
       vatPercent: 12,
+      pickupLat: 41.31,
+      pickupLng: 69.28,
     });
     expect(Object.keys(instance).sort()).toEqual([
       'brandColor',
@@ -897,12 +1004,33 @@ describe('UpdateAdminDealerDto', () => {
       'name',
       'orders',
       'phone',
+      'pickupLat',
+      'pickupLng',
       'reason',
       'status',
       'tin',
       'vatPercent',
       'years',
     ]);
+  });
+});
+
+describe('UpdateAdminDealerDto pickup coordinates', () => {
+  const errorsFor = (body: unknown) =>
+    validateSync(plainToInstance(UpdateAdminDealerDto, body) as object);
+
+  it('accepts a real location', () => {
+    expect(errorsFor({ pickupLat: 41.31, pickupLng: 69.28 })).toHaveLength(0);
+  });
+
+  it.each([
+    [{ pickupLat: 90.1 }],
+    [{ pickupLat: -90.1 }],
+    [{ pickupLng: 180.1 }],
+    [{ pickupLng: -180.1 }],
+    [{ pickupLat: 'north' }],
+  ])('refuses %j', (body) => {
+    expect(errorsFor(body)).not.toHaveLength(0);
   });
 });
 

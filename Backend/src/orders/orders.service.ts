@@ -26,6 +26,10 @@ import { resolvePromo } from '../cart/promo.util';
 import { priceCartLines } from '../cart/cart-pricing.util';
 import { allocatePromoDiscount } from './promo-allocation.util';
 import { DiscountService } from '../sales/discount.service';
+import {
+  DeliveryQuote,
+  DeliveryQuoteService,
+} from '../shipping/delivery-quote.service';
 import { ORDER_INCLUDE, presentOrder } from './order.presenter';
 import {
   ACTIVE_PROVIDER_STATE,
@@ -38,6 +42,8 @@ import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { SYSTEM_ONLY_ORDER_STATUSES, canTransition } from './order-transitions';
 import {
   DELIVERY_COST_UNAVAILABLE,
+  DELIVERY_PRICE_CHANGED,
+  DELIVERY_QUOTE_STALE,
   PART_UNAVAILABLE,
   assertAllAvailable,
   findUnavailableParts,
@@ -66,6 +72,7 @@ export class OrdersService {
     private readonly orderStatus: OrderStatusService,
     private readonly discounts: DiscountService,
     private readonly audit: AdminAuditService,
+    private readonly deliveryQuotes: DeliveryQuoteService,
   ) {}
 
   async createFromCart(userId: string, dto: CreateOrderDto) {
@@ -145,26 +152,55 @@ export class OrdersService {
     const paymentType = dto.payment_type
       ? PAYMENT_TYPE_MAP[dto.payment_type]
       : undefined;
-    // Courier delivery has no price here yet. It will come per order from the delivery
-    // provider, and no flat figure may stand in for that, so nothing is stored rather
-    // than a made-up cost. An order to be paid online cannot go ahead without one, and
-    // refusing now leaves the customer the cart, which creating the order would consume,
-    // and the choice of pickup. Paying on delivery is settled offline, so it is not
-    // stopped here, and its total simply holds no delivery.
+    // Courier delivery is charged what the backend computes now, never a figure from the
+    // request. `confirmed_delivery_uzs` and `delivery_quote_id` only say what the buyer was
+    // shown:
+    //   • A client stating neither has shown no price (every build from before this, and one
+    //     stating no method at all, since pickup is not assumed). Charging it would bill an
+    //     amount the buyer never saw, so it is refused, and the customer keeps the cart and
+    //     the choice of pickup.
+    //   • A quote for other points or rates is refused, even at the same price: the buyer
+    //     moved the saved destination, or a seller or the tariff changed, so they need a new
+    //     quote for where the courier would now go.
+    //   • A price that no longer matches is refused too: the cart or the roads changed, and
+    //     the buyer agrees to the new one or not at all. Changing the number in the request
+    //     therefore changes nothing but whether the order is placed.
+    // Everything is settled before the transaction, so no network call happens inside it.
     const needsDeliveryCost =
       deliveryMethod === DeliveryMethod.COURIER &&
       cart.items.some((i) => i.partId || i.offerId);
-    const paysOnDelivery =
-      paymentType === PaymentType.CASH || paymentType === PaymentType.TERMINAL;
-    if (needsDeliveryCost && !paysOnDelivery) {
-      throw new ConflictException({
-        code: DELIVERY_COST_UNAVAILABLE,
-        message:
-          'The cost of courier delivery is not available yet. Choose pickup to place this order.',
-      });
+    let delivery: DeliveryQuote | null = null;
+    if (needsDeliveryCost) {
+      if (dto.confirmed_delivery_uzs == null || !dto.delivery_quote_id) {
+        throw new ConflictException({
+          code: DELIVERY_COST_UNAVAILABLE,
+          message:
+            'The cost of courier delivery is not available yet. Choose pickup to place this order.',
+        });
+      }
+      delivery = await this.deliveryQuotes.quote(
+        userId,
+        snap.delivery_address_id,
+        cart.items,
+      );
+      if (delivery.quoteId !== dto.delivery_quote_id) {
+        throw new ConflictException({
+          code: DELIVERY_QUOTE_STALE,
+          message:
+            'The delivery details have changed. Check the new price and confirm the order again.',
+        });
+      }
+      if (delivery.priceUzs !== dto.confirmed_delivery_uzs) {
+        throw new ConflictException({
+          code: DELIVERY_PRICE_CHANGED,
+          message:
+            'The delivery price has changed. Check the new price and confirm the order again.',
+        });
+      }
     }
+    const deliveryUzs = delivery?.priceUzs ?? 0;
     const discount = cart.promoCode ? resolvePromo(cart.promoCode, subtotal).discountUzs : 0;
-    const total = Math.max(0, subtotal - discount);
+    const total = Math.max(0, subtotal - discount) + deliveryUzs;
 
     // Spread the promo discount INTO the line prices, in tiyin, so the charged
     // amount is carried entirely by the items. A Payme receipt has no negative
@@ -196,7 +232,20 @@ export class OrdersService {
           subtotalUzs: subtotal,
           // Written once, here. Payment reads what this stored, so nothing may change
           // it later, least of all between Check and Perform.
-          deliveryUzs: 0,
+          deliveryUzs,
+          ...(delivery
+            ? {
+                deliveryShipments:
+                  delivery.shipments as unknown as Prisma.InputJsonValue,
+                // A copy, so that editing or deleting the address cannot move this order.
+                ...(delivery.destination
+                  ? {
+                      deliveryDestination:
+                        delivery.destination as unknown as Prisma.InputJsonValue,
+                    }
+                  : {}),
+              }
+            : {}),
           serviceFeeUzs: 0,
           discountUzs: discount,
           totalUzs: total,

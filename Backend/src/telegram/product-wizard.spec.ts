@@ -795,7 +795,7 @@ describe('photos-first entry', () => {
         'MODEL',
         'CATEGORY',
         'SUBCATEGORY',
-        // Fiscal sale form — asked only for a category with two package codes.
+        // Fiscal sale form — asked only for a category with several package codes.
         'PACKAGE_FORM',
         'PART_NUMBER_TYPE',
         'PART_NUMBER',

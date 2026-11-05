@@ -2,7 +2,7 @@ import { NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { UserService } from '../../src/user/user.service';
 import { AddressesService } from '../../src/addresses/addresses.service';
-import { createPrismaMock, buildAppUser, PrismaMock } from '../utils/harness';
+import { createPrismaMock, buildAppUser, PrismaMock, fakeConfig } from '../utils/harness';
 
 describe('User API smoke', () => {
   let prisma: PrismaMock;
@@ -13,7 +13,7 @@ describe('User API smoke', () => {
     prisma = createPrismaMock();
     // Real AddressesService over the same Prisma double; getDefault resolves to
     // null (address.findFirst is an unstubbed jest.fn) unless a test sets it.
-    addresses = new AddressesService(prisma);
+    addresses = new AddressesService(prisma, fakeConfig());
     svc = new UserService(prisma, addresses);
   });
 

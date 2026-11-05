@@ -28,8 +28,8 @@ export class ClassifySourcingOfferDto {
 
   @ApiPropertyOptional({
     description:
-      'How it is sold, when the category has both package codes. Absent means the ' +
-      'single code.',
+      'How it is sold. Needed when the category holds more than one package code: ' +
+      'absent there leaves the offer unpayable online, never assumed to be a piece.',
     enum: PackageForm,
     nullable: true,
   })

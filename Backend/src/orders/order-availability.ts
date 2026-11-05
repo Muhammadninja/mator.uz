@@ -35,6 +35,12 @@ export const PART_UNAVAILABLE = 'PART_UNAVAILABLE';
 /** The order needs courier delivery, and no real cost for it is known. */
 export const DELIVERY_COST_UNAVAILABLE = 'DELIVERY_COST_UNAVAILABLE';
 
+/** The courier price computed now is not the one the buyer confirmed. */
+export const DELIVERY_PRICE_CHANGED = 'DELIVERY_PRICE_CHANGED';
+
+/** The destination, a pickup point or the rates are not those the quote was for. */
+export const DELIVERY_QUOTE_STALE = 'DELIVERY_QUOTE_STALE';
+
 export async function findUnavailableParts(
   prisma: Pick<PrismaService, 'catalogPart'>,
   lines: readonly { partId: string | null; title: string }[],

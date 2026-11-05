@@ -18,6 +18,7 @@ import {
   buildOrder,
   createPrismaMock,
   fakeConfig,
+  fakeDeliveryQuotes,
   PrismaMock,
 } from '../../test/utils/harness';
 
@@ -33,6 +34,7 @@ function build(prisma: PrismaMock) {
     new OrderStatusService(prisma),
     {} as any,
     audit as any,
+    fakeDeliveryQuotes(),
   );
   return { svc, notifications, realtime, audit };
 }

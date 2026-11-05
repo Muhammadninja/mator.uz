@@ -31,6 +31,6 @@ export class ConfirmCategoryFiscalDto {
   @ValidateIf((dto: ConfirmCategoryFiscalDto) => dto.confirmed === true)
   @IsString()
   @IsNotEmpty()
-  @MaxLength(60)
+  @MaxLength(80)
   codes?: string;
 }

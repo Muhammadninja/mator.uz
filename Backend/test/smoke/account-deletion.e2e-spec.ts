@@ -12,6 +12,7 @@
 //   • the endpoint acts on the AUTHENTICATED principal, never a client-sent id;
 //   • an order in progress refuses deletion (409) and the token keeps working.
 
+import { Prisma } from '@prisma/client';
 import { ConflictException, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { AccountDeletionService } from '../../src/user/account-deletion.service';
@@ -235,7 +236,12 @@ describe('DELETE /v1/me — account deletion smoke', () => {
     expect(prisma.order.deleteMany).not.toHaveBeenCalled();
     expect(prisma.order.updateMany).toHaveBeenCalledWith({
       where: { userId: USER_ID },
-      data: { contactPhoneE164: null, deliveryAddressId: null },
+      data: {
+        contactPhoneE164: null,
+        deliveryAddressId: null,
+        deliveryShipments: Prisma.DbNull,
+        deliveryDestination: Prisma.DbNull,
+      },
     });
   });
 

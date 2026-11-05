@@ -20,7 +20,7 @@ import {
  * rules in PartCategoryService and the kind capabilities in product-kind.ts.
  *
  * Ownership, which nothing here may blur:
- *   Category → mxik + packageCodeSingle + packageCodeSet + what was confirmed
+ *   Category → mxik + a package code per sale form + what was confirmed
  *   Dealer   → tin + vatPercent
  *   Product  → the sale FORM only (which code, never the code itself)
  *
@@ -36,9 +36,13 @@ import {
 export const MXIK_PATTERN = /^\d{17}$/;
 
 /**
- * A Tasnif package code, as issued by tasnif.soliq.uz (e.g. 1417722). Digits
- * only; the length is not fixed by the registry, so only the shape and the
- * column bound (VarChar(20)) are enforced.
+ * A Tasnif package code, as issued by tasnif.soliq.uz (e.g. 1417722), sent to Payme as
+ * `package_code`. Digits only; the length is not fixed by the registry, so only the
+ * shape and the column bound (VarChar(20)) are enforced.
+ *
+ * Tasnif issues these PER MXIK, so a code means something only next to its own: "штука"
+ * is 1417722 on brakes and 1417728 on the steering mechanism. No code is universal, and
+ * none may be copied from one category to another.
  */
 export const PACKAGE_CODE_PATTERN = /^\d{1,20}$/;
 
@@ -58,7 +62,31 @@ export interface CategoryFiscalData {
   mxik: string | null;
   packageCodeSingle: string | null;
   packageCodeSet: string | null;
+  packageCodeBox: string | null;
 }
+
+/**
+ * How a listing is sold → the category column holding its package code. The ONE mapping
+ * between the two, and nothing else decides which code a form gets. It names a column
+ * rather than a code because the codes differ per MXIK (see PACKAGE_CODE_PATTERN).
+ */
+export const PACKAGE_CODE_COLUMN = {
+  [PackageForm.SINGLE]: 'packageCodeSingle',
+  [PackageForm.SET]: 'packageCodeSet',
+  [PackageForm.BOX]: 'packageCodeBox',
+} as const satisfies Record<PackageForm, keyof CategoryFiscalData>;
+
+type CategoryPackageCodeColumns = Pick<
+  CategoryFiscalData,
+  (typeof PACKAGE_CODE_COLUMN)[PackageForm]
+>;
+
+/** The sale forms in the order a seller is asked about them. */
+const PACKAGE_FORMS = [
+  PackageForm.SINGLE,
+  PackageForm.SET,
+  PackageForm.BOX,
+] as const;
 
 /** One resolved (MXIK, package code) pair, whatever it was derived from. */
 export interface FiscalCodes {
@@ -118,8 +146,8 @@ export function resolveOilFiscalCodes(
 
 /**
  * Whether a category is fiscally CONFIGURED — i.e. a product in it can be sold
- * online at all. Both an MXIK and a single package code are required; the set
- * code is optional and never makes a category configured on its own.
+ * online at all. Both an MXIK and a single package code are required; the set and
+ * box codes are optional and never make a category configured on their own.
  */
 export function isCategoryFiscallyConfigured(
   category: CategoryFiscalData,
@@ -127,36 +155,67 @@ export function isCategoryFiscallyConfigured(
   return !!category.mxik && !!category.packageCodeSingle;
 }
 
-/**
- * Whether the seller must be ASKED how the item is sold. True only when the
- * category genuinely offers a choice — both codes present. A category with one
- * package code has nothing to ask about, so the wizard never shows the step and
- * the single code applies automatically.
- */
-export function offersPackageChoice(
-  category: Pick<CategoryFiscalData, 'packageCodeSingle' | 'packageCodeSet'>,
-): boolean {
-  return !!category.packageCodeSingle && !!category.packageCodeSet;
+/** The sale forms this category holds a code for, in the order a seller is asked. */
+export function offeredPackageForms(
+  category: CategoryPackageCodeColumns,
+): PackageForm[] {
+  return PACKAGE_FORMS.filter((form) => !!category[PACKAGE_CODE_COLUMN[form]]);
 }
 
 /**
- * The Tasnif package code that fiscalizes a listing: the SET code when the
- * seller chose "Комплект / набор", else the single code.
+ * Whether the seller must be ASKED how the item is sold. True only when the
+ * category genuinely offers a choice, with more than one code. A category with one
+ * package code has nothing to ask about, so the wizard never shows the step.
+ */
+export function offersPackageChoice(
+  category: CategoryPackageCodeColumns,
+): boolean {
+  return offeredPackageForms(category).length > 1;
+}
+
+/**
+ * The Tasnif package code that fiscalizes a listing, or null when there is none. Null
+ * is an answer the caller must treat as a refusal: nothing stands in for a missing
+ * code, least of all "штука", which on a set or a box would misstate what was sold.
  *
- * `form` is null for every listing whose category offered no choice — the
- * question was never asked — and the single code is then the answer. A SET
- * choice whose code has since been removed by an admin falls back to the single
- * code rather than fiscalizing with nothing; returns null only when the category
- * carries no usable code at all, which the caller must treat as an error.
+ *   • A stated form gets the code of that form, and only that.
+ *   • A listing that states nothing gets the single code only where the category holds
+ *     nothing else. That is no assumption: an operator confirms codes as true of every
+ *     listing on the node, so confirming one code says everything there is sold that
+ *     way. With more than one code, someone has to say which applies.
  */
 export function resolvePackageCode(
-  category: Pick<CategoryFiscalData, 'packageCodeSingle' | 'packageCodeSet'>,
+  category: CategoryPackageCodeColumns,
   form: PackageForm | null | undefined,
 ): string | null {
-  if (form === PackageForm.SET && category.packageCodeSet) {
-    return category.packageCodeSet;
+  if (form) return category[PACKAGE_CODE_COLUMN[form]] ?? null;
+  const offered = offeredPackageForms(category);
+  return offered.length === 1 && offered[0] === PackageForm.SINGLE
+    ? category.packageCodeSingle
+    : null;
+}
+
+/** A listing states no sale form, on a category holding more than one code. */
+export const PACKAGE_FORM_NOT_STATED =
+  'the listing does not state how it is sold, and its category holds more than one package code';
+
+/**
+ * What is wrong with this sale form on this category, or null. Says nothing about a
+ * category with no codes at all, which is a gap of its own. The oil table holds one
+ * code per composition, for oil sold the way that code says, so it has none for
+ * anything else.
+ */
+export function packageFormGap(
+  category: Pick<FiscalCategorySource, 'id' | keyof CategoryFiscalData>,
+  form: PackageForm | null | undefined,
+): string | null {
+  const noCode = (stated: PackageForm) =>
+    `category "${category.id}" has no package code for a listing sold as ${stated}`;
+  if (isFiscalizedByOilType(category)) {
+    return form && form !== PackageForm.SINGLE ? noCode(form) : null;
   }
-  return category.packageCodeSingle ?? null;
+  if (form) return category[PACKAGE_CODE_COLUMN[form]] ? null : noCode(form);
+  return offersPackageChoice(category) ? PACKAGE_FORM_NOT_STATED : null;
 }
 
 // ── The classification resolver ──────────────────────────────────────────────
@@ -171,6 +230,7 @@ export const FISCAL_CATEGORY_SELECT = {
   mxik: true,
   packageCodeSingle: true,
   packageCodeSet: true,
+  packageCodeBox: true,
   fiscalConfirmedCodes: true,
   _count: { select: { children: { where: { isActive: true } } } },
 } satisfies Prisma.PartCategorySelect;
@@ -226,7 +286,8 @@ function holdsRepresentativeCode(category: {
 /**
  * The codes a listing on this category would carry, as the one comparable string an
  * operator confirms, or null when there is nothing they may confirm. A composition
- * category with no code of its own takes them from OIL_TYPE_FISCAL.
+ * category with no code of its own takes them from OIL_TYPE_FISCAL. A box code adds a
+ * part of its own, so a category without one keeps the string it was confirmed under.
  */
 export function confirmableFiscalCodes(
   category: Pick<FiscalCategorySource, 'id' | keyof CategoryFiscalData>,
@@ -242,7 +303,10 @@ export function confirmableFiscalCodes(
   ) {
     return null;
   }
-  return `${category.mxik}:${category.packageCodeSingle}:${category.packageCodeSet ?? ''}`;
+  const codes = `${category.mxik}:${category.packageCodeSingle}:${category.packageCodeSet ?? ''}`;
+  return category.packageCodeBox
+    ? `${codes}:${category.packageCodeBox}`
+    : codes;
 }
 
 /**
@@ -300,6 +364,8 @@ export function resolveFiscalClassification(
   if (composition && byOilTable) {
     if (!oilType) gaps.push(OIL_TYPE_REQUIRED);
     else codes = resolveOilFiscalCodes(composition);
+    const formGap = packageFormGap(category, packageForm);
+    if (formGap) gaps.push(formGap);
   } else if (
     kind === ProductKind.MOTOR_OIL &&
     category.id === CategoryAnchor.MOTOR_OIL
@@ -318,9 +384,12 @@ export function resolveFiscalClassification(
     }
     // A set code alone never makes a category configured, even for a listing sold
     // as a set: see isCategoryFiscallyConfigured.
-    if (!packageCode || !category.packageCodeSingle) {
+    const formGap = packageFormGap(category, packageForm);
+    if (!category.packageCodeSingle) {
       gaps.push('category has no package code');
-    } else if (!PACKAGE_CODE_PATTERN.test(packageCode)) {
+    } else if (formGap) {
+      gaps.push(formGap);
+    } else if (packageCode && !PACKAGE_CODE_PATTERN.test(packageCode)) {
       gaps.push(`category package code "${packageCode}" is malformed`);
     }
     if (category.mxik && packageCode) {
@@ -398,7 +467,9 @@ export function categoryFiscalReadiness(category: FiscalCategorySource): {
 } {
   const result = resolveFiscalClassification({
     ...listingTypeForCategory(category.id),
-    packageForm: null,
+    // A question about the category, not about a listing that forgot to say how it is
+    // sold: the form every configured category holds a code for.
+    packageForm: PackageForm.SINGLE,
     category,
   });
   if (result.ok) return { status: 'READY', gaps: [] };

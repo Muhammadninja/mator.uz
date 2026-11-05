@@ -220,7 +220,7 @@ missing (read the dry-run first: a missing row may be one an operator removed on
 ## 9. Open items
 
 - **Payme MXIK/ИКПУ codes need entering and confirming against Tasnif.** Fiscal fields:
-  `mxik`, `packageCodeSingle`, `packageCodeSet`, `fiscalConfirmedCodes`. What a listing's
+  `mxik`, `packageCodeSingle`, `packageCodeSet`, `packageCodeBox`, `fiscalConfirmedCodes`. What a listing's
   receipt may carry is decided in one place, `resolveFiscalClassification` in
   `common/fiscal.util.ts`, which the Payme receipt and every console flag share:
   - A code must be the category's **own**. There is no inheritance, and a node with active
@@ -244,6 +244,26 @@ missing (read the dry-run first: a missing row may be one an operator removed on
     `MOTOR_OIL` only.
   - Until then checkout refuses the listing. `GET /v1/admin/categories?fiscalStatus=NEEDS_CODES`
     and `=NEEDS_CONFIRMATION` list what is left to do.
+  - Package codes go to Payme as `package_code`, and Tasnif issues them **per MXIK**: there is
+    no universal code for a piece, a set or a box. `PACKAGE_CODE_COLUMN` maps a sale form to
+    the category's column, and nothing stands in for a missing code: a set or box with no
+    code of its own is refused, not sold as a piece. A listing that states no form takes the
+    single code only where the category holds no other, because confirming that one code says
+    everything filed there is sold that way. On a category holding more, it is refused until
+    an operator states the form (`bulk-move` with `packageForm`, on the part alone).
+- **The receipt is frozen on the invoice.** `POST /v1/payments/payme/invoices` runs every rule
+  above and stores the resulting `detail` in `payme_fiscal_snapshots`, which a trigger keeps
+  immutable. CheckPerformTransaction hands over that copy and CreateTransaction binds the
+  transaction to that row; neither reads the catalog's fiscal data, because Check carries no
+  transaction id to tie a later build to. So a corrected code applies to invoices issued after
+  it: an open invoice keeps what it froze, for as long as the order's payment window lasts. A
+  second tap on Pay reuses the open invoice. With none open (a link already used and cancelled,
+  or past its window), Check and Create refuse and the customer starts the payment again.
+- **Fiscal receipts.** Payme reports what it registered through `SetFiscalData`, stored in
+  `payme_fiscal_receipts`, one row per payment and type (`PERFORM`, `CANCEL`). A repeat changes
+  nothing. An accepted receipt (`status_code` 0, the only code Payme's documentation gives a
+  meaning for) is never overwritten: a differing callback is kept beside it (`last_conflict_*`)
+  and answered with success, for reconciliation to look at. Nothing reads these rows yet.
 - **Who owns a part's filing.** `bulk-move` writes `CatalogPart` alone, because a `Product` can
   be shared between sellers. A later projection keeps that filing unless the seller, going
   through the wizard again, gives a different category, kind or oil type than the product
@@ -256,7 +276,8 @@ missing (read the dry-run first: a missing row may be one an operator removed on
     environment variable can change them.
   - Its price is what the order stores, written once at creation. No flat price exists: the
     real one is to come per order from the delivery provider, so until then nothing is
-    quoted for a courier, and a courier order is refused if it is to be paid online.
+    quoted for a courier, and goods can only be picked up: `POST /v1/orders` with a courier
+    is refused however it is to be paid (`DELIVERY_COST_UNAVAILABLE`).
     `Order.deliveryMethod = COURIER` with goods and a cost of 0 means "no cost known", which
     every Payme step refuses. Nothing may change the stored cost once payment has started,
     or fetch a new one between Check and Perform.

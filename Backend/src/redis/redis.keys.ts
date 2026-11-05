@@ -31,6 +31,17 @@ export const RedisKeys = {
   // into it; invalidate() drops it too, since a taxonomy edit re-roots parts.
   cacheReferenceCategoryCounts: (): string =>
     `cache:reference:categories:counts`,
+  // A road distance between two points. `routeId` is a hash, so no buyer location
+  // sits in the keyspace: see DeliveryQuoteService.
+  cacheDeliveryRoute: (routeId: string): string =>
+    `cache:delivery:route:${routeId}`,
+  // What a typed address found. Hashed like the route, so what people type is not in the
+  // keyspace: see AddressSuggestionsService.
+  cacheAddressSearch: (searchId: string): string =>
+    `cache:address:search:${searchId}`,
+  // What is at a point on the map. Hashed for the same reason.
+  cacheAddressReverse: (pointId: string): string =>
+    `cache:address:reverse:${pointId}`,
 
   // ── Rate limiting ─────────────────────────────────────────────────────────
   // Fixed-window counters consumed via the RateLimiter (FixedWindow). One key per

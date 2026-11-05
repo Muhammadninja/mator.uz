@@ -4,7 +4,7 @@
 // test/integration/admin-category-transfer.int-spec.ts.
 
 import { ConflictException } from '@nestjs/common';
-import { OilType, ProductKind } from '@prisma/client';
+import { OilType, PackageForm, ProductKind } from '@prisma/client';
 import { AdminCategoryTransferService } from './admin-category-transfer.service';
 import {
   confirmedCategory,
@@ -25,6 +25,7 @@ const node = (id: string, parentId: string | null, over = {}) => ({
   mxik: null,
   packageCodeSingle: null,
   packageCodeSet: null,
+  packageCodeBox: null,
   fiscalConfirmedCodes: null,
   _count: { children: 0 },
   ...over,
@@ -242,6 +243,69 @@ describe('AdminCategoryTransferService — fiscal readiness', () => {
     const { service } = world([SPARE]);
     const { data } = await service.preview('brakes', 'oil-and-fluids');
     expect(codesOf(data.blockers)).toContain('TARGET_NOT_FISCALIZED');
+  });
+
+  describe('how the moved listings are sold', () => {
+    const codes = (id: string, over: Record<string, string>) =>
+      node(id, 'brake-system', {
+        mxik: '08708005011000000',
+        packageCodeSingle: '1417722',
+        ...over,
+      });
+    const TREE_WITH_CODES = [
+      codes('single-only', {}),
+      codes('with-set', { packageCodeSet: '1417723' }),
+      node('brake-system', null, { _count: { children: 2 } }),
+    ];
+    const previewWith = async (
+      forms: { packageForm: PackageForm | null; count: number }[],
+      target: string,
+    ) => {
+      const { prisma, service } = world([SPARE], TREE_WITH_CODES);
+      const byKind = prisma.product.groupBy.getMockImplementation()!;
+      prisma.product.groupBy.mockImplementation((args: { by: string[] }) =>
+        args.by.includes('packageForm')
+          ? Promise.resolve(
+              forms.map((f) => ({
+                packageForm: f.packageForm,
+                _count: { _all: f.count },
+              })),
+            )
+          : byKind(args),
+      );
+      const source = target === 'single-only' ? 'with-set' : 'single-only';
+      return (await service.preview(source, target)).data;
+    };
+
+    it('warns that a set has no code on a target without one, not that it becomes a piece', async () => {
+      const data = await previewWith(
+        [{ packageForm: PackageForm.SET, count: 3 }],
+        'single-only',
+      );
+      const warning = data.warnings.find(
+        (w: { code: string }) => w.code === 'SALE_FORM_UNAVAILABLE',
+      );
+      expect(warning?.message).toContain('3 listing(s)');
+    });
+
+    it('warns about listings that state nothing on a target holding several codes', async () => {
+      const data = await previewWith(
+        [{ packageForm: null, count: 2 }],
+        'with-set',
+      );
+      expect(codesOf(data.warnings)).toContain('SALE_FORM_UNAVAILABLE');
+    });
+
+    it('is quiet when every listing keeps a code', async () => {
+      const data = await previewWith(
+        [
+          { packageForm: PackageForm.SET, count: 1 },
+          { packageForm: PackageForm.SINGLE, count: 1 },
+        ],
+        'with-set',
+      );
+      expect(codesOf(data.warnings)).not.toContain('SALE_FORM_UNAVAILABLE');
+    });
   });
 
   it('counts a composition as having codes: they come from the oil table', async () => {

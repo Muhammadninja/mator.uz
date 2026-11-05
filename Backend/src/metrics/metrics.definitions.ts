@@ -61,6 +61,12 @@ export interface AppMetrics {
   draftsExpiredTotal: Counter<string>;
   /** SMS accepted by a provider, by provider name and template. */
   smsSentTotal: Counter<'provider' | 'template'>;
+  /** Requests that reached UzMaps, cache misses only, by billable product and outcome. */
+  uzmapsRequestsTotal: Counter<'product' | 'outcome'>;
+  /** A UzMaps key's monthly allowance, shared across its products, as UzMaps reports it. */
+  uzmapsQuotaLimit: Gauge<'key_role'>;
+  /** How much of that allowance is used this month, as UzMaps reports it. */
+  uzmapsQuotaUsed: Gauge<'key_role'>;
   /** SMS that failed to send, by provider and coarse reason. */
   smsFailedTotal: Counter<'provider' | 'template' | 'reason'>;
   /**
@@ -166,6 +172,24 @@ export function createAppMetrics(
     draftsExpiredTotal: new Counter({
       name: `${prefix}drafts_expired_total`,
       help: 'Total product drafts expired by the TTL sweep without publishing.',
+      registers,
+    }),
+    uzmapsRequestsTotal: new Counter({
+      name: `${prefix}uzmaps_requests_total`,
+      help: 'Requests sent to UzMaps, by product and outcome. Cached answers are not counted.',
+      labelNames: ['product', 'outcome'] as const,
+      registers,
+    }),
+    uzmapsQuotaLimit: new Gauge({
+      name: `${prefix}uzmaps_quota_limit`,
+      help: "A UzMaps key's monthly request allowance, shared across its products.",
+      labelNames: ['key_role'] as const,
+      registers,
+    }),
+    uzmapsQuotaUsed: new Gauge({
+      name: `${prefix}uzmaps_quota_used`,
+      help: 'Requests a UzMaps key has used this calendar month, as UzMaps counts them.',
+      labelNames: ['key_role'] as const,
       registers,
     }),
     smsSentTotal: new Counter({

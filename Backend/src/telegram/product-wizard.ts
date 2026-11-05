@@ -52,7 +52,7 @@ import { Markup } from 'telegraf';
 import type { PartNumberType } from '../ai/part-parser.types';
 import { parsePrice } from '../ai/price-parser';
 import { capabilitiesOf, isUniversalFor } from '../common/product-kind';
-import { offersPackageChoice } from '../common/fiscal.util';
+import { offeredPackageForms } from '../common/fiscal.util';
 import {
   OIL_TYPES,
   OIL_VISCOSITIES,
@@ -97,11 +97,11 @@ export enum WizardStep {
    *  масло" branch only — antifreeze is filed under its own category anchor and
    *  never sees this step. */
   OTHER_CATEGORY = 'OTHER_CATEGORY',
-  /** "Как продаётся товар?" — Штука or Комплект / набор. CONDITIONAL, like
-   *  SUBCATEGORY: it exists only for a category that carries BOTH Tasnif package
-   *  codes, so it is spliced into the flow by {@link flowSteps} from the chosen
-   *  category's own fiscal data. A category sold in one form never shows it and
-   *  its single code applies automatically. */
+  /** "Как продаётся товар?" — the forms the category has codes for. CONDITIONAL, like
+   *  SUBCATEGORY: it exists only for a category that carries more than one Tasnif
+   *  package code, so it is spliced into the flow by {@link flowSteps} from the chosen
+   *  category's own fiscal data. A category sold in one form never shows it, and its
+   *  one code answers for the listing (see resolvePackageCode). */
   PACKAGE_FORM = 'PACKAGE_FORM',
   // ── Motor-oil steps ───────────────────────────────────────────────────────
   OIL_VISCOSITY = 'OIL_VISCOSITY',
@@ -430,19 +430,24 @@ export interface WizardSession {
   // ── Sale form (fiscal) ────────────────────────────────────────────────────
   /**
    * How the item is sold, once the seller has been asked. Null when the
-   * question does not apply (the chosen category carries one package code) —
-   * the category's single code then fiscalizes the listing, so "not asked" and
-   * "Штука" are deliberately the same stored value: null.
+   * question does not apply (the chosen category carries one package code),
+   * which that one code then answers for.
    */
   packageForm: PackageForm | null;
   /**
-   * Whether the CHOSEN category offers both package codes and the seller
+   * Whether the CHOSEN category offers more than one package code and the seller
    * therefore owes an answer. Recomputed by every category transition from the
    * category actually picked, and cleared when the choice moves to a node that
    * offers no alternative — which is what makes the step appear and disappear
    * with the category, in both directions of the flow.
    */
   packageChoiceRequired: boolean;
+  /**
+   * The forms the seller may pick from: those the chosen category holds a code for,
+   * so the question never offers an answer that could not be paid for. Read again
+   * from the live tree each time the step renders (see ensureCategoryOptions).
+   */
+  packageFormOptions: PackageForm[];
   title: string | null;
   description: string | null;
   /** 'UNKNOWN' until the seller picks OEM/GM; Skip keeps it 'UNKNOWN'. */
@@ -517,7 +522,7 @@ export interface CategoryOption {
 }
 
 /**
- * The two Tasnif package codes of ONE category — the only fiscal fact the
+ * The Tasnif package codes of ONE category — the only fiscal fact the
  * wizard needs. Passed in by the caller from the LIVE tree (the same uncached
  * read that re-validates the tapped category), never carried on
  * {@link CategoryOption}: option lists are cached for the reference API, and a
@@ -526,6 +531,7 @@ export interface CategoryOption {
 export interface CategoryPackageCodes {
   packageCodeSingle: string | null;
   packageCodeSet: string | null;
+  packageCodeBox: string | null;
 }
 
 // ── Inline-button callback payloads ─────────────────────────────────────────
@@ -589,7 +595,11 @@ export interface CategoryPackageCodes {
 // is asked before the viscosity. A version-5 keyboard belongs to a dialogue
 // that would answer the wrong question under the new order, so its taps are
 // routed to the "catalog updated, start again" notice instead.
-export const CATALOG_VERSION = 6;
+//
+// Bumped to 7 for the consumer-box sale form. The SESSION SHAPE gained
+// `packageFormOptions` and the `pf:` payload a third value, so a version-6 keyboard
+// is routed to the same notice.
+export const CATALOG_VERSION = 7;
 
 /** Build a versioned callback payload, e.g. buildAction('b', 5) → "wiz:1:b:5". */
 export function buildAction(kind: string, arg: string | number): string {
@@ -613,9 +623,17 @@ export const WIZ_CATEGORY_ACTION = new RegExp(
 export const WIZ_SUBCATEGORY_ACTION = new RegExp(
   `^wiz:${V}:sc:([a-z0-9_-]{1,64})$`,
 );
-// The sale form: "Штука" or "Комплект / набор". A closed two-value payload
-// (not an index), so nothing about it can shift when catalogs change.
-export const WIZ_PACKAGE_FORM_ACTION = new RegExp(`^wiz:${V}:pf:(single|set)$`);
+// The sale form: "Штука", "Комплект / набор" or "Потребительская коробка". A closed
+// payload (not an index), so nothing about it can shift when catalogs change.
+export const WIZ_PACKAGE_FORM_ACTION = new RegExp(
+  `^wiz:${V}:pf:(single|set|box)$`,
+);
+/** The sale form each `pf:` payload names. */
+export const PACKAGE_FORM_BY_PAYLOAD: Readonly<Record<string, PackageForm>> = {
+  single: PackageForm.SINGLE,
+  set: PackageForm.SET,
+  box: PackageForm.BOX,
+};
 export const WIZ_DESCRIPTION_SKIP = buildAction('d', 'skip');
 export const WIZ_PART_NUMBER_TYPE_ACTION = new RegExp(
   `^wiz:${V}:t:(OEM|GM|SKIP)$`,
@@ -737,6 +755,7 @@ export class WizardSessionStore {
       categoryStepPending: false,
       packageForm: null,
       packageChoiceRequired: false,
+      packageFormOptions: [],
       title: null,
       description: null,
       partNumberType: 'UNKNOWN',
@@ -967,6 +986,7 @@ export interface CategoryAnchorSelection {
 function clearPackageChoice(session: WizardSession): void {
   session.packageForm = null;
   session.packageChoiceRequired = false;
+  session.packageFormOptions = [];
 }
 
 /**
@@ -983,7 +1003,8 @@ function applyPackageChoice(
   fiscal: CategoryPackageCodes | null | undefined,
 ): void {
   clearPackageChoice(session);
-  session.packageChoiceRequired = fiscal ? offersPackageChoice(fiscal) : false;
+  session.packageFormOptions = fiscal ? offeredPackageForms(fiscal) : [];
+  session.packageChoiceRequired = session.packageFormOptions.length > 1;
 }
 
 /**
@@ -1177,15 +1198,17 @@ export function selectSubcategory(
 // ── Sale-form transition ────────────────────────────────────────────────────
 /**
  * "Как продаётся товар?" — record the form and move on. Only reachable when the
- * chosen category carries both package codes, so there is no "skip": a category
- * that offers a choice always gets an explicit answer, and one that does not
- * never asks.
+ * chosen category carries more than one package code, so there is no "skip": a
+ * category that offers a choice always gets an explicit answer, and one that does
+ * not never asks. A form the category holds no code for (a button left over from
+ * before an admin removed it) is refused here rather than at payment.
  */
 export function selectPackageForm(
   session: WizardSession,
   form: PackageForm,
 ): WizardResult {
   if (session.step !== WizardStep.PACKAGE_FORM) return STALE;
+  if (!session.packageFormOptions.includes(form)) return STALE;
   session.packageForm = form;
   return advance(session);
 }
@@ -1684,34 +1707,30 @@ export function subcategoryKeyboard(session: WizardSession): InlineKeyboard {
 }
 
 /**
- * The two sale forms, one per row so the longer "Комплект / набор" label is not
- * truncated. Shown only on a category that carries both package codes.
+ * The forms the chosen category holds a code for, one per row so the longer labels
+ * are not truncated. Shown only on a category that carries more than one.
  */
 export function packageFormKeyboard(session: WizardSession): InlineKeyboard {
-  return withBack(session, [
-    [
+  return withBack(
+    session,
+    session.packageFormOptions.map((form) => [
       Markup.button.callback(
-        packageFormLabel(PackageForm.SINGLE, session.lang),
-        buildAction('pf', 'single'),
+        packageFormLabel(form, session.lang),
+        buildAction('pf', form.toLowerCase()),
       ),
-    ],
-    [
-      Markup.button.callback(
-        packageFormLabel(PackageForm.SET, session.lang),
-        buildAction('pf', 'set'),
-      ),
-    ],
-  ]);
+    ]),
+  );
 }
 
 /**
- * The RUSSIAN names of the two sale forms, kept for callers (and tests) that
- * refer to the label rather than to a seller's language. Localized rendering
- * goes through {@link packageFormLabel}.
+ * The RUSSIAN names of the sale forms, kept for callers (and tests) that refer to
+ * the label rather than to a seller's language. Localized rendering goes through
+ * {@link packageFormLabel}.
  */
 export const PACKAGE_FORM_LABELS: Record<PackageForm, string> = {
   [PackageForm.SINGLE]: packageFormLabel(PackageForm.SINGLE, 'ru'),
   [PackageForm.SET]: packageFormLabel(PackageForm.SET, 'ru'),
+  [PackageForm.BOX]: packageFormLabel(PackageForm.BOX, 'ru'),
 };
 
 export function descriptionKeyboard(session: WizardSession): InlineKeyboard {

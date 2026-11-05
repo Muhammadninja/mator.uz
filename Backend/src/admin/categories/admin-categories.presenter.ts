@@ -48,6 +48,7 @@ export const ADMIN_CATEGORY_NODE_SELECT = {
   mxik: true,
   packageCodeSingle: true,
   packageCodeSet: true,
+  packageCodeBox: true,
   fiscalConfirmedCodes: true,
   // Parts (buyer catalog) plus the supply-side listings and live drafts that
   // point here, through either column. The same set the delete guard checks, so
@@ -94,9 +95,11 @@ export interface AdminCategoryTreeNode {
   mxik: string | null;
   /** Tasnif package code for "Штука". */
   packageCodeSingle: string | null;
-  /** Tasnif package code for "Комплект / набор"; null when the category is sold
-   *  in one form only — the seller is then never asked. */
+  /** Tasnif package code for "Комплект / набор"; null when it is not sold that way. */
   packageCodeSet: string | null;
+  /** Tasnif package code for "Потребительская коробка"; null when it is not sold that
+   *  way. With one code in all, the seller is never asked how an item is sold. */
+  packageCodeBox: string | null;
   /** Derived: whether products of this category can reach a receipt, by the same
    *  resolver Payme checkout runs. False until an operator has confirmed the codes.
    *  The console renders the warning off this rather than re-deriving the rule. */
@@ -114,7 +117,8 @@ export interface AdminCategoryTreeNode {
    *  confirm them; null when there is nothing to confirm, or on a node that cannot
    *  be confirmed because nothing should be sold from it. */
   fiscalCodesToConfirm: string | null;
-  /** Derived: whether the seller bot asks "Штука или комплект?" here. */
+  /** Derived: whether the seller bot asks how an item is sold here, which also means a
+   *  listing that states no form cannot be paid for online. */
   offersPackageChoice: boolean;
   /** Buyer-catalog parts linked directly to this node. */
   productsCount: number;
@@ -147,6 +151,7 @@ export function presentAdminCategoryNode(
     mxik: row.mxik,
     packageCodeSingle: row.packageCodeSingle,
     packageCodeSet: row.packageCodeSet,
+    packageCodeBox: row.packageCodeBox,
     // Every flag comes from the shared rules, so the console, the seller bot and
     // the Payme builder can never disagree about what "configured" means.
     fiscalConfigured: readiness.status === 'READY',

@@ -5,6 +5,7 @@ import { AdminAuthModule } from '../admin/auth/admin-auth.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { RealtimeModule } from '../realtime/realtime.module';
 import { SalesModule } from '../sales/sales.module';
+import { ShippingModule } from '../shipping/shipping.module';
 import { OrdersService } from './orders.service';
 import { OrderStatusService } from './order-status.service';
 import { OfflineOrderMonitorService } from './offline-order-monitor.service';
@@ -14,6 +15,7 @@ import { PaymentsController } from './payments.controller';
 import { SettlementService } from './webhooks/settlement.service';
 import { PaymeService } from './webhooks/payme.service';
 import { PaymeFiscalService } from './webhooks/payme-fiscal.service';
+import { PaymeFiscalReceiptService } from './webhooks/payme-fiscal-receipt.service';
 import { ClickService } from './webhooks/click.service';
 import { PaymentWebhookController } from './webhooks/payment-webhook.controller';
 
@@ -29,6 +31,8 @@ import { PaymentWebhookController } from './webhooks/payment-webhook.controller'
     RealtimeModule,
     // Exports DiscountService so an order charges the active sale price.
     SalesModule,
+    // Exports DeliveryQuoteService so an order charges what a quote computes.
+    ShippingModule,
   ],
   providers: [
     OrdersService,
@@ -37,9 +41,10 @@ import { PaymentWebhookController } from './webhooks/payment-webhook.controller'
     PaymentsService,
     SettlementService,
     PaymeService,
-    // The fiscal-receipt builder, used by BOTH Payme paths: the checkout gate
-    // (PaymentsService) and the webhook's CheckPerformTransaction reply.
+    // The fiscal-receipt builder: the checkout gate, and the receipt each invoice
+    // freezes for the webhook's CheckPerformTransaction reply (PaymentsService).
     PaymeFiscalService,
+    PaymeFiscalReceiptService,
     ClickService,
   ],
   controllers: [OrdersController, PaymentsController, PaymentWebhookController],

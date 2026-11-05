@@ -317,7 +317,7 @@ describeWithDb('category transfer (real PostgreSQL)', () => {
       expect(await blockerCodes(from.id, to.id)).toEqual([]);
     });
 
-    it('warns when the codes change, and when a set falls back to the single code', async () => {
+    it('warns when the codes change, and when a set has no code on the target', async () => {
       const from = await category('from');
       const to = await category('to', { mxik: '00000000000000001' });
       await listing('set', {
@@ -328,7 +328,7 @@ describeWithDb('category transfer (real PostgreSQL)', () => {
       const codes = (await preview(from.id, to.id)).warnings.map((w) => w.code);
 
       expect(codes).toEqual(
-        expect.arrayContaining(['FISCAL_CODES_CHANGE', 'SET_FORM_FALLS_BACK']),
+        expect.arrayContaining(['FISCAL_CODES_CHANGE', 'SALE_FORM_UNAVAILABLE']),
       );
     });
 

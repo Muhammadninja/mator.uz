@@ -146,6 +146,10 @@ function dealerTaxData(dealer: {
  * fills in a dealer's tax data, or corrects a category's MXIK, makes every
  * existing product of theirs fiscally valid at once — no product row is
  * rewritten and no order is migrated.
+ *
+ * The one copy is made when a Payme invoice is created, from what this returns (see
+ * PaymeFiscalSnapshot and PaymentsService.createPaymeInvoice). From then on Payme hears
+ * that copy, so a correction applies to the invoices issued after it.
  */
 @Injectable()
 export class PaymeFiscalService implements OnModuleInit {
@@ -370,15 +374,6 @@ export class PaymeFiscalService implements OnModuleInit {
       `receipt total ${receiptTiyin} tiyin does not match the charged ` +
       `${chargedTiyin} tiyin`
     );
-  }
-
-  /**
-   * Assert an order is fiscalizable without keeping the receipt — used by the
-   * checkout path, which only needs the refusal. Same rules, same exception, so
-   * an order that passes here cannot fail when the webhook builds the receipt.
-   */
-  async assertFiscalizable(orderId: string): Promise<void> {
-    await this.buildOrderDetail(orderId);
   }
 
   /**

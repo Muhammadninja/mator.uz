@@ -176,7 +176,7 @@ export class UpdateCategoryDto {
   @ApiPropertyOptional({
     description:
       'Tasnif package code for a set ("Комплект / набор"), or null to clear. ' +
-      'Its presence is what makes the seller bot ask how the item is sold.',
+      'A second code is what makes the seller bot ask how the item is sold.',
     nullable: true,
     example: '1417723',
   })
@@ -187,4 +187,19 @@ export class UpdateCategoryDto {
     message: 'packageCodeSet must be 1–20 digits',
   })
   packageCodeSet?: string | null;
+
+  @ApiPropertyOptional({
+    description:
+      'Tasnif package code for a consumer box ("Потребительская коробка"), or null ' +
+      'to clear. The one listed for this MXIK: Tasnif issues package codes per MXIK.',
+    nullable: true,
+    example: '1533557',
+  })
+  @IsOptional()
+  @ValidateIf((_, value) => value !== null)
+  @IsString()
+  @Matches(PACKAGE_CODE_PATTERN, {
+    message: 'packageCodeBox must be 1–20 digits',
+  })
+  packageCodeBox?: string | null;
 }

@@ -30,6 +30,7 @@ const row = (
   mxik: null,
   packageCodeSingle: null,
   packageCodeSet: null,
+  packageCodeBox: null,
   ...over,
 });
 

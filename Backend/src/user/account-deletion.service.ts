@@ -57,6 +57,9 @@ export const ACCOUNT_HAS_ACTIVE_ORDERS = 'ACCOUNT_HAS_ACTIVE_ORDERS';
  *   • orders.delivery_address_id  → NULL (detached before the address row is
  *                                  deleted; the FK is SetNull, so this is
  *                                  explicit rather than incidental)
+ *   • orders.delivery_destination, .delivery_shipments → NULL (the exact place the buyer
+ *                                  chose and the trip to it; the delivery charge itself
+ *                                  stays on the order)
  *   • legal_acceptances.ip_address / .user_agent → NULL (network and device
  *                                  identifiers; the consent fact itself, its
  *                                  version and timestamp are retained)
@@ -144,7 +147,12 @@ export class AccountDeletionService {
       // dependent on the FK's SetNull firing.
       await tx.order.updateMany({
         where: { userId },
-        data: { contactPhoneE164: null, deliveryAddressId: null },
+        data: {
+          contactPhoneE164: null,
+          deliveryAddressId: null,
+          deliveryShipments: Prisma.DbNull,
+          deliveryDestination: Prisma.DbNull,
+        },
       });
 
       // The actor-name snapshot on the user's own status transitions. Scoped to

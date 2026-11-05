@@ -37,6 +37,7 @@ import {
   CatalogProjectionService,
   ProjectionOptions,
 } from '../catalog/projection/catalog-projection.service';
+import { offeredPackageForms } from '../common/fiscal.util';
 import { QueueService } from '../queue/queue.service';
 import { DraftLock } from '../redis/draft-lock.service';
 import { RedisKeys } from '../redis/redis.keys';
@@ -80,6 +81,7 @@ import {
   WIZ_MODEL_ACTION,
   WIZ_CATEGORY_ACTION,
   WIZ_SUBCATEGORY_ACTION,
+  PACKAGE_FORM_BY_PAYLOAD,
   WIZ_PACKAGE_FORM_ACTION,
   WIZ_DESCRIPTION_SKIP,
   WIZ_PART_NUMBER_TYPE_ACTION,
@@ -434,6 +436,8 @@ export function buildSessionFromDraft(
     // only matters when the seller re-picks a category, which recomputes it.
     packageChoiceRequired:
       draft.packageForm !== null || step === WizardStep.PACKAGE_FORM,
+    // Loaded when the step renders, like the category options above.
+    packageFormOptions: [],
     title: draft.title,
     description: draft.description,
     partNumberType: draft.partNumberType ?? 'UNKNOWN',
@@ -847,11 +851,11 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       );
     });
 
-    // "Штука" / "Комплект / набор" — only reachable for a category that carries
-    // both package codes (the step is otherwise not in the flow).
+    // "Штука" / "Комплект / набор" / "Потребительская коробка" — only reachable for a
+    // category that carries more than one package code (the step is otherwise not in
+    // the flow).
     this.bot.action(WIZ_PACKAGE_FORM_ACTION, async (ctx) => {
-      const form =
-        ctx.match[1] === 'set' ? PackageForm.SET : PackageForm.SINGLE;
+      const form = PACKAGE_FORM_BY_PAYLOAD[ctx.match[1]];
       await this.handleWizardAction(ctx, (session) =>
         selectPackageForm(session, form),
       );
@@ -2539,8 +2543,33 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       case WizardStep.SUBCATEGORY:
         await this.openCategoryLevel(session, session.categoryOptionsParentId);
         return;
+      // Not a category level, but the same rule: the buttons come from the live tree,
+      // and a resumed dialogue has none until they are read.
+      case WizardStep.PACKAGE_FORM:
+        await this.openPackageFormOptions(session);
+        return;
       default:
         return;
+    }
+  }
+
+  /**
+   * The sale forms of the chosen category, read at the moment the question is shown.
+   * A load failure leaves none rather than throwing, like openCategoryLevel: the seller
+   * then sees the step with only "Назад" instead of the bot dying mid-dialogue.
+   */
+  private async openPackageFormOptions(session: WizardSession): Promise<void> {
+    session.packageFormOptions = [];
+    if (!session.categoryId) return;
+    try {
+      const category = await this.categories.findById(session.categoryId);
+      if (category) session.packageFormOptions = offeredPackageForms(category);
+    } catch (err) {
+      this.logger.error(
+        `Sale forms of category "${session.categoryId}" failed to load: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
     }
   }
 

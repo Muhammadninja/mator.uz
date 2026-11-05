@@ -8,7 +8,7 @@ import {
   ConflictException,
   NotFoundException,
 } from '@nestjs/common';
-import { AdminAuditAction, AdminAuditEntity } from '@prisma/client';
+import { AdminAuditAction, AdminAuditEntity, PackageForm } from '@prisma/client';
 import { listingTypeForCategory } from '../../catalog/categories/category-map';
 import { REPRESENTATIVE_ONLY_MXIK } from '../../common/fiscal.util';
 import { buildFiscalItem } from '../../orders/webhooks/payme-fiscal.util';
@@ -34,6 +34,7 @@ const node = (over: Record<string, unknown> = {}) => ({
   mxik: null,
   packageCodeSingle: null,
   packageCodeSet: null,
+  packageCodeBox: null,
   _count: {
     parts: 0,
     products: 0,
@@ -512,6 +513,71 @@ describe('fiscal configuration', () => {
     );
   });
 
+  it('creates a category with a consumer box code', async () => {
+    const { service, prisma } = makeService();
+    await service.create({
+      nameRu: 'Steering',
+      nameUz: 'Steering',
+      nameEn: 'Steering',
+      name: 'Steering',
+      mxik: '08708001133000000',
+      packageCodeSingle: '1417728',
+      packageCodeSet: '1417729',
+      packageCodeBox: '1533557',
+    });
+    expect(prisma.partCategory.create.mock.calls[0][0].data).toMatchObject({
+      packageCodeSingle: '1417728',
+      packageCodeSet: '1417729',
+      packageCodeBox: '1533557',
+    });
+  });
+
+  it('rejects a box code with no MXIK or single code', async () => {
+    const { service } = makeService();
+    await expect(
+      service.create({
+        nameRu: 'Steering',
+        nameUz: 'Steering',
+        nameEn: 'Steering',
+        name: 'Steering',
+        packageCodeBox: '1533557',
+      }),
+    ).rejects.toThrow(BadRequestException);
+  });
+
+  it('adds a box code to an already-configured category, which ends its confirmation', async () => {
+    const { service, prisma } = makeService();
+    prisma.partCategory.findUnique.mockResolvedValue(
+      node({ ...FISCAL, fiscalConfirmedCodes: CODES }),
+    );
+
+    await service.update('brakes', { packageCodeBox: '1544415' });
+
+    const { data } = prisma.partCategory.update.mock.calls[0][0];
+    expect(data.packageCodeBox).toBe('1544415');
+    expect(data.fiscalConfirmedCodes).toBeNull();
+  });
+
+  it('shows the box code to the console, and what confirming it would cover', () => {
+    const row = node({
+      ...FISCAL,
+      packageCodeBox: '1544415',
+    });
+    expect(presentAdminCategoryNode(row as never)).toMatchObject({
+      packageCodeBox: '1544415',
+      fiscalCodesToConfirm: `${CODES}:1544415`,
+      offersPackageChoice: true,
+    });
+  });
+
+  it('keeps the string an existing confirmation was given under, while there is no box', () => {
+    expect(
+      presentAdminCategoryNode(
+        node({ ...FISCAL, fiscalConfirmedCodes: CODES }) as never,
+      ),
+    ).toMatchObject({ fiscalCodesToConfirm: CODES, fiscalStatus: 'READY' });
+  });
+
   it('creates an UNCONFIGURED category, writing no fiscal columns', async () => {
     const { service, prisma } = makeService();
     await service.create({
@@ -800,6 +866,7 @@ describe('fiscal configuration', () => {
       ['the single package code', { packageCodeSingle: '1417799' }],
       ['the set package code', { packageCodeSet: '1417799' }],
       ['the set package code, by removing it', { packageCodeSet: null }],
+      ['the box package code', { packageCodeBox: '1417799' }],
     ])('changing %s ends the confirmation for good', async (_, change) => {
       const { service, prisma } = makeService();
       prisma.partCategory.findUnique.mockResolvedValue(
@@ -949,7 +1016,7 @@ describe('fiscal configuration', () => {
         title: 'x',
         quantity: 1,
         priceUzs: 1,
-        packageForm: null,
+        packageForm: PackageForm.SINGLE,
         category: row as never,
         ...listingTypeForCategory(row.id),
         dealer: { tin: '301234567', vatPercent: 0 },

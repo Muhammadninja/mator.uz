@@ -28,6 +28,7 @@ import {
   OIL_TYPE_FISCAL,
   OIL_TYPE_REQUIRED,
   REPRESENTATIVE_ONLY_MXIK,
+  PACKAGE_FORM_NOT_STATED,
 } from '../../common/fiscal.util';
 import { CATEGORY_FISCAL_DATA } from '../../prisma/seed-data/catalog-reference.seed';
 import {
@@ -76,7 +77,7 @@ function orderItem(over: Record<string, unknown> = {}) {
 function catalogPart(over: Record<string, unknown> = {}) {
   return {
     id: 'part_1',
-    packageForm: null,
+    packageForm: PackageForm.SINGLE,
     kind: ProductKind.SPARE_PART,
     oilType: null,
     category: BRAKES,
@@ -152,12 +153,60 @@ describe('PaymeFiscalService.buildOrderDetail', () => {
     );
   });
 
-  it('uses the single package code automatically when the category has only one', async () => {
-    // No sale form was ever asked for (packageForm null) — the category's only
-    // code applies with no per-product configuration.
-    stub([orderItem()], [catalogPart({ category: FILTERS })]);
+  it('uses the single package code when the category holds no other', async () => {
+    // No sale form was ever asked for (packageForm null). The operator who confirmed
+    // this one code said it is true of everything filed here.
+    stub([orderItem()], [catalogPart({ category: FILTERS, packageForm: null })]);
     const detail = await svc.buildOrderDetail('ord_1');
     expect(detail?.items[0].package_code).toBe('1499205');
+  });
+
+  describe('never declares a piece for something else', () => {
+    const STEERING = confirmedCategory({
+      id: 'steering',
+      mxik: '08708001133000000',
+      packageCodeSingle: '1417728',
+      packageCodeSet: '1417729',
+      packageCodeBox: '1533557',
+    });
+
+    it.each([
+      [PackageForm.SINGLE, '1417728'],
+      [PackageForm.SET, '1417729'],
+      [PackageForm.BOX, '1533557'],
+    ])('%s goes out under its own package_code', async (packageForm, code) => {
+      stub([orderItem()], [catalogPart({ category: STEERING, packageForm })]);
+      const [item] = (await svc.buildOrderDetail('ord_1')).items;
+      expect(item.package_code).toBe(code);
+      expect(item.code).toBe('08708001133000000');
+    });
+
+    it.each([
+      ['a set on a category with no set code', FILTERS, PackageForm.SET],
+      ['a box on a category with no box code', BRAKES, PackageForm.BOX],
+      ['nothing stated, where a set is possible', BRAKES, null],
+      ['nothing stated, where a box is possible', STEERING, null],
+    ])('refuses the order: %s', async (_, category, packageForm) => {
+      stub([orderItem()], [catalogPart({ category, packageForm })]);
+      await expect(svc.buildOrderDetail('ord_1')).rejects.toBeInstanceOf(
+        FiscalDataIncompleteException,
+      );
+    });
+
+    it('names what is missing for the operator, not for the customer', async () => {
+      stub(
+        [orderItem()],
+        [catalogPart({ category: BRAKES, packageForm: null })],
+      );
+      const refusal = await svc
+        .buildOrderDetail('ord_1')
+        .catch((err: FiscalDataIncompleteException) => err);
+      expect((refusal as FiscalDataIncompleteException).gaps).toEqual([
+        `item oi_1 (part part_1): ${PACKAGE_FORM_NOT_STATED}`,
+      ]);
+      const response = (refusal as FiscalDataIncompleteException).getResponse();
+      expect((response as { message: string }).message).not.toContain('package');
+    });
   });
 
   it('takes vat_percent and commission_info.tin from the item’s DEALER', async () => {
@@ -348,12 +397,9 @@ describe('PaymeFiscalService.buildOrderDetail', () => {
     });
   });
 
-  it('refuses an order with no lines, and the checkout gate refuses it too', async () => {
+  it('refuses an order with no lines', async () => {
     stub([], []);
     await expect(svc.buildOrderDetail('ord_1')).rejects.toBeInstanceOf(
-      FiscalDataIncompleteException,
-    );
-    await expect(svc.assertFiscalizable('ord_1')).rejects.toBeInstanceOf(
       FiscalDataIncompleteException,
     );
   });
@@ -428,7 +474,7 @@ describe('order lines that are no catalog part', () => {
   /** The offer's classification, and the storefront behind the seller who made it. */
   const stubOffer = ({
     category = BRAKES as unknown,
-    packageForm = null as PackageForm | null,
+    packageForm = PackageForm.SINGLE as PackageForm | null,
     dealer = DEALER_A as unknown,
   } = {}) => {
     prisma.sourcingOffer.findMany.mockResolvedValue([
@@ -1038,7 +1084,7 @@ describe('motor-oil fiscal resolution', () => {
     prisma.catalogPart.findMany.mockResolvedValue([
       {
         id: 'part_1',
-        packageForm: null,
+        packageForm: PackageForm.SINGLE,
         kind: ProductKind.SPARE_PART,
         oilType: null,
         category: BRAKES,
@@ -1100,7 +1146,7 @@ describe('platform charge lines', () => {
     prisma.catalogPart.findMany.mockResolvedValue([
       {
         id: 'part_1',
-        packageForm: null,
+        packageForm: PackageForm.SINGLE,
         kind: ProductKind.SPARE_PART,
         oilType: null,
         category: BRAKES,
@@ -1169,7 +1215,7 @@ describe('platform charge lines', () => {
     prisma.catalogPart.findMany.mockResolvedValue([
       {
         id: 'part_1',
-        packageForm: null,
+        packageForm: PackageForm.SINGLE,
         kind: ProductKind.SPARE_PART,
         oilType: null,
         category: { ...BRAKES, fiscalConfirmedCodes: null },
@@ -1261,9 +1307,6 @@ describe('platform charge lines', () => {
         gaps: ['the order is for courier delivery and holds no delivery cost'],
         response: REFUSAL,
       });
-      await expect(
-        withCodes().assertFiscalizable('ord_1'),
-      ).rejects.toBeInstanceOf(FiscalDataIncompleteException);
     });
 
     it('pickup with a cost contradicts itself: refused', async () => {
@@ -1494,7 +1537,7 @@ describe('platform charge lines', () => {
     prisma.catalogPart.findMany.mockResolvedValue([
       {
         id: 'part_1',
-        packageForm: null,
+        packageForm: PackageForm.SINGLE,
         kind: ProductKind.SPARE_PART,
         oilType: null,
         category: BRAKES,
@@ -1533,7 +1576,7 @@ describe('platform charge lines', () => {
     prisma.catalogPart.findMany.mockResolvedValue([
       {
         id: 'part_1',
-        packageForm: null,
+        packageForm: PackageForm.SINGLE,
         kind: ProductKind.SPARE_PART,
         oilType: null,
         category: BRAKES,
@@ -1578,7 +1621,7 @@ describe('buildFiscalItem (pure mapping)', () => {
     quantity: 2,
     priceUzs: 150000,
     category: BRAKES,
-    packageForm: null,
+    packageForm: PackageForm.SINGLE,
     kind: ProductKind.SPARE_PART,
     oilType: null,
     dealer: { tin: '301234567', vatPercent: 0 },

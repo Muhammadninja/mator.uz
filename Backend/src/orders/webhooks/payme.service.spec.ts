@@ -15,15 +15,16 @@ import {
   PAYME_TIMEOUT_REASON,
 } from './payme.service';
 import {
-  confirmedCategory,
   createPrismaMock,
   fakeConfig,
-  fakeFiscal,
-  FISCAL_TEST_ENV,
+  FROZEN_RECEIPT,
   buildOrder,
+  openPaymeInvoice,
   PrismaMock,
   stubFiscalizableOrderLines,
+  stubOpenPaymeInvoice,
 } from '../../../test/utils/harness';
+import { PaymeFiscalReceiptService } from './payme-fiscal-receipt.service';
 import { SettlementService } from './settlement.service';
 import { OrderStatusService } from '../order-status.service';
 import {
@@ -86,11 +87,12 @@ describe('PaymeService (Merchant API)', () => {
       prisma,
       CONFIG as any,
       settlement as any,
-      fakeFiscal(prisma, FISCAL_TEST_ENV),
+      new PaymeFiscalReceiptService(prisma as any),
     );
     // A fully fiscalizable order unless a test says otherwise, so each protocol test
     // is about the protocol.
     stubFiscalizableOrderLines(prisma);
+    stubOpenPaymeInvoice(prisma);
   });
 
   // Any test that freezes the clock must not leak fake timers into the next one.
@@ -123,7 +125,7 @@ describe('PaymeService (Merchant API)', () => {
         prisma,
         fakeConfig({}) as any,
         settlement as any,
-        fakeFiscal(prisma),
+        new PaymeFiscalReceiptService(prisma as any),
       );
       // The header that an empty key would otherwise make valid.
       const emptyKeyAuth = 'Basic ' + Buffer.from('Paycom:').toString('base64');
@@ -185,46 +187,6 @@ describe('PaymeService (Merchant API)', () => {
       expect(res.result.detail.items).toHaveLength(3);
     });
 
-    it.each([
-      ['no lines at all', []],
-      [
-        'a line stating no part, offer or service',
-        [{ id: 'oi_1', title: 'Запчасть', quantity: 1, priceUzs: 185000 }],
-      ],
-      [
-        'a sourcing offer nobody has classified',
-        [
-          {
-            id: 'oi_1',
-            offerId: 'soff_1',
-            offerSellerTgId: '555',
-            title: 'Стартер',
-            quantity: 1,
-            priceUzs: 185000,
-          },
-        ],
-      ],
-    ])(
-      'never allows an order with %s, with or without a detail',
-      async (_, lines) => {
-        prisma.order.findUnique.mockResolvedValue(
-          buildOrder({ id: 'ord_1', totalUzs: 215000 }),
-        );
-        prisma.orderItem.findMany.mockResolvedValue(lines);
-        prisma.sourcingOffer.findMany.mockResolvedValue([
-          { id: 'soff_1', packageForm: null, category: null },
-        ]);
-
-        const res = await call('CheckPerformTransaction', {
-          account: { order_id: 'ord_1' },
-          amount: 21_500_000,
-        });
-
-        expect(res.error.code).toBe(-31008);
-        expect(res.result).toBeUndefined();
-      },
-    );
-
     it('rejects a wrong amount with -31001', async () => {
       prisma.order.findUnique.mockResolvedValue(
         buildOrder({ id: 'ord_1', totalUzs: 215000 }),
@@ -267,80 +229,17 @@ describe('PaymeService (Merchant API)', () => {
 
     // ── Фискализация ──────────────────────────────────────────────────────
     // Payme takes the receipt from this reply, so the items are attached here.
-    it('returns the fiscal receipt alongside allow', async () => {
-      // buildOrder(): 185 000 goods + 25 000 delivery + 5 000 fee = 215 000,
-      // which is the amount Payme is about to charge — so the receipt has to
-      // carry a line for each of the three.
-      const fiscal = new PaymeService(
-        prisma,
-        CONFIG as any,
-        settlement as any,
-        fakeFiscal(prisma, FISCAL_TEST_ENV),
-      );
+    it('hands over the receipt frozen on the invoice, alongside allow', async () => {
       prisma.order.findUnique.mockResolvedValue(
         buildOrder({ id: 'ord_1', totalUzs: 215000 }),
       );
-      prisma.orderItem.findMany.mockResolvedValue([
-        {
-          id: 'oi_1',
-          partId: 'part_1',
-          title: 'Тормозные колодки',
-          quantity: 1,
-          priceUzs: 185000,
-        },
-      ]);
-      prisma.catalogPart.findMany.mockResolvedValue([
-        {
-          id: 'part_1',
-          packageForm: 'SET',
-          kind: 'SPARE_PART',
-          oilType: null,
-          category: confirmedCategory(),
-          inStock: true,
-          seller: { status: 'ACTIVE', tin: '301234567', vatPercent: 0 },
-        },
-      ]);
 
-      const res: any = await fiscal.handle(AUTH, {
-        id: 1,
-        method: 'CheckPerformTransaction',
-        params: { account: { order_id: 'ord_1' }, amount: 21_500_000 },
+      const res = await call('CheckPerformTransaction', {
+        account: { order_id: 'ord_1' },
+        amount: 21_500_000,
       });
 
-      expect(res.result).toEqual({
-        allow: true,
-        detail: {
-          receipt_type: 0,
-          items: [
-            {
-              title: 'Тормозные колодки',
-              price: 18_500_000,
-              count: 1,
-              code: '08708005011000000',
-              package_code: '1417723',
-              vat_percent: 0,
-              commission_info: { tin: '301234567' },
-            },
-            {
-              title: 'Доставка',
-              price: 2_500_000,
-              count: 1,
-              code: '10112006002000000',
-              package_code: '1542432',
-              vat_percent: 0,
-            },
-            {
-              title: 'Сервисный сбор',
-              price: 500_000,
-              count: 1,
-              code: '10307001001000000',
-              package_code: '1000001',
-              vat_percent: 0,
-            },
-          ],
-        },
-      });
-
+      expect(res.result).toEqual({ allow: true, detail: FROZEN_RECEIPT });
       // The receipt adds up to exactly the amount being authorised.
       const sum = res.result.detail.items.reduce(
         (t: number, i: any) => t + i.price * i.count,
@@ -349,37 +248,182 @@ describe('PaymeService (Merchant API)', () => {
       expect(sum).toBe(21_500_000);
     });
 
-    it('refuses an order it cannot fiscalize instead of sending a partial receipt', async () => {
-      prisma.order.findUnique.mockResolvedValue(
-        buildOrder({ id: 'ord_1', totalUzs: 215000 }),
-      );
-      prisma.orderItem.findMany.mockResolvedValue([
-        {
-          id: 'oi_1',
-          partId: 'part_1',
-          title: 'Колодки',
-          quantity: 1,
-          priceUzs: 150000,
-        },
-      ]);
-      // The dealer's ИНН / ставка НДС have not been entered by an operator yet.
-      prisma.catalogPart.findMany.mockResolvedValue([
-        {
-          id: 'part_1',
-          packageForm: null,
-          category: confirmedCategory({ packageCodeSet: null }),
-          inStock: true,
-          seller: { status: 'ACTIVE', tin: null, vatPercent: null },
-        },
-      ]);
-
-      const res = await call('CheckPerformTransaction', {
+    describe('what was agreed does not move', () => {
+      const CHECK = {
         account: { order_id: 'ord_1' },
         amount: 21_500_000,
+      };
+      beforeEach(() => {
+        prisma.order.findUnique.mockResolvedValue(
+          buildOrder({ id: 'ord_1', totalUzs: 215000 }),
+        );
       });
 
-      expect(res.error.code).toBe(-31008);
-      expect(res.result).toBeUndefined();
+      it('ignores a catalog that changed since the invoice: another MXIK, VAT, dealer', async () => {
+        prisma.catalogPart.findMany.mockResolvedValue([
+          {
+            id: 'part_1',
+            inStock: true,
+            priceUzs: 185000,
+            packageForm: 'SET',
+            kind: 'SPARE_PART',
+            oilType: null,
+            category: { id: 'moved', mxik: '00000000000000000' },
+            seller: { status: 'ACTIVE', tin: '999999999', vatPercent: 12 },
+          },
+        ]);
+
+        const res = await call('CheckPerformTransaction', CHECK);
+
+        expect(res.result.detail).toEqual(FROZEN_RECEIPT);
+      });
+
+      it('still allows when the data has since become incomplete', async () => {
+        prisma.catalogPart.findMany.mockResolvedValue([
+          {
+            id: 'part_1',
+            inStock: true,
+            priceUzs: 185000,
+            category: null,
+            seller: { status: 'ACTIVE', tin: null, vatPercent: null },
+          },
+        ]);
+
+        const res = await call('CheckPerformTransaction', CHECK);
+
+        expect(res.result.allow).toBe(true);
+      });
+
+      it('answers every Check for the invoice the same', async () => {
+        const first = await call('CheckPerformTransaction', CHECK);
+        const second = await call('CheckPerformTransaction', CHECK);
+        expect(second.result).toEqual(first.result);
+      });
+
+      it('still refuses parts that went out of stock: availability is a live fact', async () => {
+        prisma.catalogPart.findMany.mockResolvedValue([
+          {
+            id: 'part_1',
+            inStock: false,
+            priceUzs: 185000,
+            seller: { status: 'ACTIVE' },
+          },
+        ]);
+
+        const res = await call('CheckPerformTransaction', CHECK);
+
+        expect(res.error.code).toBe(-31008);
+      });
+
+      it('builds nothing itself: there is no receipt without an invoice', async () => {
+        prisma.payment.findFirst.mockResolvedValue(null);
+
+        const res = await call('CheckPerformTransaction', CHECK);
+
+        expect(res.error.code).toBe(-31008);
+        expect(res.result).toBeUndefined();
+      });
+
+      it('refuses a receipt that no longer adds up to the amount, rather than send it', async () => {
+        stubOpenPaymeInvoice(
+          prisma,
+          openPaymeInvoice({
+            fiscalSnapshot: {
+              paymentId: 'pay_invoice',
+              detail: FROZEN_RECEIPT,
+              totalTiyin: BigInt(21_500_001),
+            },
+          }),
+        );
+
+        const res = await call('CheckPerformTransaction', CHECK);
+
+        expect(res.error.code).toBe(-31008);
+        expect(res.result).toBeUndefined();
+      });
+
+      it('looks only at an invoice no transaction has taken, in its window, with a receipt', async () => {
+        await call('CheckPerformTransaction', CHECK);
+
+        const lookup = prisma.payment.findFirst.mock.calls
+          .map(([args]: any[]) => args)
+          .find((args: any) => args.where.providerTransactionId === null);
+        expect(lookup.where).toEqual({
+          orderId: 'ord_1',
+          provider: 'PAYME',
+          providerTransactionId: null,
+          status: 'PENDING',
+          fiscalSnapshot: { isNot: null },
+          OR: [{ expiresAt: null }, { expiresAt: { gt: expect.any(Date) } }],
+        });
+        expect(lookup.orderBy).toEqual({ createdAt: 'desc' });
+      });
+    });
+  });
+
+  // ── SetFiscalData ──────────────────────────────────────────────────────────
+  describe('SetFiscalData', () => {
+    const PARAMS = {
+      id: 'pmt-xyz',
+      type: 'PERFORM',
+      fiscal_data: { receipt_id: 121, status_code: 0, message: 'accepted' },
+    };
+
+    it('is on the list of methods, and answers { success: true }', async () => {
+      prisma.payment.findUnique.mockResolvedValue({
+        id: 'pay_1',
+        providerState: 2,
+      });
+      prisma.paymeFiscalReceipt.findUnique.mockResolvedValue(null);
+
+      const res = await call('SetFiscalData', PARAMS);
+
+      expect(res.result).toEqual({ success: true });
+      expect(prisma.paymeFiscalReceipt.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('is authorized like every other method', async () => {
+      const res = await call('SetFiscalData', PARAMS, 'Basic wrong');
+      expect(res.error.code).toBe(-32504);
+      expect(prisma.payment.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('-32001 with a plain message for an unknown check', async () => {
+      prisma.payment.findUnique.mockResolvedValue(null);
+      const res = await call('SetFiscalData', PARAMS);
+      expect(res.error).toEqual({
+        code: -32001,
+        message: 'Чек с таким id не найден',
+      });
+    });
+
+    it('-32602 naming the parameter in a plain message, before any lookup', async () => {
+      const res = await call('SetFiscalData', { ...PARAMS, type: 'REFUND' });
+      expect(res.error).toEqual({ code: -32602, message: 'type' });
+      expect(prisma.payment.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('-32602 for params that are no object, rather than -32600', async () => {
+      const res: any = await svc.handle(AUTH, {
+        id: 1,
+        method: 'SetFiscalData',
+        params: 'nope' as never,
+      });
+      expect(res.error).toEqual({ code: -32602, message: 'params' });
+    });
+
+    it('a database failure is -32400, with no internal message', async () => {
+      prisma.payment.findUnique.mockRejectedValue(new Error('secret detail'));
+      const res = await call('SetFiscalData', PARAMS);
+      expect(res.error.code).toBe(-32400);
+      expect(JSON.stringify(res)).not.toContain('secret detail');
+    });
+
+    it('leaves the message of every other method localized', async () => {
+      const res = await call('CheckTransaction', { id: 'pmt-unknown' });
+      expect(res.error.message).toEqual(
+        expect.objectContaining({ ru: expect.any(String) }),
+      );
     });
   });
 
@@ -392,42 +436,46 @@ describe('PaymeService (Merchant API)', () => {
       account: { order_id: 'ord_1' },
     };
 
-    it('creates a transaction in state 1', async () => {
+    it('creates a transaction in state 1, on the invoice', async () => {
       prisma.payment.findUnique.mockResolvedValue(null);
       prisma.order.findUnique.mockResolvedValue(
         buildOrder({ id: 'ord_1', totalUzs: 215000 }),
       );
-      prisma.payment.findFirst.mockResolvedValue(null);
       // The persisted row carries the create time Payme sent, which is what the
       // reply echoes back.
-      prisma.payment.create.mockResolvedValue(
-        buildPayment({ providerCreateTime: BigInt(params.time) }),
+      prisma.payment.update.mockResolvedValue(
+        buildPayment({
+          id: 'pay_invoice',
+          providerCreateTime: BigInt(params.time),
+        }),
       );
 
       const res = await call('CreateTransaction', params);
       expect(res.result).toEqual({
         create_time: 1_700_000_000_000,
-        transaction: 'pay_1',
+        transaction: 'pay_invoice',
         state: 1,
       });
       // Payme's clock is authoritative for create_time — we persist what it sent.
-      expect(prisma.payment.create).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({
-            providerCreateTime: BigInt(params.time),
-          }),
-        }),
-      );
+      expect(prisma.payment.update).toHaveBeenCalledWith({
+        where: { id: 'pay_invoice' },
+        data: {
+          providerTransactionId: 'pmt-xyz',
+          providerState: 1,
+          providerCreateTime: BigInt(params.time),
+          amountTiyin: BigInt(21_500_000),
+        },
+      });
+      // The receipt it took stays the invoice's: nothing is written to it.
+      expect(prisma.payment.create).not.toHaveBeenCalled();
     });
 
-    it('opens no transaction for an order that cannot be fiscalized', async () => {
-      // The last gate before funds are held: Check may have run a while ago, or the
-      // data may have changed since.
+    it('opens no transaction with no invoice to take: no receipt would be on file', async () => {
       prisma.payment.findUnique.mockResolvedValue(null);
       prisma.order.findUnique.mockResolvedValue(
         buildOrder({ id: 'ord_1', totalUzs: 215000 }),
       );
-      prisma.orderItem.findMany.mockResolvedValue([]);
+      prisma.payment.findFirst.mockResolvedValue(null);
 
       const res = await call('CreateTransaction', params);
 
@@ -436,24 +484,44 @@ describe('PaymeService (Merchant API)', () => {
       expect(prisma.payment.update).not.toHaveBeenCalled();
     });
 
-    it('binds an existing unbound invoice row instead of creating a second payment', async () => {
+    it('opens no transaction on a receipt that does not add up to the amount', async () => {
       prisma.payment.findUnique.mockResolvedValue(null);
       prisma.order.findUnique.mockResolvedValue(
         buildOrder({ id: 'ord_1', totalUzs: 215000 }),
       );
-      // No active transaction, but an invoice row awaiting binding.
-      prisma.payment.findFirst
-        .mockResolvedValueOnce(null)
-        .mockResolvedValueOnce(
-          buildPayment({ id: 'pay_invoice', providerTransactionId: null }),
-        );
-      prisma.payment.update.mockResolvedValue(
-        buildPayment({ id: 'pay_invoice' }),
+      stubOpenPaymeInvoice(
+        prisma,
+        openPaymeInvoice({
+          fiscalSnapshot: {
+            paymentId: 'pay_invoice',
+            detail: FROZEN_RECEIPT,
+            totalTiyin: BigInt(100),
+          },
+        }),
       );
 
       const res = await call('CreateTransaction', params);
+
+      expect(res.error.code).toBe(-31008);
+      expect(prisma.payment.update).not.toHaveBeenCalled();
+    });
+
+    it('does not read the catalog: the receipt was settled when the invoice was made', async () => {
+      prisma.payment.findUnique.mockResolvedValue(null);
+      prisma.order.findUnique.mockResolvedValue(
+        buildOrder({ id: 'ord_1', totalUzs: 215000 }),
+      );
+      prisma.payment.update.mockResolvedValue(
+        buildPayment({ id: 'pay_invoice' }),
+      );
+      prisma.catalogPart.findMany.mockClear();
+      prisma.orderItem.findMany.mockClear();
+
+      const res = await call('CreateTransaction', params);
+
       expect(res.result.transaction).toBe('pay_invoice');
-      expect(prisma.payment.create).not.toHaveBeenCalled();
+      expect(prisma.catalogPart.findMany).not.toHaveBeenCalled();
+      expect(prisma.orderItem.findMany).not.toHaveBeenCalled();
     });
 
     it('is idempotent: a duplicate request returns the stored create_time', async () => {
@@ -469,7 +537,7 @@ describe('PaymeService (Merchant API)', () => {
     });
 
     it('concurrent create with the SAME id: the P2002 loser reports the winner row', async () => {
-      // Nothing on the first read; the unique index rejects our insert because a
+      // Nothing on the first read; the unique index rejects our write because a
       // parallel request won, and the re-read then finds the winner.
       const winner = buildPayment({ id: 'pay_winner' });
       prisma.payment.findUnique
@@ -478,8 +546,7 @@ describe('PaymeService (Merchant API)', () => {
       prisma.order.findUnique.mockResolvedValue(
         buildOrder({ id: 'ord_1', totalUzs: 215000 }),
       );
-      prisma.payment.findFirst.mockResolvedValue(null);
-      prisma.payment.create.mockRejectedValue(uniqueViolation());
+      prisma.payment.update.mockRejectedValue(uniqueViolation());
 
       const res = await call('CreateTransaction', params);
       expect(res.result).toEqual({
@@ -551,8 +618,7 @@ describe('PaymeService (Merchant API)', () => {
       prisma.order.findUnique.mockResolvedValue(
         buildOrder({ id: 'ord_1', totalUzs: 215000 }),
       );
-      prisma.payment.findFirst.mockResolvedValue(null);
-      prisma.payment.create.mockResolvedValue(buildPayment());
+      prisma.payment.update.mockResolvedValue(buildPayment());
 
       await call('CreateTransaction', params);
 
@@ -600,8 +666,10 @@ describe('PaymeService (Merchant API)', () => {
       );
       prisma.payment.findFirst
         .mockResolvedValueOnce(stale)
-        .mockResolvedValueOnce(null);
-      prisma.payment.create.mockResolvedValue(buildPayment());
+        .mockResolvedValueOnce(openPaymeInvoice());
+      prisma.payment.update.mockResolvedValue(
+        buildPayment({ id: 'pay_invoice' }),
+      );
 
       const res = await call('CreateTransaction', params);
       expect(res.result.state).toBe(1);
@@ -662,25 +730,17 @@ describe('PaymeService (Merchant API)', () => {
     });
 
     it('builds no receipt and reads no price: the stored order is what was agreed', async () => {
-      const fiscal = { buildOrderDetail: jest.fn() };
-      const performing = new PaymeService(
-        prisma,
-        CONFIG as any,
-        settlement as any,
-        fiscal as any,
-      );
       prisma.payment.findUnique
         .mockResolvedValueOnce(buildPayment())
         .mockResolvedValueOnce(buildPayment({ providerState: 2 }));
+      prisma.catalogPart.findMany.mockClear();
+      prisma.orderItem.findMany.mockClear();
 
-      await performing.handle(AUTH, {
-        id: 1,
-        method: 'PerformTransaction',
-        params: { id: 'pmt-xyz' },
-      });
+      await call('PerformTransaction', { id: 'pmt-xyz' });
 
       expect(settlement.markPaid).toHaveBeenCalled();
-      expect(fiscal.buildOrderDetail).not.toHaveBeenCalled();
+      expect(prisma.catalogPart.findMany).not.toHaveBeenCalled();
+      expect(prisma.orderItem.findMany).not.toHaveBeenCalled();
       expect(prisma.order.update).not.toHaveBeenCalled();
     });
 
@@ -1012,9 +1072,10 @@ describe('PaymeService — request validation, order state, active transaction',
       prisma,
       CONFIG,
       settlement as any,
-      fakeFiscal(prisma, FISCAL_TEST_ENV),
+      new PaymeFiscalReceiptService(prisma as any),
     );
     stubFiscalizableOrderLines(prisma);
+    stubOpenPaymeInvoice(prisma);
   });
 
   const call = (method: string, params: unknown) =>
@@ -1087,13 +1148,15 @@ describe('PaymeService — request validation, order state, active transaction',
     });
 
     it('allows when the open transaction is past the 12h window (Create would expire it)', async () => {
-      prisma.payment.findFirst.mockResolvedValue(
-        buildPayment({
-          providerCreateTime: BigInt(
-            Date.now() - PAYME_TRANSACTION_TIMEOUT_MS - 1,
-          ),
-        }),
-      );
+      prisma.payment.findFirst
+        .mockResolvedValueOnce(
+          buildPayment({
+            providerCreateTime: BigInt(
+              Date.now() - PAYME_TRANSACTION_TIMEOUT_MS - 1,
+            ),
+          }),
+        )
+        .mockResolvedValueOnce(openPaymeInvoice());
       const res = await call('CheckPerformTransaction', params);
       expect(res.result.allow).toBe(true);
     });

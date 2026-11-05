@@ -10,7 +10,10 @@ import {
 } from '@prisma/client';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
-import { FISCAL_CODES_UNCONFIRMED } from '../common/fiscal.util';
+import {
+  FISCAL_CODES_UNCONFIRMED,
+  PACKAGE_FORM_NOT_STATED,
+} from '../common/fiscal.util';
 import { confirmedCategory } from '../../test/utils/harness';
 import { ClassifySourcingOfferDto } from './dto/classify-sourcing-offer.dto';
 import { SourcingService } from './sourcing.service';
@@ -83,8 +86,28 @@ describe('SourcingService.classifyOffer', () => {
       ...confirmedCategory(),
       fiscalConfirmedCodes: null,
     });
-    const res = await service.classifyOffer('soff_1', { categoryId: 'brakes' });
+    const res = await service.classifyOffer('soff_1', {
+      categoryId: 'brakes',
+      packageForm: PackageForm.SINGLE,
+    });
     expect(res.data.fiscalGaps).toEqual([FISCAL_CODES_UNCONFIRMED]);
+  });
+
+  it('says so at once when an offer states no form where the category holds several', async () => {
+    const { service } = classifying(confirmedCategory());
+    const res = await service.classifyOffer('soff_1', { categoryId: 'brakes' });
+    expect(res.data.fiscalGaps).toEqual([PACKAGE_FORM_NOT_STATED]);
+  });
+
+  it('says so at once when the category has no code for the form stated', async () => {
+    const { service } = classifying(confirmedCategory());
+    const res = await service.classifyOffer('soff_1', {
+      categoryId: 'brakes',
+      packageForm: PackageForm.BOX,
+    });
+    expect(res.data.fiscalGaps).toEqual([
+      'category "brakes" has no package code for a listing sold as BOX',
+    ]);
   });
 
   it('clearing the category makes the offer unpayable again', async () => {

@@ -149,5 +149,32 @@ Backend-owned gaps from this workstream are closed. What is left:
 4. **Privacy Policy / Terms legal content** — §1 above; not backend code, but a
    hard App Store blocker.
 
+5. **Courier delivery pricing** — before courier delivery can work, in this order:
+   1. Review and set `DELIVERY_COVERAGE_POLYGON`: the approved area is Tashkent City, without
+      its detached Mirzo Ulug'bek settlement, and the New Tashkent project territory, and
+      nothing else in Tashkent Region, ready to copy from
+      `config/delivery-coverage/delivery-coverage.env.txt` (see DEPLOYMENT.md). It is a
+      practical boundary, not a cadastral one, so review it before supplying it.
+      Until it is set, courier delivery stays off and pickup works: there is no default.
+      Set `UZMAPS_API_KEY` with it, since boot is refused with an area and no key. The key
+      needs UzMaps' search and geocoding products too, unless `UZMAPS_SEARCH_API_KEY` is
+      set. Watch `mator_uzmaps_quota_used` and `mator_uzmaps_requests_total`.
+   2. Apply migrations `20261105000000_order_delivery_shipments` and
+      `20261105000100_delivery_destination_and_landmark`, then deploy the code.
+   3. Record a pickup location for every seller whose goods should be deliverable:
+      `PATCH /v1/admin/dealers/:id` with `pickupLat` and `pickupLng`. Nothing else writes
+      these, and until they are set a courier is refused for that seller's goods with
+      `PICKUP_LOCATION_MISSING`. Buyers can still choose pickup.
+   4. Set `DELIVERY_VAT_PERCENT` to the rate the accountant approved. Until then Payme
+      refuses every order that has a delivery cost.
+   5. Release the app build that sends `delivery_method: 'courier'` and places orders with
+      `delivery_quote_id`. The backend must already be live, or that build's courier quote
+      is refused. Builds already installed keep offering pickup only. It needs a native
+      build with `GOOGLE_MAPS_ANDROID_API_KEY` set for its Android map: see the app's
+      docs/API_CONTRACT.md.
+   6. Show `shippingAddress.location` and `landmark` from the admin order detail to whoever
+      dispatches couriers: that is the exact destination, and the admin panel has no map
+      or field for it yet.
+
 Production deployment and production migrations are performed manually by the
 project owner.

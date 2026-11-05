@@ -44,6 +44,7 @@ describeWithDb('order lifecycle (real PostgreSQL)', () => {
     statuses,
     {} as never,
     new AdminAuditService(prisma as never),
+    {} as never,
   );
   const settlement = new SettlementService(
     prisma as never,

@@ -4,6 +4,7 @@ import {
   PaymentStatus,
   Prisma,
 } from '@prisma/client';
+import type { DeliveryDestination } from '../../shipping/delivery-quote.service';
 
 /**
  * Prisma `select` for an admin list row — only the columns the row projection
@@ -47,6 +48,7 @@ export const ADMIN_ORDER_DETAIL_SELECT = {
   paymentType: true,
   refundSettledAt: true,
   deliveryMethod: true,
+  deliveryDestination: true,
   createdAt: true,
   updatedAt: true,
   user: {
@@ -65,6 +67,7 @@ export const ADMIN_ORDER_DETAIL_SELECT = {
       district: true,
       street: true,
       fullText: true,
+      landmark: true,
       lat: true,
       lng: true,
     },
@@ -192,21 +195,48 @@ export function presentAdminOrderRow(
   };
 }
 
+/** Where this order was confirmed to go, when it was priced for a point. */
+function confirmedDestination(
+  snapshot: Prisma.JsonValue,
+): (DeliveryDestination & { lat: number; lng: number }) | null {
+  const destination = snapshot as unknown as DeliveryDestination | null;
+  return typeof destination?.lat === 'number' &&
+    typeof destination.lng === 'number'
+    ? destination
+    : null;
+}
+
 /**
- * Map the delivery Address onto the shipping contract. Returns null when the
- * order has no address (e.g. pickup). There is no dedicated landmark column, so
- * `landmark` is null; `location` is null unless both coordinates are present.
+ * Map the delivery onto the shipping contract. Returns null when the order has no
+ * address and no confirmed destination (e.g. pickup).
+ *
+ * For an order priced for a point everything here is the destination as confirmed, so what
+ * the courier sees cannot change when the buyer edits or deletes the address afterwards.
+ * `location` is the exact point the buyer chose. Only older orders read the address row,
+ * since they have nothing else.
  */
-function presentShippingAddress(a: AdminOrderDetail['deliveryAddress']) {
+function presentShippingAddress(
+  a: AdminOrderDetail['deliveryAddress'],
+  snapshot: AdminOrderDetail['deliveryDestination'],
+) {
+  const destination = confirmedDestination(snapshot);
+  if (destination) {
+    return {
+      city: destination.regionCode ?? null,
+      district: destination.district ?? null,
+      addressLine: destination.fullText ?? null,
+      landmark: destination.landmark ?? null,
+      location: { lat: destination.lat, lng: destination.lng },
+    };
+  }
   if (!a) return null;
-  const location =
-    a.lat != null && a.lng != null ? { lat: a.lat, lng: a.lng } : null;
   return {
     city: a.regionCode ?? null,
     district: a.district ?? null,
     addressLine: a.fullText ?? null,
-    landmark: null,
-    location,
+    landmark: a.landmark ?? null,
+    location:
+      a.lat != null && a.lng != null ? { lat: a.lat, lng: a.lng } : null,
   };
 }
 
@@ -274,7 +304,10 @@ export function presentAdminOrderDetail(
       phone: o.user.phoneE164,
       email: o.user.email,
     },
-    shippingAddress: presentShippingAddress(o.deliveryAddress),
+    shippingAddress: presentShippingAddress(
+      o.deliveryAddress,
+      o.deliveryDestination,
+    ),
     items: o.items.map((it) => ({
       id: it.id,
       productId: it.partId,

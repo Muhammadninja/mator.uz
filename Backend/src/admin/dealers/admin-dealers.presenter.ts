@@ -41,6 +41,8 @@ export const ADMIN_DEALER_DETAIL_SELECT = {
   // Налоговые данные — the console's tax section.
   tin: true,
   vatPercent: true,
+  // Not presented: finds the supply-side seller that holds the pickup location.
+  internalSellerId: true,
 } satisfies Prisma.CatalogSellerSelect;
 
 export type AdminDealerListRow = Prisma.CatalogSellerGetPayload<{

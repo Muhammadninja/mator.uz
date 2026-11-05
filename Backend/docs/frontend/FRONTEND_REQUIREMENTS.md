@@ -58,7 +58,7 @@
 | `iconKey`, `color` | `string \| null` | Оформление плитки в покупательском приложении. |
 | `isActive` | `boolean` | Мягкое скрытие. |
 | `mainCategory` | `enum \| null` | Легаси-зеркало енама, только у 12 канонических строк. |
-| `mxik`, `packageCodeSingle`, `packageCodeSet` | `string \| null` | Фискальные коды — без изменений, см. основную спеку. |
+| `mxik`, `packageCodeSingle`, `packageCodeSet`, `packageCodeBox` | `string \| null` | Фискальные коды — без изменений, см. основную спеку. |
 | `fiscalConfigured`, `fiscalByOilType`, `offersPackageChoice` | `boolean` | Производные — без изменений. |
 | `productsCount`, `listingsCount` | `number` | Счётчики для guard'а удаления — без изменений. |
 
@@ -341,6 +341,7 @@ Content-Type: application/json
     "mxik": null,
     "packageCodeSingle": null,
     "packageCodeSet": null,
+    "packageCodeBox": null,
     "fiscalConfigured": false,
     "fiscalByOilType": false,
     "offersPackageChoice": false,
