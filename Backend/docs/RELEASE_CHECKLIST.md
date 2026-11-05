@@ -165,8 +165,10 @@ Backend-owned gaps from this workstream are closed. What is left:
       `PATCH /v1/admin/dealers/:id` with `pickupLat` and `pickupLng`. Nothing else writes
       these, and until they are set a courier is refused for that seller's goods with
       `PICKUP_LOCATION_MISSING`. Buyers can still choose pickup.
-   4. Set `DELIVERY_VAT_PERCENT` to the rate the accountant approved. Until then Payme
-      refuses every order that has a delivery cost.
+   4. Set `MARKETPLACE_TIN` to the 9-digit ИНН of ООО «MATOR INNOVATIONS». Until then Payme
+      refuses every order that has a delivery cost. `DELIVERY_VAT_PERCENT` is no longer
+      read: delivery's rate is fixed at 0, because the company pays turnover tax and is not
+      registered for VAT.
    5. Release the app build that sends `delivery_method: 'courier'` and places orders with
       `delivery_quote_id`. The backend must already be live, or that build's courier quote
       is refused. Builds already installed keep offering pickup only. It needs a native

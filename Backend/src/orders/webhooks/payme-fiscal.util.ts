@@ -56,16 +56,16 @@ export interface PaymeFiscalItem {
   code: string;
   /** Tasnif package code for the form this listing is sold in. */
   package_code: string;
-  /** The dealer's VAT rate, as a percentage. */
+  /** The seller's VAT rate, as a percentage: the dealer's on goods, Mator's on delivery. */
   vat_percent: number;
   /**
-   * The dealer's own tax id, so each line settles to the right merchant.
+   * The seller's tax id, so each line settles to the right merchant. Mator is the
+   * platform: goods are sold under their dealer's tax id and VAT rate, never Mator's.
    *
-   * OPTIONAL, and present on every PRODUCT line: a platform line (delivery, the
-   * service fee) is the marketplace's own service, so it carries the
-   * marketplace TIN when one is configured and omits the field entirely when
-   * not — an empty or borrowed TIN on a platform line would attribute the
-   * marketplace's revenue to a dealer.
+   * OPTIONAL, and present on every PRODUCT line and on delivery: a platform line is the
+   * marketplace's own service, so it carries the marketplace TIN. Delivery is refused
+   * without it; the service fee omits the field when none is configured. A borrowed TIN
+   * on a platform line would attribute the marketplace's revenue to someone else.
    */
   commission_info?: { tin: string };
 }
@@ -127,8 +127,10 @@ export interface FiscalFeeSource {
   codes: { mxik: string | null; packageCode: string | null };
   /** Null when no valid rate is configured, which refuses the line. */
   vatPercent: number | null;
-  /** The MARKETPLACE's tax id, or null to omit commission_info entirely. */
+  /** The MARKETPLACE's tax id, or null when none is configured. */
   marketplaceTin: string | null;
+  /** The line cannot go without that tax id, or it omits commission_info entirely. */
+  tinRequired: boolean;
 }
 
 /**
@@ -193,13 +195,12 @@ export function buildFiscalItem(line: FiscalLineSource): FiscalLineResult {
  * Payme reconciles a receipt against the amount actually charged, so every
  * component of the order total needs a line — a receipt listing only the goods
  * is short by exactly the fees. These lines are the PLATFORM's, not a dealer's:
- * delivery has a fixed system code, the service fee's comes from configuration, and
- * their `commission_info` is the marketplace's TIN, omitted entirely when none is
- * configured.
+ * delivery has fixed system codes and a fixed rate, the service fee's come from
+ * configuration, and their `commission_info` is the marketplace's TIN.
  *
- * Reports a gap instead of guessing when a code or the VAT rate is unset: a charge
- * fiscalized under a code that describes something else, or a rate nobody stated, is
- * worse than a refused checkout.
+ * Reports a gap instead of guessing when a code, the VAT rate or a required TIN is unset:
+ * a charge fiscalized under a code that describes something else, or a rate nobody
+ * stated, is worse than a refused checkout.
  */
 export function buildFeeItem(fee: FiscalFeeSource): FiscalLineResult {
   const gaps: string[] = [];
@@ -209,6 +210,11 @@ export function buildFeeItem(fee: FiscalFeeSource): FiscalLineResult {
   }
   if (fee.vatPercent === null) {
     gaps.push(`${fee.reference}: no valid VAT percentage is configured`);
+  }
+  if (fee.tinRequired && !fee.marketplaceTin) {
+    gaps.push(
+      `${fee.reference}: MARKETPLACE_TIN does not hold Mator's 9-digit tax id`,
+    );
   }
   if (gaps.length > 0) return { ok: false, gaps };
 
@@ -224,8 +230,8 @@ export function buildFeeItem(fee: FiscalFeeSource): FiscalLineResult {
       code: fee.codes.mxik as string,
       package_code: fee.codes.packageCode as string,
       vat_percent: fee.vatPercent as number,
-      // Omitted (not blanked) when the platform has no TIN configured: Payme
-      // then attributes the line to the merchant account itself.
+      // Omitted (not blanked) on a line that may go without one: Payme then attributes
+      // it to the merchant account itself.
       ...(fee.marketplaceTin
         ? { commission_info: { tin: fee.marketplaceTin } }
         : {}),

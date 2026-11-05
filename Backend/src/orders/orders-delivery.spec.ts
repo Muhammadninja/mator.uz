@@ -449,7 +449,7 @@ describe('Courier delivery on an order', () => {
     stubFiscalizableOrderLines(prisma);
 
     const receipt = await fakeFiscal(prisma, {
-      DELIVERY_VAT_PERCENT: '0',
+      MARKETPLACE_TIN: '123456789',
     }).buildOrderDetail('ord_1');
 
     const line = receipt.items.find(

@@ -271,7 +271,7 @@ export const FISCAL_TEST_ENV = {
   SERVICE_FEE_MXIK: '10307001001000000',
   SERVICE_FEE_PACKAGE_CODE: '1000001',
   SERVICE_FEE_VAT_PERCENT: '0',
-  DELIVERY_VAT_PERCENT: '0',
+  MARKETPLACE_TIN: '123456789',
 };
 
 /**
@@ -345,6 +345,7 @@ export const FROZEN_RECEIPT = {
       code: '10112006002000000',
       package_code: '1542432',
       vat_percent: 0,
+      commission_info: { tin: '123456789' },
     },
     {
       title: 'Сервисный сбор',

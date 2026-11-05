@@ -4,6 +4,8 @@ import {
   readPaymeConfig,
   readPaymeFiscalConfig,
   DELIVERY_FISCAL_CODES,
+  DELIVERY_VAT_RATE,
+  YANDEX_GO_TIN,
   DEFAULT_PAYME_CHECKOUT_URL,
   DEFAULT_PAYME_ACCOUNT_FIELD,
 } from './payme.config';
@@ -137,11 +139,11 @@ describe('PAYME_ALLOW_SERVICE_ONLY_ORDERS', () => {
   });
 });
 
-describe('a platform charge’s VAT rate', () => {
+describe('the service fee’s VAT rate', () => {
   const rate = (value?: string) =>
     readPaymeFiscalConfig((key) =>
-      key === 'DELIVERY_VAT_PERCENT' ? value : undefined,
-    ).delivery.vatPercent;
+      key === 'SERVICE_FEE_VAT_PERCENT' ? value : undefined,
+    ).serviceFee.vatPercent;
 
   it('is nothing at all when it is not configured: never an assumed 0', () => {
     expect(rate()).toBeNull();
@@ -162,6 +164,42 @@ describe('a platform charge’s VAT rate', () => {
     ['100', 100],
   ])('is exactly what was stated: %s', (value, expected) => {
     expect(rate(value)).toBe(expected);
+  });
+});
+
+describe('the marketplace’s tax id', () => {
+  const tin = (value?: string) =>
+    readPaymeFiscalConfig((key) =>
+      key === 'MARKETPLACE_TIN' ? value : undefined,
+    ).marketplaceTin;
+
+  it('is the company’s 9-digit ИНН, as stated', () => {
+    expect(tin('123456789')).toBe('123456789');
+    expect(tin(' 123456789 ')).toBe('123456789');
+    // Leading zeros carry meaning, which is why it stays a string.
+    expect(tin('012345678')).toBe('012345678');
+  });
+
+  it('is nothing at all when it is not configured', () => {
+    expect(tin()).toBeNull();
+    expect(tin('')).toBeNull();
+    expect(tin('   ')).toBeNull();
+  });
+
+  it.each([
+    ['too short', '12345678'],
+    ['too long', '1234567890'],
+    ['a person’s ПИНФЛ: Mator is an ООО', '12345678901234'],
+    ['not digits', 'MATOR'],
+    ['a stray character', '12345678O'],
+  ])('is nothing at all when it is %s', (_, value) => {
+    expect(tin(value)).toBeNull();
+  });
+
+  it('is never YandexGo’s', () => {
+    expect(YANDEX_GO_TIN).toBe('309457999');
+    expect(tin('309457999')).toBeNull();
+    expect(tin(' 309457999 ')).toBeNull();
   });
 });
 
@@ -189,6 +227,20 @@ describe('delivery’s fiscal codes', () => {
     });
   });
 
+  it('carry a VAT rate of 0: Mator pays turnover tax and is not registered for VAT', () => {
+    expect(DELIVERY_VAT_RATE).toBe(0);
+  });
+
+  it.each([undefined, '', '12', '4', 'abc'])(
+    'keep that rate whatever the environment says: %j',
+    (value) => {
+      const { delivery } = readPaymeFiscalConfig((key) =>
+        key === 'DELIVERY_VAT_PERCENT' ? value : undefined,
+      );
+      expect(delivery.vatPercent).toBe(0);
+    },
+  );
+
   const backend = join(__dirname, '..', '..', '..');
   const walk = (dir: string): string[] =>
     readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
@@ -211,6 +263,18 @@ describe('delivery’s fiscal codes', () => {
         ['src', 'scripts', 'prisma'],
       ),
     ).toEqual([]);
+  });
+
+  it('nothing reads a VAT rate for delivery from the environment', () => {
+    expect(filesMatching(/DELIVERY_VAT_PERCENT/, ['src', 'scripts'])).toEqual(
+      [],
+    );
+  });
+
+  it('YandexGo’s tax id is named once, to refuse it', () => {
+    expect(filesMatching(/309457999/, ['src', 'scripts', 'prisma'])).toEqual([
+      'src/orders/webhooks/payme.config.ts',
+    ]);
   });
 
   it('nothing reads a flat delivery price or a service fee from the environment', () => {

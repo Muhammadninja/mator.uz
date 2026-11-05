@@ -132,13 +132,17 @@ export function validatePaymeEnv(
  * carrying one is refused with a message naming these keys rather than fiscalized
  * under a code that describes delivery.
  *
- * A rate is never assumed: with no valid one configured, `vatPercent` is null and the
- * line that needs it is refused.
+ * Delivery's VAT rate is fixed with its codes (DELIVERY_VAT_RATE). Any other rate is
+ * never assumed: with no valid one configured, `vatPercent` is null and the line that
+ * needs it is refused.
  */
 export interface PaymeFiscalConfig {
   delivery: PlatformChargeFiscal;
   serviceFee: PlatformChargeFiscal;
-  /** The marketplace's own ИНН, attached to platform lines. Null ⇒ omitted. */
+  /**
+   * Mator's own ИНН, attached to the platform's lines. Null when it is unset or cannot
+   * be ours (see readMarketplaceTin), which refuses a delivery line.
+   */
   marketplaceTin: string | null;
   /**
    * Whether an order made up ONLY of service lines may be paid online at all. Off
@@ -168,6 +172,30 @@ export const DELIVERY_FISCAL_CODES = {
   packageCode: '1542432',
 } as const;
 
+/**
+ * VAT on delivery. Delivery is sold by Mator (ООО «MATOR INNOVATIONS»), which pays
+ * turnover tax and is not registered for VAT, so its line says 0. Turnover tax is a
+ * different tax, and its rate never goes in `vat_percent`. Fixed for the same reason as
+ * the codes: registering for VAT would be a decision to change this, not a setting. A
+ * dealer's own rate (12% at Driver's Village) belongs on that dealer's goods alone.
+ */
+export const DELIVERY_VAT_RATE = 0;
+
+/** A company's ИНН. Mator is an ООО, so a person's 14-digit ПИНФЛ cannot be its own. */
+const COMPANY_TIN_PATTERN = /^\d{9}$/;
+
+/**
+ * YandexGo's ИНН. Delivery is included in Mator's order and receipt, under Mator's ИНН,
+ * and is never recorded in YandexGo's name, so this is refused if it is ever configured.
+ */
+export const YANDEX_GO_TIN = '309457999';
+
+/** MARKETPLACE_TIN, if it can be Mator's. Anything else counts as not configured. */
+function readMarketplaceTin(raw: string | undefined): string | null {
+  const tin = asTrimmedString(raw);
+  return COMPANY_TIN_PATTERN.test(tin) && tin !== YANDEX_GO_TIN ? tin : null;
+}
+
 export function readPaymeFiscalConfig(
   get: (key: string) => string | undefined,
 ): PaymeFiscalConfig {
@@ -182,7 +210,7 @@ export function readPaymeFiscalConfig(
   return {
     delivery: {
       ...DELIVERY_FISCAL_CODES,
-      vatPercent: percent('DELIVERY_VAT_PERCENT'),
+      vatPercent: DELIVERY_VAT_RATE,
     },
     serviceFee: {
       // No default: the marketplace's service fee is a different service from
@@ -191,7 +219,7 @@ export function readPaymeFiscalConfig(
       packageCode: asTrimmedString(get('SERVICE_FEE_PACKAGE_CODE')) || null,
       vatPercent: percent('SERVICE_FEE_VAT_PERCENT'),
     },
-    marketplaceTin: asTrimmedString(get('MARKETPLACE_TIN')) || null,
+    marketplaceTin: readMarketplaceTin(get('MARKETPLACE_TIN')),
     allowServiceOnlyOrders:
       asTrimmedString(get('PAYME_ALLOW_SERVICE_ONLY_ORDERS')) === 'true',
   };

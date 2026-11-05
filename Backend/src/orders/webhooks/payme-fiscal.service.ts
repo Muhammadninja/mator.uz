@@ -162,16 +162,16 @@ export class PaymeFiscalService implements OnModuleInit {
 
   /**
    * Say so at boot, rather than when a customer's payment is refused. Only a warning:
-   * the rate is the accountant's to approve, and pickup orders need none of this.
+   * pickup orders need none of this.
    */
   onModuleInit(): void {
-    const { delivery } = readPaymeFiscalConfig((key) =>
+    const { marketplaceTin } = readPaymeFiscalConfig((key) =>
       this.config.get<string>(key),
     );
-    if (delivery.vatPercent === null) {
+    if (marketplaceTin === null) {
       this.logger.warn(
-        'DELIVERY_VAT_PERCENT is unset or not a valid percentage: any order with a ' +
-          'delivery cost will be refused until an approved rate is configured.',
+        "MARKETPLACE_TIN is unset or cannot be Mator's 9-digit tax id: any order with " +
+          'a delivery cost will be refused until it is configured.',
       );
     }
   }
@@ -323,12 +323,13 @@ export class PaymeFiscalService implements OnModuleInit {
     );
     if (deliveryUzs > 0 && !alreadyOnReceipt) {
       fees.push({
-        reference: 'delivery fee (set DELIVERY_VAT_PERCENT)',
+        reference: 'delivery fee',
         title: DELIVERY_TITLE,
         amountUzs: deliveryUzs,
         codes: fiscal.delivery,
         vatPercent: fiscal.delivery.vatPercent,
         marketplaceTin: fiscal.marketplaceTin,
+        tinRequired: true,
       });
     }
 
@@ -344,6 +345,7 @@ export class PaymeFiscalService implements OnModuleInit {
         codes: fiscal.serviceFee,
         vatPercent: fiscal.serviceFee.vatPercent,
         marketplaceTin: fiscal.marketplaceTin,
+        tinRequired: false,
       });
     }
 
