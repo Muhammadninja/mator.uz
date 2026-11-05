@@ -1172,6 +1172,7 @@ describe('platform charge lines', () => {
       code: '10112006002000000',
       package_code: '1542432',
       vat_percent: 0,
+      commission_info: { tin: '123456789' },
     });
   });
 
@@ -1358,52 +1359,121 @@ describe('platform charge lines', () => {
     });
   });
 
-  describe('delivery’s VAT rate', () => {
+  describe('delivery’s line', () => {
+    /** The goods of Driver's Village, whose own tax id and 12% VAT are on the dealer. */
+    const DRIVERS_VILLAGE = {
+      tin: '305123456',
+      vatPercent: new Prisma.Decimal(12),
+    };
+    const MATOR_TIN = '123456789';
+    const fromDriversVillage = () => {
+      stubOrder({ deliveryUzs: 25000, serviceFeeUzs: 0 });
+      prisma.catalogPart.findMany.mockResolvedValue([
+        {
+          id: 'part_1',
+          packageForm: PackageForm.SINGLE,
+          kind: ProductKind.SPARE_PART,
+          oilType: null,
+          category: BRAKES,
+          seller: DRIVERS_VILLAGE,
+        },
+      ]);
+    };
+
+    it('is exactly what was fixed: Mator’s, with its code, its unit and no VAT', async () => {
+      fromDriversVillage();
+
+      const detail = await withCodes({
+        MARKETPLACE_TIN: MATOR_TIN,
+      }).buildOrderDetail('ord_1');
+
+      expect(detail.items[1]).toEqual({
+        title: 'Доставка',
+        price: 2_500_000,
+        count: 1,
+        code: '10112006002000000',
+        package_code: '1542432',
+        vat_percent: 0,
+        commission_info: { tin: MATOR_TIN },
+      });
+    });
+
+    it('leaves the goods to their dealer: Mator is only the platform', async () => {
+      fromDriversVillage();
+
+      const detail = await withCodes({
+        MARKETPLACE_TIN: MATOR_TIN,
+      }).buildOrderDetail('ord_1');
+
+      expect(detail.items[0]).toMatchObject({
+        vat_percent: 12,
+        commission_info: { tin: DRIVERS_VILLAGE.tin },
+      });
+    });
+
+    it('is one line of our own receipt, with no separate record for a carrier', async () => {
+      fromDriversVillage();
+
+      const detail = await withCodes().buildOrderDetail('ord_1');
+
+      expect(Object.keys(detail).sort()).toEqual(['items', 'receipt_type']);
+      expect(detail.items.filter((i) => i.title === 'Доставка')).toHaveLength(1);
+    });
+
+    it.each(['12', '4', '7', 'abc', ''])(
+      'keeps its 0 whatever DELIVERY_VAT_PERCENT says: %j',
+      async (value) => {
+        stubOrder({ deliveryUzs: 25000, serviceFeeUzs: 0 });
+
+        const detail = await withCodes({
+          DELIVERY_VAT_PERCENT: value,
+        }).buildOrderDetail('ord_1');
+
+        expect(detail.items[1].vat_percent).toBe(0);
+      },
+    );
+
     it.each<[string, Record<string, string | undefined>]>([
-      ['absent', { DELIVERY_VAT_PERCENT: undefined }],
-      ['blank', { DELIVERY_VAT_PERCENT: '' }],
-      ['not a number', { DELIVERY_VAT_PERCENT: 'abc' }],
-      ['written with a sign', { DELIVERY_VAT_PERCENT: '12%' }],
-      ['out of range', { DELIVERY_VAT_PERCENT: '101' }],
-    ])('%s: refused, naming the setting, rather than sent as 0', async (_, env) => {
+      ['no tax id at all', { MARKETPLACE_TIN: undefined }],
+      ['a blank one', { MARKETPLACE_TIN: ' ' }],
+      ['a malformed one', { MARKETPLACE_TIN: '12345' }],
+      ['YandexGo’s', { MARKETPLACE_TIN: '309457999' }],
+    ])('is refused with %s, naming the setting', async (_, env) => {
       stubOrder({ deliveryUzs: 25000, serviceFeeUzs: 0 });
 
       await expect(
         withCodes(env as Record<string, string>).buildOrderDetail('ord_1'),
       ).rejects.toMatchObject({
         gaps: [
-          'delivery fee (set DELIVERY_VAT_PERCENT): no valid VAT percentage is configured',
+          "delivery fee: MARKETPLACE_TIN does not hold Mator's 9-digit tax id",
         ],
       });
     });
 
-    it.each([
-      ['0', 0],
-      ['7', 7],
-    ])('stated as %s, the line carries exactly that', async (value, expected) => {
-      stubOrder({ deliveryUzs: 25000, serviceFeeUzs: 0 });
-
-      const detail = await withCodes({
-        DELIVERY_VAT_PERCENT: value,
-      }).buildOrderDetail('ord_1');
-
-      expect(detail.items[1].vat_percent).toBe(expected);
-    });
-
-    it('its absence is said at boot, before a customer is refused', () => {
+    it('says so at boot, before a customer is refused', () => {
       const warn = jest
         .spyOn(Logger.prototype, 'warn')
         .mockImplementation(() => undefined);
 
       new PaymeFiscalService(prisma, fakeConfig({})).onModuleInit();
       expect(warn).toHaveBeenCalledWith(
-        expect.stringContaining('DELIVERY_VAT_PERCENT'),
+        expect.stringContaining('MARKETPLACE_TIN'),
       );
 
       warn.mockClear();
       withCodes().onModuleInit();
       expect(warn).not.toHaveBeenCalled();
       warn.mockRestore();
+    });
+
+    it('a pickup order needs no tax id of ours: there is no line to carry it', async () => {
+      stubOrder({ deliveryUzs: 0, serviceFeeUzs: 0, deliveryMethod: 'PICKUP' });
+
+      const detail = await withCodes({
+        MARKETPLACE_TIN: '',
+      }).buildOrderDetail('ord_1');
+
+      expect(detail.items.map((i) => i.title)).toEqual(['Колодки']);
     });
   });
 
@@ -1453,15 +1523,6 @@ describe('platform charge lines', () => {
     expect(detail.items.map((i) => i.title)).toEqual(['Колодки']);
   });
 
-  it('takes delivery’s VAT rate from configuration', async () => {
-    stubOrder({ deliveryUzs: 25000, serviceFeeUzs: 0 });
-    const detail = await withCodes({
-      DELIVERY_VAT_PERCENT: '12',
-    }).buildOrderDetail('ord_1');
-
-    expect(detail.items[1]).toMatchObject({ vat_percent: 12 });
-  });
-
   it('attributes platform lines to the MARKETPLACE tin when configured', async () => {
     stubOrder({ deliveryUzs: 25000, serviceFeeUzs: 0 });
     const detail = await withCodes({
@@ -1473,9 +1534,12 @@ describe('platform charge lines', () => {
     expect(detail.items[0].commission_info).toEqual({ tin: '301234567' });
   });
 
-  it('omits commission_info on a platform line when no marketplace tin is set', async () => {
-    stubOrder({ deliveryUzs: 25000, serviceFeeUzs: 0 });
-    const detail = await withCodes().buildOrderDetail('ord_1');
+  it('omits commission_info on a service fee when no marketplace tin is set', async () => {
+    stubOrder({ deliveryUzs: 0, serviceFeeUzs: 5000 });
+    const detail = await withCodes({ MARKETPLACE_TIN: '' }).buildOrderDetail(
+      'ord_1',
+    );
+    expect(detail.items[1].title).toBe('Сервисный сбор');
     expect(detail.items[1]).not.toHaveProperty('commission_info');
   });
 
@@ -1500,7 +1564,7 @@ describe('platform charge lines', () => {
     stubOrder({ deliveryUzs: 25000, serviceFeeUzs: 5000 });
     const unconfigured = new PaymeFiscalService(
       prisma,
-      fakeConfig({ DELIVERY_VAT_PERCENT: '0' }),
+      fakeConfig({ MARKETPLACE_TIN: '123456789' }),
     );
 
     // Every missing part is reported, each naming the env key an operator has to

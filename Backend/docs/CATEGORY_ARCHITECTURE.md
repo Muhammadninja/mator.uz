@@ -281,10 +281,16 @@ missing (read the dry-run first: a missing row may be one an operator removed on
     `Order.deliveryMethod = COURIER` with goods and a cost of 0 means "no cost known", which
     every Payme step refuses. Nothing may change the stored cost once payment has started,
     or fetch a new one between Check and Perform.
-  - Its VAT rate comes from `DELIVERY_VAT_PERCENT`, as stated. Unset or not a percentage, the
-    line is refused rather than sent as 0, and the boot log says so.
-  - Its tax id, `commission_info.tin`, is `MARKETPLACE_TIN`, omitted when that is unset. No
-    legal scheme has been confirmed, so no other party's tax id is ever put there.
+  - Delivery is Mator's own line, inside Mator's order and receipt. Mator (ООО «MATOR
+    INNOVATIONS») pays turnover tax and is not registered for VAT, so `vat_percent` is a
+    system constant of 0 (`DELIVERY_VAT_RATE`). Turnover tax is a different tax and its rate
+    never goes there. `DELIVERY_VAT_PERCENT` is no longer read.
+  - Its tax id, `commission_info.tin`, is `MARKETPLACE_TIN`, Mator's 9-digit ИНН. Unset, or
+    anything that cannot be that, including YandexGo's ИНН, the line is refused and the boot
+    log says so. Nothing is ever recorded in YandexGo's name.
+  - Goods are not Mator's: Mator is the platform, and each line carries its own dealer's tax
+    id and VAT rate (`CatalogSeller.tin`, `vatPercent`; 12% at Driver's Village, as an
+    operator enters it). No rate of Mator's reaches them, and no dealer's reaches delivery.
 - **Service fee.** Removed: new orders hold none, and `SERVICE_FEE_UZS` is no longer read. An
   order placed earlier still has it in its total, so it needs its line, or is refused.
 - **Services.** A service line takes its codes from `ProviderServiceOffering.categoryId`, under

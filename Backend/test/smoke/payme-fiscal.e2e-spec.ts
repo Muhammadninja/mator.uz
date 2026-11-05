@@ -59,6 +59,7 @@ import {
 } from '../utils/harness';
 
 // Set here, read by nothing else: no real key, token or configuration is involved.
+const MATOR_TIN = '123456789';
 const FAKE_KEY = 'smoke-test-merchant-key-not-a-secret';
 const AUTH = 'Basic ' + Buffer.from(`Paycom:${FAKE_KEY}`).toString('base64');
 const BASE_ENV = {
@@ -68,8 +69,8 @@ const BASE_ENV = {
   SERVICE_FEE_MXIK: '09900000000000002',
   SERVICE_FEE_PACKAGE_CODE: '1000002',
   SERVICE_FEE_VAT_PERCENT: '7',
-  // A test value: no rate for delivery has been decided, and 7 is not a real one.
-  DELIVERY_VAT_PERCENT: '7',
+  // Fictional, like every other value here: not Mator's real tax id.
+  MARKETPLACE_TIN: MATOR_TIN,
 };
 const FLAG = 'PAYME_ALLOW_SERVICE_ONLY_ORDERS';
 
@@ -822,7 +823,8 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
         count: 1,
         code: DELIVERY_MXIK,
         package_code: DELIVERY_UNIT_CODE,
-        vat_percent: 7,
+        vat_percent: 0,
+        commission_info: { tin: MATOR_TIN },
       });
       expect(sumOf(items)).toBe(amount);
     });
@@ -882,48 +884,49 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
       });
     });
 
-    describe('its VAT rate', () => {
+    describe('its tax data', () => {
+      it.each(['12', '4', 'abc', undefined])(
+        'its VAT rate is 0, whatever DELIVERY_VAT_PERCENT says: %j',
+        async (value) => {
+          env.DELIVERY_VAT_PERCENT = value;
+          const amount = orderOf([payableGoods()], { deliveryUzs: 25000 });
+
+          const { items } = (await check(amount)).result.detail;
+
+          expect(items[1].vat_percent).toBe(0);
+        },
+      );
+
       it.each<[string, string | undefined]>([
         ['absent', undefined],
-        ['blank', ''],
-        ['not a number', 'abc'],
-        ['written with a sign', '12%'],
-        ['out of range', '101'],
-      ])('%s: refused, rather than sent as 0', async (_, value) => {
-        env.DELIVERY_VAT_PERCENT = value;
+        ['blank', ' '],
+        ['malformed', '12345'],
+        ['YandexGo’s', '309457999'],
+      ])('with Mator’s tax id %s: refused', async (_, value) => {
+        env.MARKETPLACE_TIN = value;
         const amount = orderOf([payableGoods()], { deliveryUzs: 25000 });
 
         expect(refusedCode(await check(amount))).toBe(REFUSED);
       });
 
-      it('stated as 0, it is sent as 0: only the absence of one is refused', async () => {
-        env.DELIVERY_VAT_PERCENT = '0';
-        const amount = orderOf([payableGoods()], { deliveryUzs: 25000 });
-
-        const { items } = (await check(amount)).result.detail;
-
-        expect(items[1].vat_percent).toBe(0);
-      });
-
       it('a pickup order needs none', async () => {
-        delete env.DELIVERY_VAT_PERCENT;
+        delete env.MARKETPLACE_TIN;
         const amount = orderOf([payableGoods()]);
 
         expect((await check(amount)).result.allow).toBe(true);
       });
-    });
 
-    it('carries the marketplace’s tax id if one is configured, and none otherwise', async () => {
-      const amount = orderOf([payableGoods()], { deliveryUzs: 25000 });
+      it('the goods keep their dealer’s tax id and VAT rate beside it', async () => {
+        const amount = orderOf([payableGoods()], { deliveryUzs: 25000 });
 
-      const without = (await check(amount)).result.detail.items[1];
-      expect(without).not.toHaveProperty('commission_info');
+        const { items } = (await check(amount)).result.detail;
 
-      env.MARKETPLACE_TIN = '123456789';
-      const withTin = (await check(amount)).result.detail.items;
-      expect(withTin[1].commission_info).toEqual({ tin: '123456789' });
-      // The goods keep their own dealer's.
-      expect(withTin[0].commission_info).toEqual({ tin: DEALER.tin });
+        expect(items[1].commission_info).toEqual({ tin: MATOR_TIN });
+        expect(items[0]).toMatchObject({
+          vat_percent: DEALER.vatPercent,
+          commission_info: { tin: DEALER.tin },
+        });
+      });
     });
 
     it('is no line at all when the order charges none', async () => {
