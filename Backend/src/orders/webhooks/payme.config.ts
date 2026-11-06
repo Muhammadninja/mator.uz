@@ -12,7 +12,12 @@
  * bootstrap instead of serving an open webhook.
  */
 
-import { MAX_VAT_PERCENT, MIN_VAT_PERCENT } from '../../common/fiscal.util';
+import {
+  MAX_VAT_PERCENT,
+  MIN_VAT_PERCENT,
+  MXIK_PATTERN,
+  PACKAGE_CODE_PATTERN,
+} from '../../common/fiscal.util';
 
 /** Official Payme checkout host — used when PAYME_CHECKOUT_URL is not set. */
 export const DEFAULT_PAYME_CHECKOUT_URL = 'https://checkout.paycom.uz';
@@ -141,7 +146,7 @@ export interface PaymeFiscalConfig {
   serviceFee: PlatformChargeFiscal;
   /**
    * Mator's own ИНН, attached to the platform's lines. Null when it is unset or cannot
-   * be ours (see readMarketplaceTin), which refuses a delivery line.
+   * be ours (see readMarketplaceTin), which refuses a delivery or a service fee line.
    */
   marketplaceTin: string | null;
   /**
@@ -196,6 +201,21 @@ function readMarketplaceTin(raw: string | undefined): string | null {
   return COMPANY_TIN_PATTERN.test(tin) && tin !== YANDEX_GO_TIN ? tin : null;
 }
 
+/**
+ * A code for the service fee, if it can be one. Delivery's codes describe delivery, so
+ * entering them here counts as not configured: the receipt would declare the fee as a
+ * delivery. A malformed code counts the same, since Payme or the tax authority would turn
+ * away the receipt after the customer has tapped Pay.
+ */
+function readServiceFeeCode(
+  raw: string | undefined,
+  pattern: RegExp,
+  deliveryCode: string,
+): string | null {
+  const code = asTrimmedString(raw);
+  return pattern.test(code) && code !== deliveryCode ? code : null;
+}
+
 export function readPaymeFiscalConfig(
   get: (key: string) => string | undefined,
 ): PaymeFiscalConfig {
@@ -215,8 +235,16 @@ export function readPaymeFiscalConfig(
     serviceFee: {
       // No default: the marketplace's service fee is a different service from
       // delivery, and reusing delivery's code would mis-declare it.
-      mxik: asTrimmedString(get('SERVICE_FEE_MXIK')) || null,
-      packageCode: asTrimmedString(get('SERVICE_FEE_PACKAGE_CODE')) || null,
+      mxik: readServiceFeeCode(
+        get('SERVICE_FEE_MXIK'),
+        MXIK_PATTERN,
+        DELIVERY_FISCAL_CODES.mxik,
+      ),
+      packageCode: readServiceFeeCode(
+        get('SERVICE_FEE_PACKAGE_CODE'),
+        PACKAGE_CODE_PATTERN,
+        DELIVERY_FISCAL_CODES.packageCode,
+      ),
       vatPercent: percent('SERVICE_FEE_VAT_PERCENT'),
     },
     marketplaceTin: readMarketplaceTin(get('MARKETPLACE_TIN')),

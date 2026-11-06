@@ -130,3 +130,149 @@ describe('Click disabled — no invoices, not listed', () => {
     );
   });
 });
+
+/* eslint-disable @typescript-eslint/no-unsafe-assignment -- jest matchers are typed `any` */
+describe('Click — an order with a service fee', () => {
+  const SECRET = 'real-secret';
+  // 600 000 of parts, a 20 000 fee and 25 000 of delivery.
+  const TOTAL = 645_000;
+
+  function signed(over: Record<string, unknown>, complete: boolean) {
+    const p: Record<string, unknown> = {
+      click_trans_id: '777',
+      service_id: '12345',
+      merchant_trans_id: 'ord_1',
+      merchant_prepare_id: '1700000000000',
+      amount: String(TOTAL),
+      action: complete ? 1 : 0,
+      error: 0,
+      sign_time: '2026-11-06 01:00:00',
+      ...over,
+    };
+    return { ...p, sign_string: sign(p, SECRET, complete) };
+  }
+
+  function world() {
+    const { svc, prisma, settlement } = build({ CLICK_SECRET_KEY: SECRET });
+    prisma.order.findUnique.mockResolvedValue({
+      id: 'ord_1',
+      status: 'PENDING_PAYMENT',
+      totalUzs: TOTAL,
+    });
+    return { svc, prisma, settlement };
+  }
+
+  it('Prepare takes the whole total, fee included, and records exactly that', async () => {
+    const { svc, prisma } = world();
+
+    const res = await svc.prepare(signed({}, false));
+
+    expect(res.error).toBe(0);
+    expect(prisma.payment.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ amountUzs: TOTAL, orderId: 'ord_1' }),
+    });
+  });
+
+  it.each([
+    ['without the fee', 625_000],
+    ['without delivery', 620_000],
+    ['a tiyin short', 644_999.99],
+  ])('Prepare refuses an amount %s (-2)', async (_, amount) => {
+    const { svc, prisma } = world();
+
+    const res = await svc.prepare(signed({ amount: String(amount) }, false));
+
+    expect(res.error).toBe(-2);
+    expect(prisma.payment.create).not.toHaveBeenCalled();
+  });
+
+  it('a repeated Prepare answers as before and writes no second payment', async () => {
+    const { svc, prisma } = world();
+    prisma.payment.findFirst.mockResolvedValue({
+      id: 'pay_1',
+      orderId: 'ord_1',
+      status: 'PENDING',
+      providerPrepareId: '1700000000000',
+    });
+
+    const res = await svc.prepare(signed({}, false));
+
+    expect(res).toMatchObject({
+      error: 0,
+      merchant_prepare_id: '1700000000000',
+    });
+    expect(prisma.payment.create).not.toHaveBeenCalled();
+    expect(prisma.payment.update).not.toHaveBeenCalled();
+  });
+
+  describe('Complete', () => {
+    const prepared = (over: Record<string, unknown> = {}) => ({
+      id: 'pay_1',
+      orderId: 'ord_1',
+      status: 'PENDING',
+      amountUzs: TOTAL,
+      providerPrepareId: '1700000000000',
+      ...over,
+    });
+
+    it('settles the payment at the amount Prepare agreed', async () => {
+      const { svc, prisma, settlement } = world();
+      prisma.payment.findFirst.mockResolvedValue(prepared());
+      settlement.markPaid.mockResolvedValue('paid');
+
+      const res = await svc.complete(signed({}, true));
+
+      expect(res.error).toBe(0);
+      expect(settlement.markPaid).toHaveBeenCalledWith('pay_1');
+    });
+
+    it('refuses an amount other than the one agreed, and settles nothing (-2)', async () => {
+      const { svc, prisma, settlement } = world();
+      prisma.payment.findFirst.mockResolvedValue(prepared());
+
+      const res = await svc.complete(signed({ amount: '625000' }, true));
+
+      expect(res.error).toBe(-2);
+      expect(settlement.markPaid).not.toHaveBeenCalled();
+    });
+
+    it('a repeat after success is a success, and settles nothing twice', async () => {
+      const { svc, prisma, settlement } = world();
+      prisma.payment.findFirst.mockResolvedValue(prepared({ status: 'PAID' }));
+
+      const res = await svc.complete(signed({}, true));
+
+      expect(res.error).toBe(0);
+      expect(settlement.markPaid).not.toHaveBeenCalled();
+    });
+
+    it.each(['order_not_payable', 'not_settleable', 'not_found'])(
+      'never reports success when settlement says %s: Click must give the money back (-9)',
+      async (outcome) => {
+        const { svc, prisma, settlement } = world();
+        prisma.payment.findFirst.mockResolvedValue(prepared());
+        settlement.markPaid.mockResolvedValue(outcome);
+
+        const res = await svc.complete(signed({}, true));
+
+        expect(res.error).toBe(-9);
+      },
+    );
+
+    it('Click’s own failure cancels the payment, refunding nothing that was never taken', async () => {
+      const { svc, prisma, settlement } = world();
+      prisma.payment.findFirst.mockResolvedValue(prepared());
+
+      const res = await svc.complete(signed({ error: -5017 }, true));
+
+      expect(res.error).toBe(-9);
+      expect(settlement.markCancelled).toHaveBeenCalledWith(
+        'pay_1',
+        -5017,
+        false,
+      );
+      expect(settlement.markPaid).not.toHaveBeenCalled();
+    });
+  });
+});
+/* eslint-enable @typescript-eslint/no-unsafe-assignment */

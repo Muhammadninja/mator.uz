@@ -4,6 +4,7 @@ import { createHash, timingSafeEqual } from 'crypto';
 import { OrderStatus, PaymentProvider, PaymentStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { prefixedId, IdPrefix } from '../../common/ulid.util';
+import { toTiyin } from '../service-fee.util';
 import { SettlementService } from './settlement.service';
 import { clickSecret, isClickEnabled } from './click.config';
 
@@ -20,6 +21,14 @@ const ERR = {
   DISABLED: -8,
   CANCELLED: -9,
 };
+
+/** Two amounts in UZS, compared to the tiyin. Anything that is no number is no match. */
+function isSameAmount(
+  expected: { toString(): string },
+  stated: unknown,
+): boolean {
+  return toTiyin(Number(expected)) === toTiyin(Number(stated));
+}
 
 @Injectable()
 export class ClickService {
@@ -52,11 +61,32 @@ export class ClickService {
 
     const order = await this.prisma.order.findUnique({ where: { id: String(p.merchant_trans_id) } });
     if (!order) return this.reply(p, ERR.ORDER_NOT_FOUND, 'Order not found');
-    if (Math.round(Number(order.totalUzs)) !== Math.round(Number(p.amount))) {
+    // The order's whole total, service fee and delivery included, to the tiyin.
+    if (!isSameAmount(order.totalUzs, p.amount)) {
       return this.reply(p, ERR.BAD_AMOUNT, 'Incorrect amount');
     }
     if (order.status !== OrderStatus.PENDING_PAYMENT) {
       return this.reply(p, ERR.ALREADY_PAID, 'Order is not awaiting payment');
+    }
+
+    // A repeat of a Prepare already recorded: the same answer, and nothing written. A second
+    // row for this transaction is what the unique index would refuse.
+    const known = await this.prisma.payment.findFirst({
+      where: {
+        provider: PaymentProvider.CLICK,
+        providerTransactionId: String(p.click_trans_id),
+      },
+    });
+    if (known) {
+      return known.orderId === order.id &&
+        known.status === PaymentStatus.PENDING
+        ? this.reply(p, ERR.SUCCESS, 'Success', known.providerPrepareId)
+        : this.reply(
+            p,
+            ERR.CANCELLED,
+            'Transaction cancelled',
+            known.providerPrepareId,
+          );
     }
 
     const prepareId = Date.now().toString();
@@ -103,6 +133,16 @@ export class ClickService {
     if (payment.status === PaymentStatus.PAID) {
       return this.reply(p, ERR.SUCCESS, 'Already confirmed', payment.providerPrepareId);
     }
+    // What Prepare agreed to, which holds the whole order total. Checked again here because
+    // this is the call that settles the order.
+    if (!isSameAmount(payment.amountUzs, p.amount)) {
+      return this.reply(
+        p,
+        ERR.BAD_AMOUNT,
+        'Incorrect amount',
+        payment.providerPrepareId,
+      );
+    }
 
     // Click signals its own failure via a negative `error` field.
     if (Number(p.error) < 0) {
@@ -113,7 +153,17 @@ export class ClickService {
       return this.reply(p, ERR.ACTION_NOT_FOUND, 'Action not found', payment.providerPrepareId);
     }
 
-    await this.settlement.markPaid(payment.id);
+    // Success only for a payment that is settled. An order cancelled meanwhile, or a payment
+    // already cancelled, has to reach Click as a failure, so the buyer's money goes back.
+    const outcome = await this.settlement.markPaid(payment.id);
+    if (outcome !== 'paid' && outcome !== 'already_paid') {
+      return this.reply(
+        p,
+        ERR.CANCELLED,
+        'Transaction cancelled',
+        payment.providerPrepareId,
+      );
+    }
     return this.reply(p, ERR.SUCCESS, 'Success', payment.providerPrepareId);
   }
 

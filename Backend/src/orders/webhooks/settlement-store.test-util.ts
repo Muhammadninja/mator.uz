@@ -99,8 +99,13 @@ export function settlementStore(seed: { payments: Row[]; orders: Row[] }) {
       },
       create: async ({ data }: Row) => {
         await tick();
-        // A plain number: structuredClone, used for rollback, cannot copy a Decimal.
-        refunds.push({ ...data, amountUzs: Number(data.amountUzs) });
+        // Plain numbers: structuredClone, used for rollback, cannot copy a Decimal. The
+        // fee share defaults to 0, as the column does.
+        refunds.push({
+          ...data,
+          amountUzs: Number(data.amountUzs),
+          serviceFeeUzs: Number(data.serviceFeeUzs ?? 0),
+        });
         return data;
       },
     },

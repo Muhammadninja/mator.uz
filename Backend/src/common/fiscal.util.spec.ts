@@ -892,6 +892,7 @@ describe('the one place a receipt’s MXIK comes from', () => {
       'catalog/categories/category-map.ts', // isFiscalizedByOilType
       'orders/webhooks/payme-fiscal.util.ts', // the resolved code, and a fee's config
       'orders/webhooks/payme-fiscal.service.ts', // delivery's system code, not a category's
+      'orders/webhooks/payme.config.ts', // keeps the service fee off delivery's system code
       'admin/categories/admin-categories.presenter.ts', // shows it to an operator
       'admin/categories/admin-categories.service.ts', // an operator editing it
       'admin/categories/admin-category-transfer.service.ts', // warns that it differs

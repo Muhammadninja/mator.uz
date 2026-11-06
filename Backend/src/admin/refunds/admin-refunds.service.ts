@@ -14,6 +14,7 @@ import {
 import { clampLimit } from '../../common/pagination.util';
 import { IdPrefix, prefixedId } from '../../common/ulid.util';
 import {
+  RefundPosition,
   readRefundPosition,
   settleRefundPosition,
 } from '../../orders/financial-refund.ledger';
@@ -36,6 +37,32 @@ const MAX_LIMIT = 100;
 /** Clocks differ a little between an operator's machine and this server. */
 const FUTURE_TOLERANCE_MS = 5 * 60 * 1000;
 const TX_OPTIONS = { maxWait: 10_000, timeout: 30_000 };
+
+/**
+ * An entry has to say truly how much of it is the service fee. What is left of the order
+ * besides the fee is all a refund can return without touching it, so a full refund has to
+ * state the whole fee, and what stays with Mator can never read higher than it is.
+ */
+function assertServiceFeeShare(
+  amount: Prisma.Decimal,
+  serviceFee: Prisma.Decimal,
+  position: RefundPosition,
+): void {
+  const feeLeft = position.serviceFee.retained;
+  if (serviceFee.gt(amount) || serviceFee.gt(feeLeft)) {
+    throw new ConflictException({
+      code: 'REFUND_FEE_EXCEEDS_CHARGED',
+      message: `The service fee part cannot be more than the refund, or than the ${feeLeft.toFixed(2)} UZS of the fee this order still holds.`,
+    });
+  }
+  const restLeft = position.remaining.sub(feeLeft);
+  if (amount.sub(serviceFee).gt(restLeft)) {
+    throw new ConflictException({
+      code: 'REFUND_FEE_NOT_STATED',
+      message: `This refund reaches into the service fee: only ${restLeft.toFixed(2)} UZS of it can be anything else. State how much of it is the fee.`,
+    });
+  }
+}
 
 /**
  * The registry of money returned to customers. An entry says that money moved and
@@ -87,7 +114,7 @@ export class AdminRefundsService {
       // Money that really went back: voided entries never count, whatever is listed.
       this.prisma.financialRefund.aggregate({
         where: { AND: [where, { voidedAt: null }] },
-        _sum: { amountUzs: true },
+        _sum: { amountUzs: true, serviceFeeUzs: true },
       }),
     ]);
 
@@ -100,6 +127,7 @@ export class AdminRefundsService {
         totalItems,
         totalPages: Math.ceil(totalItems / limit),
         totalAmount: Number(totals._sum.amountUzs ?? 0),
+        totalServiceFee: Number(totals._sum.serviceFeeUzs ?? 0),
       },
     };
   }
@@ -134,6 +162,7 @@ export class AdminRefundsService {
       });
     }
     const amount = new Prisma.Decimal(dto.amountUzs);
+    const serviceFee = new Prisma.Decimal(dto.serviceFeeUzs ?? 0);
 
     const id = await this.prisma.$transaction(async (tx) => {
       await this.lockOrder(tx, orderId);
@@ -173,6 +202,7 @@ export class AdminRefundsService {
           message: `Only ${position.remaining.toFixed(2)} UZS of this order can still be returned.`,
         });
       }
+      assertServiceFeeShare(amount, serviceFee, position);
 
       const created = await tx.financialRefund.create({
         data: {
@@ -180,6 +210,7 @@ export class AdminRefundsService {
           orderId,
           paymentId: position.paymentId,
           amountUzs: amount,
+          serviceFeeUzs: serviceFee,
           method: dto.method,
           source: RefundSource.MANUAL,
           reference: dto.reference,
@@ -206,6 +237,7 @@ export class AdminRefundsService {
           newValues: {
             refundId: created.id,
             amountUzs: amount.toFixed(2),
+            serviceFeeUzs: serviceFee.toFixed(2),
             method: dto.method,
             reference: dto.reference,
             refundedAt: refundedAt.toISOString(),

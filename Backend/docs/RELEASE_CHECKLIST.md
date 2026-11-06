@@ -178,5 +178,18 @@ Backend-owned gaps from this workstream are closed. What is left:
       dispatches couriers: that is the exact destination, and the admin panel has no map
       or field for it yet.
 
+6. **Service fee** — every order above 100 000 of parts now carries one. In this order:
+   1. Apply migration `20261105000200_service_fee_refunds_and_line_seller` (two additive
+      columns), run `prisma generate`, build, then deploy the code.
+   2. Set `SERVICE_FEE_MXIK`, `SERVICE_FEE_PACKAGE_CODE` and `SERVICE_FEE_VAT_PERCENT` (see
+      DEPLOYMENT.md), and `MARKETPLACE_TIN` if it is not set yet. Until all four are valid,
+      Payme refuses every order that carries a fee; cash and terminal orders still work.
+   3. Release the app build that shows the fee and sends `confirmed_total_uzs`. Builds already
+      installed show no fee line: they are charged the right total, but their screen does not
+      add the fee in, so release the new build right after the backend.
+   4. Refunds recorded by hand now take `serviceFeeUzs`, the part of the refund that is the
+      fee. A refund that reaches into the fee is refused until it says so. The admin panel
+      has no field for it yet, and none for `settlement` or `serviceFeeRevenueUzs`.
+
 Production deployment and production migrations are performed manually by the
 project owner.

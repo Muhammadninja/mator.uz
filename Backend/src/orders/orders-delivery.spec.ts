@@ -12,7 +12,10 @@ import { CreateOrderDto } from './dto/create-order.dto';
 import { presentOrder } from './order.presenter';
 import { OrderStatusService } from './order-status.service';
 import { OrdersService } from './orders.service';
-import { DELIVERY_TITLE } from './webhooks/payme-fiscal.service';
+import {
+  DELIVERY_TITLE,
+  SERVICE_FEE_TITLE,
+} from './webhooks/payme-fiscal.service';
 import { receiptTotalTiyin } from './webhooks/payme-fiscal.util';
 import {
   buildCart,
@@ -22,6 +25,7 @@ import {
   fakeConfig,
   fakeDiscounts,
   fakeFiscal,
+  FISCAL_TEST_ENV,
   fakeNotifications,
   fakeRealtime,
   PrismaMock,
@@ -126,8 +130,9 @@ describe('Courier delivery on an order', () => {
       deliveryAddressId: 'addr_1',
       subtotalUzs: 185_000,
       deliveryUzs: 37_500,
-      serviceFeeUzs: 0,
-      totalUzs: 222_500,
+      // The tariff's, for 185 000 of parts: never inside the delivery price.
+      serviceFeeUzs: 5_000,
+      totalUzs: 227_500,
       deliveryShipments: QUOTE.shipments,
     });
     expect(prisma.cartItem.deleteMany).toHaveBeenCalled();
@@ -225,7 +230,10 @@ describe('Courier delivery on an order', () => {
       subtotalUzs: 200_000,
       discountUzs: 20_000,
       deliveryUzs: 37_500,
-      totalUzs: 217_500,
+      // Neither delivery nor the fee is discounted. The fee's tier is read from the parts
+      // before the promo: 200 000 is the 10 000 tier.
+      serviceFeeUzs: 10_000,
+      totalUzs: 227_500,
     });
     expect(created().items.create[0].lineTotalUzs).toBe(180_000);
   });
@@ -334,7 +342,8 @@ describe('Courier delivery on an order', () => {
         expect(created()).toMatchObject({
           deliveryMethod: 'PICKUP',
           deliveryUzs: 0,
-          totalUzs: 185_000,
+          serviceFeeUzs: 5_000,
+          totalUzs: 190_000,
         });
         expect(created()).not.toHaveProperty('deliveryShipments');
         expect(created()).not.toHaveProperty('deliveryDestination');
@@ -436,27 +445,32 @@ describe('Courier delivery on an order', () => {
 
   it('what the order stores is what its Payme receipt adds up to', async () => {
     await service.createFromCart('usr_1', COURIER);
-    const { deliveryMethod, deliveryUzs, totalUzs } = created();
+    const { deliveryMethod, deliveryUzs, serviceFeeUzs, totalUzs } = created();
 
     prisma.order.findUnique.mockResolvedValue({
       id: 'ord_1',
       deliveryMethod,
       deliveryUzs: new Prisma.Decimal(deliveryUzs),
       totalUzs: new Prisma.Decimal(totalUzs),
-      serviceFeeUzs: new Prisma.Decimal(0),
+      serviceFeeUzs: new Prisma.Decimal(serviceFeeUzs),
       discountUzs: new Prisma.Decimal(0),
     });
     stubFiscalizableOrderLines(prisma);
 
-    const receipt = await fakeFiscal(prisma, {
-      MARKETPLACE_TIN: '123456789',
-    }).buildOrderDetail('ord_1');
+    const receipt = await fakeFiscal(prisma, FISCAL_TEST_ENV).buildOrderDetail(
+      'ord_1',
+    );
 
     const line = receipt.items.find(
       (item: { title: string }) => item.title === DELIVERY_TITLE,
     );
     expect(line).toMatchObject({ price: 3_750_000, count: 1 });
-    expect(receiptTotalTiyin(receipt.items)).toBe(22_250_000);
+    const fee = receipt.items.find(
+      (item: { title: string }) => item.title === SERVICE_FEE_TITLE,
+    );
+    expect(fee).toMatchObject({ price: 500_000, count: 1 });
+    // 185 000 + 37 500 + 5 000, the very total the order holds.
+    expect(receiptTotalTiyin(receipt.items)).toBe(22_750_000);
   });
 });
 

@@ -50,7 +50,10 @@ describe('cart presenter — sale pricing', () => {
     expect(out.items[0].price_uzs).toBe(100000);
     expect(out.items[0].sale).toBeNull();
     expect(out.subtotal_uzs).toBe(200000);
-    expect(out.total_uzs).toBe(200000);
+    // 200 000 of parts is the 10 000 tier: on top of the goods, never inside them.
+    expect(out.service_fee_uzs).toBe(10000);
+    expect(out.items[0].price_uzs).toBe(100000);
+    expect(out.total_uzs).toBe(210000);
   });
 
   it('applies the per-line sale to the unit price, subtotal, and total', () => {
@@ -63,7 +66,9 @@ describe('cart presenter — sale pricing', () => {
     expect(out.items[0].original_price_uzs).toBe(100000);
     expect(out.items[0].sale).toMatchObject({ id: 's1', discount_percent: 15 });
     expect(out.subtotal_uzs).toBe(170000);
-    expect(out.total_uzs).toBe(170000);
+    // The tier follows the sale price, which is what the parts cost.
+    expect(out.service_fee_uzs).toBe(5000);
+    expect(out.total_uzs).toBe(175000);
   });
 
   it('stacks a promo on top of the sale-adjusted subtotal', () => {
@@ -71,6 +76,9 @@ describe('cart presenter — sale pricing', () => {
     const lineDiscounts: CartLineDiscounts = new Map([['ci_1', sale15]]);
     const out = presentCart(c, lineDiscounts);
     expect(out.subtotal_uzs).toBe(170000); // sale-adjusted
-    expect(out.total_uzs).toBe(153000); // 170 000 − 17 000 promo
+    expect(out.discount_uzs).toBe(17000);
+    // A promo discounts the goods. The tier is read from the parts before it.
+    expect(out.service_fee_uzs).toBe(5000);
+    expect(out.total_uzs).toBe(158000); // 170 000 − 17 000 promo + 5 000 fee
   });
 });

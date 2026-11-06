@@ -78,7 +78,9 @@ describe('Cart smoke', () => {
       expect.objectContaining({ data: { promoCode: 'MATOR10', promoDiscountUzs: 18500 } }),
     );
     expect(res.promo).toEqual({ code: 'MATOR10', discountUzs: 18500, isValid: true });
-    expect(res.total_uzs).toBe(166500);
+    // 185 000 − 18 500 promo, plus the 5 000 fee of a 185 000 cart of parts.
+    expect(res.service_fee_uzs).toBe(5000);
+    expect(res.total_uzs).toBe(171500);
   });
 
   it('previews an invalid promo without persisting it', async () => {

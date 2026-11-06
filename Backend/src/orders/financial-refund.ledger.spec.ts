@@ -14,18 +14,27 @@ import {
 
 function txWith(state: {
   total?: number;
+  fee?: number;
   payments?: { id: string; amountUzs: number; status?: PaymentStatus }[];
-  entries?: { amountUzs: number; paymentId?: string }[];
+  entries?: { amountUzs: number; serviceFeeUzs?: number; paymentId?: string }[];
   timesPaid?: number;
 }) {
   return {
     order: {
-      findUnique: jest.fn().mockResolvedValue({ totalUzs: state.total ?? 100 }),
+      findUnique: jest.fn().mockResolvedValue({
+        totalUzs: state.total ?? 100,
+        serviceFeeUzs: state.fee ?? 0,
+      }),
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     },
     payment: { findMany: jest.fn().mockResolvedValue(state.payments ?? []) },
     financialRefund: {
-      findMany: jest.fn().mockResolvedValue(state.entries ?? []),
+      // The fee share is NOT NULL DEFAULT 0 in the table.
+      findMany: jest
+        .fn()
+        .mockResolvedValue(
+          (state.entries ?? []).map((e) => ({ serviceFeeUzs: 0, ...e })),
+        ),
     },
     orderStatusHistory: {
       count: jest.fn().mockResolvedValue(state.timesPaid ?? 0),
@@ -195,5 +204,73 @@ describe('settleRefundPosition', () => {
 
   it('uses the enum the registry stores', () => {
     expect(RefundMethod.PROVIDER).toBe('PROVIDER');
+  });
+});
+
+describe('readRefundPosition — the service fee', () => {
+  const fee = async (tx: ReturnType<typeof txWith>) => {
+    const p = await readRefundPosition(tx as never, 'ord_1');
+    return {
+      charged: Number(p.serviceFee.charged),
+      refunded: Number(p.serviceFee.refunded),
+      retained: Number(p.serviceFee.retained),
+      remaining: Number(p.remaining),
+    };
+  };
+
+  it('a partial refund that says nothing about the fee leaves it all with Mator', async () => {
+    const tx = txWith({
+      total: 645_000,
+      fee: 20_000,
+      payments: [{ id: 'pay_1', amountUzs: 645_000 }],
+      entries: [{ amountUzs: 100_000 }],
+    });
+
+    expect(await fee(tx)).toEqual({
+      charged: 20_000,
+      refunded: 0,
+      retained: 20_000,
+      remaining: 545_000,
+    });
+  });
+
+  it('a refund stating a share of the fee gives back that share', async () => {
+    const tx = txWith({
+      total: 645_000,
+      fee: 20_000,
+      payments: [{ id: 'pay_1', amountUzs: 645_000 }],
+      entries: [{ amountUzs: 120_000, serviceFeeUzs: 5_000 }],
+    });
+
+    expect(await fee(tx)).toMatchObject({ refunded: 5_000, retained: 15_000 });
+  });
+
+  it('once everything has gone back, so has the fee, even where no entry says so', async () => {
+    const tx = txWith({
+      total: 645_000,
+      fee: 20_000,
+      payments: [
+        { id: 'pay_1', amountUzs: 645_000, status: PaymentStatus.REFUNDED },
+      ],
+    });
+
+    expect(await fee(tx)).toEqual({
+      charged: 20_000,
+      refunded: 20_000,
+      retained: 0,
+      remaining: 0,
+    });
+  });
+
+  it('an order that took nothing holds no fee to keep or give back', async () => {
+    const tx = txWith({ total: 645_000, fee: 20_000 });
+
+    expect(await fee(tx)).toMatchObject({ charged: 0, retained: 0 });
+  });
+
+  it('a cash order paid by hand holds its fee too', async () => {
+    const tx = txWith({ total: 645_000, fee: 20_000, timesPaid: 1 });
+
+    expect(await fee(tx)).toMatchObject({ charged: 20_000, retained: 20_000 });
   });
 });

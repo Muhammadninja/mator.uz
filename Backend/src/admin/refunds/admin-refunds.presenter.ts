@@ -6,6 +6,7 @@ export const ADMIN_REFUND_SELECT = {
   orderId: true,
   paymentId: true,
   amountUzs: true,
+  serviceFeeUzs: true,
   method: true,
   source: true,
   reference: true,
@@ -49,6 +50,7 @@ export function presentRefund(r: RefundRow) {
       null,
     customerPhone: user.phoneE164,
     amount: Number(r.amountUzs),
+    serviceFee: Number(r.serviceFeeUzs),
     method: r.method.toLowerCase(),
     source: r.source.toLowerCase(),
     reference: r.reference,
@@ -68,5 +70,10 @@ export function presentPosition(p: RefundPosition) {
     received: Number(p.received),
     refunded: Number(p.refunded),
     remaining: Number(p.remaining),
+    serviceFee: {
+      charged: Number(p.serviceFee.charged),
+      refunded: Number(p.serviceFee.refunded),
+      retained: Number(p.serviceFee.retained),
+    },
   };
 }

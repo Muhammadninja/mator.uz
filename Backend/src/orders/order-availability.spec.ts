@@ -203,7 +203,7 @@ describe('availability at each step', () => {
               partId: null,
               offerId: 'soff_1',
               offer: { sellerTgId: '555' },
-              priceUzsSnapshot: 185000,
+              priceUzsSnapshot: 250000,
             }),
           ],
         }),
@@ -213,11 +213,12 @@ describe('availability at each step', () => {
         prisma.order.create.mock.calls[0][0].data;
       return { deliveryUzs, serviceFeeUzs, totalUzs, subtotalUzs };
     };
+    // The fee is the tariff's for 250 000 of parts, and not the 5 000 left in the environment.
     const GOODS_ONLY = {
       deliveryUzs: 0,
-      serviceFeeUzs: 0,
-      totalUzs: 185000,
-      subtotalUzs: 185000,
+      serviceFeeUzs: 10000,
+      totalUzs: 260000,
+      subtotalUzs: 250000,
     };
 
     beforeEach(() => {
@@ -249,7 +250,7 @@ describe('availability at each step', () => {
     });
 
     it.each(['payme', 'cash', 'terminal', undefined] as const)(
-      'pickup paid by %s holds only the goods, whatever the environment still says',
+      'pickup paid by %s holds the goods and the tariff’s fee, whatever the environment still says',
       async (payment_type) => {
         await orders(LEFTOVER).createFromCart('usr_1', {
           payment_type,

@@ -39,9 +39,9 @@ describe('Orders smoke', () => {
         id: 'ord_1',
         subtotalUzs: 370000,
         deliveryUzs: 0,
-        serviceFeeUzs: 0,
+        serviceFeeUzs: 10000,
         discountUzs: 0,
-        totalUzs: 370000,
+        totalUzs: 380000,
         items: [
           { partId: 'part_belt', serviceId: null, title: 'Timing belt', quantity: 2, priceUzs: 185000, lineTotalUzs: 370000, scheduledAt: null },
         ],
@@ -54,13 +54,20 @@ describe('Orders smoke', () => {
 
     expect(prisma.order.create).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ subtotalUzs: 370000, deliveryUzs: 0, serviceFeeUzs: 0, totalUzs: 370000 }),
+        // 370 000 of parts is the 10 000 tier.
+        data: expect.objectContaining({
+          subtotalUzs: 370000,
+          deliveryUzs: 0,
+          serviceFeeUzs: 10000,
+          totalUzs: 380000,
+        }),
       }),
     );
     expect(prisma.cartItem.deleteMany).toHaveBeenCalledWith({ where: { cartId: 'cart_1' } });
     expect(res.order_id).toBe('ord_1');
     expect(res.status).toBe('pending_payment');
-    expect(res.total_uzs).toBe(370000);
+    expect(res.service_fee_uzs).toBe(10000);
+    expect(res.total_uzs).toBe(380000);
   });
 
   it('embeds a promo discount into the ITEM prices, exact to the tiyin', async () => {
@@ -88,7 +95,7 @@ describe('Orders smoke', () => {
     await svc.createFromCart('usr_1', { cart_snapshot: { delivery_method: 'pickup' } } as any);
 
     const { data } = prisma.order.create.mock.calls[0][0];
-    const subtotal = 33333 * 3 + 100001; // 199 998
+    const subtotal = 33333 * 3 + 100001; // 200 000
     const discount = Math.round(subtotal * 0.1); // 20 000
     expect(data.subtotalUzs).toBe(subtotal);
     expect(data.discountUzs).toBe(discount);
@@ -99,8 +106,11 @@ describe('Orders smoke', () => {
     const goodsTiyin = lines.reduce((s, l) => s + Math.round(l.lineTotalUzs * 100), 0);
     expect(goodsTiyin).toBe(Math.round((subtotal - discount) * 100));
 
-    // …and the order's own total is those same goods.
-    expect(Math.round(data.totalUzs * 100)).toBe(goodsTiyin);
+    // …and the order's own total is those same goods plus the fee, which no line carries.
+    // The tier is read from the parts before the promo: 200 000 is the 10 000 tier.
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access -- `data` is the untyped mock's argument, as above
+    expect(data.serviceFeeUzs).toBe(10000);
+    expect(Math.round(data.totalUzs * 100)).toBe(goodsTiyin + 10000 * 100);
   });
 
   it('rejects checkout on an empty cart', async () => {

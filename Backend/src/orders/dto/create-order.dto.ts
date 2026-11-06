@@ -4,6 +4,7 @@ import {
   IsObject,
   IsIn,
   IsInt,
+  IsNumber,
   MaxLength,
   Min,
 } from 'class-validator';
@@ -50,4 +51,12 @@ export class CreateOrderDto {
   @IsString()
   @MaxLength(128)
   delivery_quote_id?: string;
+
+  // The total the buyer was shown and agreed to. Compared against the total computed for the
+  // order and never charged from: see OrdersService.createFromCart. There is no field for a
+  // service fee or a total to charge, because no figure from a client is ever charged.
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  confirmed_total_uzs?: number;
 }

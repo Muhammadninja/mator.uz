@@ -391,7 +391,9 @@ describe('Payments + webhooks smoke', () => {
         id: 'pay_1',
         providerPrepareId: '1700',
         status: 'PENDING',
+        amountUzs: 215000,
       });
+      settlement.markPaid.mockResolvedValue('paid');
 
       const res: any = await svc.complete(p);
       expect(res.error).toBe(0);

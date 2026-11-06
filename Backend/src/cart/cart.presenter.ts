@@ -1,5 +1,10 @@
 import { Prisma } from '@prisma/client';
 import { formatUzs } from '../catalog/parts/part.presenter';
+import {
+  PricedLine,
+  computeOrderCharges,
+  linesSubtotalUzs,
+} from '../orders/service-fee.util';
 import type { DiscountResult } from '../sales/discount.service';
 
 export const CART_INCLUDE = { items: { orderBy: { createdAt: 'asc' } } } satisfies Prisma.CartInclude;
@@ -18,16 +23,33 @@ function unitPrice(
   return d?.appliedSale ? d.finalPrice : Number(item.priceUzsSnapshot);
 }
 
+function pricedLines(
+  cart: CartWithItems,
+  lineDiscounts?: CartLineDiscounts,
+): PricedLine[] {
+  return cart.items.map((i) => ({
+    partId: i.partId,
+    offerId: i.offerId,
+    serviceId: i.serviceId,
+    unitPriceUzs: unitPrice(i, lineDiscounts),
+    quantity: i.quantity,
+  }));
+}
+
 export function cartSubtotal(
   cart: CartWithItems,
   lineDiscounts?: CartLineDiscounts,
 ): number {
-  return cart.items.reduce((sum, i) => sum + unitPrice(i, lineDiscounts) * i.quantity, 0);
+  return linesSubtotalUzs(pricedLines(cart, lineDiscounts));
 }
 
 export function presentCart(cart: CartWithItems, lineDiscounts?: CartLineDiscounts) {
-  const subtotal = cartSubtotal(cart, lineDiscounts);
-  const discount = cart.promoCode ? Number(cart.promoDiscountUzs ?? 0) : 0;
+  const charges = computeOrderCharges({
+    lines: pricedLines(cart, lineDiscounts),
+    discountUzs: cart.promoCode ? Number(cart.promoDiscountUzs ?? 0) : 0,
+    // Depends on the address and the sellers, so only a quote can state it.
+    deliveryUzs: 0,
+  });
   return {
     items: cart.items.map((i) => {
       const d = lineDiscounts?.get(i.id);
@@ -59,9 +81,17 @@ export function presentCart(cart: CartWithItems, lineDiscounts?: CartLineDiscoun
       };
     }),
     promo: cart.promoCode
-      ? { code: cart.promoCode, discountUzs: discount, isValid: true }
+      ? {
+          code: cart.promoCode,
+          discountUzs: charges.discountUzs,
+          isValid: true,
+        }
       : null,
-    subtotal_uzs: subtotal,
-    total_uzs: Math.max(0, subtotal - discount),
+    subtotal_uzs: charges.subtotalUzs,
+    discount_uzs: charges.discountUzs,
+    service_fee_uzs: charges.serviceFeeUzs,
+    // The goods after discount, plus the fee: all of it but delivery. Worked out afresh on
+    // every read and every change to the cart, so this is what an order placed now charges.
+    total_uzs: charges.totalUzs,
   };
 }

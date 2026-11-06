@@ -465,6 +465,99 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
     });
   });
 
+  /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-return -- jest matchers and the mocks are untyped */
+  describe('the service fee, from the order to what Payme is told', () => {
+    beforeEach(() => {
+      confirmed(subcategory('brake-discs', 'brake-system'));
+      part('p1', 'brake-discs');
+    });
+    /** The brief's order: 600 000 of parts, a 20 000 fee and 25 000 of delivery. */
+    const briefOrder = () =>
+      orderOf(
+        [
+          partLine('p1', {
+            quantity: 6,
+            priceUzs: 100000,
+            lineTotalUzs: 600000,
+          }),
+        ],
+        { deliveryUzs: 25000, serviceFeeUzs: 20000 },
+      );
+
+    it('Payme is asked for 645 000, and the receipt says what each part of it is', async () => {
+      const amount = briefOrder();
+      expect(amount).toBe(64_500_000);
+
+      const body = await check(amount);
+
+      expect(body.result.allow).toBe(true);
+      const { items } = body.result.detail;
+      expect(
+        items.map((i: any) => [i.title, i.code, i.price * i.count]),
+      ).toEqual([
+        ['Товар', SUB_MXIK, 60_000_000],
+        ['Доставка', DELIVERY_MXIK, 2_500_000],
+        ['Сервисный сбор', BASE_ENV.SERVICE_FEE_MXIK, 2_000_000],
+      ]);
+      expect(items[2]).toMatchObject({
+        count: 1,
+        package_code: BASE_ENV.SERVICE_FEE_PACKAGE_CODE,
+        vat_percent: 7,
+        commission_info: { tin: MATOR_TIN },
+      });
+      // The goods are sold under their dealer, and nothing of the fee is in their price.
+      expect(items[0]).toMatchObject({
+        price: 10_000_000,
+        count: 6,
+        commission_info: { tin: DEALER.tin },
+      });
+      expect(sumOf(items)).toBe(amount);
+    });
+
+    it('an amount without the fee is not this order’s amount', async () => {
+      const amount = briefOrder();
+      await check(amount);
+
+      expect(refusedCode(await checkAgain(amount - 2_000_000))).toBe(-31001);
+    });
+
+    it('Create binds the transaction at the whole amount, fee included', async () => {
+      const amount = briefOrder();
+      await check(amount);
+
+      const created = await rpc('CreateTransaction', {
+        id: 'pmt-fee',
+        time: Date.now(),
+        amount,
+        account: { order_id: 'ord_1' },
+      });
+
+      expect(created.result.state).toBe(1);
+      expect(invoices[0]).toMatchObject({
+        providerTransactionId: 'pmt-fee',
+        amountTiyin: BigInt(amount),
+      });
+      expect(invoices[0].fiscalSnapshot.totalTiyin).toBe(BigInt(amount));
+    });
+
+    it('an order with no fee has no fee line at all', async () => {
+      const body = await check(orderOf([partLine('p1')]));
+
+      expect(body.result.detail.items.map((i: any) => i.title)).toEqual([
+        'Товар',
+      ]);
+    });
+
+    it('a fee whose codes are delivery’s is refused, never declared as delivery', async () => {
+      env.SERVICE_FEE_MXIK = DELIVERY_MXIK;
+      env.SERVICE_FEE_PACKAGE_CODE = DELIVERY_UNIT_CODE;
+
+      expect(refusedCode(await check(briefOrder()))).toBe(REFUSED);
+    });
+  });
+
+  /* eslint-enable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-return */
+
   describe('2. a product on a category with no MXIK', () => {
     it('is refused before any transaction exists', async () => {
       category('brake-discs', 'brake-system');

@@ -287,12 +287,42 @@ missing (read the dry-run first: a missing row may be one an operator removed on
     never goes there. `DELIVERY_VAT_PERCENT` is no longer read.
   - Its tax id, `commission_info.tin`, is `MARKETPLACE_TIN`, Mator's 9-digit ИНН. Unset, or
     anything that cannot be that, including YandexGo's ИНН, the line is refused and the boot
-    log says so. Nothing is ever recorded in YandexGo's name.
+    log says so. Nothing is ever recorded in YandexGo's name. The service fee's line carries
+    the same tax id, under the same rule.
   - Goods are not Mator's: Mator is the platform, and each line carries its own dealer's tax
     id and VAT rate (`CatalogSeller.tin`, `vatPercent`; 12% at Driver's Village, as an
     operator enters it). No rate of Mator's reaches them, and no dealer's reaches delivery.
-- **Service fee.** Removed: new orders hold none, and `SERVICE_FEE_UZS` is no longer read. An
-  order placed earlier still has it in its total, so it needs its line, or is refused.
+- **Service fee.** Mator's own income, charged once per order by a flat tariff on the cost of
+  the parts (`src/orders/service-fee.util.ts`, the only copy of the tiers; the app shows what
+  the API answers): up to and including 100 000 nothing, then 5 000, from 200 000 10 000, from
+  500 000 20 000, from 1 000 000 30 000. Worked out from the server's cart on every cart read
+  and change, and written once, with the other charges, when the order is created
+  (`orders.service_fee_uzs`). Nothing in a request can state it: `confirmed_total_uzs` only
+  says what the buyer was shown, and a total that no longer matches is refused with
+  `ORDER_TOTAL_CHANGED`. `SERVICE_FEE_UZS` is not read.
+  - What it is computed from: catalog parts and sourced offers at their current (sale) price,
+    before a promo code. A promo discounts the goods only, never the fee or delivery. A
+    service booked beside the goods is not a part and adds nothing. Both are choices made in
+    this code, not stated in the tariff: see the release report.
+  - On the receipt it is a line of its own, titled `Сервисный сбор`, count 1, never inside a
+    goods price or delivery, and absent when the fee is 0. Its codes come from configuration,
+    because nobody has supplied them yet: `SERVICE_FEE_MXIK`, `SERVICE_FEE_PACKAGE_CODE` and
+    `SERVICE_FEE_VAT_PERCENT`. Delivery's codes are refused there, as is a malformed code, and
+    no rate is assumed. Its tax id is `MARKETPLACE_TIN`, like delivery's. With any of the four
+    missing, Payme refuses every order that carries a fee, and the boot log says so.
+  - Refunds: Payme can only reverse a whole transaction, fee included, and the refund registry
+    records that the fee went back. A refund recorded by hand states how much of it is the fee
+    (`serviceFeeUzs`, 0 unless stated): a partial refund leaves the fee with Mator, a refund
+    reaching into the fee has to say so, and it can never be given back twice. The fee is
+    never recomputed for what remains of an order.
+- **Whose money an order holds.** The buyer pays Mator the whole total, and Mator settles with
+  the sellers. Each order line records the storefront that sold it (`order_items.seller_id`),
+  frozen when the order is placed, and `src/orders/order-settlement.ts` sums what each seller
+  is owed from their own lines. The fee and delivery are separate columns and Mator's lines on
+  the receipt, so they are in no seller's figure, by construction. A promo code is spread into
+  the line prices, so a seller's figure is net of it: whether the seller or Mator bears that
+  discount is an open business decision. Nothing pays a seller yet, and refunds are not taken
+  off a seller's figure, because the registry does not say which seller's goods went back.
 - **Services.** A service line takes its codes from `ProviderServiceOffering.categoryId`, under
   the same resolver and confirmation, and its tax data from `ServiceProvider.tin` /
   `vatPercent`. Nothing writes those columns yet, so every service line is refused.

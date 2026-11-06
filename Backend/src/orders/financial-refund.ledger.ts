@@ -23,6 +23,15 @@ export interface RefundPosition {
   remaining: Prisma.Decimal;
   /** The payment the money came through, or null when no payment row exists. */
   paymentId: string | null;
+  /** The service fee inside those figures: Mator's income, unless it goes back. */
+  serviceFee: {
+    /** What the order took as a fee. Zero when it took nothing. */
+    charged: Prisma.Decimal;
+    /** What has gone back to the buyer. */
+    refunded: Prisma.Decimal;
+    /** What stays with Mator so far, which is also what could still go back. */
+    retained: Prisma.Decimal;
+  };
 }
 
 const sum = (amounts: Prisma.Decimal.Value[]) =>
@@ -30,6 +39,8 @@ const sum = (amounts: Prisma.Decimal.Value[]) =>
     (total, amount) => total.add(amount),
     new Prisma.Decimal(0),
   );
+
+const smaller = (a: Prisma.Decimal, b: Prisma.Decimal) => (a.lt(b) ? a : b);
 
 /**
  * The arithmetic of the registry. Callers pass their transaction and hold the
@@ -50,7 +61,7 @@ export async function readRefundPosition(
   const [order, payments, entries, timesPaid] = await Promise.all([
     tx.order.findUnique({
       where: { id: orderId },
-      select: { totalUzs: true },
+      select: { totalUzs: true, serviceFeeUzs: true },
     }),
     tx.payment.findMany({
       where: { orderId, status: { in: MONEY_TAKEN } },
@@ -59,7 +70,7 @@ export async function readRefundPosition(
     }),
     tx.financialRefund.findMany({
       where: { orderId, voidedAt: null },
-      select: { amountUzs: true, paymentId: true },
+      select: { amountUzs: true, serviceFeeUzs: true, paymentId: true },
     }),
     tx.orderStatusHistory.count({
       where: { orderId, status: OrderStatus.PAID },
@@ -85,15 +96,31 @@ export async function readRefundPosition(
     ...reversedWithoutEntry,
   ]);
   const left = received.sub(refunded);
+  const remaining = left.gt(0) ? left : new Prisma.Decimal(0);
+
+  // The fee stays where it is unless a refund says otherwise, and a partial refund does not
+  // recompute it: it was fixed when the order was placed. Once everything has gone back the
+  // fee has too, by arithmetic, even for a reversal with no entry to say so.
+  const feeCharged = new Prisma.Decimal(
+    received.gt(0) ? (order?.serviceFeeUzs ?? 0) : 0,
+  );
+  const feeRefunded = remaining.lte(0)
+    ? feeCharged
+    : smaller(feeCharged, sum(entries.map((e) => e.serviceFeeUzs)));
 
   return {
     received,
     refunded,
-    remaining: left.gt(0) ? left : new Prisma.Decimal(0),
+    remaining,
     paymentId:
       payments.find((p) => p.status === PaymentStatus.PAID)?.id ??
       payments[0]?.id ??
       null,
+    serviceFee: {
+      charged: feeCharged,
+      refunded: feeRefunded,
+      retained: feeCharged.sub(feeRefunded),
+    },
   };
 }
 
@@ -137,7 +164,7 @@ export async function recordProviderRefund(
 ): Promise<void> {
   const active = await tx.financialRefund.findMany({
     where: { paymentId: payment.id, voidedAt: null },
-    select: { id: true, amountUzs: true, method: true },
+    select: { id: true, amountUzs: true, serviceFeeUzs: true, method: true },
   });
 
   const byProvider = active
@@ -154,12 +181,24 @@ export async function recordProviderRefund(
     sum(active.map((entry) => entry.amountUzs)),
   );
   if (unaccounted.gt(0)) {
+    // A provider reversal is of the whole payment, so whatever of the fee no entry has
+    // accounted for yet goes back with it.
+    const order = await tx.order.findUnique({
+      where: { id: payment.orderId },
+      select: { serviceFeeUzs: true },
+    });
+    const feeLeft = new Prisma.Decimal(order?.serviceFeeUzs ?? 0).sub(
+      sum(active.map((entry) => entry.serviceFeeUzs)),
+    );
     await tx.financialRefund.create({
       data: {
         id: prefixedId(IdPrefix.FINANCIAL_REFUND),
         orderId: payment.orderId,
         paymentId: payment.id,
         amountUzs: unaccounted,
+        serviceFeeUzs: feeLeft.gt(0)
+          ? smaller(feeLeft, unaccounted)
+          : new Prisma.Decimal(0),
         method: RefundMethod.PROVIDER,
         source: RefundSource.PROVIDER_CALLBACK,
         reference: payment.providerTransactionId ?? payment.id,

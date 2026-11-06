@@ -290,8 +290,11 @@ describe('delivery’s fiscal codes', () => {
     expect(filesMatching(/\bdeliveryUzs\b/, ['src', 'scripts']).sort()).toEqual(
       [
         'src/admin/orders/admin-orders.presenter.ts', // shows it
+        'src/cart/cart.presenter.ts', // states none: only a quote prices delivery
+        'src/orders/order-settlement.ts', // keeps it out of what a seller is owed
         'src/orders/order.presenter.ts', // shows it
         'src/orders/orders.service.ts', // the one writer, at creation
+        'src/orders/service-fee.util.ts', // adds it to the total, never to the fee
         'src/orders/webhooks/payme-fiscal.service.ts', // reads it for the receipt
       ],
     );

@@ -27,6 +27,18 @@ export class RecordRefundDto {
   @Max(999_999_999_999.99)
   amountUzs!: number;
 
+  @ApiPropertyOptional({
+    description:
+      'How much of that is the service fee going back. None unless stated: a partial refund ' +
+      'leaves the fee with Mator. A refund reaching into the fee has to say so.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Max(999_999_999_999.99)
+  serviceFeeUzs?: number;
+
   @ApiProperty({ enum: RefundMethod })
   @IsEnum(RefundMethod)
   method!: RefundMethod;

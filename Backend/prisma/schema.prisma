@@ -1709,6 +1709,9 @@ model Order {
   // address row can change or be deleted later, and this does not. Never served to the
   // buyer, cleared on account deletion.
   deliveryDestination Json?              @map("delivery_destination")
+  // Mator's service fee, written once with the rest of the charges (see service-fee.util).
+  // Part of totalUzs, and of nothing else: not of a line price, of deliveryUzs, or of what a
+  // seller is owed.
   serviceFeeUzs     Decimal              @default(0) @map("service_fee_uzs") @db.Decimal(14, 2)
   discountUzs       Decimal              @default(0) @map("discount_uzs") @db.Decimal(14, 2)
   totalUzs          Decimal              @map("total_uzs") @db.Decimal(14, 2)
@@ -1767,6 +1770,10 @@ model FinancialRefund {
   // Null when no payment row exists, as for cash and terminal orders.
   paymentId           String?      @map("payment_id") @db.VarChar(64)
   amountUzs           Decimal      @map("amount_uzs") @db.Decimal(14, 2)
+  // How much of amountUzs is the service fee going back. The fee is Mator's income and
+  // nobody else's, so what stays of it can only be told if each refund says this. See
+  // readRefundPosition.
+  serviceFeeUzs       Decimal      @default(0) @map("service_fee_uzs") @db.Decimal(14, 2)
   method              RefundMethod
   source              RefundSource @default(MANUAL)
   // The document behind it: a provider transaction id, a cabinet record, a receipt.
@@ -1809,6 +1816,11 @@ model OrderItem {
   // ids, like partId: the ticket and its offers can be deleted, the order cannot.
   offerId         String? @map("offer_id") @db.VarChar(64)
   offerSellerTgId String? @map("offer_seller_tg_id")
+  // The storefront (CatalogSeller.id) that sold this line, as it stood when the order was
+  // placed: a part can be delisted or change hands afterwards, and what is owed for this
+  // sale cannot. A plain id, for the same reason as partId. Null on a service line, whose
+  // provider is providerId, and when no seller could be found.
+  sellerId     String?   @map("seller_id") @db.VarChar(64)
   title        String    @db.VarChar(255)
   quantity     Int       @default(1)
   priceUzs     Decimal   @map("price_uzs") @db.Decimal(14, 2)

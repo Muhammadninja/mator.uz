@@ -7,7 +7,7 @@ import {
   ConflictException,
   NotFoundException,
 } from '@nestjs/common';
-import { AdminAuditAction, RefundMethod } from '@prisma/client';
+import { AdminAuditAction, Prisma, RefundMethod } from '@prisma/client';
 import { AdminRefundsService } from './admin-refunds.service';
 import { RecordRefundDto } from './dto/record-refund.dto';
 
@@ -16,6 +16,9 @@ const ACTOR = { id: 'adm_1', email: 'mgr@mator.test', name: 'Mira' };
 function build(state: {
   received?: number;
   refunded?: number;
+  /** The order's service fee, and how much of it entries already gave back. */
+  fee?: number;
+  feeRefunded?: number;
   duplicate?: boolean;
   orderExists?: boolean;
   entry?: Record<string, unknown> | null;
@@ -25,6 +28,7 @@ function build(state: {
     orderId: 'ord_1',
     paymentId: 'pay_1',
     amountUzs: 100,
+    serviceFeeUzs: 0,
     method: RefundMethod.PROVIDER,
     source: 'MANUAL',
     reference: 'TX-1',
@@ -52,9 +56,10 @@ function build(state: {
       .fn()
       .mockResolvedValue(state.orderExists === false ? [] : [{ id: 'ord_1' }]),
     order: {
-      findUnique: jest
-        .fn()
-        .mockResolvedValue({ totalUzs: state.received ?? 0 }),
+      findUnique: jest.fn().mockResolvedValue({
+        totalUzs: state.received ?? 0,
+        serviceFeeUzs: state.fee ?? 0,
+      }),
       update: jest.fn(),
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     },
@@ -69,11 +74,16 @@ function build(state: {
     },
     orderStatusHistory: { count: jest.fn().mockResolvedValue(0) },
     financialRefund: {
-      findMany: jest
-        .fn()
-        .mockResolvedValue(
-          state.refunded ? [{ amountUzs: state.refunded }] : [],
-        ),
+      findMany: jest.fn().mockResolvedValue(
+        state.refunded
+          ? [
+              {
+                amountUzs: state.refunded,
+                serviceFeeUzs: state.feeRefunded ?? 0,
+              },
+            ]
+          : [],
+      ),
       findFirst: jest
         .fn()
         .mockResolvedValue(state.duplicate ? { id: 'rfd_0' } : null),
@@ -317,3 +327,118 @@ describe('AdminRefundsService.voidEntry', () => {
     ).rejects.toBeInstanceOf(NotFoundException);
   });
 });
+
+/* eslint-disable @typescript-eslint/no-unsafe-assignment -- jest matchers are typed `any` */
+describe('AdminRefundsService.record — the service fee', () => {
+  // The brief's order: 600 000 of parts, a 20 000 fee, 25 000 of delivery.
+  const PAID = { received: 645_000, fee: 20_000 };
+
+  it('a partial refund of goods leaves the fee with Mator, unless it says otherwise', async () => {
+    const { service, tx } = build(PAID);
+
+    await service.record('ord_1', dto({ amountUzs: 100_000 }));
+
+    expect(tx.financialRefund.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          amountUzs: new Prisma.Decimal(100_000),
+          serviceFeeUzs: new Prisma.Decimal(0),
+        }),
+      }),
+    );
+  });
+
+  it('records the share of the fee a refund gives back, in the entry and its audit', async () => {
+    const { service, tx, audit } = build(PAID);
+
+    await service.record(
+      'ord_1',
+      dto({ amountUzs: 120_000, serviceFeeUzs: 20_000 }),
+    );
+
+    expect(tx.financialRefund.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          serviceFeeUzs: new Prisma.Decimal(20_000),
+        }),
+      }),
+    );
+    expect(audit.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        newValues: expect.objectContaining({ serviceFeeUzs: '20000.00' }),
+      }),
+      tx,
+    );
+  });
+
+  it('a full refund has to state the whole fee: it is part of what went back', async () => {
+    const { service, tx } = build(PAID);
+
+    expect(
+      await conflictCode(service.record('ord_1', dto({ amountUzs: 645_000 }))),
+    ).toBe('REFUND_FEE_NOT_STATED');
+    expect(tx.financialRefund.create).not.toHaveBeenCalled();
+
+    await service.record(
+      'ord_1',
+      dto({ amountUzs: 645_000, serviceFeeUzs: 20_000 }),
+    );
+    expect(tx.financialRefund.create).toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      'more of the fee than the refund',
+      { amountUzs: 10_000, serviceFeeUzs: 15_000 },
+    ],
+    [
+      'more of the fee than the order holds',
+      { amountUzs: 100_000, serviceFeeUzs: 25_000 },
+    ],
+  ])('refuses %s', async (_, over) => {
+    const { service, tx } = build(PAID);
+
+    expect(await conflictCode(service.record('ord_1', dto(over)))).toBe(
+      'REFUND_FEE_EXCEEDS_CHARGED',
+    );
+    expect(tx.financialRefund.create).not.toHaveBeenCalled();
+  });
+
+  it('a fee given back once cannot be given back again', async () => {
+    const { service } = build({
+      ...PAID,
+      refunded: 20_000,
+      feeRefunded: 20_000,
+    });
+
+    expect(
+      await conflictCode(
+        service.record(
+          'ord_1',
+          dto({ amountUzs: 5_000, serviceFeeUzs: 5_000 }),
+        ),
+      ),
+    ).toBe('REFUND_FEE_EXCEEDS_CHARGED');
+  });
+
+  it('shows where the fee stands, with the order’s other figures', async () => {
+    const { service, tx } = build({ ...PAID, refunded: 100_000 });
+    // The listing reads full rows; the position reads amounts only.
+    tx.financialRefund.findMany.mockImplementation(
+      ({ select }: { select: Record<string, unknown> }) =>
+        Promise.resolve(
+          'order' in select ? [] : [{ amountUzs: 100_000, serviceFeeUzs: 0 }],
+        ),
+    );
+
+    const res = await service.forOrder('ord_1');
+
+    expect(res.data).toMatchObject({
+      received: 645_000,
+      refunded: 100_000,
+      remaining: 545_000,
+      serviceFee: { charged: 20_000, refunded: 0, retained: 20_000 },
+    });
+  });
+});
+/* eslint-enable @typescript-eslint/no-unsafe-assignment */

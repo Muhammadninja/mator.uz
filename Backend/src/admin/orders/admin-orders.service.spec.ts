@@ -575,3 +575,128 @@ describe('ListAdminOrdersQueryDto validation', () => {
     expect(errors[0].property).toBe('order');
   });
 });
+
+describe('AdminOrdersService — Mator’s money and the sellers’', () => {
+  const config = { get: () => undefined } as never;
+
+  it('order detail: each charge apart, and what each seller is owed without the fee or delivery', async () => {
+    const order = {
+      findUnique: jest.fn().mockResolvedValue(
+        detailRow({
+          subtotalUzs: 600_000,
+          discountUzs: 0,
+          serviceFeeUzs: 20_000,
+          deliveryUzs: 25_000,
+          totalUzs: 645_000,
+          items: [
+            {
+              id: 'oi_1',
+              partId: 'part_1',
+              title: 'Колодки',
+              quantity: 1,
+              priceUzs: 350_000,
+              lineTotalUzs: 350_000,
+              sellerId: 'dealer_a',
+              providerId: null,
+            },
+            {
+              id: 'oi_2',
+              partId: 'part_2',
+              title: 'Фильтр',
+              quantity: 1,
+              priceUzs: 250_000,
+              lineTotalUzs: 250_000,
+              sellerId: 'dealer_b',
+              providerId: null,
+            },
+          ],
+        }),
+      ),
+    };
+    const catalogSeller = {
+      findMany: jest.fn().mockResolvedValue([
+        { id: 'dealer_a', name: 'Driver’s Village' },
+        { id: 'dealer_b', name: 'Avto Ehtiyot' },
+      ]),
+    };
+    const service = new AdminOrdersService(
+      { order, catalogSeller } as never,
+      config,
+    );
+
+    const { data } = await service.getOne('ord_1');
+
+    expect(data).toMatchObject({
+      itemsSubtotal: 600_000,
+      discount: 0,
+      serviceFee: 20_000,
+      deliveryFee: 25_000,
+      totalAmount: 645_000,
+      settlement: {
+        sellers: [
+          { sellerId: 'dealer_a', name: 'Driver’s Village', amount: 350_000 },
+          { sellerId: 'dealer_b', name: 'Avto Ehtiyot', amount: 250_000 },
+        ],
+        providers: [],
+        unattributed: 0,
+        matorServiceFee: 20_000,
+        delivery: 25_000,
+        total: 645_000,
+      },
+    });
+    expect(catalogSeller.findMany).toHaveBeenCalledWith({
+      where: { id: { in: ['dealer_a', 'dealer_b'] } },
+      select: { id: true, name: true },
+    });
+  });
+
+  it('dashboard totals: the fee Mator kept, net of what refunds gave back', async () => {
+    const prisma = {
+      order: {
+        groupBy: jest.fn().mockResolvedValue([
+          {
+            status: OrderStatus.DELIVERED,
+            _count: { _all: 2 },
+            _sum: { totalUzs: 1_290_000, serviceFeeUzs: 40_000 },
+          },
+          {
+            status: OrderStatus.PENDING_PAYMENT,
+            _count: { _all: 1 },
+            _sum: { totalUzs: 155_000, serviceFeeUzs: 5_000 },
+          },
+        ]),
+        count: jest.fn().mockResolvedValue(0),
+      },
+      financialRefund: {
+        aggregate: jest
+          .fn()
+          .mockResolvedValue({ _sum: { serviceFeeUzs: 20_000 } }),
+      },
+    };
+    const service = new AdminOrdersService(prisma as never, config);
+
+    const { data } = await service.summary();
+
+    // An unpaid order earns nothing yet; a returned fee is no longer Mator's.
+    expect(data).toMatchObject({
+      revenueUzs: 1_290_000,
+      serviceFeeRevenueUzs: 20_000,
+    });
+    expect(prisma.financialRefund.aggregate).toHaveBeenCalledWith({
+      where: {
+        voidedAt: null,
+        order: {
+          status: {
+            in: [
+              OrderStatus.PAID,
+              OrderStatus.PROCESSING,
+              OrderStatus.SHIPPED,
+              OrderStatus.DELIVERED,
+            ],
+          },
+        },
+      },
+      _sum: { serviceFeeUzs: true },
+    });
+  });
+});

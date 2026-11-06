@@ -142,12 +142,22 @@ export class AdminOrdersService {
       select: ADMIN_ORDER_DETAIL_SELECT,
     });
     if (!order) throw new NotFoundException('Order not found');
+    const sellerIds = [
+      ...new Set(order.items.flatMap((it) => it.sellerId ?? [])),
+    ];
+    const sellers = sellerIds.length
+      ? await this.prisma.catalogSeller.findMany({
+          where: { id: { in: sellerIds } },
+          select: { id: true, name: true },
+        })
+      : [];
     return {
       success: true,
       data: presentAdminOrderDetail(
         order,
         isOverOfflineSla(order, new Date(), this.offlinePolicy),
         isPastOperatorWarning(order, new Date(), this.offlinePolicy),
+        new Map(sellers.map((seller) => [seller.id, seller.name])),
       ),
     };
   }
@@ -224,25 +234,38 @@ export class AdminOrdersService {
   }
 
   private async statusTotals() {
-    const rows = await this.prisma.order.groupBy({
-      by: ['status'],
-      _count: { _all: true },
-      _sum: { totalUzs: true },
-    });
+    const [rows, feesReturned] = await Promise.all([
+      this.prisma.order.groupBy({
+        by: ['status'],
+        _count: { _all: true },
+        _sum: { totalUzs: true, serviceFeeUzs: true },
+      }),
+      // The share of the fee refunds gave back on orders still counted below. An order that
+      // left those statuses took its whole fee out of the figure with it.
+      this.prisma.financialRefund.aggregate({
+        where: {
+          voidedAt: null,
+          order: { status: { in: REVENUE_STATUSES } },
+        },
+        _sum: { serviceFeeUzs: true },
+      }),
+    ]);
     const counts = Object.fromEntries(
       ORDER_STATUSES.map((status) => [status, 0]),
     ) as Record<(typeof ORDER_STATUSES)[number], number>;
     let totalOrders = 0;
     let revenueUzs = 0;
+    let serviceFeeRevenueUzs = -Number(feesReturned._sum.serviceFeeUzs ?? 0);
     for (const row of rows) {
       const key = row.status.toLowerCase() as keyof typeof counts;
       counts[key] = row._count._all;
       totalOrders += row._count._all;
       if (REVENUE_STATUSES.includes(row.status)) {
         revenueUzs += Number(row._sum.totalUzs ?? 0);
+        serviceFeeRevenueUzs += Number(row._sum.serviceFeeUzs ?? 0);
       }
     }
-    return { counts, totalOrders, revenueUzs };
+    return { counts, totalOrders, revenueUzs, serviceFeeRevenueUzs };
   }
 
   /**

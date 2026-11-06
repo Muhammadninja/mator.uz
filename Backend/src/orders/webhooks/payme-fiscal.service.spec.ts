@@ -1534,13 +1534,25 @@ describe('platform charge lines', () => {
     expect(detail.items[0].commission_info).toEqual({ tin: '301234567' });
   });
 
-  it('omits commission_info on a service fee when no marketplace tin is set', async () => {
+  it('refuses a service fee line without Mator’s tax id: the fee is Mator’s income, never unnamed', async () => {
     stubOrder({ deliveryUzs: 0, serviceFeeUzs: 5000 });
-    const detail = await withCodes({ MARKETPLACE_TIN: '' }).buildOrderDetail(
-      'ord_1',
-    );
-    expect(detail.items[1].title).toBe('Сервисный сбор');
-    expect(detail.items[1]).not.toHaveProperty('commission_info');
+
+    await expect(
+      withCodes({ MARKETPLACE_TIN: '' }).buildOrderDetail('ord_1'),
+    ).rejects.toMatchObject({
+      gaps: [expect.stringContaining('MARKETPLACE_TIN')],
+    });
+  });
+
+  it('names Mator on the service fee line, and the dealer on the goods', async () => {
+    stubOrder({ deliveryUzs: 0, serviceFeeUzs: 5000 });
+    const detail = await withCodes().buildOrderDetail('ord_1');
+
+    expect(detail.items[1]).toMatchObject({
+      title: 'Сервисный сбор',
+      commission_info: { tin: '123456789' },
+    });
+    expect(detail.items[0].commission_info).toEqual({ tin: '301234567' });
   });
 
   it('adds a service-fee line when the order carries one', async () => {
@@ -1577,6 +1589,81 @@ describe('platform charge lines', () => {
       ],
     });
   });
+
+  /* eslint-disable @typescript-eslint/no-unsafe-argument -- the Prisma double is typed `any` */
+  describe('the service fee’s own line', () => {
+    it('is a line of its own, at the stored fee, count 1, under the fee’s codes and Mator’s tax id', async () => {
+      stubOrder({ deliveryUzs: 25000, serviceFeeUzs: 20000 });
+      const detail = await withCodes().buildOrderDetail('ord_1');
+
+      const fee = detail.items.find((i) => i.title === SERVICE_FEE_TITLE);
+      expect(fee).toEqual({
+        title: 'Сервисный сбор',
+        price: 2_000_000,
+        count: 1,
+        code: FISCAL_TEST_ENV.SERVICE_FEE_MXIK,
+        package_code: FISCAL_TEST_ENV.SERVICE_FEE_PACKAGE_CODE,
+        vat_percent: 0,
+        commission_info: { tin: FISCAL_TEST_ENV.MARKETPLACE_TIN },
+      });
+      // The goods and delivery lines are what they would be without it.
+      expect(detail.items[0].price).toBe(15_000_000);
+      expect(detail.items[1]).toMatchObject({
+        title: 'Доставка',
+        price: 2_500_000,
+      });
+    });
+
+    it('is absent when the order carries no fee: no line for nothing', async () => {
+      stubOrder({ deliveryUzs: 25000, serviceFeeUzs: 0 });
+      const detail = await withCodes().buildOrderDetail('ord_1');
+
+      expect(detail.items.map((i) => i.title)).toEqual(['Колодки', 'Доставка']);
+    });
+
+    it.each([
+      ['delivery’s MXIK', { SERVICE_FEE_MXIK: '10112006002000000' }, 'MXIK'],
+      [
+        'delivery’s unit code',
+        { SERVICE_FEE_PACKAGE_CODE: '1542432' },
+        'package code',
+      ],
+      ['a malformed MXIK', { SERVICE_FEE_MXIK: '1030700100' }, 'MXIK'],
+      [
+        'a malformed unit code',
+        { SERVICE_FEE_PACKAGE_CODE: 'шт' },
+        'package code',
+      ],
+    ])(
+      'is refused under %s: the fee is never declared as delivery or as nothing',
+      async (_, env, what) => {
+        stubOrder({ deliveryUzs: 25000, serviceFeeUzs: 5000 });
+
+        await expect(
+          withCodes(env).buildOrderDetail('ord_1'),
+        ).rejects.toMatchObject({
+          gaps: [expect.stringContaining(`no ${what} is configured`)],
+        });
+      },
+    );
+
+    it('says so at boot when its codes or rate are missing', () => {
+      const warn = jest
+        .spyOn(Logger.prototype, 'warn')
+        .mockImplementation(() => undefined);
+
+      new PaymeFiscalService(
+        prisma,
+        fakeConfig({ MARKETPLACE_TIN: '123456789' }),
+      ).onModuleInit();
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('SERVICE_FEE_MXIK'),
+      );
+      warn.mockRestore();
+    });
+  });
+
+  /* eslint-enable @typescript-eslint/no-unsafe-argument */
 
   // ── the sum Payme itself checks ────────────────────────────────────────────
   it('makes products + delivery + fee add up to the charged amount', async () => {

@@ -62,12 +62,11 @@ export interface PaymeFiscalItem {
    * The seller's tax id, so each line settles to the right merchant. Mator is the
    * platform: goods are sold under their dealer's tax id and VAT rate, never Mator's.
    *
-   * OPTIONAL, and present on every PRODUCT line and on delivery: a platform line is the
-   * marketplace's own service, so it carries the marketplace TIN. Delivery is refused
-   * without it; the service fee omits the field when none is configured. A borrowed TIN
+   * On every line. A platform line (delivery, the service fee) is the marketplace's own
+   * service, so it carries the marketplace TIN and is refused without it. A borrowed TIN
    * on a platform line would attribute the marketplace's revenue to someone else.
    */
-  commission_info?: { tin: string };
+  commission_info: { tin: string };
 }
 
 /**
@@ -127,10 +126,8 @@ export interface FiscalFeeSource {
   codes: { mxik: string | null; packageCode: string | null };
   /** Null when no valid rate is configured, which refuses the line. */
   vatPercent: number | null;
-  /** The MARKETPLACE's tax id, or null when none is configured. */
+  /** The MARKETPLACE's tax id, or null when none is configured, which refuses the line. */
   marketplaceTin: string | null;
-  /** The line cannot go without that tax id, or it omits commission_info entirely. */
-  tinRequired: boolean;
 }
 
 /**
@@ -198,7 +195,7 @@ export function buildFiscalItem(line: FiscalLineSource): FiscalLineResult {
  * delivery has fixed system codes and a fixed rate, the service fee's come from
  * configuration, and their `commission_info` is the marketplace's TIN.
  *
- * Reports a gap instead of guessing when a code, the VAT rate or a required TIN is unset:
+ * Reports a gap instead of guessing when a code, the VAT rate or the TIN is unset:
  * a charge fiscalized under a code that describes something else, or a rate nobody
  * stated, is worse than a refused checkout.
  */
@@ -211,7 +208,7 @@ export function buildFeeItem(fee: FiscalFeeSource): FiscalLineResult {
   if (fee.vatPercent === null) {
     gaps.push(`${fee.reference}: no valid VAT percentage is configured`);
   }
-  if (fee.tinRequired && !fee.marketplaceTin) {
+  if (!fee.marketplaceTin) {
     gaps.push(
       `${fee.reference}: MARKETPLACE_TIN does not hold Mator's 9-digit tax id`,
     );
@@ -222,20 +219,18 @@ export function buildFeeItem(fee: FiscalFeeSource): FiscalLineResult {
     ok: true,
     // Always exactly one line: a fee is a single charge of count 1, so it has no
     // per-unit remainder to split.
-    items: [{
-      title: fee.title,
-      // The whole charge is one line of count 1 — a fee has no unit price.
-      price: Math.round(fee.amountUzs * 100),
-      count: 1,
-      code: fee.codes.mxik as string,
-      package_code: fee.codes.packageCode as string,
-      vat_percent: fee.vatPercent as number,
-      // Omitted (not blanked) on a line that may go without one: Payme then attributes
-      // it to the merchant account itself.
-      ...(fee.marketplaceTin
-        ? { commission_info: { tin: fee.marketplaceTin } }
-        : {}),
-    }],
+    items: [
+      {
+        title: fee.title,
+        // The whole charge is one line of count 1 — a fee has no unit price.
+        price: Math.round(fee.amountUzs * 100),
+        count: 1,
+        code: fee.codes.mxik as string,
+        package_code: fee.codes.packageCode as string,
+        vat_percent: fee.vatPercent as number,
+        commission_info: { tin: fee.marketplaceTin as string },
+      },
+    ],
   };
 }
 
