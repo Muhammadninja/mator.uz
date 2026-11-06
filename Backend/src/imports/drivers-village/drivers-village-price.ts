@@ -108,6 +108,9 @@ export type SourcePrice =
  * is: a price in thousands may carry up to 5 decimals (×1000 shifts 3 of them
  * into the integer part), a price in UZS up to 2. Anything else — empty, zero,
  * negative, malformed, too precise, too large — is a reason, not a value.
+ *
+ * The 1C price is цена с учётом НДС: VAT is already inside it, so the scale is
+ * the only thing ever applied. No VAT is added, here or anywhere downstream.
  */
 export function normalizeSourcePrice(
   raw: string,

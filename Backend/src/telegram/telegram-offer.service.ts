@@ -121,7 +121,8 @@ export class TelegramOfferService {
     this.setSession(from.id, { ticketId, partName, step: 'PRICE', images: [] });
     await ctx.reply(
       `Заявка на запчасть: ${partName ?? 'запчасть'}\n\n` +
-        'Укажите вашу цену в сумах (например 250000):',
+        'Укажите вашу цену в сумах с учётом НДС, если вы его платите: ' +
+        'это итоговая цена для покупателя (например 250000):',
     );
     return true;
   }
@@ -145,7 +146,7 @@ export class TelegramOfferService {
       s.price = price;
       s.step = 'CONDITION';
       await ctx.reply(
-        `Цена: ${this.formatPrice(price)} сум.\nСостояние детали?`,
+        `Цена с учётом НДС: ${this.formatPrice(price)} сум.\nСостояние детали?`,
         this.conditionKeyboard(),
       );
       return true;

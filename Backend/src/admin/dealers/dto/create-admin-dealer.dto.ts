@@ -4,7 +4,6 @@ import {
   IsBoolean,
   IsIn,
   IsInt,
-  IsNumber,
   IsOptional,
   IsString,
   Matches,
@@ -12,11 +11,7 @@ import {
   MaxLength,
   Min,
 } from 'class-validator';
-import {
-  MAX_VAT_PERCENT,
-  MIN_VAT_PERCENT,
-  TIN_PATTERN,
-} from '../../../common/fiscal.util';
+import { ALLOWED_VAT_PERCENTS, TIN_PATTERN } from '../../../common/fiscal.util';
 import { ADMIN_DEALER_STATUSES } from './list-admin-dealers.query.dto';
 // `import type` is required: with isolatedModules + emitDecoratorMetadata, a
 // type used in a decorated signature must not be emitted as a value import.
@@ -111,16 +106,18 @@ export class CreateAdminDealerDto {
   tin?: string;
 
   @ApiPropertyOptional({
-    description: 'Ставка НДС in percent (e.g. 0 or 12).',
+    description:
+      'Ставка НДС in percent: 12 for a VAT payer, 0 for a seller who is not one ' +
+      '(turnover tax). No other rate is accepted. Goes to Payme as vat_percent and ' +
+      'never changes a price: catalog prices already include VAT.',
     example: 12,
-    minimum: MIN_VAT_PERCENT,
-    maximum: MAX_VAT_PERCENT,
+    enum: [...ALLOWED_VAT_PERCENTS],
   })
   @IsOptional()
   @Type(() => Number)
-  @IsNumber({ maxDecimalPlaces: 2 })
-  @Min(MIN_VAT_PERCENT)
-  @Max(MAX_VAT_PERCENT)
+  @IsIn(ALLOWED_VAT_PERCENTS, {
+    message: `vatPercent must be one of ${ALLOWED_VAT_PERCENTS.join(', ')}`,
+  })
   vatPercent?: number;
 
   @ApiPropertyOptional({ description: 'MATOR-certified badge. Defaults to true for a console-created dealer.', example: true })

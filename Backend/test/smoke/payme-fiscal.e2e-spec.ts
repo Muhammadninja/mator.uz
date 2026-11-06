@@ -68,6 +68,7 @@ const BASE_ENV = {
   PAYME_ACCOUNT_FIELD: 'order_id',
   SERVICE_FEE_MXIK: '09900000000000002',
   SERVICE_FEE_PACKAGE_CODE: '1000002',
+  // A stale value that nothing reads any more: the fee carries Mator's own 0 anyway.
   SERVICE_FEE_VAT_PERCENT: '7',
   // Fictional, like every other value here: not Mator's real tax id.
   MARKETPLACE_TIN: MATOR_TIN,
@@ -499,12 +500,15 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
         ['Доставка', DELIVERY_MXIK, 2_500_000],
         ['Сервисный сбор', BASE_ENV.SERVICE_FEE_MXIK, 2_000_000],
       ]);
+      // Mator's own rate, 0, like delivery's: SERVICE_FEE_VAT_PERCENT says 7 and is not read.
       expect(items[2]).toMatchObject({
         count: 1,
         package_code: BASE_ENV.SERVICE_FEE_PACKAGE_CODE,
-        vat_percent: 7,
+        vat_percent: 0,
         commission_info: { tin: MATOR_TIN },
       });
+      expect(items[1]).toMatchObject({ vat_percent: 0 });
+      expect(items[0]).toMatchObject({ vat_percent: DEALER.vatPercent });
       // The goods are sold under their dealer, and nothing of the fee is in their price.
       expect(items[0]).toMatchObject({
         price: 10_000_000,

@@ -50,7 +50,9 @@ export class BatchUpdateInventoryItemDto {
   purchasePrice?: number | null;
 
   @ApiPropertyOptional({
-    description: 'Retail (sell) price in UZS (greater than zero).',
+    description:
+      'Retail (sell) price in UZS (greater than zero) — цена с учётом НДС: the ' +
+      'price the buyer pays, VAT included. Stored as given; no VAT is ever added to it.',
     example: 180000,
   })
   @ValidateIf(whenPresent)

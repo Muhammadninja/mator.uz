@@ -53,9 +53,24 @@ export const PACKAGE_CODE_PATTERN = /^\d{1,20}$/;
  */
 export const TIN_PATTERN = /^(\d{9}|\d{14})$/;
 
-/** VAT rate bounds for the admin-entered percentage (0 and 12 are the usual). */
-export const MIN_VAT_PERCENT = 0;
-export const MAX_VAT_PERCENT = 100;
+/**
+ * The VAT rates a seller's receipt line may carry, and so the only ones a dealer or a
+ * service provider can hold: 12, the standard rate, for a VAT payer, and 0 for a seller
+ * who is not one. A seller on turnover tax is a 0: turnover tax is a different tax, and its
+ * rate never goes in `vat_percent`. Anything else (4 copied from the turnover tax, 15 from
+ * before 2023, 12.5) is refused rather than declared to the tax authority.
+ *
+ * A rate is what the receipt says about the seller, never part of a price: a catalog price
+ * already includes VAT, and nothing multiplies or divides one by a rate.
+ */
+export const ALLOWED_VAT_PERCENTS = [0, 12] as const;
+
+export type VatPercent = (typeof ALLOWED_VAT_PERCENTS)[number];
+
+/** Whether a rate, read as a number, is one of {@link ALLOWED_VAT_PERCENTS}. */
+export function isAllowedVatPercent(rate: number): rate is VatPercent {
+  return (ALLOWED_VAT_PERCENTS as readonly number[]).includes(rate);
+}
 
 /** The fiscal columns of a category, as every consumer reads them. */
 export interface CategoryFiscalData {
@@ -420,11 +435,10 @@ export function dealerFiscalGaps(
   else if (!TIN_PATTERN.test(dealer.tin)) gaps.push('dealer TIN is malformed');
   if (dealer.vatPercent == null) {
     gaps.push('dealer has no VAT percentage');
-  } else {
-    const rate = Number(dealer.vatPercent);
-    if (!(rate >= MIN_VAT_PERCENT && rate <= MAX_VAT_PERCENT)) {
-      gaps.push('dealer VAT percentage is out of range');
-    }
+  } else if (!isAllowedVatPercent(Number(dealer.vatPercent))) {
+    gaps.push(
+      `dealer VAT percentage is not one of ${ALLOWED_VAT_PERCENTS.join(', ')}`,
+    );
   }
   return gaps;
 }

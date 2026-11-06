@@ -45,7 +45,7 @@ export const UZ: BotStrings = {
     '7️⃣ Tavsif — o‘tkazib yuborish mumkin\n' +
     '8️⃣ Raqam turi: OEM, GM yoki o‘tkazib yuborish\n' +
     '9️⃣ Detal raqami (OEM/GM tanlansa)\n' +
-    '🔟 Narxi so‘mda\n\n' +
+    '🔟 Narxi so‘mda, QQS bilan\n\n' +
     '🛢 Ehtiyot qism emas, motor moyi sotyapsizmi? Marka tanlash bosqichida «Boshqa» → «Motor moylari» ni bosing:\n' +
     'bot marka, model va detal raqami o‘rniga qovushqoqlik, tur va hajmni so‘raydi.\n\n' +
     '⚡ Siz ma’lumot to‘ldirayotganingizda suratlar fonda qayta ishlanadi — kutish shart emas.\n' +
@@ -95,7 +95,7 @@ export const UZ: BotStrings = {
   'preview.header': '📋 *Qo‘shishdan oldin mahsulotni tekshiring.*',
   'preview.title': 'Nomi',
   'preview.description': 'Tavsifi',
-  'preview.price': 'Narxi',
+  'preview.price': 'Narxi (QQS bilan)',
   'preview.vehicle': 'Avtomobil',
   'preview.category': 'Turkum',
   'preview.viscosity': 'Qovushqoqlik',
@@ -169,7 +169,8 @@ export const UZ: BotStrings = {
   'step.partNumberType':
     '🔢 Detal raqami turini ko‘rsating yoki «O‘tkazib yuborish» ni bosing.',
   'step.partNumber': '🔢 {type} detal raqamini kiriting.\nMasalan: 96535062',
-  'step.price': '💰 Narxini so‘mda kiriting.\nMasalan: 250 000',
+  'step.price':
+    '💰 Narxini so‘mda QQS bilan kiriting, agar uni to‘lasangiz: bu xaridor uchun yakuniy narx, unga QQS qo‘shilmaydi.\nMasalan: 250 000',
   'step.questionnaireDone': '⏳ Suratlarni qayta ishlashni yakunlayapmiz…',
 
   'invalid.viscosity':

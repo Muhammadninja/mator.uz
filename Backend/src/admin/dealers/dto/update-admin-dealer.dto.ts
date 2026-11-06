@@ -13,11 +13,7 @@ import {
   Min,
   ValidateIf,
 } from 'class-validator';
-import {
-  MAX_VAT_PERCENT,
-  MIN_VAT_PERCENT,
-  TIN_PATTERN,
-} from '../../../common/fiscal.util';
+import { ALLOWED_VAT_PERCENTS, TIN_PATTERN } from '../../../common/fiscal.util';
 import { ADMIN_DEALER_STATUSES } from './list-admin-dealers.query.dto';
 // `import type` is required: with isolatedModules + emitDecoratorMetadata, a
 // type used in a decorated signature must not be emitted as a value import.
@@ -120,18 +116,18 @@ export class UpdateAdminDealerDto {
 
   @ApiPropertyOptional({
     description:
-      'Ставка НДС in percent — the value Payme receives as vat_percent. ' +
-      'Set explicitly per dealer (0 and 12 are the usual rates); it is never ' +
-      'defaulted in business logic.',
+      'Ставка НДС in percent — the value Payme receives as vat_percent: 12 for a ' +
+      'VAT payer, 0 for a seller who is not one (turnover tax). No other rate is ' +
+      'accepted, and none is defaulted in business logic. Changing it never ' +
+      'changes a price: catalog prices already include VAT.',
     example: 12,
-    minimum: MIN_VAT_PERCENT,
-    maximum: MAX_VAT_PERCENT,
+    enum: [...ALLOWED_VAT_PERCENTS],
   })
   @IsOptional()
   @Type(() => Number)
-  @IsNumber({ maxDecimalPlaces: 2 })
-  @Min(MIN_VAT_PERCENT)
-  @Max(MAX_VAT_PERCENT)
+  @IsIn(ALLOWED_VAT_PERCENTS, {
+    message: `vatPercent must be one of ${ALLOWED_VAT_PERCENTS.join(', ')}`,
+  })
   vatPercent?: number;
 
   @ApiPropertyOptional({

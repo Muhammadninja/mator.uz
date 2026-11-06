@@ -181,9 +181,10 @@ Backend-owned gaps from this workstream are closed. What is left:
 6. **Service fee** — every order above 100 000 of parts now carries one. In this order:
    1. Apply migration `20261105000200_service_fee_refunds_and_line_seller` (two additive
       columns), run `prisma generate`, build, then deploy the code.
-   2. Set `SERVICE_FEE_MXIK`, `SERVICE_FEE_PACKAGE_CODE` and `SERVICE_FEE_VAT_PERCENT` (see
-      DEPLOYMENT.md), and `MARKETPLACE_TIN` if it is not set yet. Until all four are valid,
-      Payme refuses every order that carries a fee; cash and terminal orders still work.
+   2. Set `SERVICE_FEE_MXIK` and `SERVICE_FEE_PACKAGE_CODE` (see DEPLOYMENT.md), and
+      `MARKETPLACE_TIN` if it is not set yet. Until all three are valid, Payme refuses every
+      order that carries a fee; cash and terminal orders still work. `SERVICE_FEE_VAT_PERCENT`
+      is no longer read: the fee carries Mator's own rate, 0, like delivery.
    3. Release the app build that shows the fee and sends `confirmed_total_uzs`. Builds already
       installed show no fee line: they are charged the right total, but their screen does not
       add the fee in, so release the new build right after the backend.
@@ -209,6 +210,17 @@ Backend-owned gaps from this workstream are closed. What is left:
    5. Finance alerts reach whatever channels the queue monitor's alerts are configured for.
    6. Click stays off: production's `PAYMENT_PROVIDERS` must not list `click` (the default is
       now `payme` alone), and `CLICK_SECRET_KEY` stays unset.
+
+8. **VAT rates** — no migration, code only:
+   1. Before deploying, list the dealers whose rate is neither 0 nor 12:
+      `SELECT id, name, vat_percent FROM catalog_sellers WHERE vat_percent NOT IN (0, 12);`
+      (the same for `service_providers`). After the deploy their goods are refused at Payme
+      checkout (`dealer VAT percentage is not one of 0, 12`) and the admin panel shows them as
+      not configured, until an operator sets 12 or 0. No row is changed by the deploy.
+   2. Remove `SERVICE_FEE_VAT_PERCENT` from the environment: it is no longer read. The service
+      fee carries Mator's own rate, 0, like delivery (`MARKETPLACE_VAT_RATE`).
+   3. Changing a dealer's rate never changes a price. Catalog prices are цена с учётом НДС, and
+      the rate only goes on the receipt as `vat_percent`.
 
 Production deployment and production migrations are performed manually by the
 project owner.

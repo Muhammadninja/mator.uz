@@ -4,7 +4,7 @@ import {
   readPaymeConfig,
   readPaymeFiscalConfig,
   DELIVERY_FISCAL_CODES,
-  DELIVERY_VAT_RATE,
+  MARKETPLACE_VAT_RATE,
   YANDEX_GO_TIN,
   DEFAULT_PAYME_CHECKOUT_URL,
   DEFAULT_PAYME_ACCOUNT_FIELD,
@@ -145,25 +145,21 @@ describe('the service fee’s VAT rate', () => {
       key === 'SERVICE_FEE_VAT_PERCENT' ? value : undefined,
     ).serviceFee.vatPercent;
 
-  it('is nothing at all when it is not configured: never an assumed 0', () => {
-    expect(rate()).toBeNull();
+  it('is Mator’s own rate, 0: the fee is Mator’s income and Mator is not a VAT payer', () => {
+    expect(rate()).toBe(0);
+    expect(rate()).toBe(MARKETPLACE_VAT_RATE);
   });
 
-  it.each(['', ' ', 'abc', '12%', '-1', '101', 'NaN', 'Infinity'])(
-    'is nothing at all for %j: not a percentage',
+  it.each(['12', '15', '4', '0', '', 'abc'])(
+    'stays 0 whatever SERVICE_FEE_VAT_PERCENT says: %j',
     (value) => {
-      expect(rate(value)).toBeNull();
+      expect(rate(value)).toBe(0);
     },
   );
 
-  it.each([
-    ['0', 0],
-    ['6', 6],
-    ['12', 12],
-    ['12.5', 12.5],
-    ['100', 100],
-  ])('is exactly what was stated: %s', (value, expected) => {
-    expect(rate(value)).toBe(expected);
+  it('is always the same rate as delivery’s: one company, one tax status', () => {
+    const { delivery, serviceFee } = readPaymeFiscalConfig(() => '12');
+    expect(serviceFee.vatPercent).toBe(delivery.vatPercent);
   });
 });
 
@@ -228,7 +224,10 @@ describe('delivery’s fiscal codes', () => {
   });
 
   it('carry a VAT rate of 0: Mator pays turnover tax and is not registered for VAT', () => {
-    expect(DELIVERY_VAT_RATE).toBe(0);
+    expect(MARKETPLACE_VAT_RATE).toBe(0);
+    expect(readPaymeFiscalConfig(() => undefined).delivery.vatPercent).toBe(
+      MARKETPLACE_VAT_RATE,
+    );
   });
 
   it.each([undefined, '', '12', '4', 'abc'])(
@@ -269,6 +268,12 @@ describe('delivery’s fiscal codes', () => {
     expect(filesMatching(/DELIVERY_VAT_PERCENT/, ['src', 'scripts'])).toEqual(
       [],
     );
+  });
+
+  it('nothing reads a VAT rate for the service fee from the environment either', () => {
+    expect(
+      filesMatching(/SERVICE_FEE_VAT_PERCENT/, ['src', 'scripts']),
+    ).toEqual([]);
   });
 
   it('YandexGo’s tax id is named once, to refuse it', () => {

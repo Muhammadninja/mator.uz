@@ -41,7 +41,7 @@ export const EN: BotStrings = {
     '7️⃣ Description — can be skipped\n' +
     '8️⃣ Number type: OEM, GM or skip\n' +
     '9️⃣ Part number (if you chose OEM/GM)\n' +
-    '🔟 Price in UZS\n\n' +
+    '🔟 Price in UZS, VAT included\n\n' +
     '🛢 Selling motor oil rather than a spare part? At the brand step press "Other" → "Motor Oils":\n' +
     'the bot asks for viscosity, type and volume instead of brand, model and part number.\n\n' +
     '⚡ Photos are processed in the background while you fill in the details — no waiting.\n' +
@@ -90,7 +90,7 @@ export const EN: BotStrings = {
   'preview.header': '📋 *Check the product before adding it.*',
   'preview.title': 'Title',
   'preview.description': 'Description',
-  'preview.price': 'Price',
+  'preview.price': 'Price (VAT included)',
   'preview.vehicle': 'Vehicle',
   'preview.category': 'Category',
   'preview.viscosity': 'Viscosity',
@@ -162,7 +162,8 @@ export const EN: BotStrings = {
   'step.description': '📝 Enter a product description or press "Skip".',
   'step.partNumberType': '🔢 Choose the part-number type or press "Skip".',
   'step.partNumber': '🔢 Enter the {type} part number.\nExample: 96535062',
-  'step.price': '💰 Enter the price in UZS.\nExample: 250 000',
+  'step.price':
+    '💰 Enter the price in UZS, VAT included if you pay it: this is the final price for the buyer, and no VAT is added to it.\nExample: 250 000',
   'step.questionnaireDone': '⏳ Finishing photo processing…',
 
   'invalid.viscosity':

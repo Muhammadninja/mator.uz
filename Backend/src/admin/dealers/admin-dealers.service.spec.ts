@@ -17,6 +17,7 @@ import {
 import { plainToInstance } from 'class-transformer';
 import { validateSync } from 'class-validator';
 import { AdminDealersService } from './admin-dealers.service';
+import { CreateAdminDealerDto } from './dto/create-admin-dealer.dto';
 import { ListAdminDealersQueryDto } from './dto/list-admin-dealers.query.dto';
 import {
   SuspendAdminDealerDto,
@@ -785,6 +786,51 @@ describe('AdminDealersService', () => {
       });
     });
 
+    it('changing the rate re-prices nothing: only the dealer row is written', async () => {
+      // The rate is a label for the receipt. Catalog prices already include VAT, so
+      // neither direction may reach a part, a stock, a listing, a cart or an order.
+      const writes = ['create', 'createMany', 'update', 'updateMany', 'upsert'];
+      const models = [
+        'catalogPart',
+        'stock',
+        'product',
+        'cartItem',
+        'order',
+        'orderItem',
+      ];
+      const priced = Object.fromEntries(
+        models.map((model) => [
+          model,
+          Object.fromEntries(writes.map((write) => [write, jest.fn()])),
+        ]),
+      );
+      Object.assign(prisma, priced);
+
+      for (const [from, to] of [
+        [0, 12],
+        [12, 0],
+      ]) {
+        prisma.catalogSeller.update.mockClear();
+        prisma.catalogSeller.findUnique
+          .mockResolvedValueOnce(mutableRow({ vatPercent: from }))
+          .mockResolvedValueOnce(detailRow());
+
+        await service.update('d1', { vatPercent: to }, CTX);
+
+        expect(prisma.catalogSeller.update).toHaveBeenCalledTimes(1);
+        expect(prisma.catalogSeller.update).toHaveBeenCalledWith({
+          where: { id: 'd1' },
+          data: { vatPercent: to },
+        });
+      }
+      for (const model of Object.values(priced)) {
+        for (const write of Object.values(model)) {
+          expect(write).not.toHaveBeenCalled();
+        }
+      }
+      expect(prisma.seller.update).not.toHaveBeenCalled();
+    });
+
     it('audits both fields together, with before and after values', async () => {
       prisma.catalogSeller.findUnique
         .mockResolvedValueOnce(mutableRow({ tin: null, vatPercent: null }))
@@ -1046,16 +1092,23 @@ describe('UpdateAdminDealerDto', () => {
     expect(validate({ tin: '' })).toHaveLength(0);
   });
 
-  it('accepts VAT rates across the whole legal range, including 0', () => {
+  it('accepts exactly the two VAT rates: 12 and an explicit 0', () => {
     expect(validate({ vatPercent: 0 })).toHaveLength(0);
     expect(validate({ vatPercent: 12 })).toHaveLength(0);
+    // A form posting the rate as text is read as the number it states.
+    expect(validate({ vatPercent: '12' })).toHaveLength(0);
   });
 
-  it('rejects a VAT rate outside 0–100 or of the wrong type', () => {
-    expect(validate({ vatPercent: -1 })[0].property).toBe('vatPercent');
-    expect(validate({ vatPercent: 101 })[0].property).toBe('vatPercent');
-    expect(validate({ vatPercent: 'twelve' })[0].property).toBe('vatPercent');
-  });
+  it.each([4, 15, 12.5, 7, 100, -1, 101, 'twelve'])(
+    'rejects any other VAT rate: %j',
+    (vatPercent) => {
+      const errors = validate({ vatPercent });
+      expect(errors[0].property).toBe('vatPercent');
+      expect(Object.values(errors[0].constraints ?? {})).toEqual([
+        'vatPercent must be one of 0, 12',
+      ]);
+    },
+  );
 
   // Derived metrics (gmvUzs, orders, skus, joinedAt) stay absent from the class,
   // so the global pipe's forbidNonWhitelisted rejects them; the editable set is
@@ -1101,6 +1154,23 @@ describe('UpdateAdminDealerDto', () => {
       'vatPercent',
       'years',
     ]);
+  });
+});
+
+describe('CreateAdminDealerDto VAT rate', () => {
+  const validate = (payload: Record<string, unknown>) =>
+    validateSync(
+      plainToInstance(CreateAdminDealerDto, { name: 'BYD Motors', ...payload }),
+    );
+
+  it('takes 12, 0, or no rate at all (configured later)', () => {
+    expect(validate({ vatPercent: 12 })).toHaveLength(0);
+    expect(validate({ vatPercent: 0 })).toHaveLength(0);
+    expect(validate({})).toHaveLength(0);
+  });
+
+  it.each([4, 15, 12.5, 100])('refuses %j', (vatPercent) => {
+    expect(validate({ vatPercent })[0].property).toBe('vatPercent');
   });
 });
 
