@@ -49,7 +49,11 @@ import {
   assertAllAvailable,
   findUnavailableParts,
 } from './order-availability';
-import { findLineSellers } from './order-settlement';
+import {
+  findCommissionRates,
+  findLineSellers,
+  lineCommissionUzs,
+} from './order-settlement';
 import {
   PricedLine,
   computeOrderCharges,
@@ -257,6 +261,11 @@ export class OrdersService {
       (await this.prisma.appUser.findUnique({ where: { id: userId } }))?.phoneE164 ??
       undefined;
     const lineSellers = await findLineSellers(this.prisma, cart.items);
+    // Mator's commission is frozen on each line now, at the seller's rate as it stands: a
+    // later change to the rate reaches only the orders placed after it.
+    const commissionRates = await findCommissionRates(this.prisma, [
+      ...lineSellers.values(),
+    ]);
 
     const order = await this.prisma.$transaction(async (tx) => {
       const created = await tx.order.create({
@@ -305,6 +314,10 @@ export class OrdersService {
               const unit = share
                 ? share.effectiveUnitPriceTiyin / 100
                 : unitPriceOf(i);
+              const sellerId = lineSellers.get(i.id) ?? null;
+              const commissionPercent = sellerId
+                ? (commissionRates.get(sellerId) ?? new Prisma.Decimal(0))
+                : new Prisma.Decimal(0);
               return {
                 id: prefixedId(IdPrefix.ORDER_ITEM),
                 partId: i.partId,
@@ -314,7 +327,9 @@ export class OrdersService {
                 // as a line with no goods, and its receipt has no dealer to name.
                 offerId: i.offerId,
                 offerSellerTgId: i.offer?.sellerTgId ?? null,
-                sellerId: lineSellers.get(i.id) ?? null,
+                sellerId,
+                commissionPercent,
+                commissionUzs: lineCommissionUzs(lineTotal, commissionPercent),
                 title: i.title,
                 quantity: i.quantity,
                 priceUzs: unit,

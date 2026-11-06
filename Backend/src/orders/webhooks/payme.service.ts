@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash, timingSafeEqual } from 'crypto';
 import {
@@ -15,6 +15,11 @@ import { findUnavailableParts } from '../order-availability';
 import { parseSetFiscalData } from './payme-fiscal-receipt.util';
 import { PaymeFiscalReceiptService } from './payme-fiscal-receipt.service';
 import { findOpenPaymeInvoice } from './payme-invoice.util';
+import { FinanceAlerts } from '../finance-alerts';
+import {
+  paymeStatementQuery,
+  presentStatementTransaction,
+} from './payme-statement';
 
 /** Constant-time string equality (hash to a fixed length first so unequal
  * lengths don't short-circuit and leak timing). */
@@ -164,6 +169,7 @@ export class PaymeService {
     private readonly config: ConfigService,
     private readonly settlement: SettlementService,
     private readonly fiscalReceipts: PaymeFiscalReceiptService,
+    @Optional() private readonly alerts?: FinanceAlerts,
   ) {
     const payme = readPaymeConfig((key) => this.config.get<string>(key));
     this.accountField = payme.accountField;
@@ -631,6 +637,29 @@ export class PaymeService {
 
     // A refund is only possible while the goods have not been handed over.
     if (outcome === 'not_refundable') {
+      // The buyer asked for their money back through Payme and it was refused: someone has
+      // to take it up by hand, through the refund registry, before the buyer chases it.
+      // A refund the buyer wants and Payme could not make is a return under way: sellers are
+      // not paid for this order until an operator settles it and releases the hold.
+      await this.prisma.order.updateMany({
+        where: { id: payment.orderId, payoutHoldAt: null },
+        data: {
+          payoutHoldAt: new Date(),
+          payoutHoldReason:
+            'Payme asked for a refund after the goods were handed over, and it was refused.',
+        },
+      });
+      this.alerts?.raise({
+        type: 'refund_refused',
+        severity: 'critical',
+        message: `Payme asked to refund payment ${payment.id} (order ${payment.orderId}), and it was refused: the order was handed over.`,
+        context: {
+          paymentId: payment.id,
+          orderId: payment.orderId,
+          transactionId: payment.providerTransactionId,
+          reason,
+        },
+      });
       throw new PaymeError(
         -31007,
         'Order has been delivered. Transaction cannot be cancelled',
@@ -670,28 +699,21 @@ export class PaymeService {
     };
   }
 
+  /**
+   * Every transaction Payme created in the window, whatever became of it, oldest first: the
+   * Merchant API asks for them in order of creation, and Payme reconciles against this list.
+   * An invoice no transaction took has no create time, so it is not among them.
+   */
   private async getStatement(params: Record<string, any>) {
     const from = BigInt(Number(params.from ?? 0));
     const to = BigInt(Number(params.to ?? Date.now()));
-    const payments = await this.prisma.payment.findMany({
-      where: {
-        provider: PaymentProvider.PAYME,
-        providerCreateTime: { gte: from, lte: to },
-      },
-    });
+    const payments = await this.prisma.payment.findMany(
+      paymeStatementQuery(from, to),
+    );
     return {
-      transactions: payments.map((p) => ({
-        id: p.providerTransactionId,
-        time: Number(p.providerCreateTime ?? 0),
-        amount: Number(p.amountTiyin ?? 0),
-        account: { [this.accountField]: p.orderId },
-        create_time: Number(p.providerCreateTime ?? 0),
-        perform_time: Number(p.providerPerformTime ?? 0),
-        cancel_time: Number(p.providerCancelTime ?? 0),
-        transaction: p.id,
-        state: p.providerState ?? 0,
-        reason: p.cancelReason ?? null,
-      })),
+      transactions: payments.map((p) =>
+        presentStatementTransaction(p, this.accountField),
+      ),
     };
   }
 

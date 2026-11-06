@@ -14,10 +14,11 @@ import {
 import { clampLimit } from '../../common/pagination.util';
 import { IdPrefix, prefixedId } from '../../common/ulid.util';
 import {
-  RefundPosition,
+  breakdownData,
   readRefundPosition,
   settleRefundPosition,
 } from '../../orders/financial-refund.ledger';
+import { checkStatedBreakdown } from '../../orders/refund-breakdown';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AdminAuditService } from '../auth/admin-audit.service';
 import { AdminAuditContext } from '../auth/admin-auth.service';
@@ -37,32 +38,6 @@ const MAX_LIMIT = 100;
 /** Clocks differ a little between an operator's machine and this server. */
 const FUTURE_TOLERANCE_MS = 5 * 60 * 1000;
 const TX_OPTIONS = { maxWait: 10_000, timeout: 30_000 };
-
-/**
- * An entry has to say truly how much of it is the service fee. What is left of the order
- * besides the fee is all a refund can return without touching it, so a full refund has to
- * state the whole fee, and what stays with Mator can never read higher than it is.
- */
-function assertServiceFeeShare(
-  amount: Prisma.Decimal,
-  serviceFee: Prisma.Decimal,
-  position: RefundPosition,
-): void {
-  const feeLeft = position.serviceFee.retained;
-  if (serviceFee.gt(amount) || serviceFee.gt(feeLeft)) {
-    throw new ConflictException({
-      code: 'REFUND_FEE_EXCEEDS_CHARGED',
-      message: `The service fee part cannot be more than the refund, or than the ${feeLeft.toFixed(2)} UZS of the fee this order still holds.`,
-    });
-  }
-  const restLeft = position.remaining.sub(feeLeft);
-  if (amount.sub(serviceFee).gt(restLeft)) {
-    throw new ConflictException({
-      code: 'REFUND_FEE_NOT_STATED',
-      message: `This refund reaches into the service fee: only ${restLeft.toFixed(2)} UZS of it can be anything else. State how much of it is the fee.`,
-    });
-  }
-}
 
 /**
  * The registry of money returned to customers. An entry says that money moved and
@@ -162,7 +137,6 @@ export class AdminRefundsService {
       });
     }
     const amount = new Prisma.Decimal(dto.amountUzs);
-    const serviceFee = new Prisma.Decimal(dto.serviceFeeUzs ?? 0);
 
     const id = await this.prisma.$transaction(async (tx) => {
       await this.lockOrder(tx, orderId);
@@ -202,7 +176,21 @@ export class AdminRefundsService {
           message: `Only ${position.remaining.toFixed(2)} UZS of this order can still be returned.`,
         });
       }
-      assertServiceFeeShare(amount, serviceFee, position);
+      // What the refund gives back of each kind of money: the fee, delivery and each
+      // seller's goods. Stated by the operator wherever it is not plain, so what Mator keeps
+      // and what it owes each seller stay true, and no part can go back twice.
+      const check = checkStatedBreakdown(position.components, amount, {
+        serviceFeeUzs: dto.serviceFeeUzs,
+        deliveryUzs: dto.deliveryUzs,
+        allocations: dto.allocations,
+      });
+      if (!check.ok) {
+        throw new ConflictException({
+          code: check.code,
+          message: check.message,
+        });
+      }
+      const { breakdown } = check;
 
       const created = await tx.financialRefund.create({
         data: {
@@ -210,10 +198,11 @@ export class AdminRefundsService {
           orderId,
           paymentId: position.paymentId,
           amountUzs: amount,
-          serviceFeeUzs: serviceFee,
+          ...breakdownData(breakdown),
           method: dto.method,
           source: RefundSource.MANUAL,
           reference: dto.reference,
+          fiscalReference: dto.fiscalReference ?? null,
           reason: dto.reason,
           refundedAt,
           createdById: ctx.actor?.id ?? null,
@@ -237,7 +226,15 @@ export class AdminRefundsService {
           newValues: {
             refundId: created.id,
             amountUzs: amount.toFixed(2),
-            serviceFeeUzs: serviceFee.toFixed(2),
+            serviceFeeUzs: breakdown.serviceFeeUzs.toFixed(2),
+            deliveryUzs: breakdown.deliveryUzs.toFixed(2),
+            allocations: breakdown.allocations.map((a) => ({
+              sellerId: a.sellerId,
+              amountUzs: a.amountUzs.toFixed(2),
+            })),
+            ...(dto.fiscalReference
+              ? { fiscalReference: dto.fiscalReference }
+              : {}),
             method: dto.method,
             reference: dto.reference,
             refundedAt: refundedAt.toISOString(),

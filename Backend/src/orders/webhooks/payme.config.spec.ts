@@ -289,13 +289,21 @@ describe('delivery’s fiscal codes', () => {
   it('the stored delivery cost has one writer: a new reader or writer has to be looked at', () => {
     expect(filesMatching(/\bdeliveryUzs\b/, ['src', 'scripts']).sort()).toEqual(
       [
+        'src/admin/finance/admin-finance-checks.service.ts', // shows an order's charges
+        'src/admin/finance/admin-finance.service.ts', // sums it, as Mator's line
         'src/admin/orders/admin-orders.presenter.ts', // shows it
+        'src/admin/refunds/admin-refunds.presenter.ts', // a refund's share of it
+        'src/admin/refunds/admin-refunds.service.ts', // a refund's share of it
+        'src/admin/refunds/dto/record-refund.dto.ts', // a refund's share of it
         'src/cart/cart.presenter.ts', // states none: only a quote prices delivery
+        'src/orders/financial-refund.ledger.ts', // what of it went back
         'src/orders/order-settlement.ts', // keeps it out of what a seller is owed
         'src/orders/order.presenter.ts', // shows it
         'src/orders/orders.service.ts', // the one writer, at creation
+        'src/orders/refund-breakdown.ts', // what of it can still go back
         'src/orders/service-fee.util.ts', // adds it to the total, never to the fee
         'src/orders/webhooks/payme-fiscal.service.ts', // reads it for the receipt
+        'src/orders/webhooks/settlement-store.test-util.ts', // a test double's column
       ],
     );
   });

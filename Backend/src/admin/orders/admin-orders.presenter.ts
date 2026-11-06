@@ -86,6 +86,7 @@ export const ADMIN_ORDER_DETAIL_SELECT = {
       lineTotalUzs: true,
       sellerId: true,
       providerId: true,
+      commissionUzs: true,
     },
     orderBy: { id: 'asc' },
   },
@@ -277,6 +278,8 @@ function presentSettlement(
       sellerId: seller.sellerId,
       name: sellerNames.get(seller.sellerId) ?? null,
       amount: seller.amountUzs,
+      commission: seller.commissionUzs,
+      net: seller.netUzs,
     })),
     providers: settlement.providers.map((provider) => ({
       providerId: provider.providerId,
@@ -284,6 +287,7 @@ function presentSettlement(
     })),
     unattributed: settlement.unattributedUzs,
     matorServiceFee: settlement.serviceFeeUzs,
+    matorCommission: settlement.commissionUzs,
     delivery: settlement.deliveryUzs,
     total: settlement.totalUzs,
   };

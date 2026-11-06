@@ -1451,6 +1451,13 @@ model CatalogSeller {
   // payable at once, with no product write.
   tin              String?       @db.VarChar(14)
   vatPercent       Decimal?      @map("vat_percent") @db.Decimal(5, 2)
+  // ── Комиссия Mator ─────────────────────────────────────────────────────────
+  // Mator's commission on this dealer's goods, in percent, as the dealer's contract states.
+  // Null is "not configured", which charges 0% by the business's decision; an explicit 0 says
+  // the same on purpose. There is no global rate. An order freezes the rate it was placed under
+  // (order_items.commission_percent), so a change here reaches new orders only. Nothing to do
+  // with Payme's commission_info.tin, which names the seller on a receipt line.
+  commissionPercent Decimal?     @map("commission_percent") @db.Decimal(5, 2)
   // ── 1C integration credential (POST /v1/integrations/dealers/sync-inventory) ──
   // SHA-256 hash of the dealer's X-API-KEY, hex-encoded — never the key itself.
   // The endpoint is machine-to-machine, so the credential is a bearer secret in
@@ -1737,6 +1744,11 @@ model Order {
   // refund still owed" can be filtered without summing per row. Maintained only in
   // the transaction that writes the registry: see financial-refund.ledger.ts.
   refundSettledAt   DateTime?            @map("refund_settled_at") @db.Timestamptz(3)
+  // Sellers are not paid for this order while it is set: a cancellation or a return is under
+  // way. Set when Payme asks for a refund that is refused, or by an operator; released by an
+  // operator. See AdminFinanceService.
+  payoutHoldAt      DateTime?            @map("payout_hold_at") @db.Timestamptz(3)
+  payoutHoldReason  String?              @map("payout_hold_reason") @db.VarChar(500)
 
   @@index([userId])
   @@index([status])
@@ -1774,10 +1786,16 @@ model FinancialRefund {
   // nobody else's, so what stays of it can only be told if each refund says this. See
   // readRefundPosition.
   serviceFeeUzs       Decimal      @default(0) @map("service_fee_uzs") @db.Decimal(14, 2)
+  // How much of amountUzs is delivery going back. What is left of the amount after the
+  // fee and delivery is goods, split between sellers in `allocations`.
+  deliveryUzs         Decimal      @default(0) @map("delivery_uzs") @db.Decimal(14, 2)
   method              RefundMethod
   source              RefundSource @default(MANUAL)
   // The document behind it: a provider transaction id, a cabinet record, a receipt.
   reference           String       @db.VarChar(120)
+  // The return receipt a cash register or the OFD issued for a refund made outside a
+  // provider. Null for a provider refund: Payme registers its own CANCEL receipt.
+  fiscalReference     String?      @map("fiscal_reference") @db.VarChar(120)
   reason              String       @db.VarChar(500)
   // When the money moved, which can be earlier than when it was written down.
   refundedAt          DateTime     @map("refunded_at") @db.Timestamptz(3)
@@ -1796,11 +1814,67 @@ model FinancialRefund {
   updatedAt           DateTime     @updatedAt @map("updated_at") @db.Timestamptz(3)
   order               Order        @relation(fields: [orderId], references: [id], onDelete: Restrict)
   payment             Payment?     @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  allocations         FinancialRefundAllocation[]
 
   @@index([orderId])
   @@index([paymentId])
   @@index([refundedAt])
   @@map("financial_refunds")
+}
+
+// Whose goods a refund gave money back for, so what each seller is owed can be told. The
+// rest of a refund is the service fee and delivery, stated on the entry itself. Written
+// with the entry and never changed: voiding the entry voids these with it.
+model FinancialRefundAllocation {
+  id        String          @id @db.VarChar(64)
+  refundId  String          @map("refund_id") @db.VarChar(64)
+  // CatalogSeller.id, as frozen on the order line. A plain id, like order_items.seller_id.
+  sellerId  String          @map("seller_id") @db.VarChar(64)
+  amountUzs Decimal         @map("amount_uzs") @db.Decimal(14, 2)
+  // The commission that went with these goods, at the order's frozen rate: Mator no longer
+  // earns it, and the seller is not charged it.
+  commissionUzs Decimal     @default(0) @map("commission_uzs") @db.Decimal(14, 2)
+  createdAt DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+  refund    FinancialRefund @relation(fields: [refundId], references: [id], onDelete: Restrict)
+
+  @@unique([refundId, sellerId])
+  @@index([sellerId])
+  @@map("financial_refund_allocations")
+}
+
+// How Mator sent a seller their money.
+enum PayoutMethod {
+  BANK_TRANSFER
+  CASH
+}
+
+// Money Mator sent a seller for their goods: the buyer pays Mator, and Mator settles with
+// the sellers. One row per transfer, not per order. Like the refund registry, a mistake is
+// voided with a reason and never deleted.
+model SellerPayout {
+  id             String       @id @db.VarChar(64)
+  // CatalogSeller.id. A plain id: a storefront can be renamed or removed, a payment cannot.
+  sellerId       String       @map("seller_id") @db.VarChar(64)
+  amountUzs      Decimal      @map("amount_uzs") @db.Decimal(14, 2)
+  method         PayoutMethod
+  // The document behind it: a payment order number, a cash receipt.
+  reference      String       @db.VarChar(120)
+  note           String?      @db.VarChar(500)
+  // When the money moved, which can be earlier than when it was written down.
+  paidAt         DateTime     @map("paid_at") @db.Timestamptz(3)
+  createdById    String?      @map("created_by_id")
+  createdByEmail String?      @map("created_by_email") @db.VarChar(255)
+  createdByName  String?      @map("created_by_name") @db.VarChar(120)
+  voidedAt       DateTime?    @map("voided_at") @db.Timestamptz(3)
+  voidedById     String?      @map("voided_by_id")
+  voidedByEmail  String?      @map("voided_by_email") @db.VarChar(255)
+  voidReason     String?      @map("void_reason") @db.VarChar(500)
+  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime     @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@index([sellerId])
+  @@index([paidAt])
+  @@map("seller_payouts")
 }
 
 // Snapshot line item (no FK to catalog — immutable order history).
@@ -1821,6 +1895,11 @@ model OrderItem {
   // sale cannot. A plain id, for the same reason as partId. Null on a service line, whose
   // provider is providerId, and when no seller could be found.
   sellerId     String?   @map("seller_id") @db.VarChar(64)
+  // Mator's commission on this line, frozen when the order is placed: the seller's rate then
+  // (0 when none was configured) and what it came to on the line as charged, so net of a
+  // promo. Never recomputed. Not Payme's commission_info.
+  commissionPercent Decimal @default(0) @map("commission_percent") @db.Decimal(5, 2)
+  commissionUzs     Decimal @default(0) @map("commission_uzs") @db.Decimal(14, 2)
   title        String    @db.VarChar(255)
   quantity     Int       @default(1)
   priceUzs     Decimal   @map("price_uzs") @db.Decimal(14, 2)
@@ -2185,6 +2264,13 @@ enum AdminAuditAction {
   CATEGORY_FISCAL_CONFIRMED
   CATEGORY_FISCAL_UNCONFIRMED
   SOURCING_OFFER_CLASSIFIED
+  // Money Mator sent a seller, and taking back a wrong entry of it. The target is the dealer.
+  SELLER_PAYOUT_RECORDED
+  SELLER_PAYOUT_VOIDED
+  // Holding an order back from seller payouts while a cancellation or return is under way,
+  // and releasing it. The target is the order.
+  ORDER_PAYOUT_HOLD_SET
+  ORDER_PAYOUT_HOLD_RELEASED
 }
 
 // What kind of thing an audit entry is about, for entries whose target is not

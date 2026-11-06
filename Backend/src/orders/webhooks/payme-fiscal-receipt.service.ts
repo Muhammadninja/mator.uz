@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import {
   PaymeFiscalReceipt,
   PaymeFiscalReceiptType,
@@ -6,6 +6,7 @@ import {
   Prisma,
 } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { FinanceAlerts } from '../finance-alerts';
 import {
   FISCAL_STATUS_ACCEPTED,
   FiscalReceiptCallback,
@@ -68,7 +69,10 @@ function isSameReceipt(
 export class PaymeFiscalReceiptService {
   private readonly logger = new Logger(PaymeFiscalReceiptService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Optional() private readonly alerts?: FinanceAlerts,
+  ) {}
 
   async record(callback: FiscalReceiptCallback): Promise<FiscalReceiptOutcome> {
     const payment = await this.prisma.payment.findUnique({
@@ -78,9 +82,15 @@ export class PaymeFiscalReceiptService {
           providerTransactionId: callback.transactionId,
         },
       },
-      select: { id: true, providerState: true },
+      select: { id: true, orderId: true, providerState: true },
     });
     if (!payment) return 'not_found';
+    const subject = {
+      paymentId: payment.id,
+      orderId: payment.orderId,
+      receiptType: callback.type,
+      receiptId: callback.receiptId,
+    };
 
     if (
       !EXPECTED_STATES[callback.type].includes(payment.providerState as number)
@@ -96,6 +106,17 @@ export class PaymeFiscalReceiptService {
       this.logger.warn(
         `Payme reports status ${callback.statusCode} on the ${callback.type} receipt of payment ${payment.id}: ${callback.message ?? 'no message'}`,
       );
+      this.alerts?.raise({
+        type: 'fiscal_receipt_failed',
+        severity: 'critical',
+        message: `The ${callback.type} receipt of payment ${payment.id} (order ${payment.orderId}) was not accepted: status ${callback.statusCode}, ${callback.message ?? 'no message'}.`,
+        context: { ...subject, statusCode: callback.statusCode },
+      });
+    }
+    // A cancellation receipt reverses the sale receipt of the same transaction, which is how
+    // the two are linked. One that comes with no accepted sale receipt reverses nothing on file.
+    if (callback.type === PaymeFiscalReceiptType.CANCEL) {
+      await this.checkSaleReceipt(payment, subject);
     }
 
     const key = { paymentId: payment.id, type: callback.type };
@@ -126,6 +147,29 @@ export class PaymeFiscalReceiptService {
     );
   }
 
+  /** Says so when a cancellation receipt has no accepted sale receipt to reverse. */
+  private async checkSaleReceipt(
+    payment: { id: string; orderId: string },
+    subject: Record<string, string | null>,
+  ): Promise<void> {
+    const sale = await this.prisma.paymeFiscalReceipt.findUnique({
+      where: {
+        paymentId_type: {
+          paymentId: payment.id,
+          type: PaymeFiscalReceiptType.PERFORM,
+        },
+      },
+      select: { statusCode: true, receiptId: true },
+    });
+    if (sale?.statusCode === FISCAL_STATUS_ACCEPTED) return;
+    this.alerts?.raise({
+      type: 'fiscal_receipt_conflict',
+      severity: 'warning',
+      message: `A cancellation receipt came for payment ${payment.id} (order ${payment.orderId}), which has no accepted sale receipt for it to reverse.`,
+      context: { ...subject, saleReceiptId: sale?.receiptId ?? null },
+    });
+  }
+
   /**
    * A second callback about a receipt we hold. The same one changes nothing. A receipt
    * not accepted so far takes the later attempt, conditionally, so an acceptance that
@@ -153,6 +197,17 @@ export class PaymeFiscalReceiptService {
     this.logger.error(
       `Payme sent a different ${stored.type} receipt for payment ${stored.paymentId}, which already holds an accepted one. Kept the accepted one.`,
     );
+    this.alerts?.raise({
+      type: 'fiscal_receipt_conflict',
+      severity: 'warning',
+      message: `Payme sent a different ${stored.type} receipt for payment ${stored.paymentId}, which already holds an accepted one. The accepted one was kept.`,
+      context: {
+        paymentId: stored.paymentId,
+        receiptType: stored.type,
+        receiptId: callback.receiptId,
+        acceptedReceiptId: stored.receiptId,
+      },
+    });
     await this.prisma.paymeFiscalReceipt.update({
       where: { paymentId_type: key },
       data: {

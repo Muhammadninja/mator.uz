@@ -210,3 +210,94 @@ describe('A Payme payment of an order with a service fee', () => {
     });
   });
 });
+
+describe('A Payme refund of an order with several sellers (Phase 3)', () => {
+  /** Dealer A 350 000, dealer B 250 000, a 20 000 fee and 25 000 of delivery. */
+  const MULTI = {
+    ...ORDER,
+    items: [
+      // Dealer A at 5%, dealer B with no commission configured.
+      { sellerId: 'dealer_a', lineTotalUzs: 350_000, commissionUzs: 17_500 },
+      { sellerId: 'dealer_b', lineTotalUzs: 250_000, commissionUzs: 0 },
+    ],
+  };
+  function multi() {
+    const store = settlementStore({
+      payments: [
+        pendingPaymePayment({
+          amountUzs: ORDER.totalUzs,
+          amountTiyin: BigInt(ORDER.totalUzs * 100),
+          providerCancelTime: null,
+          cancelReason: null,
+        }),
+      ],
+      orders: [order(OrderStatus.PENDING_PAYMENT, MULTI)],
+    });
+    const settlement = new SettlementService(
+      store.prisma as any,
+      { emit: jest.fn().mockResolvedValue(undefined) } as any,
+      { emit: jest.fn() } as any,
+      new OrderStatusService(store.prisma as any),
+      CONFIG,
+    );
+    const payme = new PaymeService(
+      store.prisma as any,
+      CONFIG,
+      settlement,
+      {} as any,
+    );
+    const rpc = (method: string, params: Record<string, unknown>) =>
+      payme.handle(AUTH, { id: 1, method, params }) as Promise<any>;
+    return {
+      store,
+      perform: () => rpc('PerformTransaction', { id: 'pmt-xyz' }),
+      cancel: () => rpc('CancelTransaction', { id: 'pmt-xyz', reason: 5 }),
+    };
+  }
+
+  it('gives back each seller’s goods to the seller, and delivery and the fee as such', async () => {
+    const { store, perform, cancel } = multi();
+    await perform();
+
+    await cancel();
+
+    expect(store.refunds()).toEqual([
+      expect.objectContaining({
+        amountUzs: 645_000,
+        serviceFeeUzs: 20_000,
+        deliveryUzs: 25_000,
+        allocations: [
+          { sellerId: 'dealer_a', amountUzs: 350_000, commissionUzs: 17_500 },
+          { sellerId: 'dealer_b', amountUzs: 250_000, commissionUzs: 0 },
+        ],
+      }),
+    ]);
+  });
+
+  it('after a seller’s goods went back by hand, the reversal gives back only what is left', async () => {
+    const { store, perform, cancel } = multi();
+    await perform();
+    await store.prisma.financialRefund.create({
+      data: {
+        id: 'rfd_cash',
+        orderId: 'ord_1',
+        paymentId: 'pay_1',
+        amountUzs: 250_000,
+        method: 'CASH',
+        allocations: { create: [{ sellerId: 'dealer_b', amountUzs: 250_000 }] },
+      },
+    });
+
+    await cancel();
+
+    const created = store.refunds().find((r) => r.id !== 'rfd_cash');
+    expect(created).toMatchObject({
+      amountUzs: 395_000,
+      serviceFeeUzs: 20_000,
+      deliveryUzs: 25_000,
+      allocations: [
+        { sellerId: 'dealer_a', amountUzs: 350_000, commissionUzs: 17_500 },
+      ],
+    });
+  });
+});

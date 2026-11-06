@@ -134,6 +134,24 @@ export class UpdateAdminDealerDto {
   @Max(MAX_VAT_PERCENT)
   vatPercent?: number;
 
+  @ApiPropertyOptional({
+    description:
+      "Mator's commission on this dealer's goods, in percent, as the contract states. " +
+      'Null clears it, and no rate configured charges 0%. Applies to orders placed after ' +
+      "the change; an order keeps the rate it was placed under. Not Payme's commission_info.",
+    example: 5,
+    minimum: 0,
+    maximum: 100,
+    nullable: true,
+  })
+  @IsOptional()
+  @ValidateIf((_, value) => value !== null)
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Max(100)
+  commissionPercent?: number | null;
+
   // Where couriers collect this dealer's goods, and so what courier delivery is priced
   // from. Kept on the supply-side seller behind the dealer. Until it is set, courier
   // delivery of the dealer's goods is refused rather than priced from a guess.

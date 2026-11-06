@@ -6,6 +6,14 @@ import {
   RefundSource,
 } from '@prisma/client';
 import { IdPrefix, prefixedId } from '../common/ulid.util';
+import {
+  ComponentPosition,
+  OrderComponents,
+  RefundBreakdown,
+  SellerPosition,
+  deriveBreakdown,
+  readComponents,
+} from './refund-breakdown';
 
 /** Statuses of a payment that really took the customer's money. */
 const MONEY_TAKEN: PaymentStatus[] = [
@@ -32,15 +40,42 @@ export interface RefundPosition {
     /** What stays with Mator so far, which is also what could still go back. */
     retained: Prisma.Decimal;
   };
+  /** Delivery inside those figures: Mator's line, unless it goes back. */
+  delivery: ComponentPosition;
+  /** Each seller's goods, and Mator's commission on them. */
+  sellers: SellerPosition[];
+  /** Goods no seller is recorded for: an order placed before sellers were. */
+  unattributed: ComponentPosition;
+  /** The same, in the shape the registry's rules take (see refund-breakdown.ts). */
+  components: OrderComponents;
 }
+
+/** What the registry reads of an entry, to tell what went back of each kind of money. */
+const ENTRY_SELECT = {
+  amountUzs: true,
+  serviceFeeUzs: true,
+  deliveryUzs: true,
+  paymentId: true,
+  allocations: {
+    select: { sellerId: true, amountUzs: true, commissionUzs: true },
+  },
+} satisfies Prisma.FinancialRefundSelect;
+
+/** What the registry reads of an order: its charges, and whose its lines are. */
+const ORDER_SELECT = {
+  totalUzs: true,
+  serviceFeeUzs: true,
+  deliveryUzs: true,
+  items: {
+    select: { sellerId: true, lineTotalUzs: true, commissionUzs: true },
+  },
+} satisfies Prisma.OrderSelect;
 
 const sum = (amounts: Prisma.Decimal.Value[]) =>
   amounts.reduce<Prisma.Decimal>(
     (total, amount) => total.add(amount),
     new Prisma.Decimal(0),
   );
-
-const smaller = (a: Prisma.Decimal, b: Prisma.Decimal) => (a.lt(b) ? a : b);
 
 /**
  * The arithmetic of the registry. Callers pass their transaction and hold the
@@ -59,10 +94,7 @@ export async function readRefundPosition(
   orderId: string,
 ): Promise<RefundPosition> {
   const [order, payments, entries, timesPaid] = await Promise.all([
-    tx.order.findUnique({
-      where: { id: orderId },
-      select: { totalUzs: true, serviceFeeUzs: true },
-    }),
+    tx.order.findUnique({ where: { id: orderId }, select: ORDER_SELECT }),
     tx.payment.findMany({
       where: { orderId, status: { in: MONEY_TAKEN } },
       select: { id: true, amountUzs: true, status: true },
@@ -70,7 +102,7 @@ export async function readRefundPosition(
     }),
     tx.financialRefund.findMany({
       where: { orderId, voidedAt: null },
-      select: { amountUzs: true, serviceFeeUzs: true, paymentId: true },
+      select: ENTRY_SELECT,
     }),
     tx.orderStatusHistory.count({
       where: { orderId, status: OrderStatus.PAID },
@@ -98,15 +130,16 @@ export async function readRefundPosition(
   const left = received.sub(refunded);
   const remaining = left.gt(0) ? left : new Prisma.Decimal(0);
 
-  // The fee stays where it is unless a refund says otherwise, and a partial refund does not
-  // recompute it: it was fixed when the order was placed. Once everything has gone back the
-  // fee has too, by arithmetic, even for a reversal with no entry to say so.
-  const feeCharged = new Prisma.Decimal(
-    received.gt(0) ? (order?.serviceFeeUzs ?? 0) : 0,
-  );
-  const feeRefunded = remaining.lte(0)
-    ? feeCharged
-    : smaller(feeCharged, sum(entries.map((e) => e.serviceFeeUzs)));
+  // The fee, delivery and each seller's goods stay where they are unless a refund says
+  // otherwise, and a partial refund recomputes none of them: they were fixed when the order
+  // was placed. Once everything has gone back, so has every part of it, by arithmetic, even
+  // for a reversal with no entry to say so.
+  const components = readComponents({
+    order: order ? toComponentOrder(order) : null,
+    entries: entries.map(toComponentEntry),
+    tookMoney: received.gt(0),
+    everythingBack: received.gt(0) && remaining.lte(0),
+  });
 
   return {
     received,
@@ -117,10 +150,58 @@ export async function readRefundPosition(
       payments[0]?.id ??
       null,
     serviceFee: {
-      charged: feeCharged,
-      refunded: feeRefunded,
-      retained: feeCharged.sub(feeRefunded),
+      charged: components.serviceFee.charged,
+      refunded: components.serviceFee.refunded,
+      retained: components.serviceFee.remaining,
     },
+    delivery: components.delivery,
+    sellers: components.sellers,
+    unattributed: components.unattributed,
+    components,
+  };
+}
+
+type OrderRow = Prisma.OrderGetPayload<{ select: typeof ORDER_SELECT }>;
+type EntryRow = Prisma.FinancialRefundGetPayload<{
+  select: typeof ENTRY_SELECT;
+}>;
+
+/** A row as read, or as a test double gives it with fewer columns. */
+function toComponentOrder(order: Partial<OrderRow>) {
+  return {
+    totalUzs: order.totalUzs ?? 0,
+    serviceFeeUzs: order.serviceFeeUzs ?? 0,
+    deliveryUzs: order.deliveryUzs ?? 0,
+    items: order.items ?? [],
+  };
+}
+
+function toComponentEntry(entry: Partial<EntryRow>) {
+  return {
+    amountUzs: entry.amountUzs ?? 0,
+    serviceFeeUzs: entry.serviceFeeUzs ?? 0,
+    deliveryUzs: entry.deliveryUzs ?? 0,
+    allocations: entry.allocations ?? [],
+  };
+}
+
+/** The columns and allocation rows an entry with this breakdown is written with. */
+export function breakdownData(breakdown: RefundBreakdown) {
+  return {
+    serviceFeeUzs: breakdown.serviceFeeUzs,
+    deliveryUzs: breakdown.deliveryUzs,
+    ...(breakdown.allocations.length > 0
+      ? {
+          allocations: {
+            create: breakdown.allocations.map((allocation) => ({
+              id: prefixedId(IdPrefix.FINANCIAL_REFUND_ALLOCATION),
+              sellerId: allocation.sellerId,
+              amountUzs: allocation.amountUzs,
+              commissionUzs: allocation.commissionUzs,
+            })),
+          },
+        }
+      : {}),
   };
 }
 
@@ -164,7 +245,7 @@ export async function recordProviderRefund(
 ): Promise<void> {
   const active = await tx.financialRefund.findMany({
     where: { paymentId: payment.id, voidedAt: null },
-    select: { id: true, amountUzs: true, serviceFeeUzs: true, method: true },
+    select: { id: true, amountUzs: true, method: true },
   });
 
   const byProvider = active
@@ -181,14 +262,12 @@ export async function recordProviderRefund(
     sum(active.map((entry) => entry.amountUzs)),
   );
   if (unaccounted.gt(0)) {
-    // A provider reversal is of the whole payment, so whatever of the fee no entry has
-    // accounted for yet goes back with it.
-    const order = await tx.order.findUnique({
-      where: { id: payment.orderId },
-      select: { serviceFeeUzs: true },
-    });
-    const feeLeft = new Prisma.Decimal(order?.serviceFeeUzs ?? 0).sub(
-      sum(active.map((entry) => entry.serviceFeeUzs)),
+    // A provider reversal is of the whole payment, so it takes whatever of each kind of money
+    // no entry has given back yet: each seller's goods, delivery and the fee. Read from the
+    // entries alone, since this payment already reads as reversed.
+    const breakdown = deriveBreakdown(
+      await componentsFromEntries(tx, payment.orderId),
+      unaccounted,
     );
     await tx.financialRefund.create({
       data: {
@@ -196,9 +275,7 @@ export async function recordProviderRefund(
         orderId: payment.orderId,
         paymentId: payment.id,
         amountUzs: unaccounted,
-        serviceFeeUzs: feeLeft.gt(0)
-          ? smaller(feeLeft, unaccounted)
-          : new Prisma.Decimal(0),
+        ...breakdownData(breakdown),
         method: RefundMethod.PROVIDER,
         source: RefundSource.PROVIDER_CALLBACK,
         reference: payment.providerTransactionId ?? payment.id,
@@ -210,4 +287,24 @@ export async function recordProviderRefund(
   }
 
   await settleRefundPosition(tx, payment.orderId, now);
+}
+
+/** Each kind of money on an order as the entries alone leave it: what no entry gave back. */
+async function componentsFromEntries(
+  tx: Prisma.TransactionClient,
+  orderId: string,
+): Promise<OrderComponents> {
+  const [order, entries] = await Promise.all([
+    tx.order.findUnique({ where: { id: orderId }, select: ORDER_SELECT }),
+    tx.financialRefund.findMany({
+      where: { orderId, voidedAt: null },
+      select: ENTRY_SELECT,
+    }),
+  ]);
+  return readComponents({
+    order: order ? toComponentOrder(order) : null,
+    entries: entries.map(toComponentEntry),
+    tookMoney: true,
+    everythingBack: false,
+  });
 }

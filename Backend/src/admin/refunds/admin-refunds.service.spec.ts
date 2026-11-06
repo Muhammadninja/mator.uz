@@ -29,6 +29,9 @@ function build(state: {
     paymentId: 'pay_1',
     amountUzs: 100,
     serviceFeeUzs: 0,
+    deliveryUzs: 0,
+    allocations: [],
+    fiscalReference: null,
     method: RefundMethod.PROVIDER,
     source: 'MANUAL',
     reference: 'TX-1',
@@ -371,17 +374,47 @@ describe('AdminRefundsService.record — the service fee', () => {
     );
   });
 
-  it('a full refund has to state the whole fee: it is part of what went back', async () => {
+  it('a refund of all that is left gives back every part of it, fee included, unasked', async () => {
+    const { service, tx } = build(PAID);
+
+    await service.record('ord_1', dto({ amountUzs: 645_000 }));
+
+    expect(tx.financialRefund.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          amountUzs: new Prisma.Decimal(645_000),
+          serviceFeeUzs: new Prisma.Decimal(20_000),
+        }),
+      }),
+    );
+  });
+
+  it('a breakdown stated for a refund of everything has to agree with it', async () => {
     const { service, tx } = build(PAID);
 
     expect(
-      await conflictCode(service.record('ord_1', dto({ amountUzs: 645_000 }))),
-    ).toBe('REFUND_FEE_NOT_STATED');
+      await conflictCode(
+        service.record(
+          'ord_1',
+          dto({ amountUzs: 645_000, serviceFeeUzs: 5_000 }),
+        ),
+      ),
+    ).toBe('REFUND_BREAKDOWN_MISMATCH');
+    expect(tx.financialRefund.create).not.toHaveBeenCalled();
+  });
+
+  it('a partial refund reaching into the fee has to say so', async () => {
+    const { service, tx } = build(PAID);
+
+    // 630 000 is more than the 625 000 the goods hold.
+    expect(
+      await conflictCode(service.record('ord_1', dto({ amountUzs: 630_000 }))),
+    ).toBe('REFUND_BREAKDOWN_REQUIRED');
     expect(tx.financialRefund.create).not.toHaveBeenCalled();
 
     await service.record(
       'ord_1',
-      dto({ amountUzs: 645_000, serviceFeeUzs: 20_000 }),
+      dto({ amountUzs: 630_000, serviceFeeUzs: 5_000 }),
     );
     expect(tx.financialRefund.create).toHaveBeenCalled();
   });

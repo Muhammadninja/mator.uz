@@ -105,6 +105,13 @@ export function settlementStore(seed: { payments: Row[]; orders: Row[] }) {
           ...data,
           amountUzs: Number(data.amountUzs),
           serviceFeeUzs: Number(data.serviceFeeUzs ?? 0),
+          deliveryUzs: Number(data.deliveryUzs ?? 0),
+          // Stored as the rows a nested create writes, as the relation reads them back.
+          allocations: ((data.allocations?.create ?? []) as Row[]).map((a) => ({
+            sellerId: a.sellerId,
+            amountUzs: Number(a.amountUzs),
+            commissionUzs: Number(a.commissionUzs ?? 0),
+          })),
         });
         return data;
       },

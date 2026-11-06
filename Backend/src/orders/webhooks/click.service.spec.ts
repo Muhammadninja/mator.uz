@@ -35,6 +35,9 @@ function forged(secret: string, complete: boolean) {
   return { ...p, sign_string: sign(p, secret, complete) };
 }
 
+/** Click switched on on purpose: listed, as it is not by default, and with its secret. */
+const LISTED = { PAYMENT_PROVIDERS: 'payme,click' };
+
 function build(env: Record<string, string | undefined>) {
   const prisma = {
     order: { findUnique: jest.fn().mockResolvedValue(null) },
@@ -87,15 +90,34 @@ describe('ClickService — fails closed when Click is not enabled', () => {
     expect(settlement.markPaid).not.toHaveBeenCalled();
   });
 
+  it('a secret alone turns nothing on: by default only Payme is listed', async () => {
+    const { svc, prisma, settlement } = build({
+      CLICK_SECRET_KEY: 'real-secret',
+    });
+    // Correctly signed with the real secret — still refused: Click is off.
+    const prep = await svc.prepare(forged('real-secret', false));
+    const done = await svc.complete(forged('real-secret', true));
+    expect(prep.error).toBe(-8);
+    expect(done.error).toBe(-8);
+    expect(prisma.order.findUnique).not.toHaveBeenCalled();
+    expect(settlement.markPaid).not.toHaveBeenCalled();
+  });
+
   it('when explicitly enabled, a request signed with the WRONG secret is still refused', async () => {
-    const { svc, settlement } = build({ CLICK_SECRET_KEY: 'real-secret' });
+    const { svc, settlement } = build({
+      ...LISTED,
+      CLICK_SECRET_KEY: 'real-secret',
+    });
     const done = await svc.complete(forged('', true));
     expect(done.error).toBe(-1);
     expect(settlement.markPaid).not.toHaveBeenCalled();
   });
 
   it('when explicitly enabled, a correctly signed prepare reaches the order lookup (control)', async () => {
-    const { svc, prisma } = build({ CLICK_SECRET_KEY: 'real-secret' });
+    const { svc, prisma } = build({
+      ...LISTED,
+      CLICK_SECRET_KEY: 'real-secret',
+    });
     const res = await svc.prepare(forged('real-secret', false));
     expect(prisma.order.findUnique).toHaveBeenCalled();
     expect(res.error).toBe(-5); // order not found in this stub — but not -8
@@ -118,6 +140,7 @@ describe('Click disabled — no invoices, not listed', () => {
 
   it.each([
     [{}, ['payme']],
+    [{ CLICK_SECRET_KEY: 's' }, ['payme']],
     [{ PAYMENT_PROVIDERS: 'payme' }, ['payme']],
     [
       { PAYMENT_PROVIDERS: 'payme,click', CLICK_SECRET_KEY: 's' },
@@ -153,7 +176,10 @@ describe('Click — an order with a service fee', () => {
   }
 
   function world() {
-    const { svc, prisma, settlement } = build({ CLICK_SECRET_KEY: SECRET });
+    const { svc, prisma, settlement } = build({
+      ...LISTED,
+      CLICK_SECRET_KEY: SECRET,
+    });
     prisma.order.findUnique.mockResolvedValue({
       id: 'ord_1',
       status: 'PENDING_PAYMENT',

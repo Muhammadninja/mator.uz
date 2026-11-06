@@ -262,6 +262,8 @@ describe('the service fee in the code', () => {
 
   it('is written once, when the order is created: a new reader or writer has to be looked at', () => {
     expect(filesMatching(/\bserviceFeeUzs\b/, ['src', 'scripts'])).toEqual([
+      'src/admin/finance/admin-finance-checks.service.ts', // shows an order's charges
+      'src/admin/finance/admin-finance.service.ts', // sums what Mator kept
       'src/admin/orders/admin-orders.presenter.ts', // shows it
       'src/admin/orders/admin-orders.service.ts', // sums Mator's income
       'src/admin/refunds/admin-refunds.presenter.ts', // a refund's share of it
@@ -272,6 +274,7 @@ describe('the service fee in the code', () => {
       'src/orders/order-settlement.ts', // keeps it out of what a seller is owed
       'src/orders/order.presenter.ts', // shows it
       'src/orders/orders.service.ts', // the one writer, at creation
+      'src/orders/refund-breakdown.ts', // what of it can still go back
       'src/orders/service-fee.util.ts', // works it out
       'src/orders/webhooks/payme-fiscal.service.ts', // its receipt line
     ]);
