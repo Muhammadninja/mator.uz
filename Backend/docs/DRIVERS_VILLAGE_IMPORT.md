@@ -143,7 +143,7 @@ the way numbers are written follows from it:
 | `manufacturer_part_number`, `oem_numbers` | no | **Never imported**, whatever they hold — the part number is `code_1c`. These cells carry unreliable values (brand and model names such as `SKODA`, `Onix`). Listed under `headers.notImported`; a file may carry both. |
 | `quantity` | no | The on-hand count: whole number → `stocks.quantity` (integer), read in the file's number format: `2,268` in the `;` export is 2268. A fractional (`12.5`, `1,234.5`) or negative (`-3`) value is rejected, never rounded. **No column or an empty cell** = not given: a new stock gets the column default `stocks.quantity DEFAULT 1`, an existing stock keeps its count. A repeated `code_1c` whose rows state different quantities gives no confirmed count either (see "Repeated `code_1c`"). |
 | `unit` | yes | `шт.`/`шт`/`штук` → `PCS`, `л`/`литр` → `L` → `stocks.unit`. Anything else (`1`, `комп.`) is rejected. |
-| `price` | yes | Price for one unit → `stocks.price_uzs` through the price rule (see Price below). |
+| `price` | yes | Price for one unit, **цена с учётом НДС** (the price the buyer pays, VAT included) → `stocks.price_uzs` through the price rule (see Price below). |
 | `vehicle_make`, `vehicle_model` | — | See §4. |
 | `category_id`, `subcategory_id` | no | **Never read by this import**, whatever they hold (blank cells and unknown ids are fine). Categories are assigned in Mator or by the classification import (§9). The report lists them under `headers.notImported`. |
 
@@ -213,6 +213,10 @@ Two more rules guard against values that are not articles:
 - The rule is applied to the **source cell of every export**, never to a
   stored price. Re-importing the same file gives the same price; nothing is
   ever multiplied twice.
+- The price is **цена с учётом НДС**: the 1C price already includes VAT, and
+  it becomes the buyer's price as it is. No VAT is added to it, here or anywhere
+  else; the dealer's rate (`catalog_sellers.vat_percent`, 0 or 12) only goes
+  on the Payme receipt as `vat_percent`, which works out the VAT inside the price.
 - Empty, zero, negative or malformed prices reject the row (`invalid_price`,
   with the reason). A rejected row writes nothing: the stored price (and
   quantity) stay as they are. For a `code_1c` on several rows see

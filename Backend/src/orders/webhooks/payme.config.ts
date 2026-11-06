@@ -12,12 +12,7 @@
  * bootstrap instead of serving an open webhook.
  */
 
-import {
-  MAX_VAT_PERCENT,
-  MIN_VAT_PERCENT,
-  MXIK_PATTERN,
-  PACKAGE_CODE_PATTERN,
-} from '../../common/fiscal.util';
+import { MXIK_PATTERN, PACKAGE_CODE_PATTERN } from '../../common/fiscal.util';
 
 /** Official Payme checkout host — used when PAYME_CHECKOUT_URL is not set. */
 export const DEFAULT_PAYME_CHECKOUT_URL = 'https://checkout.paycom.uz';
@@ -137,9 +132,8 @@ export function validatePaymeEnv(
  * carrying one is refused with a message naming these keys rather than fiscalized
  * under a code that describes delivery.
  *
- * Delivery's VAT rate is fixed with its codes (DELIVERY_VAT_RATE). Any other rate is
- * never assumed: with no valid one configured, `vatPercent` is null and the line that
- * needs it is refused.
+ * Both are Mator's own lines, so both carry Mator's own VAT rate, MARKETPLACE_VAT_RATE.
+ * It follows from Mator's tax status, so no environment variable sets it for either.
  */
 export interface PaymeFiscalConfig {
   delivery: PlatformChargeFiscal;
@@ -161,8 +155,8 @@ export interface PaymeFiscalConfig {
 export interface PlatformChargeFiscal {
   mxik: string | null;
   packageCode: string | null;
-  /** The rate an operator stated. Null when there is none, or it is no percentage. */
-  vatPercent: number | null;
+  /** Mator's own rate, MARKETPLACE_VAT_RATE: the line is Mator's. */
+  vatPercent: number;
 }
 
 /**
@@ -178,13 +172,17 @@ export const DELIVERY_FISCAL_CODES = {
 } as const;
 
 /**
- * VAT on delivery. Delivery is sold by Mator (ООО «MATOR INNOVATIONS»), which pays
- * turnover tax and is not registered for VAT, so its line says 0. Turnover tax is a
- * different tax, and its rate never goes in `vat_percent`. Fixed for the same reason as
- * the codes: registering for VAT would be a decision to change this, not a setting. A
- * dealer's own rate (12% at Driver's Village) belongs on that dealer's goods alone.
+ * Mator's own VAT rate, on every line Mator sells under its own tax id: delivery and the
+ * service fee. ООО «MATOR INNOVATIONS» pays turnover tax and is not registered for VAT,
+ * so the rate is 0. Turnover tax is a different tax, and its rate never goes in
+ * `vat_percent`.
+ *
+ * One constant for both lines, because it is one fact about one company: the two lines
+ * cannot disagree, and no environment can declare a VAT that Mator does not pay.
+ * Registering for VAT would be a decision to change this, not a setting. A dealer's own
+ * rate (12% at Driver's Village) belongs on that dealer's goods alone.
  */
-export const DELIVERY_VAT_RATE = 0;
+export const MARKETPLACE_VAT_RATE = 0;
 
 /** A company's ИНН. Mator is an ООО, so a person's 14-digit ПИНФЛ cannot be its own. */
 const COMPANY_TIN_PATTERN = /^\d{9}$/;
@@ -219,18 +217,10 @@ function readServiceFeeCode(
 export function readPaymeFiscalConfig(
   get: (key: string) => string | undefined,
 ): PaymeFiscalConfig {
-  const percent = (key: string): number | null => {
-    const raw = asTrimmedString(get(key));
-    const parsed = Number(raw);
-    return raw && parsed >= MIN_VAT_PERCENT && parsed <= MAX_VAT_PERCENT
-      ? parsed
-      : null;
-  };
-
   return {
     delivery: {
       ...DELIVERY_FISCAL_CODES,
-      vatPercent: DELIVERY_VAT_RATE,
+      vatPercent: MARKETPLACE_VAT_RATE,
     },
     serviceFee: {
       // No default: the marketplace's service fee is a different service from
@@ -245,7 +235,8 @@ export function readPaymeFiscalConfig(
         PACKAGE_CODE_PATTERN,
         DELIVERY_FISCAL_CODES.packageCode,
       ),
-      vatPercent: percent('SERVICE_FEE_VAT_PERCENT'),
+      // The fee is Mator's income, so it carries Mator's rate, exactly like delivery.
+      vatPercent: MARKETPLACE_VAT_RATE,
     },
     marketplaceTin: readMarketplaceTin(get('MARKETPLACE_TIN')),
     allowServiceOnlyOrders:

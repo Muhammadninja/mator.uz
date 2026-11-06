@@ -49,14 +49,20 @@ export function orderLineType(line: {
 /** A line item of a Payme receipt, exactly as it goes on the wire. */
 export interface PaymeFiscalItem {
   title: string;
-  /** UNIT price in TIYIN (1 UZS = 100 tiyin), like every Payme amount. */
+  /**
+   * UNIT price in TIYIN (1 UZS = 100 tiyin), like every Payme amount: what the buyer
+   * pays, VAT included. The fiscal side works out the VAT inside it from `vat_percent`.
+   */
   price: number;
   count: number;
   /** MXIK / ИКПУ of the item's category. */
   code: string;
   /** Tasnif package code for the form this listing is sold in. */
   package_code: string;
-  /** The seller's VAT rate, as a percentage: the dealer's on goods, Mator's on delivery. */
+  /**
+   * The seller's VAT rate, as a percentage: the dealer's on goods, Mator's on delivery
+   * and the service fee. Only ever a label for the receipt: `price` already includes it.
+   */
   vat_percent: number;
   /**
    * The seller's tax id, so each line settles to the right merchant. Mator is the
@@ -192,8 +198,8 @@ export function buildFiscalItem(line: FiscalLineSource): FiscalLineResult {
  * Payme reconciles a receipt against the amount actually charged, so every
  * component of the order total needs a line — a receipt listing only the goods
  * is short by exactly the fees. These lines are the PLATFORM's, not a dealer's:
- * delivery has fixed system codes and a fixed rate, the service fee's come from
- * configuration, and their `commission_info` is the marketplace's TIN.
+ * delivery has fixed system codes, the service fee's come from configuration, both
+ * carry Mator's own VAT rate, and their `commission_info` is the marketplace's TIN.
  *
  * Reports a gap instead of guessing when a code, the VAT rate or the TIN is unset:
  * a charge fiscalized under a code that describes something else, or a rate nobody

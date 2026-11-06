@@ -21,6 +21,7 @@ import {
 import {
   buildFiscalItem,
   orderLineType,
+  type PaymeFiscalItem,
   receiptTotalTiyin,
 } from './payme-fiscal.util';
 import {
@@ -1580,14 +1581,21 @@ describe('platform charge lines', () => {
     );
 
     // Every missing part is reported, each naming the env key an operator has to
-    // set — one round trip, not several.
+    // set — one round trip, not several. The rate is not among them: it is Mator's.
     await expect(unconfigured.buildOrderDetail('ord_1')).rejects.toMatchObject({
       gaps: [
-        expect.stringContaining('SERVICE_FEE_MXIK'),
-        expect.stringContaining('SERVICE_FEE_PACKAGE_CODE'),
-        expect.stringContaining('SERVICE_FEE_VAT_PERCENT'),
+        expect.stringContaining('no MXIK is configured'),
+        expect.stringContaining('no package code is configured'),
       ],
     });
+    const refusal = await unconfigured
+      .buildOrderDetail('ord_1')
+      .catch((err: FiscalDataIncompleteException) => err);
+    const { gaps } = refusal as FiscalDataIncompleteException;
+    for (const key of ['SERVICE_FEE_MXIK', 'SERVICE_FEE_PACKAGE_CODE']) {
+      expect(gaps.every((gap) => gap.includes(key))).toBe(true);
+    }
+    expect(gaps.join(' ')).not.toMatch(/VAT/);
   });
 
   /* eslint-disable @typescript-eslint/no-unsafe-argument -- the Prisma double is typed `any` */
@@ -1621,6 +1629,24 @@ describe('platform charge lines', () => {
       expect(detail.items.map((i) => i.title)).toEqual(['Колодки', 'Доставка']);
     });
 
+    it.each(['12', '15', '4', '0', ''])(
+      'carries Mator’s 0, like delivery, whatever SERVICE_FEE_VAT_PERCENT says: %j',
+      async (value) => {
+        stubOrder({ deliveryUzs: 25000, serviceFeeUzs: 5000 });
+
+        const detail = await withCodes({
+          SERVICE_FEE_VAT_PERCENT: value,
+        }).buildOrderDetail('ord_1');
+
+        const fee = detail.items.find((i) => i.title === SERVICE_FEE_TITLE);
+        expect(fee?.vat_percent).toBe(0);
+        expect(detail.items[1]).toMatchObject({
+          title: 'Доставка',
+          vat_percent: 0,
+        });
+      },
+    );
+
     it.each([
       ['delivery’s MXIK', { SERVICE_FEE_MXIK: '10112006002000000' }, 'MXIK'],
       [
@@ -1647,7 +1673,7 @@ describe('platform charge lines', () => {
       },
     );
 
-    it('says so at boot when its codes or rate are missing', () => {
+    it('says so at boot when its codes are missing', () => {
       const warn = jest
         .spyOn(Logger.prototype, 'warn')
         .mockImplementation(() => undefined);
@@ -1661,6 +1687,78 @@ describe('platform charge lines', () => {
       );
       warn.mockRestore();
     });
+  });
+
+  // The audit's scenarios, end to end through the receipt: a catalog price already
+  // includes VAT, so a dealer's rate changes what the receipt SAYS, never what it charges.
+  describe('a dealer’s VAT rate is a label on the receipt, never a price', () => {
+    const receiptAt = async (
+      priceUzs: number,
+      serviceFeeUzs: number,
+      vatPercent: number,
+    ) => {
+      stubOrder({
+        deliveryUzs: 0,
+        serviceFeeUzs,
+        totalUzs: priceUzs + serviceFeeUzs,
+      });
+      prisma.orderItem.findMany.mockResolvedValue([
+        { ...product, priceUzs: new Prisma.Decimal(priceUzs) },
+      ]);
+      prisma.catalogPart.findMany.mockResolvedValue([
+        {
+          id: 'part_1',
+          packageForm: PackageForm.SINGLE,
+          kind: ProductKind.SPARE_PART,
+          oilType: null,
+          category: BRAKES,
+          seller: {
+            tin: '305123456',
+            vatPercent: new Prisma.Decimal(vatPercent),
+          },
+        },
+      ]);
+      return withCodes().buildOrderDetail('ord_1');
+    };
+
+    it.each([
+      // catalog price, the fee its tier charges, what Payme is asked for (tiyin)
+      [100_000, 0, 10_000_000],
+      [500_000, 20_000, 52_000_000],
+    ])(
+      '%s UZS: the same receipt at 12% and at 0%, but for the goods’ vat_percent',
+      async (priceUzs, serviceFeeUzs, amountTiyin) => {
+        const at12 = await receiptAt(priceUzs, serviceFeeUzs, 12);
+        const at0 = await receiptAt(priceUzs, serviceFeeUzs, 0);
+        const withoutRate = (items: PaymeFiscalItem[]) =>
+          items.map((item) => ({ ...item, vat_percent: undefined }));
+
+        // The goods line is the catalog price, in tiyin, at either rate.
+        expect(at12.items[0]).toMatchObject({
+          price: priceUzs * 100,
+          count: 1,
+          vat_percent: 12,
+        });
+        expect(at0.items[0]).toMatchObject({
+          price: priceUzs * 100,
+          count: 1,
+          vat_percent: 0,
+        });
+        // Nothing else moves: no line grows by the VAT, and none is added for it.
+        expect(withoutRate(at12.items)).toEqual(withoutRate(at0.items));
+        expect(receiptTotalTiyin(at12.items)).toBe(amountTiyin);
+        expect(receiptTotalTiyin(at0.items)).toBe(amountTiyin);
+        // Mator's fee keeps Mator's 0, whichever rate the dealer has.
+        for (const detail of [at12, at0]) {
+          for (const item of detail.items.slice(1)) {
+            expect(item).toMatchObject({
+              title: SERVICE_FEE_TITLE,
+              vat_percent: 0,
+            });
+          }
+        }
+      },
+    );
   });
 
   /* eslint-enable @typescript-eslint/no-unsafe-argument */
@@ -1804,6 +1902,44 @@ describe('buildFiscalItem (pure mapping)', () => {
       expect.objectContaining({ price: 15_000_001, count: 1 }),
     ]);
   });
+
+  // The price already includes VAT. The dealer's rate only labels the line: it must
+  // never grow the price by the VAT, split it differently or add a line for it.
+  it.each<
+    [string, { priceUzs: number; quantity: number; lineTotalUzs?: number }]
+  >([
+    ['one unit', { priceUzs: 100000, quantity: 1 }],
+    ['several units', { priceUzs: 500000, quantity: 3 }],
+    [
+      'a promo-discounted line split to reconcile',
+      { priceUzs: 33333.33, quantity: 3, lineTotalUzs: 89999.99 },
+    ],
+  ])(
+    '%s: the same price at 12% and at 0%, only vat_percent differs',
+    (_, amounts) => {
+      const at = (vatPercent: number) => {
+        const result = buildFiscalItem(
+          line({ ...amounts, dealer: { tin: '301234567', vatPercent } }),
+        );
+        if (!result.ok) throw new Error(result.gaps.join('; '));
+        return result.items;
+      };
+      const withoutRate = (items: PaymeFiscalItem[]) =>
+        items.map((item) => ({ ...item, vat_percent: undefined }));
+
+      const at12 = at(12);
+      const at0 = at(0);
+
+      expect(at12.map((item) => item.vat_percent)).toEqual(at12.map(() => 12));
+      expect(at0.map((item) => item.vat_percent)).toEqual(at0.map(() => 0));
+      expect(withoutRate(at12)).toEqual(withoutRate(at0));
+      const charged = Math.round(
+        (amounts.lineTotalUzs ?? amounts.priceUzs * amounts.quantity) * 100,
+      );
+      expect(receiptTotalTiyin(at12)).toBe(charged);
+      expect(receiptTotalTiyin(at0)).toBe(charged);
+    },
+  );
 
   // Where a listing's codes come from is decided by its KIND. Antifreeze is the
   // case that makes the rule visible: it lives one step away from motor oil in

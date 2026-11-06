@@ -174,14 +174,10 @@ export class PaymeFiscalService implements OnModuleInit {
           'a delivery cost or a service fee will be refused until it is configured.',
       );
     }
-    if (
-      serviceFee.mxik === null ||
-      serviceFee.packageCode === null ||
-      serviceFee.vatPercent === null
-    ) {
+    if (serviceFee.mxik === null || serviceFee.packageCode === null) {
       this.logger.warn(
-        'SERVICE_FEE_MXIK, SERVICE_FEE_PACKAGE_CODE or SERVICE_FEE_VAT_PERCENT is unset or ' +
-          'invalid: Payme will refuse any order with a service fee until all three are configured.',
+        'SERVICE_FEE_MXIK or SERVICE_FEE_PACKAGE_CODE is unset or invalid: Payme will ' +
+          'refuse any order with a service fee until both are configured.',
       );
     }
   }
@@ -343,13 +339,13 @@ export class PaymeFiscalService implements OnModuleInit {
     }
 
     // Its own line, under its own codes: never inside a goods price or delivery. With a
-    // code, the rate or Mator's tax id missing the order is refused, so the fee is neither
-    // dropped from the receipt nor declared as something else.
+    // code or Mator's tax id missing the order is refused, so the fee is neither dropped
+    // from the receipt nor declared as something else. Its rate is Mator's, like delivery's.
     const serviceFeeUzs = Number(order.serviceFeeUzs);
     if (serviceFeeUzs > 0) {
       fees.push({
         reference:
-          'service fee (set SERVICE_FEE_MXIK / SERVICE_FEE_PACKAGE_CODE / SERVICE_FEE_VAT_PERCENT)',
+          'service fee (set SERVICE_FEE_MXIK / SERVICE_FEE_PACKAGE_CODE)',
         title: SERVICE_FEE_TITLE,
         amountUzs: serviceFeeUzs,
         codes: fiscal.serviceFee,

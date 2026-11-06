@@ -253,8 +253,8 @@ export function fakeDiscounts(): any {
  * production mapping, not a fake one.
  *
  * `env` supplies what a test's receipt needs from configuration: the service fee's
- * codes and the VAT rates (see FISCAL_TEST_ENV). Delivery's codes are a system
- * constant, so they need nothing here.
+ * codes and Mator's tax id (see FISCAL_TEST_ENV). Delivery's codes and Mator's VAT
+ * rate are system constants, so they need nothing here.
  */
 export function fakeFiscal(
   prisma: PrismaMock,
@@ -265,12 +265,11 @@ export function fakeFiscal(
 
 /**
  * What a deployment would configure for the platform's own charges, for `fakeFiscal`.
- * The rates are test values and say nothing about what any rate should be.
+ * The codes and the tax id are test values and say nothing about the real ones.
  */
 export const FISCAL_TEST_ENV = {
   SERVICE_FEE_MXIK: '10307001001000000',
   SERVICE_FEE_PACKAGE_CODE: '1000001',
-  SERVICE_FEE_VAT_PERCENT: '0',
   MARKETPLACE_TIN: '123456789',
 };
 
