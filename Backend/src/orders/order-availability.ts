@@ -41,6 +41,9 @@ export const DELIVERY_PRICE_CHANGED = 'DELIVERY_PRICE_CHANGED';
 /** The destination, a pickup point or the rates are not those the quote was for. */
 export const DELIVERY_QUOTE_STALE = 'DELIVERY_QUOTE_STALE';
 
+/** The total computed now is not the one the buyer confirmed. */
+export const ORDER_TOTAL_CHANGED = 'ORDER_TOTAL_CHANGED';
+
 export async function findUnavailableParts(
   prisma: Pick<PrismaService, 'catalogPart'>,
   lines: readonly { partId: string | null; title: string }[],

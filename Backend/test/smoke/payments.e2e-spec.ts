@@ -320,7 +320,11 @@ describe('Payments + webhooks smoke', () => {
 
   describe('Click', () => {
     const SECRET = 'click-secret';
-    const config = fakeConfig({ CLICK_SECRET_KEY: SECRET });
+    // Switched on on purpose: by default Payme is the only provider.
+    const config = fakeConfig({
+      PAYMENT_PROVIDERS: 'payme,click',
+      CLICK_SECRET_KEY: SECRET,
+    });
 
     function sign(p: Record<string, any>, isComplete: boolean) {
       const parts = [
@@ -391,7 +395,9 @@ describe('Payments + webhooks smoke', () => {
         id: 'pay_1',
         providerPrepareId: '1700',
         status: 'PENDING',
+        amountUzs: 215000,
       });
+      settlement.markPaid.mockResolvedValue('paid');
 
       const res: any = await svc.complete(p);
       expect(res.error).toBe(0);

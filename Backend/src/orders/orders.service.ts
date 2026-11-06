@@ -44,10 +44,22 @@ import {
   DELIVERY_COST_UNAVAILABLE,
   DELIVERY_PRICE_CHANGED,
   DELIVERY_QUOTE_STALE,
+  ORDER_TOTAL_CHANGED,
   PART_UNAVAILABLE,
   assertAllAvailable,
   findUnavailableParts,
 } from './order-availability';
+import {
+  findCommissionRates,
+  findLineSellers,
+  lineCommissionUzs,
+} from './order-settlement';
+import {
+  PricedLine,
+  computeOrderCharges,
+  linesSubtotalUzs,
+  toTiyin,
+} from './service-fee.util';
 
 const DEFAULT_ORDER_LIMIT = 20;
 
@@ -137,7 +149,13 @@ export class OrdersService {
       });
     }
 
-    const subtotal = cart.items.reduce((s, i) => s + unitPriceOf(i) * i.quantity, 0);
+    const pricedLines: PricedLine[] = cart.items.map((i) => ({
+      partId: i.partId,
+      offerId: i.offerId,
+      serviceId: i.serviceId,
+      unitPriceUzs: unitPriceOf(i),
+      quantity: i.quantity,
+    }));
     const snap = dto.cart_snapshot ?? {};
     const deliveryMethod =
       String(snap.delivery_method ?? 'courier').toUpperCase() === 'PICKUP'
@@ -198,9 +216,29 @@ export class OrdersService {
         });
       }
     }
-    const deliveryUzs = delivery?.priceUzs ?? 0;
-    const discount = cart.promoCode ? resolvePromo(cart.promoCode, subtotal).discountUzs : 0;
-    const total = Math.max(0, subtotal - discount) + deliveryUzs;
+    const discount = cart.promoCode
+      ? resolvePromo(cart.promoCode, linesSubtotalUzs(pricedLines)).discountUzs
+      : 0;
+    // Every amount on the order comes from here, from the server's own cart. Nothing in the
+    // request can state one: `confirmed_total_uzs` only says what the buyer was shown. A total
+    // that no longer matches means the cart, a sale or the tariff moved since, so the buyer
+    // agrees to the new one or not at all. A client stating no total (an older build) has
+    // shown none, and is charged what is computed here all the same.
+    const charges = computeOrderCharges({
+      lines: pricedLines,
+      discountUzs: discount,
+      deliveryUzs: delivery?.priceUzs ?? 0,
+    });
+    if (
+      dto.confirmed_total_uzs != null &&
+      toTiyin(dto.confirmed_total_uzs) !== toTiyin(charges.totalUzs)
+    ) {
+      throw new ConflictException({
+        code: ORDER_TOTAL_CHANGED,
+        message:
+          'The order total has changed. Check the new total and confirm the order again.',
+      });
+    }
 
     // Spread the promo discount INTO the line prices, in tiyin, so the charged
     // amount is carried entirely by the items. A Payme receipt has no negative
@@ -222,6 +260,12 @@ export class OrdersService {
       dto.contact_phone_e164 ??
       (await this.prisma.appUser.findUnique({ where: { id: userId } }))?.phoneE164 ??
       undefined;
+    const lineSellers = await findLineSellers(this.prisma, cart.items);
+    // Mator's commission is frozen on each line now, at the seller's rate as it stands: a
+    // later change to the rate reaches only the orders placed after it.
+    const commissionRates = await findCommissionRates(this.prisma, [
+      ...lineSellers.values(),
+    ]);
 
     const order = await this.prisma.$transaction(async (tx) => {
       const created = await tx.order.create({
@@ -229,10 +273,10 @@ export class OrdersService {
           id: prefixedId(IdPrefix.ORDER),
           userId,
           status: OrderStatus.PENDING_PAYMENT,
-          subtotalUzs: subtotal,
-          // Written once, here. Payment reads what this stored, so nothing may change
-          // it later, least of all between Check and Perform.
-          deliveryUzs,
+          subtotalUzs: charges.subtotalUzs,
+          // Every charge is written once, here. Payment reads what this stored, so nothing
+          // may change it later, least of all between Check and Perform.
+          deliveryUzs: charges.deliveryUzs,
           ...(delivery
             ? {
                 deliveryShipments:
@@ -246,9 +290,9 @@ export class OrdersService {
                   : {}),
               }
             : {}),
-          serviceFeeUzs: 0,
-          discountUzs: discount,
-          totalUzs: total,
+          serviceFeeUzs: charges.serviceFeeUzs,
+          discountUzs: charges.discountUzs,
+          totalUzs: charges.totalUzs,
           vehicleId: dto.vehicle_id,
           deliveryAddressId: snap.delivery_address_id ?? undefined,
           deliveryMethod,
@@ -270,6 +314,10 @@ export class OrdersService {
               const unit = share
                 ? share.effectiveUnitPriceTiyin / 100
                 : unitPriceOf(i);
+              const sellerId = lineSellers.get(i.id) ?? null;
+              const commissionPercent = sellerId
+                ? (commissionRates.get(sellerId) ?? new Prisma.Decimal(0))
+                : new Prisma.Decimal(0);
               return {
                 id: prefixedId(IdPrefix.ORDER_ITEM),
                 partId: i.partId,
@@ -279,6 +327,9 @@ export class OrdersService {
                 // as a line with no goods, and its receipt has no dealer to name.
                 offerId: i.offerId,
                 offerSellerTgId: i.offer?.sellerTgId ?? null,
+                sellerId,
+                commissionPercent,
+                commissionUzs: lineCommissionUzs(lineTotal, commissionPercent),
                 title: i.title,
                 quantity: i.quantity,
                 priceUzs: unit,

@@ -178,5 +178,37 @@ Backend-owned gaps from this workstream are closed. What is left:
       dispatches couriers: that is the exact destination, and the admin panel has no map
       or field for it yet.
 
+6. **Service fee** — every order above 100 000 of parts now carries one. In this order:
+   1. Apply migration `20261105000200_service_fee_refunds_and_line_seller` (two additive
+      columns), run `prisma generate`, build, then deploy the code.
+   2. Set `SERVICE_FEE_MXIK`, `SERVICE_FEE_PACKAGE_CODE` and `SERVICE_FEE_VAT_PERCENT` (see
+      DEPLOYMENT.md), and `MARKETPLACE_TIN` if it is not set yet. Until all four are valid,
+      Payme refuses every order that carries a fee; cash and terminal orders still work.
+   3. Release the app build that shows the fee and sends `confirmed_total_uzs`. Builds already
+      installed show no fee line: they are charged the right total, but their screen does not
+      add the fee in, so release the new build right after the backend.
+   4. Refunds recorded by hand now take `serviceFeeUzs`, the part of the refund that is the
+      fee. A refund that reaches into the fee is refused until it says so. The admin panel
+      has no field for it yet, and none for `settlement` or `serviceFeeRevenueUzs`.
+
+7. **Refunds, commission and the seller ledger (Phase 3)** — in this order:
+   1. Apply `20261106000000_seller_payout_audit_enum_values`, then
+      `20261106000100_refunds_payouts_and_commission`, run `prisma generate`, build, then
+      deploy the code. Both are additive: existing order lines get a commission of 0, which is
+      what they were charged, and existing refunds read as unattributed goods.
+   2. Set each dealer's commission rate from their contract (`commissionPercent` on
+      `PATCH /v1/admin/dealers/:id`). Until then a dealer is charged 0%. A rate reaches orders
+      placed after it only.
+   3. Manual refunds now take `deliveryUzs`, `allocations` (per seller) and `fiscalReference`
+      besides `serviceFeeUzs`; a partial refund of an order with several sellers is refused
+      until it says whose goods it was for. Refunds in cash, on a terminal or by transfer need
+      a return receipt from Mator's own fiscal process: the registry issues none.
+   4. Sellers are paid only for delivered, paid orders with no hold and no unconfirmed Payme
+      refund. The admin panel has no screens yet for `/v1/admin/finance` or the new refund
+      fields.
+   5. Finance alerts reach whatever channels the queue monitor's alerts are configured for.
+   6. Click stays off: production's `PAYMENT_PROVIDERS` must not list `click` (the default is
+      now `payme` alone), and `CLICK_SECRET_KEY` stays unset.
+
 Production deployment and production migrations are performed manually by the
 project owner.

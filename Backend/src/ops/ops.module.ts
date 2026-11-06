@@ -4,6 +4,7 @@ import { BullModule } from '@nestjs/bullmq';
 import { QUEUE_NAMES } from '../queue/queue.constants';
 import { AuthModule } from '../auth/auth.module';
 import { AlertService } from './alert.service';
+import { FinanceAlertListener } from './finance-alert.listener';
 import { QueueMonitorService } from './queue-monitor.service';
 import { QueueHealthController } from './queue-health.controller';
 import { bullBoardImports } from './bull-board.imports';
@@ -40,7 +41,8 @@ import { bullBoardImports } from './bull-board.imports';
     ...bullBoardImports(),
   ],
   controllers: [QueueHealthController],
-  providers: [AlertService, QueueMonitorService],
+  // FinanceAlertListener delivers what the money side raises (src/orders/finance-alerts.ts).
+  providers: [AlertService, QueueMonitorService, FinanceAlertListener],
   // Exported so a future module can raise its own alerts, or read queue samples,
   // through the same abstraction rather than inventing a second one.
   exports: [AlertService, QueueMonitorService],

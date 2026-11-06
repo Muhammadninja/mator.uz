@@ -15,6 +15,13 @@ export const ALERT_TYPES = {
   NO_ACTIVE_WORKERS: 'no_active_workers',
   /** A queue could not be sampled (Redis error) — the monitor itself degraded. */
   MONITOR_ERROR: 'monitor_error',
+  // Raised by the money side (src/orders/finance-alerts.ts), under the "queue" `payments`.
+  /** Payme reports a fiscal receipt the tax authority did not accept. */
+  FISCAL_RECEIPT_FAILED: 'fiscal_receipt_failed',
+  /** A fiscal receipt contradicts the accepted one on file, or comes where none should. */
+  FISCAL_RECEIPT_CONFLICT: 'fiscal_receipt_conflict',
+  /** Payme asked to refund a payment and the refund was refused. */
+  REFUND_REFUSED: 'refund_refused',
 } as const;
 
 export type AlertType = (typeof ALERT_TYPES)[keyof typeof ALERT_TYPES];

@@ -99,8 +99,20 @@ export function settlementStore(seed: { payments: Row[]; orders: Row[] }) {
       },
       create: async ({ data }: Row) => {
         await tick();
-        // A plain number: structuredClone, used for rollback, cannot copy a Decimal.
-        refunds.push({ ...data, amountUzs: Number(data.amountUzs) });
+        // Plain numbers: structuredClone, used for rollback, cannot copy a Decimal. The
+        // fee share defaults to 0, as the column does.
+        refunds.push({
+          ...data,
+          amountUzs: Number(data.amountUzs),
+          serviceFeeUzs: Number(data.serviceFeeUzs ?? 0),
+          deliveryUzs: Number(data.deliveryUzs ?? 0),
+          // Stored as the rows a nested create writes, as the relation reads them back.
+          allocations: ((data.allocations?.create ?? []) as Row[]).map((a) => ({
+            sellerId: a.sellerId,
+            amountUzs: Number(a.amountUzs),
+            commissionUzs: Number(a.commissionUzs ?? 0),
+          })),
+        });
         return data;
       },
     },

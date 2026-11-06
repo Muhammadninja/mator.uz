@@ -319,4 +319,73 @@ describe('PaymeFiscalReceiptService', () => {
       expect.stringContaining('status 9'),
     );
   });
+
+  /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unnecessary-type-assertion -- the Prisma double and the JSON-RPC replies are untyped */
+  describe('what needs a person: alerts (Phase 3)', () => {
+    let alerts: { raise: jest.Mock };
+    beforeEach(() => {
+      alerts = { raise: jest.fn() };
+      prisma.payment.findUnique.mockResolvedValue({
+        id: 'pay_1',
+        orderId: 'ord_1',
+        providerState: -2,
+      });
+      service = new PaymeFiscalReceiptService(prisma as any, alerts as any);
+    });
+
+    it('a receipt the tax authority did not accept is raised, naming the payment and order', async () => {
+      await service.record(
+        callback({ ...DATA, status_code: 3, message: 'rejected' }),
+      );
+
+      expect(alerts.raise).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'fiscal_receipt_failed',
+          severity: 'critical',
+          context: expect.objectContaining({
+            paymentId: 'pay_1',
+            orderId: 'ord_1',
+            statusCode: 3,
+          }),
+        }),
+      );
+    });
+
+    it('an accepted receipt raises nothing', async () => {
+      await service.record(callback());
+
+      expect(alerts.raise).not.toHaveBeenCalled();
+    });
+
+    it('a cancellation receipt with an accepted sale receipt before it is in order', async () => {
+      await service.record(callback());
+      await service.record(callback({ ...DATA, receipt_id: 122 }, 'CANCEL'));
+
+      expect(alerts.raise).not.toHaveBeenCalled();
+      expect(stored('CANCEL').receiptId).toBe('122');
+    });
+
+    it('a cancellation receipt with no sale receipt to reverse is raised, and still kept', async () => {
+      expect(
+        await service.record(callback({ ...DATA, receipt_id: 122 }, 'CANCEL')),
+      ).toBe('recorded');
+
+      expect(alerts.raise).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'fiscal_receipt_conflict',
+          context: expect.objectContaining({ saleReceiptId: null }),
+        }),
+      );
+    });
+
+    it('a receipt contradicting an accepted one is raised', async () => {
+      await service.record(callback());
+      await service.record(callback({ ...DATA, fiscal_sign: 'different' }));
+
+      expect(alerts.raise).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'fiscal_receipt_conflict' }),
+      );
+    });
+  });
+  /* eslint-enable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unnecessary-type-assertion */
 });

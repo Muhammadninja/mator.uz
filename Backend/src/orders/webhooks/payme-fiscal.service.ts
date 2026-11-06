@@ -162,16 +162,26 @@ export class PaymeFiscalService implements OnModuleInit {
 
   /**
    * Say so at boot, rather than when a customer's payment is refused. Only a warning:
-   * pickup orders need none of this.
+   * an order with no delivery cost and no service fee needs none of this.
    */
   onModuleInit(): void {
-    const { marketplaceTin } = readPaymeFiscalConfig((key) =>
+    const { marketplaceTin, serviceFee } = readPaymeFiscalConfig((key) =>
       this.config.get<string>(key),
     );
     if (marketplaceTin === null) {
       this.logger.warn(
         "MARKETPLACE_TIN is unset or cannot be Mator's 9-digit tax id: any order with " +
-          'a delivery cost will be refused until it is configured.',
+          'a delivery cost or a service fee will be refused until it is configured.',
+      );
+    }
+    if (
+      serviceFee.mxik === null ||
+      serviceFee.packageCode === null ||
+      serviceFee.vatPercent === null
+    ) {
+      this.logger.warn(
+        'SERVICE_FEE_MXIK, SERVICE_FEE_PACKAGE_CODE or SERVICE_FEE_VAT_PERCENT is unset or ' +
+          'invalid: Payme will refuse any order with a service fee until all three are configured.',
       );
     }
   }
@@ -296,8 +306,8 @@ export class PaymeFiscalService implements OnModuleInit {
   /**
    * The non-product charges on an order, in receipt order. Only charges the
    * order actually carries produce a line: a pickup order (no delivery fee) and
-   * a fee-free order get no extra lines at all, so their receipts are exactly
-   * what they were before.
+   * a fee-free order get no extra lines at all, so a receipt never holds a line
+   * for nothing.
    *
    * A promo DISCOUNT is deliberately absent, and needs no line: it is spread
    * into the item prices when the order is created (promo-allocation.util), so
@@ -329,12 +339,12 @@ export class PaymeFiscalService implements OnModuleInit {
         codes: fiscal.delivery,
         vatPercent: fiscal.delivery.vatPercent,
         marketplaceTin: fiscal.marketplaceTin,
-        tinRequired: true,
       });
     }
 
-    // New orders hold no service fee. One placed earlier still has it in its total, so
-    // it needs a line or a refusal, and a stored charge is never simply dropped.
+    // Its own line, under its own codes: never inside a goods price or delivery. With a
+    // code, the rate or Mator's tax id missing the order is refused, so the fee is neither
+    // dropped from the receipt nor declared as something else.
     const serviceFeeUzs = Number(order.serviceFeeUzs);
     if (serviceFeeUzs > 0) {
       fees.push({
@@ -345,7 +355,6 @@ export class PaymeFiscalService implements OnModuleInit {
         codes: fiscal.serviceFee,
         vatPercent: fiscal.serviceFee.vatPercent,
         marketplaceTin: fiscal.marketplaceTin,
-        tinRequired: false,
       });
     }
 

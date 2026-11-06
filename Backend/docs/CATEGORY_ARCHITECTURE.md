@@ -287,12 +287,96 @@ missing (read the dry-run first: a missing row may be one an operator removed on
     never goes there. `DELIVERY_VAT_PERCENT` is no longer read.
   - Its tax id, `commission_info.tin`, is `MARKETPLACE_TIN`, Mator's 9-digit ИНН. Unset, or
     anything that cannot be that, including YandexGo's ИНН, the line is refused and the boot
-    log says so. Nothing is ever recorded in YandexGo's name.
+    log says so. Nothing is ever recorded in YandexGo's name. The service fee's line carries
+    the same tax id, under the same rule.
   - Goods are not Mator's: Mator is the platform, and each line carries its own dealer's tax
     id and VAT rate (`CatalogSeller.tin`, `vatPercent`; 12% at Driver's Village, as an
     operator enters it). No rate of Mator's reaches them, and no dealer's reaches delivery.
-- **Service fee.** Removed: new orders hold none, and `SERVICE_FEE_UZS` is no longer read. An
-  order placed earlier still has it in its total, so it needs its line, or is refused.
+- **Service fee.** Mator's own income, charged once per order by a flat tariff on the cost of
+  the parts (`src/orders/service-fee.util.ts`, the only copy of the tiers; the app shows what
+  the API answers): up to and including 100 000 nothing, then 5 000, from 200 000 10 000, from
+  500 000 20 000, from 1 000 000 30 000. Worked out from the server's cart on every cart read
+  and change, and written once, with the other charges, when the order is created
+  (`orders.service_fee_uzs`). Nothing in a request can state it: `confirmed_total_uzs` only
+  says what the buyer was shown, and a total that no longer matches is refused with
+  `ORDER_TOTAL_CHANGED`. `SERVICE_FEE_UZS` is not read.
+  - What it is computed from: catalog parts and sourced offers at their current (sale) price,
+    before a promo code. A promo discounts the goods only, never the fee or delivery. A
+    service booked beside the goods is not a part and adds nothing. Both are choices made in
+    this code, not stated in the tariff: see the release report.
+  - On the receipt it is a line of its own, titled `Сервисный сбор`, count 1, never inside a
+    goods price or delivery, and absent when the fee is 0. Its codes come from configuration,
+    because nobody has supplied them yet: `SERVICE_FEE_MXIK`, `SERVICE_FEE_PACKAGE_CODE` and
+    `SERVICE_FEE_VAT_PERCENT`. Delivery's codes are refused there, as is a malformed code, and
+    no rate is assumed. Its tax id is `MARKETPLACE_TIN`, like delivery's. With any of the four
+    missing, Payme refuses every order that carries a fee, and the boot log says so.
+  - Refunds: Payme can only reverse a whole transaction, fee included, and the refund registry
+    records that the fee went back. A refund recorded by hand states how much of it is the fee
+    (`serviceFeeUzs`, 0 unless stated): a partial refund leaves the fee with Mator, a refund
+    reaching into the fee has to say so, and it can never be given back twice. The fee is
+    never recomputed for what remains of an order.
+- **Whose money an order holds.** The buyer pays Mator the whole total, and Mator settles with
+  the sellers. Each order line records the storefront that sold it (`order_items.seller_id`),
+  frozen when the order is placed, and `src/orders/order-settlement.ts` sums what each seller
+  is owed from their own lines. The fee and delivery are separate columns and Mator's lines on
+  the receipt, so they are in no seller's figure, by construction. A promo code is spread into
+  the line prices, so a seller's figure is net of it: whether the seller or Mator bears that
+  discount is an open business decision.
+- **Mator's commission** on a seller's goods is each dealer's own rate, by contract
+  (`catalog_sellers.commission_percent`, set with `commissionPercent` on
+  `PATCH /v1/admin/dealers/:id`, audited). No rate configured (NULL) charges 0%, as does an
+  explicit 0; nothing is blocked for want of a rate, and there is no global rate. The rate and
+  what it comes to are frozen on each line when the order is placed
+  (`order_items.commission_percent` / `commission_uzs`, half-up to the tiyin), so a new rate
+  reaches new orders only and no old order is recomputed. Its base is the line as charged,
+  promo included; delivery and the fee are never in it. It has nothing to do with
+  `commission_info.tin` on a Payme receipt, which names whose goods a receipt line sells.
+- **Refunds by kind of money** (`src/orders/refund-breakdown.ts`). An order's money is each
+  seller's goods, goods nobody is named for (the total less the fee, delivery and the named
+  lines), delivery and the fee. Every refund says what it gave back of each: `serviceFeeUzs`,
+  `deliveryUzs` and per-seller rows in `financial_refund_allocations`. A Payme reversal takes
+  whatever of each is left. A refund recorded by hand that is all that is left needs no
+  breakdown; a partial one leaves the fee and delivery unless it states them, and has to say
+  whose goods it was for when the order has more than one seller. Nothing can go back twice:
+  each kind is capped at what it still holds, under the order's row lock, and the same document
+  number cannot be recorded twice. The commission on goods that go back goes back with them, in
+  proportion (all of what is left when all of the seller's remaining goods go back), on the
+  allocation (`commission_uzs`). One seller's refund touches only that seller's rows.
+- **Refunds and tax receipts.** An entry in the registry is never a receipt. Payme's
+  cancellation receipt covers a reversal Payme itself made, which is always of the whole
+  payment. A refund in cash, on a terminal or by transfer, and so every partial refund, needs a
+  return receipt from Mator's own fiscal process (its cash register or the OFD): the registry
+  only keeps the number an operator states (`fiscalReference`), which nothing here can check.
+  Each refund shows `fiscalReceipt.status`: `accepted` / `rejected` / `awaiting_payme` for a
+  refund through Payme, `stated_by_operator` or `missing` for any other.
+- **The seller ledger** (`/v1/admin/finance`, `src/admin/finance/seller-ledger.ts`). A seller
+  earns their goods on orders that took money, less what refunds gave back of them, less
+  Mator's commission net of what went back. They are paid only for orders that are DELIVERED,
+  took the money, carry no payout hold and have no refund through Payme still unconfirmed
+  (`PAYABLE_ORDER`). A payout (`POST /sellers/:sellerId/payouts`) is recorded under a lock on
+  the seller's row, capped at what is payable less what was already sent, and its document
+  number cannot be recorded twice; a wrong one is voided, never deleted. A refund after a
+  payout leaves a debt (`debtUzs`) that later earnings pay off before anything more can be
+  sent. An order is held back from payouts with `POST /orders/:orderId/payout-hold` and freed
+  with `/release`, both audited; a refund Payme asks for after the goods were handed over,
+  refused with -31007, holds the order by itself. `GET /sellers` also shows Mator's own
+  figures: what buyers paid and got back, and the fee, commission and delivery net of refunds.
+- **Checks.** `GET /v1/admin/finance/orders/:orderId` shows one order's money by whose it is,
+  with each seller's commission and net, whether it can be paid out, each payment's sale
+  receipt and the cancellation receipt that reverses it (the same Payme transaction links
+  them), and each refund's receipt status. `/fiscal-issues` lists Payme payments whose receipts
+  are missing, refused or contradicted, refunds outside Payme with no return receipt recorded,
+  and refunds recorded as through Payme that Payme has not reversed, each after a grace period.
+  `/payme-statement?from&to` is GetStatement's own list (one query, oldest first, at most 92
+  days) checked against the payment rows and the registry: `state_mismatch`,
+  `amount_mismatch`, `refund_not_in_registry`, `refund_without_money`, `refunded_outside_payme`.
+- **Alerts.** A receipt the tax authority refused, a receipt contradicting an accepted one, a
+  cancellation receipt with no accepted sale receipt, and a refund Payme asked for and could not
+  get are raised through `src/orders/finance-alerts.ts` and delivered by the ops alert service,
+  under the subject `payments`, wherever the queue monitor's alerts go.
+- **Click is off.** There is no contract yet and Payme is the only provider. `PAYMENT_PROVIDERS`
+  lists Payme alone by default; Click works only when listed there and given
+  `CLICK_SECRET_KEY`, and its code is kept for then.
 - **Services.** A service line takes its codes from `ProviderServiceOffering.categoryId`, under
   the same resolver and confirmation, and its tax data from `ServiceProvider.tin` /
   `vatPercent`. Nothing writes those columns yet, so every service line is refused.

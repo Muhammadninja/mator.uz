@@ -2,17 +2,17 @@
  * Whether the Click provider is ENABLED — the one rule every Click surface
  * (webhook, invoice creation, payment-method listing) consults.
  *
- * Click is not a live payment method for Mator. Its webhook route still exists
- * in the code, and its signature is an MD5 over request fields plus the shared
- * secret: with an empty secret, anyone can compute a valid signature and
+ * Click is not a live payment method for Mator: there is no contract with it
+ * yet, and Payme is the only provider. Its code stays, switched off. Its webhook
+ * route still exists, and its signature is an MD5 over request fields plus the
+ * shared secret: with an empty secret, anyone can compute a valid signature and
  * "confirm" a payment that never happened. So Click is enabled ONLY when both
- *   • it is listed in PAYMENT_PROVIDERS (same default as the listing:
- *     'payme,click'), AND
+ *   • it is listed in PAYMENT_PROVIDERS, which by default lists Payme alone, AND
  *   • CLICK_SECRET_KEY is set to a non-blank value.
- * Anything else is disabled and the webhook fails closed. No new required
- * environment variable: an unconfigured Click is simply off.
+ * Anything else is disabled and the webhook fails closed. A secret on its own
+ * turns nothing on. No new required environment variable.
  */
-export const DEFAULT_PAYMENT_PROVIDERS = 'payme,click';
+export const DEFAULT_PAYMENT_PROVIDERS = 'payme';
 
 export function enabledPaymentProviders(
   get: (key: string) => string | undefined,

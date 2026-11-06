@@ -4,6 +4,7 @@ import {
   PaymentStatus,
   Prisma,
 } from '@prisma/client';
+import { settleOrder } from '../../orders/order-settlement';
 import type { DeliveryDestination } from '../../shipping/delivery-quote.service';
 
 /**
@@ -44,6 +45,9 @@ export const ADMIN_ORDER_DETAIL_SELECT = {
   id: true,
   status: true,
   totalUzs: true,
+  subtotalUzs: true,
+  discountUzs: true,
+  serviceFeeUzs: true,
   deliveryUzs: true,
   paymentType: true,
   refundSettledAt: true,
@@ -80,6 +84,9 @@ export const ADMIN_ORDER_DETAIL_SELECT = {
       quantity: true,
       priceUzs: true,
       lineTotalUzs: true,
+      sellerId: true,
+      providerId: true,
+      commissionUzs: true,
     },
     orderBy: { id: 'asc' },
   },
@@ -256,10 +263,41 @@ function presentHistoryRow(h: AdminOrderDetail['statusHistory'][number]) {
   };
 }
 
+/**
+ * Whose money the order holds: what each seller is owed, and what is Mator's. The fee and
+ * delivery are never in a seller's figure. Refunds are in the refund registry, and are not
+ * taken off here, because it does not say which seller's goods went back.
+ */
+function presentSettlement(
+  o: AdminOrderDetail,
+  sellerNames: ReadonlyMap<string, string>,
+) {
+  const settlement = settleOrder(o);
+  return {
+    sellers: settlement.sellers.map((seller) => ({
+      sellerId: seller.sellerId,
+      name: sellerNames.get(seller.sellerId) ?? null,
+      amount: seller.amountUzs,
+      commission: seller.commissionUzs,
+      net: seller.netUzs,
+    })),
+    providers: settlement.providers.map((provider) => ({
+      providerId: provider.providerId,
+      amount: provider.amountUzs,
+    })),
+    unattributed: settlement.unattributedUzs,
+    matorServiceFee: settlement.serviceFeeUzs,
+    matorCommission: settlement.commissionUzs,
+    delivery: settlement.deliveryUzs,
+    total: settlement.totalUzs,
+  };
+}
+
 export function presentAdminOrderDetail(
   o: AdminOrderDetail,
   slaOverdue = false,
   operatorWarning = false,
+  sellerNames: ReadonlyMap<string, string> = new Map(),
 ) {
   const payment = paymentSummary(o.payments, o.paymentType);
 
@@ -289,7 +327,11 @@ export function presentAdminOrderDetail(
     id: o.id,
     status: o.status.toLowerCase(),
     totalAmount: Number(o.totalUzs),
+    itemsSubtotal: Number(o.subtotalUzs),
+    discount: Number(o.discountUzs),
+    serviceFee: Number(o.serviceFeeUzs),
     deliveryFee: Number(o.deliveryUzs),
+    settlement: presentSettlement(o, sellerNames),
     deliveryMethod: o.deliveryMethod?.toLowerCase() ?? null,
     paymentMethod: payment.method,
     paymentStatus: payment.status,

@@ -1053,7 +1053,103 @@ describe('PaymeService (Merchant API)', () => {
       const res = await call('GetStatement', { from: 1, to: 2 });
       expect(res.result).toEqual({ transactions: [] });
     });
+
+    /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unnecessary-type-assertion -- the Prisma double and the JSON-RPC replies are untyped */
+    it('asks for every transaction created in the window, oldest first, as Payme requires', async () => {
+      prisma.payment.findMany.mockResolvedValue([]);
+
+      await call('GetStatement', {
+        from: 1_699_000_000_000,
+        to: 1_701_000_000_000,
+      });
+
+      expect(prisma.payment.findMany).toHaveBeenCalledWith({
+        where: {
+          provider: 'PAYME',
+          providerTransactionId: { not: null },
+          providerCreateTime: {
+            gte: BigInt(1_699_000_000_000),
+            lte: BigInt(1_701_000_000_000),
+          },
+        },
+        orderBy: [{ providerCreateTime: 'asc' }, { id: 'asc' }],
+      });
+    });
+
+    it('reports them in the order they were created, cancelled ones included', async () => {
+      prisma.payment.findMany.mockResolvedValue([
+        buildPayment({
+          id: 'pay_1',
+          providerTransactionId: 'pmt-1',
+          providerCreateTime: BigInt(1_700_000_000_000),
+          providerState: -1,
+        }),
+        buildPayment({
+          id: 'pay_2',
+          providerTransactionId: 'pmt-2',
+          providerCreateTime: BigInt(1_700_000_500_000),
+          providerState: 2,
+        }),
+      ]);
+
+      const res = await call('GetStatement', {
+        from: 1,
+        to: 2_000_000_000_000,
+      });
+
+      expect(
+        res.result.transactions.map((t: any) => [t.id, t.create_time, t.state]),
+      ).toEqual([
+        ['pmt-1', 1_700_000_000_000, -1],
+        ['pmt-2', 1_700_000_500_000, 2],
+      ]);
+    });
   });
+
+  describe('a refund Payme asks for and cannot get (Phase 3)', () => {
+    it('is raised for a person to take up, and Payme hears -31007', async () => {
+      const alerts = { raise: jest.fn() };
+      const withAlerts = new PaymeService(
+        prisma,
+        CONFIG as any,
+        settlement as any,
+        new PaymeFiscalReceiptService(prisma as any),
+        alerts as any,
+      );
+      prisma.payment.findUnique.mockResolvedValue(
+        buildPayment({ providerState: 2, status: 'PAID' }),
+      );
+      settlement.markCancelled.mockResolvedValue('not_refundable');
+
+      const res: any = await withAlerts.handle(AUTH, {
+        id: 1,
+        method: 'CancelTransaction',
+        params: { id: 'pmt-xyz', reason: 5 },
+      });
+
+      expect(res.error.code).toBe(-31007);
+      expect(alerts.raise).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'refund_refused',
+          severity: 'critical',
+          context: expect.objectContaining({
+            paymentId: 'pay_1',
+            orderId: 'ord_1',
+          }),
+        }),
+      );
+      // A return under way: no seller is paid for the order until someone settles it and
+      // releases the hold. Conditional, so a repeated request keeps the first hold.
+      expect(prisma.order.updateMany).toHaveBeenCalledWith({
+        where: { id: 'ord_1', payoutHoldAt: null },
+        data: {
+          payoutHoldAt: expect.any(Date),
+          payoutHoldReason: expect.stringContaining('refused'),
+        },
+      });
+    });
+  });
+  /* eslint-enable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unnecessary-type-assertion */
 });
 
 // ── Release fixes: params, active transaction, order state, concurrency ─────

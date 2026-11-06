@@ -34,18 +34,25 @@ describe('Account + Shipping smoke', () => {
       expect(prisma.address.findMany.mock.calls[0][0].where).toEqual({ userId: 'usr_1' });
     });
 
-    it('returns the configured payment providers (default payme,click — click only once configured)', () => {
+    it('returns the configured payment providers (default payme alone — click only once listed and configured)', () => {
       // Click is offered only when it is actually enabled: listed AND its
       // CLICK_SECRET_KEY set. Unconfigured, its webhook fails closed, so
-      // listing it would offer a method that cannot be paid.
-      const unconfigured = new AccountService(prisma, fakeConfig());
-      expect((unconfigured.paymentMethods() as any).items).toEqual([
+      // listing it would offer a method that cannot be paid. Payme is the only
+      // provider for now, so by default Click is not listed, secret or not.
+      const secretOnly = new AccountService(
+        prisma,
+        fakeConfig({ CLICK_SECRET_KEY: 'click-secret' }),
+      );
+      expect((secretOnly.paymentMethods() as any).items).toEqual([
         { provider: 'payme', saved: false },
       ]);
 
       const configured = new AccountService(
         prisma,
-        fakeConfig({ CLICK_SECRET_KEY: 'click-secret' }),
+        fakeConfig({
+          PAYMENT_PROVIDERS: 'payme,click',
+          CLICK_SECRET_KEY: 'click-secret',
+        }),
       );
       expect((configured.paymentMethods() as any).items).toEqual([
         { provider: 'payme', saved: false },

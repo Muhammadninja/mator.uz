@@ -18,6 +18,7 @@ import { PaymeFiscalService } from './webhooks/payme-fiscal.service';
 import { PaymeFiscalReceiptService } from './webhooks/payme-fiscal-receipt.service';
 import { ClickService } from './webhooks/click.service';
 import { PaymentWebhookController } from './webhooks/payment-webhook.controller';
+import { FinanceAlerts } from './finance-alerts';
 
 @Module({
   // AdminAuthModule supplies the admin-token guards for the single operator
@@ -46,6 +47,8 @@ import { PaymentWebhookController } from './webhooks/payment-webhook.controller'
     PaymeFiscalService,
     PaymeFiscalReceiptService,
     ClickService,
+    // Fiscal and refund failures for a person to take up (see finance-alerts.ts).
+    FinanceAlerts,
   ],
   controllers: [OrdersController, PaymentsController, PaymentWebhookController],
   // Exported so the expiry cron (ProvidersModule) routes EXPIRED transitions

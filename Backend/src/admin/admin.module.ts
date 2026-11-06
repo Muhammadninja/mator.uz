@@ -6,6 +6,9 @@ import { AdminOrdersService } from './orders/admin-orders.service';
 import { AdminOrdersController } from './orders/admin-orders.controller';
 import { AdminRefundsController } from './refunds/admin-refunds.controller';
 import { AdminRefundsService } from './refunds/admin-refunds.service';
+import { AdminFinanceController } from './finance/admin-finance.controller';
+import { AdminFinanceService } from './finance/admin-finance.service';
+import { AdminFinanceChecksService } from './finance/admin-finance-checks.service';
 import { AdminUsersService } from './users/admin-users.service';
 import { AdminUsersController } from './users/admin-users.controller';
 import { AdminDealersService } from './dealers/admin-dealers.service';
@@ -54,6 +57,8 @@ import { FitmentStudioModule } from './fitment-studio/fitment-studio.module';
     AdminService,
     AdminOrdersService,
     AdminRefundsService,
+    AdminFinanceService,
+    AdminFinanceChecksService,
     AdminUsersService,
     AdminDealersService,
     AdminBrandsService,
@@ -66,6 +71,7 @@ import { FitmentStudioModule } from './fitment-studio/fitment-studio.module';
     AdminController,
     AdminOrdersController,
     AdminRefundsController,
+    AdminFinanceController,
     AdminUsersController,
     AdminDealersController,
     AdminBrandsController,

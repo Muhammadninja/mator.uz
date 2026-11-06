@@ -14,9 +14,11 @@ import {
 import { clampLimit } from '../../common/pagination.util';
 import { IdPrefix, prefixedId } from '../../common/ulid.util';
 import {
+  breakdownData,
   readRefundPosition,
   settleRefundPosition,
 } from '../../orders/financial-refund.ledger';
+import { checkStatedBreakdown } from '../../orders/refund-breakdown';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AdminAuditService } from '../auth/admin-audit.service';
 import { AdminAuditContext } from '../auth/admin-auth.service';
@@ -87,7 +89,7 @@ export class AdminRefundsService {
       // Money that really went back: voided entries never count, whatever is listed.
       this.prisma.financialRefund.aggregate({
         where: { AND: [where, { voidedAt: null }] },
-        _sum: { amountUzs: true },
+        _sum: { amountUzs: true, serviceFeeUzs: true },
       }),
     ]);
 
@@ -100,6 +102,7 @@ export class AdminRefundsService {
         totalItems,
         totalPages: Math.ceil(totalItems / limit),
         totalAmount: Number(totals._sum.amountUzs ?? 0),
+        totalServiceFee: Number(totals._sum.serviceFeeUzs ?? 0),
       },
     };
   }
@@ -173,6 +176,21 @@ export class AdminRefundsService {
           message: `Only ${position.remaining.toFixed(2)} UZS of this order can still be returned.`,
         });
       }
+      // What the refund gives back of each kind of money: the fee, delivery and each
+      // seller's goods. Stated by the operator wherever it is not plain, so what Mator keeps
+      // and what it owes each seller stay true, and no part can go back twice.
+      const check = checkStatedBreakdown(position.components, amount, {
+        serviceFeeUzs: dto.serviceFeeUzs,
+        deliveryUzs: dto.deliveryUzs,
+        allocations: dto.allocations,
+      });
+      if (!check.ok) {
+        throw new ConflictException({
+          code: check.code,
+          message: check.message,
+        });
+      }
+      const { breakdown } = check;
 
       const created = await tx.financialRefund.create({
         data: {
@@ -180,9 +198,11 @@ export class AdminRefundsService {
           orderId,
           paymentId: position.paymentId,
           amountUzs: amount,
+          ...breakdownData(breakdown),
           method: dto.method,
           source: RefundSource.MANUAL,
           reference: dto.reference,
+          fiscalReference: dto.fiscalReference ?? null,
           reason: dto.reason,
           refundedAt,
           createdById: ctx.actor?.id ?? null,
@@ -206,6 +226,15 @@ export class AdminRefundsService {
           newValues: {
             refundId: created.id,
             amountUzs: amount.toFixed(2),
+            serviceFeeUzs: breakdown.serviceFeeUzs.toFixed(2),
+            deliveryUzs: breakdown.deliveryUzs.toFixed(2),
+            allocations: breakdown.allocations.map((a) => ({
+              sellerId: a.sellerId,
+              amountUzs: a.amountUzs.toFixed(2),
+            })),
+            ...(dto.fiscalReference
+              ? { fiscalReference: dto.fiscalReference }
+              : {}),
             method: dto.method,
             reference: dto.reference,
             refundedAt: refundedAt.toISOString(),
