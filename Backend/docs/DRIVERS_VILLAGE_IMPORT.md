@@ -215,7 +215,7 @@ Two more rules guard against values that are not articles:
   ever multiplied twice.
 - The price is **цена с учётом НДС**: the 1C price already includes VAT, and
   it becomes the buyer's price as it is. No VAT is added to it, here or anywhere
-  else; the dealer's rate (`catalog_sellers.vat_percent`, 0 or 12) only goes
+  else; the dealer's rate (`catalog_sellers.vat_percent`) only goes
   on the Payme receipt as `vat_percent`, which works out the VAT inside the price.
 - Empty, zero, negative or malformed prices reject the row (`invalid_price`,
   with the reason). A rejected row writes nothing: the stored price (and

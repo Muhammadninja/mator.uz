@@ -9,7 +9,6 @@ import { OilType, PackageForm, Prisma, ProductKind } from '@prisma/client';
 import { readdirSync, readFileSync } from 'fs';
 import { join, relative } from 'path';
 import {
-  ALLOWED_VAT_PERCENTS,
   REPRESENTATIVE_ONLY_MXIK,
   categoryFiscalReadiness,
   confirmableFiscalCodes,
@@ -981,37 +980,28 @@ describe('dealer tax data', () => {
       'dealer TIN is malformed',
     ]);
     expect(dealerFiscalGaps({ tin: '301234567', vatPercent: 101 })).toEqual([
-      'dealer VAT percentage is not one of 0, 12',
+      'dealer VAT percentage is out of range',
+    ]);
+    expect(dealerFiscalGaps({ tin: '301234567', vatPercent: -1 })).toEqual([
+      'dealer VAT percentage is out of range',
     ]);
     expect(
       dealerFiscalGaps({ tin: '301234567', vatPercent: undefined }),
     ).toEqual(['dealer has no VAT percentage']);
   });
 
-  it('knows exactly two rates: 12 for a VAT payer, 0 for a seller who is not one', () => {
-    expect(ALLOWED_VAT_PERCENTS).toEqual([0, 12]);
-  });
-
-  it.each([
-    ['the turnover-tax rate typed into the VAT box', 4],
-    ['the rate before 2023', 15],
-    ['a fraction of the real rate', 12.5],
-    ['the top of the old 0–100 range', 100],
-    ['a negative rate', -12],
-  ])(
-    'refuses %s (%s) at checkout, even when it is already stored',
-    (_, rate) => {
+  it.each([0, 4, 6, 12, 12.5, 100])(
+    'takes any rate the operator stated within 0–100: %s',
+    (rate) => {
       for (const vatPercent of [rate, new Prisma.Decimal(rate)]) {
-        expect(dealerFiscalGaps({ tin: '301234567', vatPercent })).toEqual([
-          'dealer VAT percentage is not one of 0, 12',
-        ]);
+        expect(dealerFiscalGaps({ tin: '301234567', vatPercent })).toEqual([]);
       }
     },
   );
 
   it('reads the rate as the Decimal the column holds', () => {
-    // Decimal(5,2) hands back 12.00 and 0.00: still the rates they are.
-    for (const rate of ['12.00', '0.00', '12', '0']) {
+    // Decimal(5,2) hands back 12.00, 4.00, 0.00: still the rates they are.
+    for (const rate of ['12.00', '4.00', '6.00', '0.00', '12.5']) {
       expect(
         dealerFiscalGaps({
           tin: '12345678901234',

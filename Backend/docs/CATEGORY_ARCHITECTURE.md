@@ -293,10 +293,10 @@ missing (read the dry-run first: a missing row may be one an operator removed on
   - Goods are not Mator's: Mator is the platform, and each line carries its own dealer's tax
     id and VAT rate (`CatalogSeller.tin`, `vatPercent`; 12% at Driver's Village, as an
     operator enters it). No rate of Mator's reaches them, and no dealer's reaches delivery.
-  - A dealer's rate is 12 (a VAT payer) or 0 (not one, turnover tax included): the admin API
-    accepts nothing else, and checkout refuses a stored rate that is neither
-    (`ALLOWED_VAT_PERCENTS`). It is a label on the receipt, never part of a price: catalog
-    prices are цена с учётом НДС, and changing a rate re-prices nothing.
+  - A dealer's rate is whatever the operator states for that dealer, from 0 to 100 with up
+    to 2 decimals (0 and 12 are the usual; 4 or 6 occur too). It is a label on the receipt,
+    never part of a price: catalog prices are цена с учётом НДС, and changing a rate
+    re-prices nothing.
 - **Service fee.** Mator's own income, charged once per order by a flat tariff on the cost of
   the parts (`src/orders/service-fee.util.ts`, the only copy of the tiers; the app shows what
   the API answers): up to and including 100 000 nothing, then 5 000, from 200 000 10 000, from

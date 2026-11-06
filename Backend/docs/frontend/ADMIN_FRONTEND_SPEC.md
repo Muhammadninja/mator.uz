@@ -535,8 +535,8 @@ immediately.
 | `years` | `number \| null` | Years in business. |
 | `certifiedPartner` | `boolean` | Internal "curated by operator" flag (`isCurated`) — distinct from the public `certified` badge; see [2.2](#22-create). |
 | `tin` | `string \| null` | ИНН (9 digits) or ПИНФЛ (14 digits). `null` = not configured. |
-| `vatPercent` | `number \| null` | `12` or `0`. `null` ≠ `0` — "not configured" is a different fact from "0% VAT" and only the former blocks Payme checkout. A row stored before the 0/12 rule can hold another value: it is not configured either. |
-| `fiscalConfigured` | `boolean` | **Derived:** a well-formed `tin` and a `vatPercent` of 0 or 12. Whether this dealer's products can go through Payme checkout at all. |
+| `vatPercent` | `number \| null` | e.g. `12`, `4`, `6`. `null` ≠ `0` — "not configured" is a different fact from "0% VAT" and only the former blocks Payme checkout. |
+| `fiscalConfigured` | `boolean` | **Derived:** a well-formed `tin` and a `vatPercent` within 0–100. Whether this dealer's products can go through Payme checkout at all. |
 | `suspendedReason` | `string \| null` | Only populated while `status === "suspended"`; `null` at every other status, even if the dealer was once suspended with a reason. |
 
 ### 2.2 Endpoints
@@ -573,7 +573,7 @@ no separate publish step.
 | `orders` | ❌ | **Pre-formatted display string** for the storefront card, e.g. `"18k+"` — not a number, not the real lifetime count. |
 | `years` | ❌ | Integer, 0–200. |
 | `tin` | ❌ | 9 or 14 digits. See [2.3](#23-tax-data-tin--vatpercent). |
-| `vatPercent` | ❌ | `12` or `0`, nothing else. See [2.3](#23-tax-data-tin--vatpercent). |
+| `vatPercent` | ❌ | 0–100, ≤2 decimals. See [2.3](#23-tax-data-tin--vatpercent). |
 | `certified` | ❌ | Default `true` **only if the dealer lands `active`**; forced `false` for any non-active status regardless of what you send. |
 | `lowestPrice` | ❌ | Default `false`. Same active-only rule as `certified`. |
 | `status` | ❌ | `"active" \| "pending" \| "suspended"`. Default `active`. |
@@ -645,7 +645,7 @@ empty `{}` (or one where every field is `undefined`) is rejected with `400
 | `name` | Cannot be set to an empty/blank string — `400`. |
 | `city`, `email`, `phone`, `brandColor`, `initial`, `logoUrl`, `orders`, `years` | Presentation fields. Empty string clears to `null` (except `name`); `years` is `null`-able directly. |
 | `tin` | 9 or 14 digits, or empty string to clear. See [2.3](#23-tax-data-tin--vatpercent). |
-| `vatPercent` | `12` or `0`, nothing else. See [2.3](#23-tax-data-tin--vatpercent). No way to *clear* it back to `null` via this endpoint — only to change its value. |
+| `vatPercent` | 0–100, ≤2 decimals. See [2.3](#23-tax-data-tin--vatpercent). No way to *clear* it back to `null` via this endpoint — only to change its value. |
 | `certified`, `lowestPrice` | Badges. Can be toggled independent of `status` here — but see [2.5](#25-audit-trail) for what happens on suspend. |
 | `status` | `"active" \| "pending" \| "suspended"`. **Goes through the same transition table** as the dedicated approve/suspend/reactivate endpoints (see [2.6](#26-status-state-machine)) — you cannot use PATCH to skip a state those endpoints wouldn't allow either. |
 | `reason` | Only meaningful when `status` is being set to `"suspended"` in the same request; ignored otherwise (including when suspending via the dedicated endpoint — that takes its own body). |
@@ -696,11 +696,9 @@ place they're entered.
 - `tin` format: `^(\d{9}|\d{14})$` — 9 digits (ИНН, legal entity) or 14 digits
   (ПИНФЛ, individual). Leading zeros are significant; treat it as a string
   input, never coerce to a number.
-- `vatPercent`: exactly `12` (a VAT payer) or `0` (not a VAT payer — a seller on
-  turnover tax is a `0`; the turnover-tax rate never goes here). Anything else
-  is a `400`. Offer the two as a choice, not a free number. `0` is a valid,
-  fully-configured rate — **do not treat `0` as "not set."** Only `null` means
-  unconfigured.
+- `vatPercent`: 0–100, up to 2 decimal places, as the operator states it per
+  dealer (`12`, `4`, `6`, `0`…). `0` is a valid, fully-configured rate — **do
+  not treat `0` as "not set."** Only `null` means unconfigured.
 - The rate is a label on the receipt, never part of a price: catalog prices are
   цена с учётом НДС, and changing a rate changes no price.
 - Render `fiscalConfigured` (detail response only) as a status indicator

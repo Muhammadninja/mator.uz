@@ -1726,30 +1726,27 @@ describe('platform charge lines', () => {
       [100_000, 0, 10_000_000],
       [500_000, 20_000, 52_000_000],
     ])(
-      '%s UZS: the same receipt at 12% and at 0%, but for the goods’ vat_percent',
+      '%s UZS: the same receipt at 12%, 6% and 0%, but for the goods’ vat_percent',
       async (priceUzs, serviceFeeUzs, amountTiyin) => {
-        const at12 = await receiptAt(priceUzs, serviceFeeUzs, 12);
-        const at0 = await receiptAt(priceUzs, serviceFeeUzs, 0);
         const withoutRate = (items: PaymeFiscalItem[]) =>
           items.map((item) => ({ ...item, vat_percent: undefined }));
+        const at0 = await receiptAt(priceUzs, serviceFeeUzs, 0);
 
-        // The goods line is the catalog price, in tiyin, at either rate.
-        expect(at12.items[0]).toMatchObject({
-          price: priceUzs * 100,
-          count: 1,
-          vat_percent: 12,
-        });
-        expect(at0.items[0]).toMatchObject({
-          price: priceUzs * 100,
-          count: 1,
-          vat_percent: 0,
-        });
-        // Nothing else moves: no line grows by the VAT, and none is added for it.
-        expect(withoutRate(at12.items)).toEqual(withoutRate(at0.items));
-        expect(receiptTotalTiyin(at12.items)).toBe(amountTiyin);
-        expect(receiptTotalTiyin(at0.items)).toBe(amountTiyin);
-        // Mator's fee keeps Mator's 0, whichever rate the dealer has.
-        for (const detail of [at12, at0]) {
+        // 6% is the simplified VAT regime's rate (decree УП-100, 2026): a VAT rate
+        // like 12, never read as a turnover tax.
+        for (const rate of [12, 6, 0]) {
+          const detail = await receiptAt(priceUzs, serviceFeeUzs, rate);
+
+          // The goods line is the catalog price, in tiyin, at every rate.
+          expect(detail.items[0]).toMatchObject({
+            price: priceUzs * 100,
+            count: 1,
+            vat_percent: rate,
+          });
+          // Nothing else moves: no line grows by the VAT, and none is added for it.
+          expect(withoutRate(detail.items)).toEqual(withoutRate(at0.items));
+          expect(receiptTotalTiyin(detail.items)).toBe(amountTiyin);
+          // Mator's fee keeps Mator's 0, whichever rate the dealer has.
           for (const item of detail.items.slice(1)) {
             expect(item).toMatchObject({
               title: SERVICE_FEE_TITLE,
@@ -1933,6 +1930,13 @@ describe('buildFiscalItem (pure mapping)', () => {
       expect(at12.map((item) => item.vat_percent)).toEqual(at12.map(() => 12));
       expect(at0.map((item) => item.vat_percent)).toEqual(at0.map(() => 0));
       expect(withoutRate(at12)).toEqual(withoutRate(at0));
+      // Any other rate an operator states labels the line the same way.
+      for (const rate of [4, 6]) {
+        expect(at(rate).map((item) => item.vat_percent)).toEqual(
+          at(rate).map(() => rate),
+        );
+        expect(withoutRate(at(rate))).toEqual(withoutRate(at0));
+      }
       const charged = Math.round(
         (amounts.lineTotalUzs ?? amounts.priceUzs * amounts.quantity) * 100,
       );
