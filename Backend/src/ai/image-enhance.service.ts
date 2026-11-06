@@ -11,41 +11,50 @@ const FLUX_ENDPOINT = 'https://api.bfl.ai/v1/flux-2-pro';
 // Target canvas. FLUX.2 accepts explicit width/height (nullable ints, min 64) to
 // fix the output resolution; there is no aspect_ratio field, so this is how the
 // exact 1000×1000 output is requested. The prompt handles composition inside it
-// (centered, ~85–90% fill, even margins) — width/height only set the canvas.
+// (centered, ~85–90% fill) — width/height only set the canvas.
 const OUTPUT_WIDTH = 1000;
 const OUTPUT_HEIGHT = 1000;
 
-// The single prompt used for every request: a BACKGROUND-ONLY edit. FLUX isolates
-// the part and puts it on a flat pure white 1000×1000 canvas; only the original
-// background, hands and surroundings are replaced. The part itself stays exactly
-// as photographed — geometry, shape, proportions, materials, colors, texture,
-// component count, holes, threads, connectors, mounting points, fasteners and
-// every surface detail (rust, dirt, dust, grease, scratches, scuffs, cracks,
-// damage), plus every logo / OEM / GM number / label / marking with its exact
-// characters (blurry stays blurry); no detail is invented. The prompt contains no
-// instruction to clean, enhance, improve, restore, retouch or otherwise change
-// the part, and does not even name those verbs: FLUX.2 has no negative prompt,
-// and BFL's prompting guide says naming an unwanted feature tends to draw it in
-// and that earlier words weigh more, so the rule is stated positively
-// ("unchanged", "exactly as photographed"). Deliberately no "sharp…" wording: the
-// model reads it as license to reconstruct detail, text included. No lighting,
-// exposure or color instruction either — those would alter the part's pixels. A
-// prompt asks, it cannot guarantee: FLUX re-synthesizes the whole canvas, so
+// The single prompt used for every request: preserve the original part exactly,
+// replace only its background with flat pure white, and frame the whole part on
+// the square canvas. The wording is the product owner's; the priority is the
+// most exact preservation of the original part, never a better-looking one.
+// Deliberate choices:
+//  • Rust is not mentioned anywhere — not "rust", "rust-free" or "no rust". Named
+//    separately, it draws FLUX's attention and it sometimes paints rust onto
+//    clean parts. Keeping what is really there is still required, stated for all
+//    surface characteristics at once (scratches, dirt, wear, physical
+//    imperfections), and adding any defect the photo does not show is forbidden.
+//  • No "clean", "pristine", "restored", "like new" or "polished", and no
+//    enhance / repair / restore / improve either, not even negated: FLUX.2 has no
+//    negative prompt and naming a thing tends to draw the model toward it, so
+//    preservation is stated positively ("exactly as they appear", "completely
+//    unchanged"). The "Do not" rules that remain name only invention and geometry.
+//  • No lighting instruction: "studio lighting" invites relighting the part, and
+//    its shadows contradict a perfectly pure white background.
+//  • No "sharp…" wording: the model reads it as license to reconstruct detail,
+//    text included.
+//  • Framing (whole part in view, centered, ~85–90%) is its own rule. Only the
+//    camera angle and perspective of the original are kept, not its "product
+//    positioning", which would contradict centering on the forced square canvas.
+// A prompt asks, it cannot guarantee: FLUX re-synthesizes the whole canvas, so
 // compliance is only ever verified on real generated images. FLUX.2 [pro] applies
 // prompt upsampling by default, so the model does not see this text exactly as
 // written; this request does not set disable_pup.
-const FLUX_PROMPT =
-  'Isolate the automotive spare part from the input image and place it on a flat pure white ' +
-  '(#FFFFFF) background. Only the original background, hands and surroundings are ' +
-  'replaced.\n\n' +
-  'The part stays exactly as photographed: its geometry, shape, proportions, materials, colors, ' +
-  'texture, number of components, holes, threads, connectors, mounting points and fasteners, ' +
-  'and every surface detail including rust, dirt, dust, grease, scratches, scuffs, cracks and ' +
-  'damage, all unchanged.\n\n' +
-  'Every logo, OEM and GM number, label and marking keeps its exact characters as they appear, ' +
-  'blurry or unreadable text included. Show only the details visible in the input image.\n\n' +
-  'Output exactly 1000×1000 pixels, the part centered, filling about 85–90% of the canvas, ' +
-  'proportions unchanged.';
+const FLUX_PROMPT = [
+  'Strict product preservation rules:',
+  '- Preserve the exact original automotive part as shown in the input image.',
+  '- Preserve all original surface characteristics, textures, colors, materials, markings, labels, OEM numbers, GM logos, scratches, dirt, wear, and physical imperfections exactly as they appear in the source image.',
+  '- Do not invent, add, remove, or exaggerate any visual details.',
+  '- Do not introduce any surface defects or characteristics that are not present in the original image.',
+  "- Do not change the product's geometry, proportions, structure, components, or orientation.",
+  'Background replacement only:',
+  '- Replace only the original background with a perfectly pure white (#FFFFFF) background.',
+  '- Keep the automotive part completely unchanged.',
+  '- Preserve the original camera angle and perspective.',
+  'Framing: Keep the whole part in view, centered on the square canvas and filling about 85-90% of it, at its original proportions.',
+  'Final result: A photorealistic product photograph on a pure white background, with the automotive part remaining visually identical to the original input image.',
+].join('\n');
 
 // Output container. The result is an opaque image on a white background (no alpha
 // is requested or relied on). PNG keeps the white background lossless; the caller
@@ -152,8 +161,9 @@ export class ImageEnhanceError extends Error {
  * Pipeline (nothing else — no local resize, compositing, or post-processing):
  *   1. receive the uploaded image buffer,
  *   2. submit it to FLUX.2 Pro (base64) with the catalog-photo prompt,
- *      output_format=png, and width=height=1000, asking for the part centered
- *      on a pure white background,
+ *      output_format=png, and width=height=1000, asking for the original
+ *      background to be replaced with pure white, the part left unchanged and
+ *      centered,
  *   3. poll until the job is Ready, download the produced 1000×1000 PNG,
  *   4. return that PNG buffer, exactly as received from FLUX.
  *
