@@ -13,6 +13,7 @@ import {
   AdminAuditAction,
   AdminAuditEntity,
   DealerStatus,
+  Prisma,
 } from '@prisma/client';
 import { plainToInstance } from 'class-transformer';
 import { validateSync } from 'class-validator';
@@ -809,6 +810,8 @@ describe('AdminDealersService', () => {
       for (const [from, to] of [
         [0, 12],
         [12, 0],
+        [12, 4],
+        [4, 6],
       ]) {
         prisma.catalogSeller.update.mockClear();
         prisma.catalogSeller.findUnique
@@ -1004,6 +1007,16 @@ describe('AdminDealersService', () => {
         fiscalConfigured: false,
       });
     });
+
+    it('presents a simplified-VAT dealer’s 6% as the number it is, and ready', async () => {
+      // Decimal(5,2) hands back 6.00; the console and Payme get 6.
+      prisma.catalogSeller.findUnique.mockResolvedValue(
+        detailRow({ tin: '301234567', vatPercent: new Prisma.Decimal('6.00') }),
+      );
+      const { data } = await service.getOne('d1');
+      expect(data).toMatchObject({ vatPercent: 6, fiscalConfigured: true });
+      expect(typeof data.vatPercent).toBe('number');
+    });
   });
 });
 
@@ -1092,21 +1105,17 @@ describe('UpdateAdminDealerDto', () => {
     expect(validate({ tin: '' })).toHaveLength(0);
   });
 
-  it('accepts exactly the two VAT rates: 12 and an explicit 0', () => {
-    expect(validate({ vatPercent: 0 })).toHaveLength(0);
-    expect(validate({ vatPercent: 12 })).toHaveLength(0);
-    // A form posting the rate as text is read as the number it states.
-    expect(validate({ vatPercent: '12' })).toHaveLength(0);
-  });
-
-  it.each([4, 15, 12.5, 7, 100, -1, 101, 'twelve'])(
-    'rejects any other VAT rate: %j',
+  it.each([0, 4, 6, 12, 12.5, 100, '12'])(
+    'accepts any VAT rate across the whole legal range, including 0: %j',
     (vatPercent) => {
-      const errors = validate({ vatPercent });
-      expect(errors[0].property).toBe('vatPercent');
-      expect(Object.values(errors[0].constraints ?? {})).toEqual([
-        'vatPercent must be one of 0, 12',
-      ]);
+      expect(validate({ vatPercent })).toHaveLength(0);
+    },
+  );
+
+  it.each([-1, 101, 12.345, 'twelve'])(
+    'rejects a VAT rate outside 0–100, with more than 2 decimals or of the wrong type: %j',
+    (vatPercent) => {
+      expect(validate({ vatPercent })[0].property).toBe('vatPercent');
     },
   );
 
@@ -1163,13 +1172,14 @@ describe('CreateAdminDealerDto VAT rate', () => {
       plainToInstance(CreateAdminDealerDto, { name: 'BYD Motors', ...payload }),
     );
 
-  it('takes 12, 0, or no rate at all (configured later)', () => {
-    expect(validate({ vatPercent: 12 })).toHaveLength(0);
-    expect(validate({ vatPercent: 0 })).toHaveLength(0);
+  it('takes any rate within 0–100, or no rate at all (configured later)', () => {
+    for (const vatPercent of [0, 4, 6, 12]) {
+      expect(validate({ vatPercent })).toHaveLength(0);
+    }
     expect(validate({})).toHaveLength(0);
   });
 
-  it.each([4, 15, 12.5, 100])('refuses %j', (vatPercent) => {
+  it.each([-1, 101, 'twelve'])('refuses %j', (vatPercent) => {
     expect(validate({ vatPercent })[0].property).toBe('vatPercent');
   });
 });

@@ -212,15 +212,11 @@ Backend-owned gaps from this workstream are closed. What is left:
       now `payme` alone), and `CLICK_SECRET_KEY` stays unset.
 
 8. **VAT rates** — no migration, code only:
-   1. Before deploying, list the dealers whose rate is neither 0 nor 12:
-      `SELECT id, name, vat_percent FROM catalog_sellers WHERE vat_percent NOT IN (0, 12);`
-      (the same for `service_providers`). After the deploy their goods are refused at Payme
-      checkout (`dealer VAT percentage is not one of 0, 12`) and the admin panel shows them as
-      not configured, until an operator sets 12 or 0. No row is changed by the deploy.
-   2. Remove `SERVICE_FEE_VAT_PERCENT` from the environment: it is no longer read. The service
+   1. Remove `SERVICE_FEE_VAT_PERCENT` from the environment: it is no longer read. The service
       fee carries Mator's own rate, 0, like delivery (`MARKETPLACE_VAT_RATE`).
-   3. Changing a dealer's rate never changes a price. Catalog prices are цена с учётом НДС, and
-      the rate only goes on the receipt as `vat_percent`.
+   2. A dealer's rate is still any value from 0 to 100 that an operator states (0, 4, 6, 12…).
+      Changing it never changes a price: catalog prices are цена с учётом НДС, and the rate
+      only goes on the receipt as `vat_percent`.
 
 Production deployment and production migrations are performed manually by the
 project owner.

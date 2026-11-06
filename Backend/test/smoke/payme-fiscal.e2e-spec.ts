@@ -25,7 +25,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
-import { OilType, ProductKind } from '@prisma/client';
+import { OilType, Prisma, ProductKind } from '@prisma/client';
 import request from 'supertest';
 import { AdminCategoriesController } from '../../src/admin/categories/admin-categories.controller';
 import { AdminCategoriesService } from '../../src/admin/categories/admin-categories.service';
@@ -467,6 +467,62 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
   });
 
   /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-return -- jest matchers and the mocks are untyped */
+  // The simplified VAT regime (decree УП-100 of 2026-05-26) charges 6% on everything a
+  // dealer on it sells. It is a VAT rate like 12, so it goes on the line as it stands,
+  // and like any rate it labels the line, never the price.
+  describe('a dealer on the simplified 6% VAT, from the invoice to what Payme is told', () => {
+    /** As the column hands it back: Decimal(5,2). */
+    const sellerAt = (rate: string) => ({
+      ...DEALER,
+      vatPercent: new Prisma.Decimal(rate),
+    });
+    const receiptAt = async (rate: string) => {
+      confirmed(subcategory('brake-discs', 'brake-system'));
+      part('p1', 'brake-discs', { seller: sellerAt(rate) });
+      const amount = orderOf(
+        [partLine('p1', { quantity: 2, lineTotalUzs: 200000 })],
+        { deliveryUzs: 25000, serviceFeeUzs: 10000 },
+      );
+      return { amount, body: await check(amount) };
+    };
+
+    it('is told as 6, at the catalog price, beside Mator’s 0 on delivery and the fee', async () => {
+      const { amount, body } = await receiptAt('6.00');
+
+      expect(amount).toBe(23_500_000);
+      expect(body.result.allow).toBe(true);
+      const { items } = body.result.detail;
+      expect(items[0]).toEqual({
+        title: 'Товар',
+        price: 10_000_000,
+        count: 2,
+        code: SUB_MXIK,
+        package_code: SUB_PACKAGE,
+        vat_percent: 6,
+        commission_info: { tin: DEALER.tin },
+      });
+      expect(items.slice(1).map((i: any) => [i.title, i.vat_percent])).toEqual([
+        ['Доставка', 0],
+        ['Сервисный сбор', 0],
+      ]);
+      expect(sumOf(items)).toBe(amount);
+    });
+
+    it('is the receipt a 12% dealer gets, but for that one number', async () => {
+      const at6 = await receiptAt('6.00');
+      const at12 = await receiptAt('12.00');
+      const withoutRate = (items: any[]) =>
+        items.map((item) => ({ ...item, vat_percent: undefined }));
+
+      expect(at6.amount).toBe(at12.amount);
+      expect(at6.body.result.detail.items[0].vat_percent).toBe(6);
+      expect(at12.body.result.detail.items[0].vat_percent).toBe(12);
+      expect(withoutRate(at6.body.result.detail.items)).toEqual(
+        withoutRate(at12.body.result.detail.items),
+      );
+    });
+  });
+
   describe('the service fee, from the order to what Payme is told', () => {
     beforeEach(() => {
       confirmed(subcategory('brake-discs', 'brake-system'));
