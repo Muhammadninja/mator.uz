@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
+  OrderStatus,
   PaymentProvider,
   PaymentStatus,
   PaymeFiscalReceiptType,
@@ -26,7 +27,11 @@ import {
   presentPosition,
   presentRefund,
 } from '../refunds/admin-refunds.presenter';
-import { FiscalIssue, presentPayment } from './admin-finance.presenter';
+import {
+  FiscalIssue,
+  PayoutBlocker,
+  presentPayment,
+} from './admin-finance.presenter';
 import { FiscalIssuesQueryDto, StatementQueryDto } from './dto/payout.dto';
 import { PAYABLE_ORDER, sellerNames } from './seller-ledger';
 
@@ -62,8 +67,8 @@ export class AdminFinanceChecksService {
   }
 
   /**
-   * One order's money: what it charged, what came in and went back of each kind, whose each
-   * part is, Mator's commission and what each seller nets, whether it can be paid out, and its
+   * One order's money: what it charged, its lines and whose each is, what came in and went back
+   * of each kind, what each seller nets, whether it can be paid out and what stops it, and its
    * payments and refunds with their tax receipts, each cancellation receipt beside the sale
    * receipt it reverses.
    */
@@ -81,7 +86,23 @@ export class AdminFinanceChecksService {
         totalUzs: true,
         payoutHoldAt: true,
         payoutHoldReason: true,
-        items: { select: { sellerId: true, commissionPercent: true } },
+        items: {
+          select: {
+            id: true,
+            title: true,
+            quantity: true,
+            priceUzs: true,
+            lineTotalUzs: true,
+            sellerId: true,
+            providerId: true,
+          },
+          orderBy: { id: 'asc' },
+        },
+        statusHistory: {
+          where: { status: OrderStatus.PAID },
+          select: { id: true },
+          take: 1,
+        },
         payments: {
           select: {
             id: true,
@@ -106,15 +127,12 @@ export class AdminFinanceChecksService {
       readRefundPosition(this.prisma, orderId),
       this.prisma.order.count({ where: { ...PAYABLE_ORDER, id: orderId } }),
     ]);
-    const names = await sellerNames(
-      this.prisma,
-      position.sellers.map((s) => s.sellerId),
-    );
-    const rateOf = (sellerId: string) =>
-      Number(
-        order.items.find((i) => i.sellerId === sellerId)?.commissionPercent ??
-          0,
-      );
+    const names = await sellerNames(this.prisma, [
+      ...new Set([
+        ...position.sellers.map((s) => s.sellerId),
+        ...order.items.flatMap((i) => (i.sellerId ? [i.sellerId] : [])),
+      ]),
+    ]);
     const presented = presentPosition(position);
     return {
       success: true,
@@ -129,21 +147,31 @@ export class AdminFinanceChecksService {
           delivery: Number(order.deliveryUzs),
           total: Number(order.totalUzs),
         },
+        // Each line as charged (net of a promo), and the seller it was sold by.
+        items: order.items.map((item) => ({
+          id: item.id,
+          title: item.title,
+          quantity: item.quantity,
+          price: Number(item.priceUzs),
+          lineTotal: Number(item.lineTotalUzs),
+          sellerId: item.sellerId,
+          sellerName: item.sellerId ? (names.get(item.sellerId) ?? null) : null,
+          providerId: item.providerId,
+        })),
         position: {
           ...presented,
           sellers: position.sellers.map((s, i) => ({
             ...presented.sellers[i],
             name: names.get(s.sellerId) ?? null,
-            commissionPercent: rateOf(s.sellerId),
-            // What the seller nets from this order as it stands: goods not returned, less the
-            // commission still charged on them.
-            net: Number(s.remaining.sub(s.commission.remaining)),
+            // What the seller nets from this order as it stands: their goods not returned.
+            net: Number(s.remaining),
           })),
         },
         payout: {
           payable: payable > 0,
           holdAt: order.payoutHoldAt?.toISOString() ?? null,
           holdReason: order.payoutHoldReason,
+          blockers: payoutBlockers(order),
         },
         payments: order.payments.map(presentPayment),
         refunds: order.financialRefunds.map(presentRefund),
@@ -161,7 +189,11 @@ export class AdminFinanceChecksService {
    *     receipt for. An entry in the registry is never a receipt by itself: cash, terminal and
    *     transfer refunds need their own fiscal process;
    *   • refunds an operator recorded as made through Payme that Payme has not reversed: no
-   *     receipt can come for them until it does.
+   *     receipt can come for them until it does;
+   *   • apart (`statedRefunds`), refunds made outside Payme whose return receipt number an
+   *     operator wrote down. Nothing here can check that number against a cash register or the
+   *     OFD, so they are not confirmed either; listed on their own, so they never crowd out
+   *     the refunds that have no receipt at all.
    */
   async fiscalIssues(query: FiscalIssuesQueryDto) {
     const graceMs = (query.graceMinutes ?? DEFAULT_GRACE_MINUTES) * 60_000;
@@ -170,7 +202,20 @@ export class AdminFinanceChecksService {
       none: { type, statusCode: FISCAL_STATUS_ACCEPTED },
     });
 
-    const [rows, refunds] = await Promise.all([
+    const manualRefunds = (where: Prisma.FinancialRefundWhereInput) =>
+      this.prisma.financialRefund.findMany({
+        where: {
+          voidedAt: null,
+          source: RefundSource.MANUAL,
+          refundedAt: { lte: before },
+          ...where,
+        },
+        select: ADMIN_REFUND_SELECT,
+        orderBy: [{ refundedAt: 'desc' }, { id: 'asc' }],
+        take: MAX_ISSUES,
+      });
+
+    const [rows, refunds, statedRefunds] = await Promise.all([
       this.prisma.payment.findMany({
         where: {
           provider: PaymentProvider.PAYME,
@@ -210,19 +255,15 @@ export class AdminFinanceChecksService {
         orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
         take: MAX_ISSUES,
       }),
-      this.prisma.financialRefund.findMany({
-        where: {
-          voidedAt: null,
-          source: RefundSource.MANUAL,
-          refundedAt: { lte: before },
-          OR: [
-            { method: { not: RefundMethod.PROVIDER }, fiscalReference: null },
-            { method: RefundMethod.PROVIDER, providerConfirmedAt: null },
-          ],
-        },
-        select: ADMIN_REFUND_SELECT,
-        orderBy: [{ refundedAt: 'desc' }, { id: 'asc' }],
-        take: MAX_ISSUES,
+      manualRefunds({
+        OR: [
+          { method: { not: RefundMethod.PROVIDER }, fiscalReference: null },
+          { method: RefundMethod.PROVIDER, providerConfirmedAt: null },
+        ],
+      }),
+      manualRefunds({
+        method: { not: RefundMethod.PROVIDER },
+        fiscalReference: { not: null },
       }),
     ]);
 
@@ -238,6 +279,7 @@ export class AdminFinanceChecksService {
       data: {
         payments,
         refunds: refunds.map(presentRefund),
+        statedRefunds: statedRefunds.map(presentRefund),
       },
     };
   }
@@ -343,4 +385,35 @@ function problemsOf(payment: {
     problems.push('receipt_conflict');
   }
   return problems;
+}
+
+/**
+ * Why the sellers cannot be paid for an order yet, in the order an operator would clear them.
+ * Empty when they can. The same conditions as PAYABLE_ORDER, one by one.
+ */
+function payoutBlockers(order: {
+  status: OrderStatus;
+  payoutHoldAt: Date | null;
+  statusHistory: unknown[];
+  financialRefunds: {
+    method: RefundMethod;
+    providerConfirmedAt: Date | null;
+    voidedAt: Date | null;
+  }[];
+}): PayoutBlocker[] {
+  const blockers: PayoutBlocker[] = [];
+  if (order.statusHistory.length === 0) blockers.push('no_money_taken');
+  if (order.status !== OrderStatus.DELIVERED) blockers.push('not_delivered');
+  if (order.payoutHoldAt) blockers.push('payout_hold');
+  if (
+    order.financialRefunds.some(
+      (r) =>
+        !r.voidedAt &&
+        r.method === RefundMethod.PROVIDER &&
+        !r.providerConfirmedAt,
+    )
+  ) {
+    blockers.push('refund_awaiting_payme');
+  }
+  return blockers;
 }

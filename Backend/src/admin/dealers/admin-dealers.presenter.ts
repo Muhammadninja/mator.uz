@@ -41,8 +41,6 @@ export const ADMIN_DEALER_DETAIL_SELECT = {
   // Налоговые данные — the console's tax section.
   tin: true,
   vatPercent: true,
-  // Mator's commission on this dealer's goods.
-  commissionPercent: true,
   // Not presented: finds the supply-side seller that holds the pickup location.
   internalSellerId: true,
 } satisfies Prisma.CatalogSellerSelect;
@@ -113,10 +111,6 @@ export function presentAdminDealerDetail(d: AdminDealerDetail) {
         tin: d.tin ?? null,
         vatPercent: d.vatPercent ?? null,
       }).length === 0,
-    // Mator's commission, by contract. Null means none is configured, which charges 0%; it
-    // is kept apart from an explicit 0 so the console can say which it is.
-    commissionPercent:
-      d.commissionPercent == null ? null : Number(d.commissionPercent),
     // Only meaningful while suspended; cleared on reactivation, so a stale
     // reason never trails an active dealer.
     suspendedReason:

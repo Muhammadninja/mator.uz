@@ -4,7 +4,13 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { AdminAuditAction, AdminAuditEntity, Prisma } from '@prisma/client';
+import {
+  AdminAuditAction,
+  AdminAuditEntity,
+  PaymentProvider,
+  PaymentStatus,
+  Prisma,
+} from '@prisma/client';
 import { IdPrefix, prefixedId } from '../../common/ulid.util';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AdminAuditService } from '../auth/admin-audit.service';
@@ -15,20 +21,33 @@ import {
   RecordPayoutDto,
   VoidPayoutDto,
 } from './dto/payout.dto';
-import { PAYABLE_ORDER, TOOK_MONEY, sellerBalances } from './seller-ledger';
+import {
+  BLOCKED_ORDER,
+  PAYABLE_ORDER,
+  TOOK_MONEY,
+  sellerBalances,
+} from './seller-ledger';
 
 /** Clocks differ a little between an operator's machine and this server. */
 const FUTURE_TOLERANCE_MS = 5 * 60 * 1000;
 const TX_OPTIONS = { maxWait: 10_000, timeout: 30_000 };
 const ZERO = new Prisma.Decimal(0);
 const n = (value: Prisma.Decimal | null | undefined) => Number(value ?? 0);
+const dec = (value: Prisma.Decimal | null | undefined) =>
+  new Prisma.Decimal(value ?? 0);
+/** Adds amounts to the tiyin, so a sum of many is not off by float noise. */
+const sumUzs = (values: number[]) =>
+  values.reduce((total, value) => total + Math.round(value * 100), 0) / 100;
 
 /**
  * The seller ledger: what each seller is owed and has been paid, what Mator keeps, and the
  * payouts and holds that move it. The arithmetic is in seller-ledger.ts.
  *
- * Mator's commission is each seller's own, as their contract states, frozen on the order's lines
- * when it was placed; a seller with none configured is charged 0%. There is no global rate.
+ * Mator takes no commission from sellers. What it keeps is the service fee, and delivery, which
+ * it carries out itself; a seller is owed their goods as charged, so net of a promo, in full.
+ *
+ * Recording a payout writes down money already sent outside this system, by a bank transfer or
+ * in cash: nothing here sends money anywhere.
  *
  * A seller is paid only for orders the buyer has, that took the money, and that have no
  * cancellation or return under way. A payout is capped at what is payable less what was already
@@ -42,80 +61,122 @@ export class AdminFinanceService {
     private readonly audit: AdminAuditService,
   ) {}
 
-  /** Every seller with money on the books, and Mator's own figures beside them. */
+  /**
+   * Every seller with money on the books, and the totals the finance view opens with. What
+   * buyers paid is not Mator's income: most of it is the sellers' goods. Mator's income is the
+   * service fee and delivery it kept, each shown as charged, refunded and kept.
+   */
   async sellers() {
-    const [balances, orders, commission, refunds, commissionBack] =
-      await Promise.all([
-        sellerBalances(this.prisma),
-        this.prisma.order.aggregate({
-          where: TOOK_MONEY,
-          _sum: { totalUzs: true, serviceFeeUzs: true, deliveryUzs: true },
-        }),
-        this.prisma.orderItem.aggregate({
-          where: { order: TOOK_MONEY },
-          _sum: { commissionUzs: true },
-        }),
-        this.prisma.financialRefund.aggregate({
-          where: { voidedAt: null },
-          _sum: { amountUzs: true, serviceFeeUzs: true, deliveryUzs: true },
-        }),
-        this.prisma.financialRefundAllocation.aggregate({
-          where: { refund: { voidedAt: null } },
-          _sum: { commissionUzs: true },
-        }),
-      ]);
+    const paidThroughPayme = (status: PaymentStatus[]) =>
+      this.prisma.payment.aggregate({
+        where: { provider: PaymentProvider.PAYME, status: { in: status } },
+        _sum: { amountUzs: true },
+      });
+    const [balances, orders, refunds, paymeIn, paymeBack] = await Promise.all([
+      sellerBalances(this.prisma),
+      this.prisma.order.aggregate({
+        where: TOOK_MONEY,
+        _sum: { totalUzs: true, serviceFeeUzs: true, deliveryUzs: true },
+      }),
+      this.prisma.financialRefund.aggregate({
+        where: { voidedAt: null },
+        _sum: { amountUzs: true, serviceFeeUzs: true, deliveryUzs: true },
+      }),
+      // Money that really came in through Payme, whatever happened to it since.
+      paidThroughPayme([PaymentStatus.PAID, PaymentStatus.REFUNDED]),
+      // Payme reverses a whole payment, so a reversed payment is all of it back.
+      paidThroughPayme([PaymentStatus.REFUNDED]),
+    ]);
+
+    const charged = {
+      total: dec(orders._sum.totalUzs),
+      fee: dec(orders._sum.serviceFeeUzs),
+      delivery: dec(orders._sum.deliveryUzs),
+    };
+    const back = {
+      total: dec(refunds._sum.amountUzs),
+      fee: dec(refunds._sum.serviceFeeUzs),
+      delivery: dec(refunds._sum.deliveryUzs),
+    };
+    const feeKept = charged.fee.sub(back.fee);
+    const deliveryKept = charged.delivery.sub(back.delivery);
+    const sellersTotal = (pick: (b: (typeof balances)[number]) => number) =>
+      sumUzs(balances.map(pick));
+
     return {
       success: true,
       data: balances,
       meta: {
-        paidByBuyers: n(orders._sum.totalUzs),
-        refundedToBuyers: n(refunds._sum.amountUzs),
-        matorServiceFee:
-          n(orders._sum.serviceFeeUzs) - n(refunds._sum.serviceFeeUzs),
-        matorCommission:
-          n(commission._sum.commissionUzs) -
-          n(commissionBack._sum.commissionUzs),
-        delivery: n(orders._sum.deliveryUzs) - n(refunds._sum.deliveryUzs),
+        // Orders that took money: what buyers paid, and what went back to them.
+        paidByBuyers: n(charged.total),
+        refundedToBuyers: n(back.total),
+        // The goods in those orders, net of a promo: the sellers' money, not Mator's.
+        goodsSold: n(charged.total.sub(charged.fee).sub(charged.delivery)),
+        goodsRefunded: n(back.total.sub(back.fee).sub(back.delivery)),
+        // Mator's own: the service fee and delivery, charged, refunded and kept.
+        serviceFeeCharged: n(charged.fee),
+        serviceFeeRefunded: n(back.fee),
+        matorServiceFee: n(feeKept),
+        deliveryCharged: n(charged.delivery),
+        deliveryRefunded: n(back.delivery),
+        delivery: n(deliveryKept),
+        matorIncome: n(feeKept.add(deliveryKept)),
+        paymeReceived: n(paymeIn._sum.amountUzs),
+        paymeRefunded: n(paymeBack._sum.amountUzs),
+        // The sellers, all together. Owed counts only those Mator owes; what sellers owe
+        // Mator after a refund of paid-out goods is their debt, apart.
+        sellersEarned: sellersTotal((b) => b.earnedUzs),
+        sellersPayable: sellersTotal((b) => b.payableUzs),
+        sellersBlocked: sellersTotal((b) => b.blockedUzs),
+        sellersPaidOut: sellersTotal((b) => b.paidOutUzs),
+        sellersOwed: sellersTotal((b) => Math.max(b.owedUzs, 0)),
+        sellersPayableNow: sellersTotal((b) => b.payableNowUzs),
+        sellersDebt: sellersTotal((b) => b.debtUzs),
       },
     };
   }
 
   /** One seller: the balance, each order it comes from, and every payout. */
   async seller(sellerId: string) {
-    const [balances, lines, allocations, payouts, payableOrders] =
-      await Promise.all([
-        sellerBalances(this.prisma, sellerId),
-        this.prisma.orderItem.findMany({
-          where: { sellerId, order: TOOK_MONEY },
-          select: {
-            orderId: true,
-            lineTotalUzs: true,
-            commissionPercent: true,
-            commissionUzs: true,
-            order: {
-              select: { status: true, createdAt: true, payoutHoldReason: true },
-            },
+    const ofSeller = { items: { some: { sellerId } } };
+    const [
+      balances,
+      lines,
+      allocations,
+      payouts,
+      payableOrders,
+      blockedOrders,
+    ] = await Promise.all([
+      sellerBalances(this.prisma, sellerId),
+      this.prisma.orderItem.findMany({
+        where: { sellerId, order: TOOK_MONEY },
+        select: {
+          orderId: true,
+          lineTotalUzs: true,
+          order: {
+            select: { status: true, createdAt: true, payoutHoldReason: true },
           },
-          orderBy: { orderId: 'desc' },
-        }),
-        this.prisma.financialRefundAllocation.findMany({
-          where: { sellerId, refund: { voidedAt: null } },
-          select: {
-            amountUzs: true,
-            commissionUzs: true,
-            refund: { select: { orderId: true } },
-          },
-        }),
-        this.prisma.sellerPayout.findMany({
-          where: { sellerId },
-          select: PAYOUT_SELECT,
-          orderBy: [{ paidAt: 'desc' }, { id: 'asc' }],
-        }),
-        this.prisma.order.findMany({
-          where: { ...PAYABLE_ORDER, items: { some: { sellerId } } },
-          select: { id: true },
-        }),
-      ]);
+        },
+        orderBy: { orderId: 'desc' },
+      }),
+      this.prisma.financialRefundAllocation.findMany({
+        where: { sellerId, refund: { voidedAt: null } },
+        select: { amountUzs: true, refund: { select: { orderId: true } } },
+      }),
+      this.prisma.sellerPayout.findMany({
+        where: { sellerId },
+        select: PAYOUT_SELECT,
+        orderBy: [{ paidAt: 'desc' }, { id: 'asc' }],
+      }),
+      this.prisma.order.findMany({
+        where: { ...PAYABLE_ORDER, ...ofSeller },
+        select: { id: true },
+      }),
+      this.prisma.order.findMany({
+        where: { ...BLOCKED_ORDER, ...ofSeller },
+        select: { id: true },
+      }),
+    ]);
     const balance = balances.find((b) => b.sellerId === sellerId);
     if (!balance && payouts.length === 0) {
       throw new NotFoundException('No money is recorded for this seller');
@@ -125,11 +186,8 @@ export class AdminFinanceService {
       status: string;
       createdAt: Date;
       holdReason: string | null;
-      commissionPercent: Prisma.Decimal;
       sold: Prisma.Decimal;
-      commission: Prisma.Decimal;
       refunded: Prisma.Decimal;
-      commissionBack: Prisma.Decimal;
     };
     const orders = new Map<string, Row>();
     for (const line of lines) {
@@ -137,23 +195,19 @@ export class AdminFinanceService {
         status: line.order.status,
         createdAt: line.order.createdAt,
         holdReason: line.order.payoutHoldReason,
-        commissionPercent: line.commissionPercent,
         sold: ZERO,
-        commission: ZERO,
         refunded: ZERO,
-        commissionBack: ZERO,
       };
       row.sold = row.sold.add(line.lineTotalUzs);
-      row.commission = row.commission.add(line.commissionUzs);
       orders.set(line.orderId, row);
     }
     for (const allocation of allocations) {
       const row = orders.get(allocation.refund.orderId);
       if (!row) continue;
       row.refunded = row.refunded.add(allocation.amountUzs);
-      row.commissionBack = row.commissionBack.add(allocation.commissionUzs);
     }
     const payable = new Set(payableOrders.map((o) => o.id));
+    const blocked = new Set(blockedOrders.map((o) => o.id));
 
     return {
       success: true,
@@ -164,16 +218,12 @@ export class AdminFinanceService {
           status: row.status.toLowerCase(),
           createdAt: row.createdAt.toISOString(),
           payable: payable.has(orderId),
+          // Held back: a payout hold (its reason below), or a Payme refund not confirmed yet.
+          blocked: blocked.has(orderId),
           payoutHold: row.holdReason,
-          commissionPercent: Number(row.commissionPercent),
           sold: Number(row.sold),
           refunded: Number(row.refunded),
-          commission: Number(row.commission.sub(row.commissionBack)),
-          net: Number(
-            row.sold
-              .sub(row.refunded)
-              .sub(row.commission.sub(row.commissionBack)),
-          ),
+          net: Number(row.sold.sub(row.refunded)),
         })),
         payouts: payouts.map(presentPayout),
       },

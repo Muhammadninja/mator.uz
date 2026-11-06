@@ -326,7 +326,6 @@ export class AdminDealersService {
       dto.status === undefined &&
       dto.tin === undefined &&
       dto.vatPercent === undefined &&
-      dto.commissionPercent === undefined &&
       dto.pickupLat === undefined &&
       dto.pickupLng === undefined
     ) {
@@ -437,19 +436,6 @@ export class AdminDealersService {
           data.vatPercent = dto.vatPercent;
           presPrev.vatPercent = current;
           presNext.vatPercent = dto.vatPercent;
-        }
-      }
-      // Mator's commission rate: a Decimal compared as a number, like vatPercent, and null
-      // kept apart from 0 (not configured vs. a contract stating none). Either charges 0%.
-      if (dto.commissionPercent !== undefined) {
-        const current =
-          dealer.commissionPercent === null
-            ? null
-            : Number(dealer.commissionPercent);
-        if (dto.commissionPercent !== current) {
-          data.commissionPercent = dto.commissionPercent;
-          presPrev.commissionPercent = current;
-          presNext.commissionPercent = dto.commissionPercent;
         }
       }
       // The pickup location lives on the supply-side seller, so it is written there, in
@@ -726,7 +712,6 @@ export class AdminDealersService {
         // Налоговые данные, so an edit can be diffed against the stored values.
         tin: true,
         vatPercent: true,
-        commissionPercent: true,
         // Finds the supply-side seller that holds the pickup location.
         internalSellerId: true,
       },

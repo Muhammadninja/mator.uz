@@ -20,18 +20,8 @@ describe('settleOrder', () => {
     const settlement = settleOrder(order());
 
     expect(settlement.sellers).toEqual([
-      {
-        sellerId: 'dealer_a',
-        amountUzs: 400_000,
-        commissionUzs: 0,
-        netUzs: 400_000,
-      },
-      {
-        sellerId: 'dealer_b',
-        amountUzs: 200_000,
-        commissionUzs: 0,
-        netUzs: 200_000,
-      },
+      { sellerId: 'dealer_a', amountUzs: 400_000 },
+      { sellerId: 'dealer_b', amountUzs: 200_000 },
     ]);
     expect(settlement.serviceFeeUzs).toBe(20_000);
     expect(settlement.deliveryUzs).toBe(25_000);
@@ -52,14 +42,7 @@ describe('settleOrder', () => {
         { sellerId: 'dealer_a', lineTotalUzs: new Prisma.Decimal('64516.71') },
       ],
     });
-    expect(s.sellers).toEqual([
-      {
-        sellerId: 'dealer_a',
-        amountUzs: 64_516.71,
-        commissionUzs: 0,
-        netUzs: 64_516.71,
-      },
-    ]);
+    expect(s.sellers).toEqual([{ sellerId: 'dealer_a', amountUzs: 64_516.71 }]);
     expect(s.totalUzs).toBe(69_516.71);
   });
 
@@ -89,14 +72,7 @@ describe('settleOrder', () => {
         items: [{ sellerId: 'dealer_a', lineTotalUzs: 180_000 }],
       }),
     );
-    expect(s.sellers).toEqual([
-      {
-        sellerId: 'dealer_a',
-        amountUzs: 180_000,
-        commissionUzs: 0,
-        netUzs: 180_000,
-      },
-    ]);
+    expect(s.sellers).toEqual([{ sellerId: 'dealer_a', amountUzs: 180_000 }]);
   });
 });
 

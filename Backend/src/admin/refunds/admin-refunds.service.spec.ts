@@ -22,6 +22,8 @@ function build(state: {
   duplicate?: boolean;
   orderExists?: boolean;
   entry?: Record<string, unknown> | null;
+  /** The written entry as it is read back, where it differs from a Payme refund. */
+  written?: Record<string, unknown>;
 }) {
   const row = {
     id: 'rfd_1',
@@ -53,6 +55,7 @@ function build(state: {
         phoneE164: '+998900000000',
       },
     },
+    ...state.written,
   };
   const tx = {
     $queryRaw: jest
@@ -76,6 +79,7 @@ function build(state: {
       updateMany: jest.fn(),
     },
     orderStatusHistory: { count: jest.fn().mockResolvedValue(0) },
+    catalogSeller: { findMany: jest.fn().mockResolvedValue([]) },
     financialRefund: {
       findMany: jest.fn().mockResolvedValue(
         state.refunded
@@ -118,8 +122,13 @@ function build(state: {
     $transaction: jest.fn((fn: (t: unknown) => unknown) => fn(tx)),
   };
   const audit = { record: jest.fn().mockResolvedValue(undefined) };
-  const service = new AdminRefundsService(prisma as never, audit as never);
-  return { service, tx, audit };
+  const alerts = { raise: jest.fn() };
+  const service = new AdminRefundsService(
+    prisma as never,
+    audit as never,
+    alerts as never,
+  );
+  return { service, tx, audit, alerts };
 }
 
 const dto = (over: Partial<RecordRefundDto> = {}): RecordRefundDto => ({
@@ -472,6 +481,128 @@ describe('AdminRefundsService.record — the service fee', () => {
       remaining: 545_000,
       serviceFee: { charged: 20_000, refunded: 0, retained: 20_000 },
     });
+  });
+});
+
+describe('AdminRefundsService — refunds outside Payme have no confirmed return receipt', () => {
+  const PAID_100 = { received: 100 };
+
+  it('a cash refund with no receipt recorded raises an alert once written', async () => {
+    const { service, alerts } = build({
+      ...PAID_100,
+      written: { method: RefundMethod.CASH, reference: 'KO-1' },
+    });
+
+    const res = await service.record(
+      'ord_1',
+      dto({ method: RefundMethod.CASH, reference: 'KO-1' }),
+    );
+
+    expect(res.data.fiscalReceipt).toEqual({
+      status: 'missing',
+      receiptId: null,
+    });
+    expect(alerts.raise).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'refund_receipt_unconfirmed',
+        severity: 'warning',
+        context: {
+          refundId: 'rfd_1',
+          orderId: 'ord_1',
+          method: 'cash',
+          fiscalStatus: 'missing',
+        },
+      }),
+    );
+  });
+
+  it('a receipt number an operator states is not a confirmation either', async () => {
+    const { service, tx, alerts } = build({
+      ...PAID_100,
+      written: {
+        method: RefundMethod.TERMINAL,
+        reference: 'T-9',
+        fiscalReference: 'OFD-555',
+      },
+    });
+
+    const res = await service.record(
+      'ord_1',
+      dto({
+        method: RefundMethod.TERMINAL,
+        reference: 'T-9',
+        fiscalReference: 'OFD-555',
+      }),
+    );
+
+    expect(tx.financialRefund.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ fiscalReference: 'OFD-555' }),
+      }),
+    );
+    expect(res.data.fiscalReceipt.status).toBe('stated_by_operator');
+    expect(alerts.raise).toHaveBeenCalledWith(
+      expect.objectContaining({
+        context: expect.objectContaining({
+          fiscalStatus: 'stated_by_operator',
+        }),
+      }),
+    );
+  });
+
+  it('a refund through Payme raises none: Payme reports its own cancellation receipt', async () => {
+    const { service, alerts } = build(PAID_100);
+
+    await service.record('ord_1', dto());
+
+    expect(alerts.raise).not.toHaveBeenCalled();
+  });
+
+  it('nothing is raised for a refund that was refused', async () => {
+    const { service, alerts } = build({ received: 50 });
+
+    await service
+      .record('ord_1', dto({ method: RefundMethod.CASH }))
+      .catch(() => undefined);
+
+    expect(alerts.raise).not.toHaveBeenCalled();
+  });
+});
+
+describe('AdminRefundsService.forOrder — whose goods can go back', () => {
+  it('names each seller beside their goods', async () => {
+    const { service, tx } = build({ received: 300_000 });
+    tx.order.findUnique.mockResolvedValue({
+      totalUzs: 300_000,
+      serviceFeeUzs: 0,
+      deliveryUzs: 0,
+      items: [
+        { sellerId: 'dealer_a', lineTotalUzs: 200_000 },
+        { sellerId: 'dealer_b', lineTotalUzs: 100_000 },
+      ],
+    });
+    tx.catalogSeller.findMany.mockResolvedValue([
+      { id: 'dealer_a', name: 'Driver’s Village' },
+    ]);
+
+    const res = await service.forOrder('ord_1');
+
+    expect(res.data.sellers).toEqual([
+      {
+        sellerId: 'dealer_a',
+        name: 'Driver’s Village',
+        charged: 200_000,
+        refunded: 0,
+        remaining: 200_000,
+      },
+      {
+        sellerId: 'dealer_b',
+        name: null,
+        charged: 100_000,
+        refunded: 0,
+        remaining: 100_000,
+      },
+    ]);
   });
 });
 /* eslint-enable @typescript-eslint/no-unsafe-assignment */

@@ -10,11 +10,8 @@ import { Prisma } from '@prisma/client';
  *   • delivery, Mator's line;
  *   • the service fee, Mator's income.
  * They add up to the total. A refund is split across them, so what each seller is owed, and
- * what Mator keeps, stays true after money goes back.
- *
- * Mator's commission rides on each seller's goods, at the rate frozen on the order's lines. When
- * goods go back, the commission on them goes with them, in proportion, so a seller is never
- * charged commission on a sale that was returned, and Mator does not keep it.
+ * what Mator keeps, stays true after money goes back. Mator takes no commission from sellers:
+ * a seller's goods are theirs in full, and one seller's refund never touches another's.
  */
 
 type Decimal = Prisma.Decimal;
@@ -33,11 +30,8 @@ export interface ComponentPosition {
   remaining: Decimal;
 }
 
-/** A seller's goods on an order, and Mator's commission on them, as they stand. */
-export type SellerPosition = { sellerId: string } & ComponentPosition & {
-    /** Charged on the goods, reversed with refunds of them, and what is left of it. */
-    commission: ComponentPosition;
-  };
+/** A seller's goods on an order, as they stand. */
+export type SellerPosition = { sellerId: string } & ComponentPosition;
 
 export interface OrderComponents {
   serviceFee: ComponentPosition;
@@ -46,11 +40,10 @@ export interface OrderComponents {
   unattributed: ComponentPosition;
 }
 
-/** One seller's share of a refund: the goods, and the commission that goes with them. */
+/** One seller's share of a refund: their goods that went back. */
 export interface RefundAllocation {
   sellerId: string;
   amountUzs: Decimal;
-  commissionUzs: Decimal;
 }
 
 /** What a refund gives back, part by part. The parts add up to the refund's amount. */
@@ -74,8 +67,6 @@ export interface ComponentOrder {
   items: {
     sellerId: string | null;
     lineTotalUzs: Prisma.Decimal.Value;
-    /** Frozen on the line when the order was placed. Absent on an older row: none. */
-    commissionUzs?: Prisma.Decimal.Value;
   }[];
 }
 
@@ -84,11 +75,7 @@ export interface ComponentEntry {
   amountUzs: Prisma.Decimal.Value;
   serviceFeeUzs: Prisma.Decimal.Value;
   deliveryUzs: Prisma.Decimal.Value;
-  allocations: {
-    sellerId: string;
-    amountUzs: Prisma.Decimal.Value;
-    commissionUzs?: Prisma.Decimal.Value;
-  }[];
+  allocations: { sellerId: string; amountUzs: Prisma.Decimal.Value }[];
 }
 
 function position(charged: Decimal, refunded: Decimal): ComponentPosition {
@@ -114,11 +101,9 @@ export function readComponents(input: {
     map.set(key, (map.get(key) ?? ZERO).add(value));
 
   const sellerCharged = new Map<string, Decimal>();
-  const commissionCharged = new Map<string, Decimal>();
   for (const item of items) {
     if (!item.sellerId) continue;
     add(sellerCharged, item.sellerId, dec(item.lineTotalUzs));
-    add(commissionCharged, item.sellerId, dec(item.commissionUzs));
   }
   const goodsCharged =
     tookMoney && order
@@ -133,17 +118,11 @@ export function readComponents(input: {
   );
 
   const sellerRefunded = new Map<string, Decimal>();
-  const commissionReversed = new Map<string, Decimal>();
   let unattributedRefunded = ZERO;
   for (const entry of entries) {
     const allocated = sum(entry.allocations.map((a) => a.amountUzs));
     for (const allocation of entry.allocations) {
       add(sellerRefunded, allocation.sellerId, dec(allocation.amountUzs));
-      add(
-        commissionReversed,
-        allocation.sellerId,
-        dec(allocation.commissionUzs),
-      );
     }
     unattributedRefunded = unattributedRefunded.add(
       dec(entry.amountUzs)
@@ -167,10 +146,6 @@ export function readComponents(input: {
     sellers: [...sellerCharged].map(([sellerId, charged]) => ({
       sellerId,
       ...of(charged, sellerRefunded.get(sellerId) ?? ZERO),
-      commission: of(
-        commissionCharged.get(sellerId) ?? ZERO,
-        commissionReversed.get(sellerId) ?? ZERO,
-      ),
     })),
     unattributed: of(unattributedCharged, unattributedRefunded),
   };
@@ -202,15 +177,12 @@ export function deriveBreakdown(
     left = left.sub(taken);
     return taken;
   };
-  const allocations = withCommission(
-    components,
-    components.sellers
-      .map((seller) => ({
-        sellerId: seller.sellerId,
-        amountUzs: take(seller.remaining),
-      }))
-      .filter((allocation) => allocation.amountUzs.gt(0)),
-  );
+  const allocations = components.sellers
+    .map((seller) => ({
+      sellerId: seller.sellerId,
+      amountUzs: take(seller.remaining),
+    }))
+    .filter((allocation) => allocation.amountUzs.gt(0));
   const unattributed = take(components.unattributed.remaining);
   const deliveryUzs = take(components.delivery.remaining);
   const serviceFeeUzs = take(components.serviceFee.remaining);
@@ -303,11 +275,10 @@ export function checkStatedBreakdown(
     );
   }
 
-  const amounts = stated.allocations
+  const allocations = stated.allocations
     ? checkAllocations(components, stated.allocations)
     : plainAllocations(components, goods);
-  if (!Array.isArray(amounts)) return amounts;
-  const allocations = withCommission(components, amounts);
+  if (!Array.isArray(allocations)) return allocations;
   const allocated = sum(allocations.map((a) => a.amountUzs));
   const unattributed = goods.sub(allocated);
   if (
@@ -330,44 +301,13 @@ export function checkStatedBreakdown(
   };
 }
 
-type AllocatedAmount = { sellerId: string; amountUzs: Decimal };
-
-/**
- * The commission that goes back with each seller's goods: in proportion to the commission
- * charged on them, to the tiyin, and all of what is left of it when all of what is left of the
- * goods goes back, so rounding can never leave a seller charged on a fully returned sale.
- */
-function withCommission(
-  components: OrderComponents,
-  allocations: AllocatedAmount[],
-): RefundAllocation[] {
-  return allocations.map((allocation) => {
-    const seller = components.sellers.find(
-      (s) => s.sellerId === allocation.sellerId,
-    );
-    if (!seller || seller.charged.lte(0)) {
-      return { ...allocation, commissionUzs: ZERO };
-    }
-    const share = allocation.amountUzs.eq(seller.remaining)
-      ? seller.commission.remaining
-      : allocation.amountUzs
-          .mul(seller.commission.charged)
-          .div(seller.charged)
-          .toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
-    return {
-      ...allocation,
-      commissionUzs: atMost(share, seller.commission.remaining),
-    };
-  });
-}
-
 /** Allocations an operator stated: known sellers, each once, each within what it has left. */
 function checkAllocations(
   components: OrderComponents,
   stated: NonNullable<StatedBreakdown['allocations']>,
-): AllocatedAmount[] | BreakdownCheck {
+): RefundAllocation[] | BreakdownCheck {
   const seen = new Set<string>();
-  const out: AllocatedAmount[] = [];
+  const out: RefundAllocation[] = [];
   for (const { sellerId, amountUzs } of stated) {
     const seller = components.sellers.find((s) => s.sellerId === sellerId);
     const amount = dec(amountUzs);
@@ -395,7 +335,7 @@ function checkAllocations(
 function plainAllocations(
   components: OrderComponents,
   goods: Decimal,
-): AllocatedAmount[] | BreakdownCheck {
+): RefundAllocation[] | BreakdownCheck {
   if (goods.eq(0)) return [];
   const withGoods = components.sellers.filter((s) => s.remaining.gt(0));
   if (withGoods.length === 0) return [];

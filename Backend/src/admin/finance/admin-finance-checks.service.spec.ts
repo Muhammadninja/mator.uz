@@ -43,9 +43,7 @@ const refundRow = (over: Record<string, unknown> = {}) => ({
   amountUzs: D(100_000),
   serviceFeeUzs: D(0),
   deliveryUzs: D(0),
-  allocations: [
-    { sellerId: 'dealer_a', amountUzs: D(100_000), commissionUzs: D(5_000) },
-  ],
+  allocations: [{ sellerId: 'dealer_a', amountUzs: D(100_000) }],
   method: RefundMethod.CASH,
   source: RefundSource.MANUAL,
   reference: 'KO-7',
@@ -74,23 +72,34 @@ const refundRow = (over: Record<string, unknown> = {}) => ({
 
 describe('AdminFinanceChecksService.order', () => {
   /**
-   * 400 000 of dealer A's goods at 5% and 250 000 of dealer B's at 0%, a 20 000 fee and
-   * 25 000 delivery: 695 000 paid through Payme. 100 000 of A's goods came back in cash, and
-   * the order is held back from payouts while that is looked at.
+   * 400 000 of dealer A's goods and 250 000 of dealer B's, a 20 000 fee and 25 000 delivery:
+   * 695 000 paid through Payme. 100 000 of A's goods came back in cash, and the order is held
+   * back from payouts while that is looked at.
    */
   const LEDGER_ORDER = {
     totalUzs: D(695_000),
     serviceFeeUzs: D(20_000),
     deliveryUzs: D(25_000),
     items: [
-      {
-        sellerId: 'dealer_a',
-        lineTotalUzs: D(400_000),
-        commissionUzs: D(20_000),
-      },
-      { sellerId: 'dealer_b', lineTotalUzs: D(250_000), commissionUzs: D(0) },
+      { sellerId: 'dealer_a', lineTotalUzs: D(400_000) },
+      { sellerId: 'dealer_b', lineTotalUzs: D(250_000) },
     ],
   };
+  const line = (
+    id: string,
+    sellerId: string,
+    title: string,
+    price: number,
+    quantity = 1,
+  ) => ({
+    id,
+    title,
+    quantity,
+    priceUzs: D(price),
+    lineTotalUzs: D(price * quantity),
+    sellerId,
+    providerId: null,
+  });
   const VIEW_ORDER = {
     id: 'ord_1',
     status: 'DELIVERED',
@@ -103,9 +112,10 @@ describe('AdminFinanceChecksService.order', () => {
     payoutHoldAt: AT,
     payoutHoldReason: 'Return requested',
     items: [
-      { sellerId: 'dealer_a', commissionPercent: D(5) },
-      { sellerId: 'dealer_b', commissionPercent: D(0) },
+      line('oi_1', 'dealer_a', 'Brake pads', 200_000, 2),
+      line('oi_2', 'dealer_b', 'Oil filter', 250_000),
     ],
+    statusHistory: [{ id: 'osh_paid' }],
     payments: [
       {
         id: 'pay_1',
@@ -117,7 +127,15 @@ describe('AdminFinanceChecksService.order', () => {
         fiscalReceipts: [receipt(PERFORM, 0)],
       },
     ],
-    financialRefunds: [refundRow()],
+    financialRefunds: [
+      refundRow({
+        payment: {
+          fiscalReceipts: [
+            { type: PERFORM, receiptId: 'R-100', statusCode: 0 },
+          ],
+        },
+      }),
+    ],
   };
 
   function setup() {
@@ -142,13 +160,7 @@ describe('AdminFinanceChecksService.order', () => {
             serviceFeeUzs: D(0),
             deliveryUzs: D(0),
             paymentId: 'pay_1',
-            allocations: [
-              {
-                sellerId: 'dealer_a',
-                amountUzs: D(100_000),
-                commissionUzs: D(5_000),
-              },
-            ],
+            allocations: [{ sellerId: 'dealer_a', amountUzs: D(100_000) }],
           },
         ]),
       },
@@ -166,7 +178,7 @@ describe('AdminFinanceChecksService.order', () => {
     };
   }
 
-  it('each seller’s goods, the commission on them and what they net; the refund touches only its seller', async () => {
+  it('each seller’s goods and what they net, in full; the refund touches only its seller', async () => {
     const { service } = setup();
 
     const res = await service.order('ord_1');
@@ -178,9 +190,7 @@ describe('AdminFinanceChecksService.order', () => {
         charged: 400_000,
         refunded: 100_000,
         remaining: 300_000,
-        commission: { charged: 20_000, refunded: 5_000, remaining: 15_000 },
-        commissionPercent: 5,
-        net: 285_000,
+        net: 300_000,
       },
       {
         sellerId: 'dealer_b',
@@ -188,9 +198,30 @@ describe('AdminFinanceChecksService.order', () => {
         charged: 250_000,
         refunded: 0,
         remaining: 250_000,
-        commission: { charged: 0, refunded: 0, remaining: 0 },
-        commissionPercent: 0,
         net: 250_000,
+      },
+    ]);
+    // Each line, and who sold it.
+    expect(res.data.items).toEqual([
+      {
+        id: 'oi_1',
+        title: 'Brake pads',
+        quantity: 2,
+        price: 200_000,
+        lineTotal: 400_000,
+        sellerId: 'dealer_a',
+        sellerName: 'Driver’s Village',
+        providerId: null,
+      },
+      {
+        id: 'oi_2',
+        title: 'Oil filter',
+        quantity: 1,
+        price: 250_000,
+        lineTotal: 250_000,
+        sellerId: 'dealer_b',
+        sellerName: 'Avto Ehtiyot',
+        providerId: null,
       },
     ]);
     // A goods-only refund leaves the fee and delivery where they were.
@@ -223,7 +254,46 @@ describe('AdminFinanceChecksService.order', () => {
       payable: false,
       holdAt: AT.toISOString(),
       holdReason: 'Return requested',
+      blockers: ['payout_hold'],
     });
+  });
+
+  it('names every reason a payout is blocked, and none once nothing stands in the way', async () => {
+    const { service, prisma } = setup();
+    prisma.order.findUnique.mockImplementation(({ select }) =>
+      Promise.resolve(
+        select.payments
+          ? {
+              ...VIEW_ORDER,
+              status: 'SHIPPED',
+              statusHistory: [],
+              financialRefunds: [
+                refundRow({ method: RefundMethod.PROVIDER }),
+                refundRow({
+                  id: 'rfd_old',
+                  method: RefundMethod.PROVIDER,
+                  voidedAt: AT,
+                }),
+              ],
+            }
+          : LEDGER_ORDER,
+      ),
+    );
+    expect((await service.order('ord_1')).data.payout.blockers).toEqual([
+      'no_money_taken',
+      'not_delivered',
+      'payout_hold',
+      'refund_awaiting_payme',
+    ]);
+
+    prisma.order.findUnique.mockImplementation(({ select }) =>
+      Promise.resolve(
+        select.payments
+          ? { ...VIEW_ORDER, payoutHoldAt: null, payoutHoldReason: null }
+          : LEDGER_ORDER,
+      ),
+    );
+    expect((await service.order('ord_1')).data.payout.blockers).toEqual([]);
   });
 
   it('shows the cash refund as having no receipt, and the sale receipt beside the payment', async () => {
@@ -236,10 +306,10 @@ describe('AdminFinanceChecksService.order', () => {
         amount: 100_000,
         serviceFee: 0,
         delivery: 0,
-        allocations: [
-          { sellerId: 'dealer_a', amount: 100_000, commission: 5_000 },
-        ],
+        allocations: [{ sellerId: 'dealer_a', amount: 100_000 }],
         fiscalReceipt: { status: 'missing', receiptId: null },
+        // The sale receipt the return receipt has to cite.
+        saleReceipt: { receiptId: 'R-100', statusCode: 0 },
       }),
     ]);
     expect(res.data.payments[0].receipts).toEqual({
@@ -293,14 +363,26 @@ describe('AdminFinanceChecksService.fiscalIssues', () => {
           ]),
       },
       financialRefund: {
-        findMany: jest.fn().mockResolvedValue([
-          refundRow(),
-          refundRow({
-            id: 'rfd_2',
-            method: RefundMethod.PROVIDER,
-            reference: 'tx_9',
-          }),
-        ]),
+        findMany: jest.fn(({ where }) =>
+          Promise.resolve(
+            where.fiscalReference
+              ? [
+                  refundRow({
+                    id: 'rfd_3',
+                    method: RefundMethod.TERMINAL,
+                    fiscalReference: 'OFD-555',
+                  }),
+                ]
+              : [
+                  refundRow(),
+                  refundRow({
+                    id: 'rfd_2',
+                    method: RefundMethod.PROVIDER,
+                    reference: 'tx_9',
+                  }),
+                ],
+          ),
+        ),
       },
     };
     return {
@@ -353,6 +435,27 @@ describe('AdminFinanceChecksService.fiscalIssues', () => {
         ['rfd_2', 'awaiting_payme'],
       ],
     );
+  });
+
+  it('lists apart the refunds outside Payme whose receipt only an operator stated: nothing confirmed it', async () => {
+    const { service, prisma } = setup();
+
+    const res = await service.fiscalIssues({});
+
+    expect(prisma.financialRefund.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          voidedAt: null,
+          source: RefundSource.MANUAL,
+          refundedAt: { lte: expect.any(Date) },
+          method: { not: RefundMethod.PROVIDER },
+          fiscalReference: { not: null },
+        },
+      }),
+    );
+    expect(
+      res.data.statedRefunds.map((r) => [r.id, r.fiscalReceipt.status]),
+    ).toEqual([['rfd_3', 'stated_by_operator']]);
   });
 
   it('gives Payme an hour by default before an absent receipt counts', async () => {

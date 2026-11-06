@@ -6,20 +6,25 @@ import {
   Prisma,
 } from '@prisma/client';
 
-/** What a seller is owed, as the finance view shows it. Amounts in UZS. See seller-ledger.ts. */
+/**
+ * What a seller is owed, as the finance view shows it. Amounts in UZS. See seller-ledger.ts.
+ * Mator takes no commission from sellers, so nothing is taken off their goods.
+ */
 export interface SellerBalance {
   sellerId: string;
   name: string | null;
-  /** Their goods on orders that took the buyer's money, as charged. */
+  /** Their goods on orders that took the buyer's money, as charged (net of a promo). */
   soldUzs: number;
   /** What refunds gave back of their goods. */
   refundedUzs: number;
-  /** Mator's commission on their goods, less what went back with refunds. */
-  commissionUzs: number;
-  /** Sold, less refunded, less commission: theirs in all. */
+  /** Sold, less refunded: theirs in all. */
   earnedUzs: number;
   /** Of that, on orders they can be paid for: delivered, paid, nothing under way. */
   payableUzs: number;
+  /** Of that, on orders held back: a payout hold, or a Payme refund not confirmed yet. */
+  blockedUzs: number;
+  /** The rest of it: orders not delivered yet, with nothing holding them back. */
+  pendingUzs: number;
   /** What Mator sent them. */
   paidOutUzs: number;
   /** Earned less paid out. Below zero when more was sent than they earned. */
@@ -126,6 +131,16 @@ export function presentPayment(p: {
     },
   };
 }
+
+/**
+ * Why the sellers cannot be paid for an order yet:
+ *   • `no_money_taken` — the order never took the buyer's money;
+ *   • `not_delivered` — the buyer does not have the goods (DELIVERED is the only payable status);
+ *   • `payout_hold` — an operator, or a refused Payme refund, held it back (see holdReason);
+ *   • `refund_awaiting_payme` — a refund through Payme is recorded and Payme has not confirmed it.
+ */
+export type PayoutBlocker =
+  'no_money_taken' | 'not_delivered' | 'payout_hold' | 'refund_awaiting_payme';
 
 export type FiscalIssue = ReturnType<typeof presentPayment> & {
   orderId: string;

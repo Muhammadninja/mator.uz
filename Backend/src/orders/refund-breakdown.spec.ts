@@ -170,7 +170,7 @@ describe('checkStatedBreakdown — a refund an operator records', () => {
       allocations: [{ sellerId: 'dealer_b', amountUzs: 100_000 }],
     });
     expect(result.ok && result.breakdown.allocations).toEqual([
-      { sellerId: 'dealer_b', amountUzs: D(100_000), commissionUzs: D(0) },
+      { sellerId: 'dealer_b', amountUzs: D(100_000) },
     ]);
     expect(result.ok && Number(result.breakdown.serviceFeeUzs)).toBe(0);
   });
@@ -191,7 +191,7 @@ describe('checkStatedBreakdown — a refund an operator records', () => {
     });
     const result = check(100_000, {}, single);
     expect(result.ok && result.breakdown.allocations).toEqual([
-      { sellerId: 'dealer_a', amountUzs: D(100_000), commissionUzs: D(0) },
+      { sellerId: 'dealer_a', amountUzs: D(100_000) },
     ]);
   });
 
@@ -265,7 +265,7 @@ describe('checkStatedBreakdown — a refund an operator records', () => {
     // …and with dealer B's goods gone, dealer A's are all the goods there are.
     const result = check(100_000, {}, after);
     expect(result.ok && result.breakdown.allocations).toEqual([
-      { sellerId: 'dealer_a', amountUzs: D(100_000), commissionUzs: D(0) },
+      { sellerId: 'dealer_a', amountUzs: D(100_000) },
     ]);
   });
 
@@ -294,103 +294,57 @@ describe('checkStatedBreakdown — a refund an operator records', () => {
   });
 });
 
-describe('Mator’s commission goes back with the goods', () => {
-  // Dealer A at 5%: 350 000 of goods, 17 500 of commission. Dealer B: no commission.
-  const withCommission = (entries: ComponentEntry[] = []) =>
-    readComponents({
-      order: {
-        ...ORDER,
-        items: [
-          {
-            sellerId: 'dealer_a',
-            lineTotalUzs: 350_000,
-            commissionUzs: 17_500,
-          },
-          { sellerId: 'dealer_b', lineTotalUzs: 250_000, commissionUzs: 0 },
-        ],
-      },
-      entries,
-      tookMoney: true,
-      everythingBack: false,
-    });
-  const allocationsOf = (result: ReturnType<typeof checkStatedBreakdown>) =>
-    result.ok
-      ? result.breakdown.allocations.map((a) => [
-          a.sellerId,
-          Number(a.amountUzs),
-          Number(a.commissionUzs),
-        ])
-      : result.code;
+describe('No commission: a seller’s goods are theirs in full', () => {
+  const check = (
+    amount: number,
+    stated: Parameters<typeof checkStatedBreakdown>[2] = {},
+  ) => checkStatedBreakdown(components(), D(amount), stated);
 
-  it('in proportion to the goods given back', () => {
-    expect(
-      allocationsOf(
-        checkStatedBreakdown(withCommission(), D(100_000), {
-          allocations: [{ sellerId: 'dealer_a', amountUzs: 100_000 }],
-        }),
-      ),
-    ).toEqual([['dealer_a', 100_000, 5_000]]);
+  it('a refund allocation is the goods amount and nothing else', () => {
+    const result = check(100_000, {
+      allocations: [{ sellerId: 'dealer_a', amountUzs: 100_000 }],
+    });
+    expect(result.ok && result.breakdown.allocations.map(Object.keys)).toEqual([
+      ['sellerId', 'amountUzs'],
+    ]);
+    expect(Object.keys(components().sellers[0]).sort()).toEqual([
+      'charged',
+      'refunded',
+      'remaining',
+      'sellerId',
+    ]);
   });
 
-  it('all that is left of it when all that is left of the goods goes back, whatever the rounding', () => {
-    const first = checkStatedBreakdown(withCommission(), D(116_666.67), {
-      allocations: [{ sellerId: 'dealer_a', amountUzs: 116_666.67 }],
-    });
-    expect(allocationsOf(first)).toEqual([['dealer_a', 116_666.67, 5_833.33]]);
-
-    const after = withCommission([
+  it('one seller’s refund never touches another seller’s goods', () => {
+    const after = components([
       entry({
-        amountUzs: 116_666.67,
-        allocations: [
-          {
-            sellerId: 'dealer_a',
-            amountUzs: 116_666.67,
-            commissionUzs: 5_833.33,
-          },
-        ],
+        amountUzs: 50_000,
+        allocations: [{ sellerId: 'dealer_b', amountUzs: 50_000 }],
       }),
     ]);
-    expect(
-      allocationsOf(
-        checkStatedBreakdown(after, D(233_333.33), {
-          allocations: [{ sellerId: 'dealer_a', amountUzs: 233_333.33 }],
-        }),
-      ),
-    ).toEqual([['dealer_a', 233_333.33, 11_666.67]]);
+    expect(plain(after).sellers).toEqual({
+      dealer_a: 350_000,
+      dealer_b: 200_000,
+    });
   });
 
-  it('a seller charged no commission gets none back, and the other seller is untouched', () => {
-    const result = checkStatedBreakdown(withCommission(), D(50_000), {
+  it('a partial refund of goods leaves the service fee and delivery with Mator', () => {
+    const result = check(50_000, {
       allocations: [{ sellerId: 'dealer_b', amountUzs: 50_000 }],
     });
-    expect(allocationsOf(result)).toEqual([['dealer_b', 50_000, 0]]);
-    const a = withCommission().sellers.find((s) => s.sellerId === 'dealer_a')!;
-    expect(Number(a.commission.remaining)).toBe(17_500);
+    expect(result.ok && Number(result.breakdown.serviceFeeUzs)).toBe(0);
+    expect(result.ok && Number(result.breakdown.deliveryUzs)).toBe(0);
   });
 
-  it('a reversal of everything takes all the commission back with the goods', () => {
-    const b = deriveBreakdown(withCommission(), D(645_000));
-    expect(
-      b.allocations.map((a) => [a.sellerId, Number(a.commissionUzs)]),
-    ).toEqual([
-      ['dealer_a', 17_500],
-      ['dealer_b', 0],
-    ]);
-  });
-
-  it('reads what earlier refunds took back of it', () => {
-    const c = withCommission([
-      entry({
-        amountUzs: 100_000,
-        allocations: [
-          { sellerId: 'dealer_a', amountUzs: 100_000, commissionUzs: 5_000 },
-        ],
-      }),
-    ]);
-    const a = c.sellers.find((s) => s.sellerId === 'dealer_a')!;
-    expect({
-      goods: Number(a.remaining),
-      commission: Number(a.commission.remaining),
-    }).toEqual({ goods: 250_000, commission: 12_500 });
+  it('a reversal of everything gives each seller’s goods back in full, with the fee and delivery', () => {
+    const b = deriveBreakdown(components(), D(645_000));
+    expect(b.allocations.map((a) => [a.sellerId, Number(a.amountUzs)])).toEqual(
+      [
+        ['dealer_a', 350_000],
+        ['dealer_b', 250_000],
+      ],
+    );
+    expect(Number(b.serviceFeeUzs)).toBe(20_000);
+    expect(Number(b.deliveryUzs)).toBe(25_000);
   });
 });

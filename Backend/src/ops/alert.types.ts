@@ -22,6 +22,8 @@ export const ALERT_TYPES = {
   FISCAL_RECEIPT_CONFLICT: 'fiscal_receipt_conflict',
   /** Payme asked to refund a payment and the refund was refused. */
   REFUND_REFUSED: 'refund_refused',
+  /** Money went back outside Payme and no return receipt is confirmed. */
+  REFUND_RECEIPT_UNCONFIRMED: 'refund_receipt_unconfirmed',
 } as const;
 
 export type AlertType = (typeof ALERT_TYPES)[keyof typeof ALERT_TYPES];

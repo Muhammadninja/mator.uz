@@ -901,92 +901,22 @@ describe('AdminDealersService', () => {
       });
     });
 
-    /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access -- the audit double is untyped, as elsewhere in this file */
-    describe("Mator's commission rate (Phase 3)", () => {
-      it('sets a rate for this dealer, audited before and after', async () => {
-        prisma.catalogSeller.findUnique
-          .mockResolvedValueOnce(mutableRow({ commissionPercent: null }))
-          .mockResolvedValueOnce(detailRow());
-
-        await service.update('d1', { commissionPercent: 7.5 }, CTX);
-
-        expect(prisma.catalogSeller.update).toHaveBeenCalledWith({
-          where: { id: 'd1' },
-          data: { commissionPercent: 7.5 },
-        });
-        const [entry] = audit.record.mock.calls[0];
-        expect(entry.previousValues).toEqual({ commissionPercent: null });
-        expect(entry.newValues).toEqual({ commissionPercent: 7.5 });
-      });
-
-      it('an explicit 0 is a rate, written as such', async () => {
-        prisma.catalogSeller.findUnique
-          .mockResolvedValueOnce(mutableRow({ commissionPercent: null }))
-          .mockResolvedValueOnce(detailRow());
-
-        await service.update('d1', { commissionPercent: 0 }, CTX);
-
-        expect(prisma.catalogSeller.update).toHaveBeenCalledWith({
-          where: { id: 'd1' },
-          data: { commissionPercent: 0 },
-        });
-      });
-
-      it('null clears it back to not configured', async () => {
-        prisma.catalogSeller.findUnique
-          .mockResolvedValueOnce(
-            mutableRow({ commissionPercent: { toString: () => '5' } }),
-          )
-          .mockResolvedValueOnce(detailRow());
-
-        await service.update('d1', { commissionPercent: null }, CTX);
-
-        expect(prisma.catalogSeller.update).toHaveBeenCalledWith({
-          where: { id: 'd1' },
-          data: { commissionPercent: null },
-        });
-      });
-
-      it('the same rate again writes nothing', async () => {
-        prisma.catalogSeller.findUnique
-          .mockResolvedValueOnce(
-            mutableRow({ commissionPercent: { toString: () => '5' } }),
-          )
-          .mockResolvedValueOnce(detailRow());
-
-        await service.update('d1', { commissionPercent: 5 }, CTX);
-
-        expect(prisma.catalogSeller.update).not.toHaveBeenCalled();
-      });
-
-      it('presents not configured apart from an explicit 0', async () => {
-        prisma.catalogSeller.findUnique.mockResolvedValue(
-          detailRow({ commissionPercent: null }),
+    describe('no commission rate: Mator takes none from dealers', () => {
+      it('the dealer endpoint refuses one, as the API validates a body', () => {
+        const errors = validateSync(
+          plainToInstance(UpdateAdminDealerDto, { commissionPercent: 7.5 }),
+          { whitelist: true, forbidNonWhitelisted: true },
         );
-        expect((await service.getOne('d1')).data).toMatchObject({
-          commissionPercent: null,
-        });
-        prisma.catalogSeller.findUnique.mockResolvedValue(
-          detailRow({ commissionPercent: 0 }),
-        );
-        expect((await service.getOne('d1')).data).toMatchObject({
-          commissionPercent: 0,
-        });
+        expect(errors.map((e) => e.property)).toEqual(['commissionPercent']);
       });
 
-      it('refuses a rate that is no percentage', () => {
-        const errors = (commissionPercent: unknown) =>
-          validateSync(
-            plainToInstance(UpdateAdminDealerDto, { commissionPercent }),
-          );
-        expect(errors(-1).length).toBeGreaterThan(0);
-        expect(errors(101).length).toBeGreaterThan(0);
-        expect(errors(2.555).length).toBeGreaterThan(0);
-        expect(errors(null)).toHaveLength(0);
-        expect(errors(12.5)).toHaveLength(0);
+      it('a dealer is never presented with one', async () => {
+        prisma.catalogSeller.findUnique.mockResolvedValue(detailRow());
+        expect((await service.getOne('d1')).data).not.toHaveProperty(
+          'commissionPercent',
+        );
       });
     });
-    /* eslint-enable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access */
 
     it('presents both fields, and the derived readiness flag', async () => {
       prisma.catalogSeller.findUnique.mockResolvedValue(
@@ -1139,7 +1069,6 @@ describe('UpdateAdminDealerDto', () => {
       reason: 'x',
       tin: '301234567',
       vatPercent: 12,
-      commissionPercent: 5,
       pickupLat: 41.31,
       pickupLng: 69.28,
     });
@@ -1147,7 +1076,6 @@ describe('UpdateAdminDealerDto', () => {
       'brandColor',
       'certified',
       'city',
-      'commissionPercent',
       'email',
       'initial',
       'logoUrl',

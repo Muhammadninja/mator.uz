@@ -1451,13 +1451,6 @@ model CatalogSeller {
   // payable at once, with no product write.
   tin              String?       @db.VarChar(14)
   vatPercent       Decimal?      @map("vat_percent") @db.Decimal(5, 2)
-  // ── Комиссия Mator ─────────────────────────────────────────────────────────
-  // Mator's commission on this dealer's goods, in percent, as the dealer's contract states.
-  // Null is "not configured", which charges 0% by the business's decision; an explicit 0 says
-  // the same on purpose. There is no global rate. An order freezes the rate it was placed under
-  // (order_items.commission_percent), so a change here reaches new orders only. Nothing to do
-  // with Payme's commission_info.tin, which names the seller on a receipt line.
-  commissionPercent Decimal?     @map("commission_percent") @db.Decimal(5, 2)
   // ── 1C integration credential (POST /v1/integrations/dealers/sync-inventory) ──
   // SHA-256 hash of the dealer's X-API-KEY, hex-encoded — never the key itself.
   // The endpoint is machine-to-machine, so the credential is a bearer secret in
@@ -1824,16 +1817,14 @@ model FinancialRefund {
 
 // Whose goods a refund gave money back for, so what each seller is owed can be told. The
 // rest of a refund is the service fee and delivery, stated on the entry itself. Written
-// with the entry and never changed: voiding the entry voids these with it.
+// with the entry and never changed: voiding the entry voids these with it. Mator takes no
+// commission from sellers, so an allocation is the goods amount and nothing else.
 model FinancialRefundAllocation {
   id        String          @id @db.VarChar(64)
   refundId  String          @map("refund_id") @db.VarChar(64)
   // CatalogSeller.id, as frozen on the order line. A plain id, like order_items.seller_id.
   sellerId  String          @map("seller_id") @db.VarChar(64)
   amountUzs Decimal         @map("amount_uzs") @db.Decimal(14, 2)
-  // The commission that went with these goods, at the order's frozen rate: Mator no longer
-  // earns it, and the seller is not charged it.
-  commissionUzs Decimal     @default(0) @map("commission_uzs") @db.Decimal(14, 2)
   createdAt DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
   refund    FinancialRefund @relation(fields: [refundId], references: [id], onDelete: Restrict)
 
@@ -1895,11 +1886,6 @@ model OrderItem {
   // sale cannot. A plain id, for the same reason as partId. Null on a service line, whose
   // provider is providerId, and when no seller could be found.
   sellerId     String?   @map("seller_id") @db.VarChar(64)
-  // Mator's commission on this line, frozen when the order is placed: the seller's rate then
-  // (0 when none was configured) and what it came to on the line as charged, so net of a
-  // promo. Never recomputed. Not Payme's commission_info.
-  commissionPercent Decimal @default(0) @map("commission_percent") @db.Decimal(5, 2)
-  commissionUzs     Decimal @default(0) @map("commission_uzs") @db.Decimal(14, 2)
   title        String    @db.VarChar(255)
   quantity     Int       @default(1)
   priceUzs     Decimal   @map("price_uzs") @db.Decimal(14, 2)

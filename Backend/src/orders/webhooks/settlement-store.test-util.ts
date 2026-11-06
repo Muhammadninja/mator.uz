@@ -110,7 +110,6 @@ export function settlementStore(seed: { payments: Row[]; orders: Row[] }) {
           allocations: ((data.allocations?.create ?? []) as Row[]).map((a) => ({
             sellerId: a.sellerId,
             amountUzs: Number(a.amountUzs),
-            commissionUzs: Number(a.commissionUzs ?? 0),
           })),
         });
         return data;
