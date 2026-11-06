@@ -9,6 +9,7 @@ import { AdminRefundsService } from './refunds/admin-refunds.service';
 import { AdminFinanceController } from './finance/admin-finance.controller';
 import { AdminFinanceService } from './finance/admin-finance.service';
 import { AdminFinanceChecksService } from './finance/admin-finance-checks.service';
+import { FinanceAlerts } from '../orders/finance-alerts';
 import { AdminUsersService } from './users/admin-users.service';
 import { AdminUsersController } from './users/admin-users.controller';
 import { AdminDealersService } from './dealers/admin-dealers.service';
@@ -59,6 +60,10 @@ import { FitmentStudioModule } from './fitment-studio/fitment-studio.module';
     AdminRefundsService,
     AdminFinanceService,
     AdminFinanceChecksService,
+    // Raises money alerts, such as a refund recorded with no confirmed return receipt. Only
+    // emits an event (OpsModule delivers it), so a second instance beside OrdersModule's is
+    // harmless.
+    FinanceAlerts,
     AdminUsersService,
     AdminDealersService,
     AdminBrandsService,

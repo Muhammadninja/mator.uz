@@ -5,17 +5,18 @@ import type { SellerBalance } from './admin-finance.presenter';
  * What each seller is owed, from the order lines, the refund allocations and the payouts. Read
  * in the database, grouped, so it stays true past a page of orders.
  *
- *   earned   = their goods on orders that took money
- *            − what refunds gave back of those goods
- *            − Mator's commission, net of the commission that went back with refunds
- *   payable  = the same, counting only orders a seller can be paid for (see PAYABLE)
+ *   earned   = their goods on orders that took money − what refunds gave back of those goods
+ *   payable  = the same, counting only orders a seller can be paid for (see PAYABLE_ORDER)
+ *   blocked  = the same, counting only orders held back from payouts (see BLOCKED_ORDER)
+ *   pending  = earned − payable − blocked: orders not delivered yet, with nothing holding them
  *   owed     = earned − paid out (below zero: Mator sent more than the seller earned)
  *   payable now = payable − paid out, never below zero
  *   debt     = paid out − payable, when that is above zero
  *
- * A refund after a payout therefore leaves a debt, which later earnings pay off before anything
- * more can be sent. Delivery and the service fee are never a seller's: they are not on any
- * line. One seller's refund touches only that seller's allocation rows.
+ * Mator takes no commission from sellers: a seller earns their goods as charged, so net of a
+ * promo, in full. Delivery and the service fee are never a seller's: they are on no line. A
+ * refund after a payout leaves a debt, which later earnings pay off before anything more can be
+ * sent. One seller's refund touches only that seller's allocation rows.
  */
 
 /**
@@ -27,6 +28,13 @@ export const TOOK_MONEY: Prisma.OrderWhereInput = {
   statusHistory: { some: { status: OrderStatus.PAID } },
 };
 
+/** A refund through the provider that the provider has not confirmed yet. */
+const UNCONFIRMED_PROVIDER_REFUND: Prisma.FinancialRefundWhereInput = {
+  voidedAt: null,
+  method: RefundMethod.PROVIDER,
+  providerConfirmedAt: null,
+};
+
 /**
  * The orders a seller can be paid for: the buyer has the goods (DELIVERED, which no order
  * leaves), the money came in, and nothing about it is unfinished — no hold for a cancellation
@@ -36,34 +44,38 @@ export const PAYABLE_ORDER: Prisma.OrderWhereInput = {
   ...TOOK_MONEY,
   status: OrderStatus.DELIVERED,
   payoutHoldAt: null,
-  financialRefunds: {
-    none: {
-      voidedAt: null,
-      method: RefundMethod.PROVIDER,
-      providerConfirmedAt: null,
-    },
-  },
+  financialRefunds: { none: UNCONFIRMED_PROVIDER_REFUND },
+};
+
+/**
+ * The orders held back from payouts, whatever their status: an operator's hold for a
+ * cancellation or return under way, or a refund through the provider it has not confirmed.
+ * Together with PAYABLE_ORDER and the orders still on their way, it splits every order that
+ * took money three ways, with no order in two of them.
+ */
+export const BLOCKED_ORDER: Prisma.OrderWhereInput = {
+  ...TOOK_MONEY,
+  OR: [
+    { payoutHoldAt: { not: null } },
+    { financialRefunds: { some: UNCONFIRMED_PROVIDER_REFUND } },
+  ],
 };
 
 type Client = Prisma.TransactionClient;
 const ZERO = new Prisma.Decimal(0);
 
-type Sums = Map<string, { a: Prisma.Decimal; b: Prisma.Decimal }>;
+type Sums = Map<string, Prisma.Decimal>;
 function bySeller(
-  rows: {
-    sellerId: string | null;
-    a: Prisma.Decimal | null;
-    b?: Prisma.Decimal | null;
-  }[],
+  rows: { sellerId: string | null; amount: Prisma.Decimal | null }[],
 ): Sums {
   const out: Sums = new Map();
   for (const row of rows) {
     if (!row.sellerId) continue;
-    out.set(row.sellerId, { a: row.a ?? ZERO, b: row.b ?? ZERO });
+    out.set(row.sellerId, row.amount ?? ZERO);
   }
   return out;
 }
-const of = (sums: Sums, id: string) => sums.get(id) ?? { a: ZERO, b: ZERO };
+const of = (sums: Sums, id: string) => sums.get(id) ?? ZERO;
 
 export async function sellerNames(
   client: Pick<Client, 'catalogSeller'>,
@@ -83,76 +95,72 @@ export async function sellerBalances(
 ): Promise<SellerBalance[]> {
   const seller = sellerId ? { sellerId } : { sellerId: { not: null } };
   const one = sellerId ? { sellerId } : {};
-  const lines = (order: Prisma.OrderWhereInput) =>
-    client.orderItem.groupBy({
-      by: ['sellerId'],
-      where: { ...seller, order },
-      _sum: { lineTotalUzs: true, commissionUzs: true },
-    });
-  const refunds = (refund: Prisma.FinancialRefundWhereInput) =>
-    client.financialRefundAllocation.groupBy({
-      by: ['sellerId'],
-      where: { ...one, refund: { voidedAt: null, ...refund } },
-      _sum: { amountUzs: true, commissionUzs: true },
-    });
-  const [sold, soldPayable, refunded, refundedPayable, paid] =
-    await Promise.all([
-      lines(TOOK_MONEY),
-      lines(PAYABLE_ORDER),
-      refunds({}),
-      refunds({ order: PAYABLE_ORDER }),
-      client.sellerPayout.groupBy({
+  const lines = async (order: Prisma.OrderWhereInput) =>
+    bySeller(
+      (
+        await client.orderItem.groupBy({
+          by: ['sellerId'],
+          where: { ...seller, order },
+          _sum: { lineTotalUzs: true },
+        })
+      ).map((r) => ({ sellerId: r.sellerId, amount: r._sum.lineTotalUzs })),
+    );
+  const refunds = async (refund: Prisma.FinancialRefundWhereInput) =>
+    bySeller(
+      (
+        await client.financialRefundAllocation.groupBy({
+          by: ['sellerId'],
+          where: { ...one, refund: { voidedAt: null, ...refund } },
+          _sum: { amountUzs: true },
+        })
+      ).map((r) => ({ sellerId: r.sellerId, amount: r._sum.amountUzs })),
+    );
+  const [
+    sold,
+    soldPayable,
+    soldBlocked,
+    refunded,
+    refundedPayable,
+    refundedBlocked,
+    paid,
+  ] = await Promise.all([
+    lines(TOOK_MONEY),
+    lines(PAYABLE_ORDER),
+    lines(BLOCKED_ORDER),
+    refunds({}),
+    refunds({ order: PAYABLE_ORDER }),
+    refunds({ order: BLOCKED_ORDER }),
+    client.sellerPayout
+      .groupBy({
         by: ['sellerId'],
         where: { ...one, voidedAt: null },
         _sum: { amountUzs: true },
-      }),
-    ]);
+      })
+      .then((rows) =>
+        bySeller(
+          rows.map((r) => ({ sellerId: r.sellerId, amount: r._sum.amountUzs })),
+        ),
+      ),
+  ]);
 
-  const lineSums = (rows: typeof sold) =>
-    bySeller(
-      rows.map((r) => ({
-        sellerId: r.sellerId,
-        a: r._sum.lineTotalUzs,
-        b: r._sum.commissionUzs,
-      })),
-    );
-  const refundSums = (rows: typeof refunded) =>
-    bySeller(
-      rows.map((r) => ({
-        sellerId: r.sellerId,
-        a: r._sum.amountUzs,
-        b: r._sum.commissionUzs,
-      })),
-    );
-  const soldBy = lineSums(sold);
-  const soldPayableBy = lineSums(soldPayable);
-  const refundedBy = refundSums(refunded);
-  const refundedPayableBy = refundSums(refundedPayable);
-  const paidBy = bySeller(
-    paid.map((r) => ({ sellerId: r.sellerId, a: r._sum.amountUzs })),
-  );
-
-  const ids = [...new Set([...soldBy.keys(), ...paidBy.keys()])];
+  const ids = [...new Set([...sold.keys(), ...paid.keys()])];
   const names = await sellerNames(client, ids);
   return ids
     .map((id) => {
-      const s = of(soldBy, id);
-      const r = of(refundedBy, id);
-      const commission = s.b.sub(r.b);
-      const earned = s.a.sub(r.a).sub(commission);
-      const sp = of(soldPayableBy, id);
-      const rp = of(refundedPayableBy, id);
-      const payable = sp.a.sub(rp.a).sub(sp.b.sub(rp.b));
-      const paidOut = of(paidBy, id).a;
+      const earned = of(sold, id).sub(of(refunded, id));
+      const payable = of(soldPayable, id).sub(of(refundedPayable, id));
+      const blocked = of(soldBlocked, id).sub(of(refundedBlocked, id));
+      const paidOut = of(paid, id);
       const now = payable.sub(paidOut);
       return {
         sellerId: id,
         name: names.get(id) ?? null,
-        soldUzs: Number(s.a),
-        refundedUzs: Number(r.a),
-        commissionUzs: Number(commission),
+        soldUzs: Number(of(sold, id)),
+        refundedUzs: Number(of(refunded, id)),
         earnedUzs: Number(earned),
         payableUzs: Number(payable),
+        blockedUzs: Number(blocked),
+        pendingUzs: Number(earned.sub(payable).sub(blocked)),
         paidOutUzs: Number(paidOut),
         owedUzs: Number(earned.sub(paidOut)),
         payableNowUzs: Number(now.gt(0) ? now : ZERO),

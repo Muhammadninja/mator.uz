@@ -187,26 +187,10 @@ describe('The service fee on an order', () => {
     // What each seller is owed comes from their own lines: the fee and delivery are not
     // anybody's but Mator's, and everything adds up to what the buyer pays.
     const settlement = settleOrder({ ...data, items: data.items.create });
-    // No commission is configured for any of them in this test, which charges 0%.
     expect(settlement.sellers).toEqual([
-      {
-        sellerId: 'dealer_a',
-        amountUzs: 300_000,
-        commissionUzs: 0,
-        netUzs: 300_000,
-      },
-      {
-        sellerId: 'dealer_b',
-        amountUzs: 250_000,
-        commissionUzs: 0,
-        netUzs: 250_000,
-      },
-      {
-        sellerId: 'seller_7',
-        amountUzs: 100_000,
-        commissionUzs: 0,
-        netUzs: 100_000,
-      },
+      { sellerId: 'dealer_a', amountUzs: 300_000 },
+      { sellerId: 'dealer_b', amountUzs: 250_000 },
+      { sellerId: 'seller_7', amountUzs: 100_000 },
     ]);
     expect(settlement.serviceFeeUzs).toBe(20_000);
     expect(

@@ -31,7 +31,8 @@ import {
 /**
  * The money side: what sellers are owed and were paid, what Mator keeps, each order's money
  * by whose it is, and payments whose fiscal receipts need a look. Every admin role can read
- * it, like the refund registry; recording a payout takes a manager.
+ * it, like the refund registry; recording or voiding a payout and holding an order back take a
+ * manager. A payout here records money already sent outside the system: none is sent from it.
  */
 @ApiTags('Admin Finance')
 @ApiBearerAuth('jwt')
@@ -76,7 +77,7 @@ export class AdminFinanceController {
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
     summary:
-      'Record money sent to a seller. At most what is owed on delivered orders.',
+      'Record money already sent to a seller outside the system (it sends nothing). At most what is payable now on delivered orders.',
   })
   recordPayout(
     @Param('sellerId') sellerId: string,
@@ -161,7 +162,7 @@ export class AdminFinanceController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Payme payments with a missing, refused or contradicted receipt, and refunds made outside Payme with no return receipt recorded',
+      'Payme payments with a missing, refused or contradicted receipt; refunds outside Payme with no return receipt, or one only an operator stated; Payme refunds Payme has not confirmed',
   })
   fiscalIssues(@Query() query: FiscalIssuesQueryDto) {
     return this.checks.fiscalIssues(query);

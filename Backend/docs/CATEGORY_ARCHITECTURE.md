@@ -299,8 +299,9 @@ missing (read the dry-run first: a missing row may be one an operator removed on
     re-prices nothing.
 - **Service fee.** Mator's own income, charged once per order by a flat tariff on the cost of
   the parts (`src/orders/service-fee.util.ts`, the only copy of the tiers; the app shows what
-  the API answers): up to and including 100 000 nothing, then 5 000, from 200 000 10 000, from
-  500 000 20 000, from 1 000 000 30 000. Worked out from the server's cart on every cart read
+  the API answers). Tariff A, confirmed by the business on 2026-11-06: up to and including
+  100 000 nothing, above 100 000 5 000, from 200 000 10 000, from 500 000 20 000, from
+  1 000 000 30 000. Worked out from the server's cart on every cart read
   and change, and written once, with the other charges, when the order is created
   (`orders.service_fee_uzs`). Nothing in a request can state it: `confirmed_total_uzs` only
   says what the buyer was shown, and a total that no longer matches is refused with
@@ -326,17 +327,14 @@ missing (read the dry-run first: a missing row may be one an operator removed on
   frozen when the order is placed, and `src/orders/order-settlement.ts` sums what each seller
   is owed from their own lines. The fee and delivery are separate columns and Mator's lines on
   the receipt, so they are in no seller's figure, by construction. A promo code is spread into
-  the line prices, so a seller's figure is net of it: whether the seller or Mator bears that
-  discount is an open business decision.
-- **Mator's commission** on a seller's goods is each dealer's own rate, by contract
-  (`catalog_sellers.commission_percent`, set with `commissionPercent` on
-  `PATCH /v1/admin/dealers/:id`, audited). No rate configured (NULL) charges 0%, as does an
-  explicit 0; nothing is blocked for want of a rate, and there is no global rate. The rate and
-  what it comes to are frozen on each line when the order is placed
-  (`order_items.commission_percent` / `commission_uzs`, half-up to the tiyin), so a new rate
-  reaches new orders only and no old order is recomputed. Its base is the line as charged,
-  promo included; delivery and the fee are never in it. It has nothing to do with
-  `commission_info.tin` on a Payme receipt, which names whose goods a receipt line sells.
+  the line prices in proportion when the order is placed, so a seller's figure is net of it,
+  and what a seller is paid is read from those stored lines; the fee and delivery are never
+  discounted. Neither Mator nor a seller funds a promo for the other: there is no promo
+  funding at this stage, and no placed order is recomputed.
+- **No commission.** Mator takes no commission from sellers. Its income is the service fee,
+  plus delivery, which it carries out itself; a seller is owed their goods as charged, in full.
+  There is no rate on a dealer, on an order line or on a refund. `commission_info.tin` on a
+  Payme receipt is something else: it names whose goods a receipt line sells.
 - **Refunds by kind of money** (`src/orders/refund-breakdown.ts`). An order's money is each
   seller's goods, goods nobody is named for (the total less the fee, delivery and the named
   lines), delivery and the fee. Every refund says what it gave back of each: `serviceFeeUzs`,
@@ -345,41 +343,50 @@ missing (read the dry-run first: a missing row may be one an operator removed on
   breakdown; a partial one leaves the fee and delivery unless it states them, and has to say
   whose goods it was for when the order has more than one seller. Nothing can go back twice:
   each kind is capped at what it still holds, under the order's row lock, and the same document
-  number cannot be recorded twice. The commission on goods that go back goes back with them, in
-  proportion (all of what is left when all of the seller's remaining goods go back), on the
-  allocation (`commission_uzs`). One seller's refund touches only that seller's rows.
+  number cannot be recorded twice. One seller's refund touches only that seller's rows.
 - **Refunds and tax receipts.** An entry in the registry is never a receipt. Payme's
   cancellation receipt covers a reversal Payme itself made, which is always of the whole
   payment. A refund in cash, on a terminal or by transfer, and so every partial refund, needs a
   return receipt from Mator's own fiscal process (its cash register or the OFD): the registry
   only keeps the number an operator states (`fiscalReference`), which nothing here can check.
   Each refund shows `fiscalReceipt.status`: `accepted` / `rejected` / `awaiting_payme` for a
-  refund through Payme, `stated_by_operator` or `missing` for any other.
+  refund through Payme, `stated_by_operator` or `missing` for any other, and never `accepted`
+  without Payme's cancellation receipt. It also shows `saleReceipt`, the Payme sale receipt of
+  the payment it goes back on, which a return receipt has to cite.
 - **The seller ledger** (`/v1/admin/finance`, `src/admin/finance/seller-ledger.ts`). A seller
-  earns their goods on orders that took money, less what refunds gave back of them, less
-  Mator's commission net of what went back. They are paid only for orders that are DELIVERED,
-  took the money, carry no payout hold and have no refund through Payme still unconfirmed
-  (`PAYABLE_ORDER`). A payout (`POST /sellers/:sellerId/payouts`) is recorded under a lock on
+  earns their goods on orders that took money, less what refunds gave back of them. They are
+  paid only for orders that are DELIVERED, took the money, carry no payout hold and have no
+  refund through Payme still unconfirmed (`PAYABLE_ORDER`). What they earned splits three
+  ways: payable, blocked (`BLOCKED_ORDER`: a hold, or an unconfirmed Payme refund) and pending
+  (not delivered yet). A payout records money already sent outside the system, by transfer or
+  in cash: nothing here sends money. It (`POST /sellers/:sellerId/payouts`) is recorded under a lock on
   the seller's row, capped at what is payable less what was already sent, and its document
   number cannot be recorded twice; a wrong one is voided, never deleted. A refund after a
   payout leaves a debt (`debtUzs`) that later earnings pay off before anything more can be
   sent. An order is held back from payouts with `POST /orders/:orderId/payout-hold` and freed
   with `/release`, both audited; a refund Payme asks for after the goods were handed over,
-  refused with -31007, holds the order by itself. `GET /sellers` also shows Mator's own
-  figures: what buyers paid and got back, and the fee, commission and delivery net of refunds.
-- **Checks.** `GET /v1/admin/finance/orders/:orderId` shows one order's money by whose it is,
-  with each seller's commission and net, whether it can be paid out, each payment's sale
-  receipt and the cancellation receipt that reverses it (the same Payme transaction links
-  them), and each refund's receipt status. `/fiscal-issues` lists Payme payments whose receipts
-  are missing, refused or contradicted, refunds outside Payme with no return receipt recorded,
-  and refunds recorded as through Payme that Payme has not reversed, each after a grace period.
+  refused with -31007, holds the order by itself. `GET /sellers` also gives the totals: what
+  buyers paid and got back, the goods sold and refunded, the fee and delivery charged,
+  refunded and kept (`matorIncome` is the two kept, never the order totals), what came in and
+  went back through Payme, and the sellers' earned, payable, blocked, paid out, owed and debt.
+- **Checks.** `GET /v1/admin/finance/orders/:orderId` shows one order's money by whose it is:
+  each line and its seller, each seller's net, whether it can be paid out and what stops it
+  (`payout.blockers`: `no_money_taken`, `not_delivered`, `payout_hold`,
+  `refund_awaiting_payme`), each payment's sale receipt and the cancellation receipt that
+  reverses it (the same Payme transaction links them), and each refund's receipt status.
+  `/fiscal-issues` lists Payme payments whose receipts are missing, refused or contradicted,
+  refunds outside Payme with no return receipt recorded, and refunds recorded as through Payme
+  that Payme has not reversed, each after a grace period; apart from those, `statedRefunds`
+  lists refunds outside Payme whose return receipt only an operator stated.
   `/payme-statement?from&to` is GetStatement's own list (one query, oldest first, at most 92
   days) checked against the payment rows and the registry: `state_mismatch`,
   `amount_mismatch`, `refund_not_in_registry`, `refund_without_money`, `refunded_outside_payme`.
 - **Alerts.** A receipt the tax authority refused, a receipt contradicting an accepted one, a
-  cancellation receipt with no accepted sale receipt, and a refund Payme asked for and could not
-  get are raised through `src/orders/finance-alerts.ts` and delivered by the ops alert service,
-  under the subject `payments`, wherever the queue monitor's alerts go.
+  cancellation receipt with no accepted sale receipt, a refund Payme asked for and could not
+  get, and a refund recorded outside Payme with no confirmed return receipt
+  (`refund_receipt_unconfirmed`) are raised through `src/orders/finance-alerts.ts` and
+  delivered by the ops alert service, under the subject `payments`, wherever the queue
+  monitor's alerts go.
 - **Click is off.** There is no contract yet and Payme is the only provider. `PAYMENT_PROVIDERS`
   lists Payme alone by default; Click works only when listed there and given
   `CLICK_SECRET_KEY`, and its code is kept for then.

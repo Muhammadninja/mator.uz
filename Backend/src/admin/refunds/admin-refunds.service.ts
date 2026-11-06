@@ -3,6 +3,7 @@ import {
   ConflictException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import {
   AdminAuditAction,
@@ -18,10 +19,12 @@ import {
   readRefundPosition,
   settleRefundPosition,
 } from '../../orders/financial-refund.ledger';
+import { FinanceAlerts } from '../../orders/finance-alerts';
 import { checkStatedBreakdown } from '../../orders/refund-breakdown';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AdminAuditService } from '../auth/admin-audit.service';
 import { AdminAuditContext } from '../auth/admin-auth.service';
+import { sellerNames } from '../finance/seller-ledger';
 import {
   ADMIN_REFUND_SELECT,
   presentPosition,
@@ -49,12 +52,16 @@ const TX_OPTIONS = { maxWait: 10_000, timeout: 30_000 };
  *
  * Writes lock the order row first, so two people recording at once cannot both spend
  * the same remaining amount, and the second sees the first one's document number.
+ *
+ * A refund made outside Payme raises a finance alert once it is written: nothing here can
+ * confirm its return receipt, so someone has to see it (see refundFiscalStatus).
  */
 @Injectable()
 export class AdminRefundsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AdminAuditService,
+    @Optional() private readonly alerts?: FinanceAlerts,
   ) {}
 
   async list(query: ListRefundsQueryDto) {
@@ -107,7 +114,10 @@ export class AdminRefundsService {
     };
   }
 
-  /** One order's entries, and where it stands. Voided ones included: it is history. */
+  /**
+   * One order's entries, and where it stands. Voided ones included: it is history. Each
+   * seller's goods carry the seller's name, so a refund can say whose goods went back.
+   */
   async forOrder(orderId: string) {
     await this.requireOrder(orderId);
     const [rows, position] = await Promise.all([
@@ -118,9 +128,21 @@ export class AdminRefundsService {
       }),
       readRefundPosition(this.prisma, orderId),
     ]);
+    const names = await sellerNames(
+      this.prisma,
+      position.sellers.map((s) => s.sellerId),
+    );
+    const presented = presentPosition(position);
     return {
       success: true,
-      data: { ...presentPosition(position), refunds: rows.map(presentRefund) },
+      data: {
+        ...presented,
+        sellers: presented.sellers.map((s) => ({
+          ...s,
+          name: names.get(s.sellerId) ?? null,
+        })),
+        refunds: rows.map(presentRefund),
+      },
     };
   }
 
@@ -248,7 +270,33 @@ export class AdminRefundsService {
       return created.id;
     }, TX_OPTIONS);
 
-    return this.presentOne(id);
+    const presented = await this.presentOne(id);
+    this.alertUnconfirmedReceipt(presented.data);
+    return presented;
+  }
+
+  /**
+   * Money that went back outside Payme has no return receipt anyone here can confirm: at best
+   * an operator wrote down its number. Raised after the entry is written, never for a refund
+   * through Payme, whose cancellation receipt Payme reports itself.
+   */
+  private alertUnconfirmedReceipt(refund: ReturnType<typeof presentRefund>) {
+    const { status } = refund.fiscalReceipt;
+    if (status !== 'missing' && status !== 'stated_by_operator') return;
+    this.alerts?.raise({
+      type: 'refund_receipt_unconfirmed',
+      severity: 'warning',
+      message:
+        status === 'missing'
+          ? `Refund ${refund.id} on order ${refund.orderId} went back by ${refund.method} with no return receipt recorded.`
+          : `Refund ${refund.id} on order ${refund.orderId} went back by ${refund.method}; its return receipt was stated by an operator and is not confirmed.`,
+      context: {
+        refundId: refund.id,
+        orderId: refund.orderId,
+        method: refund.method,
+        fiscalStatus: status,
+      },
+    });
   }
 
   /**

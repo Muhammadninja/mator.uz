@@ -42,7 +42,7 @@ export interface RefundPosition {
   };
   /** Delivery inside those figures: Mator's line, unless it goes back. */
   delivery: ComponentPosition;
-  /** Each seller's goods, and Mator's commission on them. */
+  /** Each seller's goods. */
   sellers: SellerPosition[];
   /** Goods no seller is recorded for: an order placed before sellers were. */
   unattributed: ComponentPosition;
@@ -56,9 +56,7 @@ const ENTRY_SELECT = {
   serviceFeeUzs: true,
   deliveryUzs: true,
   paymentId: true,
-  allocations: {
-    select: { sellerId: true, amountUzs: true, commissionUzs: true },
-  },
+  allocations: { select: { sellerId: true, amountUzs: true } },
 } satisfies Prisma.FinancialRefundSelect;
 
 /** What the registry reads of an order: its charges, and whose its lines are. */
@@ -66,9 +64,7 @@ const ORDER_SELECT = {
   totalUzs: true,
   serviceFeeUzs: true,
   deliveryUzs: true,
-  items: {
-    select: { sellerId: true, lineTotalUzs: true, commissionUzs: true },
-  },
+  items: { select: { sellerId: true, lineTotalUzs: true } },
 } satisfies Prisma.OrderSelect;
 
 const sum = (amounts: Prisma.Decimal.Value[]) =>
@@ -197,7 +193,6 @@ export function breakdownData(breakdown: RefundBreakdown) {
               id: prefixedId(IdPrefix.FINANCIAL_REFUND_ALLOCATION),
               sellerId: allocation.sellerId,
               amountUzs: allocation.amountUzs,
-              commissionUzs: allocation.commissionUzs,
             })),
           },
         }

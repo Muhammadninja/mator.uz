@@ -1,15 +1,21 @@
 // Whether a refund has a tax receipt to show for it. An entry in the registry is never a
 // receipt by itself: a refund outside Payme, and so every partial refund, needs Mator's own.
 
-import { RefundMethod } from '@prisma/client';
-import { refundFiscalStatus } from './admin-refunds.presenter';
+import { PaymeFiscalReceiptType, RefundMethod } from '@prisma/client';
+import { refundFiscalStatus, saleReceiptOf } from './admin-refunds.presenter';
 
 type Refund = Parameters<typeof refundFiscalStatus>[0];
 type Status = ReturnType<typeof refundFiscalStatus>;
 
 const AT = new Date('2026-11-01T10:00:00Z');
 const cancelReceipt = (statusCode: number | null) => ({
+  type: PaymeFiscalReceiptType.CANCEL,
   receiptId: 'R-101',
+  statusCode,
+});
+const saleReceipt = (statusCode: number | null) => ({
+  type: PaymeFiscalReceiptType.PERFORM,
+  receiptId: 'R-100',
   statusCode,
 });
 
@@ -84,7 +90,47 @@ describe('refundFiscalStatus: an entry in the registry is never a receipt by its
       },
       { status: 'rejected', receiptId: 'R-101' },
     ],
+    [
+      'reversed by Payme, with only the sale receipt reported: the sale is never the cancellation',
+      {
+        method: RefundMethod.PROVIDER,
+        providerConfirmedAt: AT,
+        payment: { fiscalReceipts: [saleReceipt(0)] },
+      },
+      { status: 'awaiting_payme', receiptId: null },
+    ],
+    [
+      'reversed by Payme, the sale receipt listed first and the cancellation accepted',
+      {
+        method: RefundMethod.PROVIDER,
+        providerConfirmedAt: AT,
+        payment: { fiscalReceipts: [saleReceipt(0), cancelReceipt(0)] },
+      },
+      { status: 'accepted', receiptId: 'R-101' },
+    ],
+    [
+      'cash, on a payment whose Payme receipts are all accepted: still Mator’s own return receipt to make',
+      { payment: { fiscalReceipts: [saleReceipt(0), cancelReceipt(0)] } },
+      { status: 'missing', receiptId: null },
+    ],
   ])('%s', (_label, over, expected) => {
     expect(refundFiscalStatus(refund(over))).toEqual(expected);
+  });
+});
+
+describe('saleReceiptOf: the sale receipt a return goes back on', () => {
+  it('is the payment’s PERFORM receipt, never its cancellation', () => {
+    expect(
+      saleReceiptOf({
+        payment: { fiscalReceipts: [cancelReceipt(0), saleReceipt(0)] },
+      }),
+    ).toEqual({ receiptId: 'R-100', statusCode: 0 });
+  });
+
+  it('is none when the money did not come through Payme, or Payme has not reported it', () => {
+    expect(saleReceiptOf({ payment: null })).toBeNull();
+    expect(
+      saleReceiptOf({ payment: { fiscalReceipts: [cancelReceipt(0)] } }),
+    ).toBeNull();
   });
 });

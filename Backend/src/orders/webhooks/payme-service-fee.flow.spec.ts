@@ -216,9 +216,8 @@ describe('A Payme refund of an order with several sellers (Phase 3)', () => {
   const MULTI = {
     ...ORDER,
     items: [
-      // Dealer A at 5%, dealer B with no commission configured.
-      { sellerId: 'dealer_a', lineTotalUzs: 350_000, commissionUzs: 17_500 },
-      { sellerId: 'dealer_b', lineTotalUzs: 250_000, commissionUzs: 0 },
+      { sellerId: 'dealer_a', lineTotalUzs: 350_000 },
+      { sellerId: 'dealer_b', lineTotalUzs: 250_000 },
     ],
   };
   function multi() {
@@ -266,9 +265,10 @@ describe('A Payme refund of an order with several sellers (Phase 3)', () => {
         amountUzs: 645_000,
         serviceFeeUzs: 20_000,
         deliveryUzs: 25_000,
+        // Each seller's goods in full: Mator takes no commission from them.
         allocations: [
-          { sellerId: 'dealer_a', amountUzs: 350_000, commissionUzs: 17_500 },
-          { sellerId: 'dealer_b', amountUzs: 250_000, commissionUzs: 0 },
+          { sellerId: 'dealer_a', amountUzs: 350_000 },
+          { sellerId: 'dealer_b', amountUzs: 250_000 },
         ],
       }),
     ]);
@@ -295,9 +295,7 @@ describe('A Payme refund of an order with several sellers (Phase 3)', () => {
       amountUzs: 395_000,
       serviceFeeUzs: 20_000,
       deliveryUzs: 25_000,
-      allocations: [
-        { sellerId: 'dealer_a', amountUzs: 350_000, commissionUzs: 17_500 },
-      ],
+      allocations: [{ sellerId: 'dealer_a', amountUzs: 350_000 }],
     });
   });
 });

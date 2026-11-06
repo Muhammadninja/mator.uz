@@ -25,8 +25,9 @@ export interface ServiceFeeTier {
 }
 
 /**
- * The approved tariff, ascending. The first boundary is the odd one out because the tariff
- * says "up to and including 100 000" there, and "from" everywhere else.
+ * The approved tariff ("tariff A", confirmed by the business on 2026-11-06), ascending. The
+ * first boundary is the odd one out because the tariff says "up to and including 100 000"
+ * there, and "from" everywhere else.
  */
 export const SERVICE_FEE_TIERS: readonly ServiceFeeTier[] = [
   { fromTiyin: 0, feeUzs: 0 }, // up to and including 100 000

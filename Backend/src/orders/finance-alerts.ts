@@ -4,7 +4,8 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 /**
  * Money that went wrong and needs a person: a fiscal receipt the tax authority did not
  * accept, a receipt that contradicts the one on file, a cancellation receipt with no sale
- * receipt before it, a refund Payme asked for and could not get.
+ * receipt before it, a refund Payme asked for and could not get, a refund made outside Payme
+ * with no confirmed return receipt.
  *
  * Raised here and delivered by OpsModule (FinanceAlertListener), which hands it to the same
  * channels the queue monitor uses, so it reaches whoever reads those. Through an event, so the
@@ -19,7 +20,12 @@ export type FinanceAlertType =
   /** A receipt differs from an accepted one on file, or arrives where none should. */
   | 'fiscal_receipt_conflict'
   /** Payme asked to refund a payment, and the refund was refused. */
-  | 'refund_refused';
+  | 'refund_refused'
+  /**
+   * Money went back outside Payme (cash, a terminal, a transfer) and no return receipt is
+   * confirmed: none was recorded, or only an operator's word for one.
+   */
+  | 'refund_receipt_unconfirmed';
 
 export interface FinanceAlert {
   type: FinanceAlertType;

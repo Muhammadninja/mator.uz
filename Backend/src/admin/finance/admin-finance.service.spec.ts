@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-call -- the Prisma double and jest matchers are untyped */
-// The seller ledger: what each seller is owed and was paid, Mator's commission, payouts and the
-// holds that stop them.
+// The seller ledger: what each seller is owed and was paid, payouts and the holds that stop
+// them. Mator takes no commission from sellers: its own money is the service fee and delivery.
 
 import {
   BadRequestException,
@@ -10,81 +10,76 @@ import {
 import {
   AdminAuditAction,
   OrderStatus,
+  PaymentStatus,
   PayoutMethod,
   Prisma,
   RefundMethod,
 } from '@prisma/client';
 import { AdminFinanceService } from './admin-finance.service';
 import { RecordPayoutDto } from './dto/payout.dto';
-import { PAYABLE_ORDER } from './seller-ledger';
+import { BLOCKED_ORDER, PAYABLE_ORDER, TOOK_MONEY } from './seller-ledger';
 
 const ACTOR = { id: 'adm_1', email: 'mgr@mator.test', name: 'Mira' };
 const D = (n: number) => new Prisma.Decimal(n);
 
 /**
- * Dealer A, at 5%: order 1 delivered (400 000 of goods, 20 000 commission), order 2 still on its
- * way (200 000, 10 000). 100 000 of order 1's goods went back AFTER 300 000 had been sent.
- * Dealer B, no commission: 250 000 on order 1, nothing sent.
- * Order 1: 650 000 of goods + 20 000 fee + 25 000 delivery; order 2: 200 000 + 10 000 fee, pickup.
+ * Dealer A: order 1 delivered (400 000 of goods), order 2 still on its way (200 000). 100 000 of
+ * order 1's goods went back AFTER 350 000 had been sent. Dealer B: 250 000 on order 1, nothing
+ * sent. Order 1: 650 000 of goods + 20 000 fee + 25 000 delivery, paid through Payme; order 2:
+ * 200 000 + 10 000 fee, pickup, paid in cash.
+ *
+ * `order2`: 'delivered' makes order 2 payable too; 'held' holds it back from payouts.
  */
 function world(
   over: {
-    payable?: 'order1' | 'both';
+    order2?: 'on_its_way' | 'delivered' | 'held';
     duplicate?: boolean;
     seller?: boolean;
   } = {},
 ) {
-  const rows = (pairs: [string, number, number][], a: string, b: string) =>
-    pairs.map(([sellerId, x, y]) => ({
-      sellerId,
-      _sum: { [a]: D(x), [b]: D(y) },
-    }));
-  const payableLines: [string, number, number][] =
-    over.payable === 'both'
-      ? [
-          ['dealer_a', 600_000, 30_000],
-          ['dealer_b', 250_000, 0],
-        ]
-      : [
-          ['dealer_a', 400_000, 20_000],
-          ['dealer_b', 250_000, 0],
-        ];
+  const order2 = over.order2 ?? 'on_its_way';
+  const sums = (pairs: [string, number][], key: string) =>
+    pairs.map(([sellerId, x]) => ({ sellerId, _sum: { [key]: D(x) } }));
+  const lines = (order: unknown): [string, number][] => {
+    if (order === TOOK_MONEY) {
+      return [
+        ['dealer_a', 600_000],
+        ['dealer_b', 250_000],
+      ];
+    }
+    if (order === PAYABLE_ORDER) {
+      return [
+        ['dealer_a', order2 === 'delivered' ? 600_000 : 400_000],
+        ['dealer_b', 250_000],
+      ];
+    }
+    if (order === BLOCKED_ORDER) {
+      return order2 === 'held' ? [['dealer_a', 200_000]] : [];
+    }
+    throw new Error('unexpected order filter');
+  };
+  // The refund was of order 1, which is payable in every case here.
+  const refunded = (order: unknown): [string, number][] =>
+    order === undefined || order === PAYABLE_ORDER
+      ? [['dealer_a', 100_000]]
+      : [];
   const prisma: any = {
     orderItem: {
       groupBy: jest.fn(({ where }) =>
-        Promise.resolve(
-          'payoutHoldAt' in where.order
-            ? rows(payableLines, 'lineTotalUzs', 'commissionUzs')
-            : rows(
-                [
-                  ['dealer_a', 600_000, 30_000],
-                  ['dealer_b', 250_000, 0],
-                ],
-                'lineTotalUzs',
-                'commissionUzs',
-              ),
-        ),
+        Promise.resolve(sums(lines(where.order), 'lineTotalUzs')),
       ),
       findMany: jest.fn().mockResolvedValue([]),
-      aggregate: jest
-        .fn()
-        .mockResolvedValue({ _sum: { commissionUzs: D(30_000) } }),
     },
     financialRefundAllocation: {
-      groupBy: jest.fn(() =>
-        Promise.resolve(
-          rows([['dealer_a', 100_000, 5_000]], 'amountUzs', 'commissionUzs'),
-        ),
+      groupBy: jest.fn(({ where }) =>
+        Promise.resolve(sums(refunded(where.refund.order), 'amountUzs')),
       ),
       findMany: jest.fn().mockResolvedValue([]),
-      aggregate: jest
-        .fn()
-        .mockResolvedValue({ _sum: { commissionUzs: D(5_000) } }),
     },
     sellerPayout: {
       groupBy: jest.fn(() =>
         Promise.resolve([
-          { sellerId: 'dealer_a', _sum: { amountUzs: D(300_000) } },
+          { sellerId: 'dealer_a', _sum: { amountUzs: D(350_000) } },
         ]),
       ),
       findFirst: jest
@@ -151,6 +146,18 @@ function world(
         _sum: { amountUzs: D(100_000), serviceFeeUzs: D(0), deliveryUzs: D(0) },
       }),
     },
+    // Order 1 came in through Payme; the refund went back by hand.
+    payment: {
+      aggregate: jest.fn(({ where }) =>
+        Promise.resolve({
+          _sum: {
+            amountUzs: where.status.in.includes(PaymentStatus.PAID)
+              ? D(695_000)
+              : D(0),
+          },
+        }),
+      ),
+    },
     $queryRaw: jest.fn(() =>
       Promise.resolve(
         over.seller === false ? [] : [{ id: 'dealer_b', name: 'Avto Ehtiyot' }],
@@ -173,7 +180,7 @@ const conflictCode = async (work: Promise<unknown>) => {
 };
 
 describe('AdminFinanceService.sellers', () => {
-  it('owed: goods less refunds less net commission, less what was sent; a refund after a payout is a debt', async () => {
+  it('owed: goods less refunds, less what was sent; a refund after a payout is a debt', async () => {
     const { service } = world();
 
     const res = await service.sellers();
@@ -184,9 +191,10 @@ describe('AdminFinanceService.sellers', () => {
         name: 'Avto Ehtiyot',
         soldUzs: 250_000,
         refundedUzs: 0,
-        commissionUzs: 0,
         earnedUzs: 250_000,
         payableUzs: 250_000,
+        blockedUzs: 0,
+        pendingUzs: 0,
         paidOutUzs: 0,
         owedUzs: 250_000,
         payableNowUzs: 250_000,
@@ -197,35 +205,53 @@ describe('AdminFinanceService.sellers', () => {
         name: 'Driver’s Village',
         soldUzs: 600_000,
         refundedUzs: 100_000,
-        // 30 000 charged, 5 000 went back with the refunded goods.
-        commissionUzs: 25_000,
-        earnedUzs: 475_000,
-        // Order 1 only: 400 000 − 100 000 − (20 000 − 5 000).
-        payableUzs: 285_000,
-        paidOutUzs: 300_000,
-        owedUzs: 175_000,
+        // Theirs in full: no commission is taken off.
+        earnedUzs: 500_000,
+        // Order 1 only: 400 000 − 100 000.
+        payableUzs: 300_000,
+        blockedUzs: 0,
+        // Order 2, on its way.
+        pendingUzs: 200_000,
+        paidOutUzs: 350_000,
+        owedUzs: 150_000,
         payableNowUzs: 0,
-        // Sent 300 000 against 285 000 payable once the goods came back.
-        debtUzs: 15_000,
+        // Sent 350 000 against 300 000 payable once the goods came back.
+        debtUzs: 50_000,
       },
     ]);
   });
 
   it('later earnings pay the debt off before anything more can be sent', async () => {
-    const { service } = world({ payable: 'both' });
+    const { service } = world({ order2: 'delivered' });
 
     const res = await service.sellers();
     const a = res.data.find((s) => s.sellerId === 'dealer_a')!;
 
-    // Order 2 delivered: 475 000 payable, 300 000 already sent.
+    // Order 2 delivered: 500 000 payable, 350 000 already sent.
     expect(a).toMatchObject({
-      payableUzs: 475_000,
-      payableNowUzs: 175_000,
+      payableUzs: 500_000,
+      pendingUzs: 0,
+      payableNowUzs: 150_000,
       debtUzs: 0,
     });
   });
 
-  it('Mator’s figures: what buyers paid, and the fee, commission and delivery it keeps', async () => {
+  it('an order held back from payouts is blocked, not pending and not payable', async () => {
+    const { service } = world({ order2: 'held' });
+
+    const res = await service.sellers();
+    const a = res.data.find((s) => s.sellerId === 'dealer_a')!;
+
+    expect(a).toMatchObject({
+      earnedUzs: 500_000,
+      payableUzs: 300_000,
+      blockedUzs: 200_000,
+      pendingUzs: 0,
+    });
+    expect(res.meta.sellersBlocked).toBe(200_000);
+  });
+
+  it('the totals: what buyers paid apart from Mator’s income, which is the fee and delivery it keeps', async () => {
     const { service } = world();
 
     const res = await service.sellers();
@@ -233,10 +259,26 @@ describe('AdminFinanceService.sellers', () => {
     expect(res.meta).toEqual({
       paidByBuyers: 905_000,
       refundedToBuyers: 100_000,
+      goodsSold: 850_000,
+      goodsRefunded: 100_000,
+      serviceFeeCharged: 30_000,
       // The refund gave back goods only: the fee and delivery stay Mator's.
+      serviceFeeRefunded: 0,
       matorServiceFee: 30_000,
-      matorCommission: 25_000,
+      deliveryCharged: 25_000,
+      deliveryRefunded: 0,
       delivery: 25_000,
+      matorIncome: 55_000,
+      paymeReceived: 695_000,
+      paymeRefunded: 0,
+      sellersEarned: 750_000,
+      sellersPayable: 550_000,
+      sellersBlocked: 0,
+      sellersPaidOut: 350_000,
+      // What Mator owes dealer B and dealer A; dealer A's debt is apart.
+      sellersOwed: 400_000,
+      sellersPayableNow: 250_000,
+      sellersDebt: 50_000,
     });
   });
 
@@ -245,30 +287,121 @@ describe('AdminFinanceService.sellers', () => {
 
     await service.sellers();
 
+    const unconfirmedPaymeRefund = {
+      voidedAt: null,
+      method: RefundMethod.PROVIDER,
+      providerConfirmedAt: null,
+    };
     expect(PAYABLE_ORDER).toEqual({
       statusHistory: { some: { status: OrderStatus.PAID } },
       status: OrderStatus.DELIVERED,
       payoutHoldAt: null,
-      financialRefunds: {
-        none: {
-          voidedAt: null,
-          method: RefundMethod.PROVIDER,
-          providerConfirmedAt: null,
-        },
-      },
+      financialRefunds: { none: unconfirmedPaymeRefund },
+    });
+    expect(BLOCKED_ORDER).toEqual({
+      statusHistory: { some: { status: OrderStatus.PAID } },
+      OR: [
+        { payoutHoldAt: { not: null } },
+        { financialRefunds: { some: unconfirmedPaymeRefund } },
+      ],
     });
     expect(prisma.orderItem.groupBy).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { sellerId: { not: null }, order: PAYABLE_ORDER },
+        _sum: { lineTotalUzs: true },
       }),
     );
     expect(prisma.financialRefundAllocation.groupBy).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { refund: { voidedAt: null, order: PAYABLE_ORDER } },
+        _sum: { amountUzs: true },
       }),
     );
     expect(prisma.sellerPayout.groupBy).toHaveBeenCalledWith(
       expect.objectContaining({ where: { voidedAt: null } }),
+    );
+  });
+});
+
+describe('AdminFinanceService.seller', () => {
+  it('each order the seller sold on, net of what went back, and where it stands for a payout', async () => {
+    const { service, prisma } = world();
+    const placed = new Date('2026-11-01T10:00:00Z');
+    prisma.orderItem.findMany.mockResolvedValue([
+      {
+        orderId: 'ord_2',
+        lineTotalUzs: D(200_000),
+        order: {
+          status: OrderStatus.SHIPPED,
+          createdAt: placed,
+          payoutHoldReason: null,
+        },
+      },
+      {
+        orderId: 'ord_1',
+        lineTotalUzs: D(300_000),
+        order: {
+          status: OrderStatus.DELIVERED,
+          createdAt: placed,
+          payoutHoldReason: null,
+        },
+      },
+      {
+        orderId: 'ord_1',
+        lineTotalUzs: D(100_000),
+        order: {
+          status: OrderStatus.DELIVERED,
+          createdAt: placed,
+          payoutHoldReason: null,
+        },
+      },
+    ]);
+    prisma.financialRefundAllocation.findMany.mockResolvedValue([
+      { amountUzs: D(100_000), refund: { orderId: 'ord_1' } },
+    ]);
+    prisma.order.findMany.mockImplementation(({ where }) =>
+      Promise.resolve(
+        where.status === OrderStatus.DELIVERED ? [{ id: 'ord_1' }] : [],
+      ),
+    );
+
+    const res = await service.seller('dealer_a');
+
+    expect(res.data.orders).toEqual([
+      {
+        orderId: 'ord_2',
+        status: 'shipped',
+        createdAt: placed.toISOString(),
+        payable: false,
+        blocked: false,
+        payoutHold: null,
+        sold: 200_000,
+        refunded: 0,
+        net: 200_000,
+      },
+      {
+        orderId: 'ord_1',
+        status: 'delivered',
+        createdAt: placed.toISOString(),
+        payable: true,
+        blocked: false,
+        payoutHold: null,
+        sold: 400_000,
+        refunded: 100_000,
+        net: 300_000,
+      },
+    ]);
+    expect(res.data.balance).toMatchObject({ debtUzs: 50_000 });
+  });
+
+  it('404s on a seller with no money and no payouts on record', async () => {
+    const { service, prisma } = world();
+    prisma.orderItem.groupBy.mockResolvedValue([]);
+    prisma.financialRefundAllocation.groupBy.mockResolvedValue([]);
+    prisma.sellerPayout.groupBy.mockResolvedValue([]);
+
+    await expect(service.seller('nobody')).rejects.toBeInstanceOf(
+      NotFoundException,
     );
   });
 });
