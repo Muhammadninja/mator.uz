@@ -174,6 +174,10 @@ Backend-owned gaps from this workstream are closed. What is left:
       is refused. Builds already installed keep offering pickup only. It needs a native
       build with `GOOGLE_MAPS_ANDROID_API_KEY` set for its Android map: see the app's
       docs/API_CONTRACT.md.
+      The quote now answers pickup and the courier together, an unpriceable courier as
+      `available: false` with its reason (200, no longer 422/503). Ship the app update that
+      reads it with this backend: app code from before it shows such a courier as "try
+      again" instead of its reason, while pickup keeps working.
    6. Show `shippingAddress.location` and `landmark` from the admin order detail to whoever
       dispatches couriers: that is the exact destination, and the admin panel has no map
       or field for it yet.

@@ -1,8 +1,14 @@
 // What a client hears from POST /v1/shipping/quote, and what it cannot say to it.
 
-import { ValidationPipe } from '@nestjs/common';
+import {
+  BadRequestException,
+  NotFoundException,
+  ServiceUnavailableException,
+  UnprocessableEntityException,
+  ValidationPipe,
+} from '@nestjs/common';
 import { ShippingQuoteDto } from './dto/shipping-quote.dto';
-import { ShippingService } from './shipping.service';
+import { COURIER_UNAVAILABLE_CODES, ShippingService } from './shipping.service';
 
 const SHIPMENTS = [
   {
@@ -66,7 +72,7 @@ describe('ShippingService.quote', () => {
     expect(quotes.quoteCart).toHaveBeenCalledWith('usr_1', 'addr_1');
   });
 
-  it('tells the buyer the price and nothing else about the route', async () => {
+  it('offers both: pickup, free, and the courier at the computed price', async () => {
     const res = await service.quote('usr_1', {
       delivery_address_id: 'addr_1',
       delivery_method: 'courier',
@@ -75,17 +81,89 @@ describe('ShippingService.quote', () => {
     expect(res).toEqual({
       options: [
         {
+          type: 'pickup',
+          label: 'Olib ketish',
+          available: true,
+          price_uzs: 0,
+          quote_id: null,
+          unavailable_reason: null,
+        },
+        {
           type: 'courier',
           label: 'Kuryer',
+          available: true,
           price_uzs: 24_000,
           quote_id: 'quote_1',
+          unavailable_reason: null,
         },
       ],
       currency: 'UZS',
     });
+  });
+
+  it('tells the buyer the price and nothing else about the route', async () => {
+    const res = await service.quote('usr_1', {
+      delivery_address_id: 'addr_1',
+      delivery_method: 'courier',
+    });
+
     expect(JSON.stringify(res)).not.toMatch(
-      /distance|duration|billable|eta|geometry|route|shipment|pickup|destination|landmark|41\.|69\./i,
+      /distance|duration|billable|eta|geometry|route|shipment|destination|landmark|41\.|69\./i,
     );
+  });
+
+  describe('a courier that cannot be had', () => {
+    it.each([
+      ['DELIVERY_ADDRESS_REQUIRED', UnprocessableEntityException],
+      ['COURIER_DELIVERY_UNAVAILABLE', UnprocessableEntityException],
+      ['DELIVERY_ADDRESS_COORDINATES_MISSING', UnprocessableEntityException],
+      ['DELIVERY_OUTSIDE_COVERAGE', UnprocessableEntityException],
+      ['PICKUP_LOCATION_MISSING', UnprocessableEntityException],
+      ['DELIVERY_ROUTE_NOT_FOUND', UnprocessableEntityException],
+      ['DELIVERY_ROUTING_UNAVAILABLE', ServiceUnavailableException],
+    ])(
+      '%s: offered as unavailable, with the reason, and pickup stays',
+      async (code, Refusal) => {
+        quotes.quoteCart.mockRejectedValue(new Refusal({ code, message: 'm' }));
+
+        const res = await service.quote('usr_1', {
+          delivery_address_id: 'addr_1',
+          delivery_method: 'courier',
+        });
+
+        expect(res.options).toEqual([
+          expect.objectContaining({
+            type: 'pickup',
+            available: true,
+            price_uzs: 0,
+          }),
+          {
+            type: 'courier',
+            label: 'Kuryer',
+            available: false,
+            // Never a number: an unavailable courier is not a free one.
+            price_uzs: null,
+            quote_id: null,
+            unavailable_reason: { code, message: 'm' },
+          },
+        ]);
+        expect(res.currency).toBe('UZS');
+      },
+    );
+
+    it('covers exactly the refusals about availability', () => {
+      expect([...COURIER_UNAVAILABLE_CODES].sort()).toEqual(
+        [
+          'COURIER_DELIVERY_UNAVAILABLE',
+          'DELIVERY_ADDRESS_COORDINATES_MISSING',
+          'DELIVERY_ADDRESS_REQUIRED',
+          'DELIVERY_OUTSIDE_COVERAGE',
+          'DELIVERY_ROUTE_NOT_FOUND',
+          'DELIVERY_ROUTING_UNAVAILABLE',
+          'PICKUP_LOCATION_MISSING',
+        ].sort(),
+      );
+    });
   });
 
   describe('coverage', () => {
@@ -120,14 +198,22 @@ describe('ShippingService.quote', () => {
     });
   });
 
-  it('lets a refusal through rather than answering with a price', async () => {
-    quotes.quoteCart.mockRejectedValue(new Error('refused'));
+  it.each([
+    ['a fault', new Error('refused')],
+    ["someone else's address", new NotFoundException('Address not found')],
+    ['an empty cart', new BadRequestException('Cart is empty')],
+    [
+      'a code that is not about availability',
+      new UnprocessableEntityException({ code: 'SOMETHING_ELSE' }),
+    ],
+  ])('lets %s through rather than answering with options', async (_, err) => {
+    quotes.quoteCart.mockRejectedValue(err);
     await expect(
       service.quote('usr_1', {
         delivery_address_id: 'addr_1',
         delivery_method: 'courier',
       }),
-    ).rejects.toThrow('refused');
+    ).rejects.toBe(err);
   });
 });
 

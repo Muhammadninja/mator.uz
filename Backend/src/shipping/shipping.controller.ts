@@ -37,13 +37,17 @@ export class ShippingController {
   @ApiOperation({
     summary: "Delivery options and prices for the caller's cart",
     description:
-      "With delivery_method 'courier' and a saved delivery_address_id, prices courier " +
-      'delivery from each seller in the cart to that address. The order is placed with the ' +
-      'quote_id and the price from this answer. Refusals carry a code: 422 ' +
+      "With delivery_method 'courier' and a saved delivery_address_id, answers both options: " +
+      'pickup (always available, price_uzs 0) and courier, priced from each seller in the ' +
+      'cart to that address. Each option is { type, label, available, price_uzs, quote_id, ' +
+      'unavailable_reason }, in UZS. A courier that cannot be priced is available: false, ' +
+      'price_uzs: null, and unavailable_reason { code, message } with code ' +
       'DELIVERY_ADDRESS_REQUIRED, DELIVERY_ADDRESS_COORDINATES_MISSING, ' +
-      'COURIER_DELIVERY_UNAVAILABLE, DELIVERY_OUTSIDE_COVERAGE, PICKUP_LOCATION_MISSING or ' +
-      'DELIVERY_ROUTE_NOT_FOUND; 503 ' +
-      'DELIVERY_ROUTING_UNAVAILABLE.',
+      'COURIER_DELIVERY_UNAVAILABLE, DELIVERY_OUTSIDE_COVERAGE, PICKUP_LOCATION_MISSING, ' +
+      'DELIVERY_ROUTE_NOT_FOUND or DELIVERY_ROUTING_UNAVAILABLE. The order is placed with ' +
+      'the quote_id and the price from this answer. Without a method, the answer is pickup ' +
+      'alone, as installed app builds expect. 404 for an address that is not the caller’s, ' +
+      '400 for an empty cart.',
   })
   quote(
     @Request() req: { user: { id: string } },

@@ -165,6 +165,8 @@ describe('Delivery to Tashkent City and New Tashkent only (e2e)', () => {
     request(app.getHttpServer())
       .post('/v1/shipping/quote')
       .send({ delivery_address_id: 'addr_1', delivery_method: 'courier' });
+  const courierOf = (body: any) =>
+    body.options.find((option: any) => option.type === 'courier');
 
   describe('what the app is told', () => {
     it('the geometry the backend enforces, and the box around it', async () => {
@@ -218,7 +220,10 @@ describe('Delivery to Tashkent City and New Tashkent only (e2e)', () => {
     ])('prices an address %s', async (_, point) => {
       addressAt(point);
       const res = await courierQuote().expect(200);
-      expect(res.body.options[0].price_uzs).toBe(24_000);
+      expect(courierOf(res.body)).toMatchObject({
+        available: true,
+        price_uzs: 24_000,
+      });
     });
 
     it.each([
@@ -228,9 +233,18 @@ describe('Delivery to Tashkent City and New Tashkent only (e2e)', () => {
     ])('refuses an address %s, without a paid route', async (_, point) => {
       addressAt(point);
 
-      const res = await courierQuote().expect(422);
+      const res = await courierQuote().expect(200);
 
-      expect(res.body.code).toBe('DELIVERY_OUTSIDE_COVERAGE');
+      expect(courierOf(res.body)).toMatchObject({
+        available: false,
+        price_uzs: null,
+        unavailable_reason: { code: 'DELIVERY_OUTSIDE_COVERAGE' },
+      });
+      // Pickup is still there for the buyer to take.
+      expect(res.body.options[0]).toMatchObject({
+        type: 'pickup',
+        available: true,
+      });
       expect(routing.routeDistanceMeters).not.toHaveBeenCalled();
     });
   });

@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   HttpException,
   HttpStatus,
@@ -89,6 +90,51 @@ describe('HttpExceptionFilter smoke', () => {
     expect(res.statusCode).toBe(429);
     expect(res.body.code).toBe('TOO_MANY_REQUESTS');
     expect(res.body.message).toBe('slow down');
+  });
+
+  it('hands back the details a refusal states on purpose, beside its code', () => {
+    const { host, res } = mockHost();
+    filter.catch(
+      new ConflictException({
+        code: 'ORDER_TOTAL_CHANGED',
+        message: 'The order total has changed.',
+        details: { total_uzs: 515_000, delivery_uzs: 25_000 },
+      }),
+      host,
+    );
+    expect(res.statusCode).toBe(409);
+    expect(res.body).toEqual({
+      code: 'ORDER_TOTAL_CHANGED',
+      message: 'The order total has changed.',
+      details: { total_uzs: 515_000, delivery_uzs: 25_000 },
+    });
+  });
+
+  it.each([
+    ['a string', 'secret'],
+    ['a list', ['secret']],
+    ['null', null],
+  ])('passes no details that are %s', (_, details) => {
+    const { host, res } = mockHost();
+    filter.catch(
+      new ConflictException({ code: 'X_Y', message: 'm', details }),
+      host,
+    );
+    expect(res.body).toEqual({ code: 'X_Y', message: 'm' });
+  });
+
+  it('passes nothing else an exception body holds', () => {
+    const { host, res } = mockHost();
+    filter.catch(
+      new BadRequestException({
+        code: 'X_Y',
+        message: 'm',
+        gaps: ['dealer tin'],
+        statusCode: 400,
+      }),
+      host,
+    );
+    expect(res.body).toEqual({ code: 'X_Y', message: 'm' });
   });
 
   it('does not write a body when headers were already sent (SSE)', () => {

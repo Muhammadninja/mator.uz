@@ -35,6 +35,16 @@ const DEFAULT_MESSAGE: Record<string, string> = {
 interface ErrorBody {
   code: string;
   message: string;
+  /**
+   * Figures a refusal hands back on purpose, such as what an order would charge now. Only
+   * ever present when the code that threw put a plain `details` object on the exception:
+   * nothing else from an exception body reaches the client.
+   */
+  details?: Record<string, unknown>;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /** Express request carrying the id stamped by requestIdMiddleware. */
@@ -139,6 +149,8 @@ export class HttpExceptionFilter implements ExceptionFilter {
         DEFAULT_MESSAGE[code] ?? DEFAULT_MESSAGE[fallbackCode] ?? 'Error';
     }
 
-    return { code, message };
+    return isPlainObject(r.details)
+      ? { code, message, details: r.details }
+      : { code, message };
   }
 }
