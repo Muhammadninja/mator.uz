@@ -165,6 +165,10 @@ Backend-owned gaps from this workstream are closed. What is left:
       `PATCH /v1/admin/dealers/:id` with `pickupLat` and `pickupLng`. Nothing else writes
       these, and until they are set a courier is refused for that seller's goods with
       `PICKUP_LOCATION_MISSING`. Buyers can still choose pickup.
+      The same point is what a buyer who collects the order is shown in checkout
+      (`GET /v1/shipping/pickup-points`) and what operators see on a pickup order. Its
+      address text is `sellers.address_comment`, which nothing writes yet: until it is
+      filled, the app says the dealer's address is not specified.
    4. Set `MARKETPLACE_TIN` to the 9-digit ИНН of ООО «MATOR INNOVATIONS». Until then Payme
       refuses every order that has a delivery cost. `DELIVERY_VAT_PERCENT` is no longer
       read: delivery's rate is fixed at 0, because the company pays turnover tax and is not

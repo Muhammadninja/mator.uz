@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { DeliveryQuoteService } from './delivery-quote.service';
+import { PickupPointsService } from './pickup-points.service';
 import { ROUTING_PROVIDER } from './routing/routing-provider';
 import { UzmapsRoutingProvider } from './routing/uzmaps-routing.provider';
 import { UzmapsUsageMonitor } from './routing/uzmaps-usage.monitor';
@@ -12,6 +13,7 @@ import { ShippingController } from './shipping.controller';
   providers: [
     ShippingService,
     DeliveryQuoteService,
+    PickupPointsService,
     // The one line that names the routing provider: see routing-provider.ts.
     { provide: ROUTING_PROVIDER, useClass: UzmapsRoutingProvider },
     UzmapsUsageMonitor,
