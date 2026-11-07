@@ -21,6 +21,10 @@ import {
 import { BUYER_LISTED_PART } from '../buyer-visibility';
 import { matchesWhere } from '../compatibility/where-eval.test-util';
 import * as fx from '../compatibility/fitment-fixtures.test-util';
+import {
+  edgesOf,
+  partCategoryFindMany,
+} from '../categories/seeded-category-tree.test-util';
 
 export const BOSCH = 'brand_bosch';
 export const MANN = 'brand_mann';
@@ -231,6 +235,7 @@ export function catalogPrisma(rows: CatalogueRow[] = CATALOGUE) {
         });
       },
     },
+    partCategory: { findMany: partCategoryFindMany(edgesOf(PARENT)) },
     partBrand: {
       findMany: ({ where }: { where: { id: { in: string[] } } }) =>
         Promise.resolve(PART_BRANDS.filter((b) => where.id.in.includes(b.id))),

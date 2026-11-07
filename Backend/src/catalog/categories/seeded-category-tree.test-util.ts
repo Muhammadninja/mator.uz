@@ -71,3 +71,33 @@ export const LIVE_TREE: readonly TreeRow[] = [
 
 export const SEEDED_PARENTS = categoryParentMap(SEEDED_TREE);
 export const LIVE_PARENTS = categoryParentMap(LIVE_TREE);
+
+/** Is this `partCategory.findMany` call the tree read of category-tree-scope? */
+export function isTreeEdgeRead(args: unknown): boolean {
+  const select = (args as { select?: Record<string, unknown> } | undefined)
+    ?.select;
+  return (
+    !!select &&
+    Object.keys(select).sort().join(',') === 'id,parentId' &&
+    !(args as { where?: unknown }).where
+  );
+}
+
+/**
+ * A `partCategory.findMany` double for the buyer services: the tree read
+ * (loadCategoryTreeScope) gets `edges`, every other read gets `other(args)`.
+ */
+export function partCategoryFindMany(
+  edges: readonly TreeRow[] = LIVE_TREE,
+  other: (args: unknown) => unknown = () => [],
+) {
+  return (args?: unknown): Promise<unknown> =>
+    Promise.resolve(isTreeEdgeRead(args) ? edges : other(args));
+}
+
+/** Edges from a `child → parent` table. */
+export function edgesOf(
+  parentOf: Readonly<Record<string, string | null>>,
+): TreeRow[] {
+  return Object.entries(parentOf).map(([id, parentId]) => ({ id, parentId }));
+}

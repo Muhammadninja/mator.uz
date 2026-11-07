@@ -8,6 +8,7 @@
 import { selectIds } from '../../catalog/compatibility/where-eval.test-util';
 import { READY_PHOTO } from '../../catalog/compatibility/fitment-fixtures.test-util';
 import { PartsService } from '../../catalog/parts/parts.service';
+import { partCategoryFindMany } from '../../catalog/categories/seeded-category-tree.test-util';
 import { importHarness } from '../../../test/utils/drivers-village-import-harness';
 
 /** The catalog part ids the buyer search returns for `q`, over these rows. */
@@ -17,6 +18,7 @@ async function search(
 ): Promise<string[]> {
   let where: unknown;
   const prisma = {
+    partCategory: { findMany: partCategoryFindMany() },
     catalogPart: {
       count: () => Promise.resolve(0),
       findMany: (args: { where: unknown }) => {

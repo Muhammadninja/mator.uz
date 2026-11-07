@@ -11,6 +11,10 @@ import { PartsService } from './parts.service';
 import { ListPartsQueryDto } from './dto/list-parts.query.dto';
 import { matchesWhere, selectIds } from '../compatibility/where-eval.test-util';
 import * as fx from '../compatibility/fitment-fixtures.test-util';
+import {
+  edgesOf,
+  partCategoryFindMany,
+} from '../categories/seeded-category-tree.test-util';
 
 /** `parent_id` edges as the part_categories table holds them for these systems. */
 const PARENT: Record<string, string | null> = {
@@ -74,7 +78,9 @@ const PARTS = [
   filed('b_no_photo', 'front-brake-pads', B.BRAKES, { images: [] }),
 
   filed('s_root', 'suspension-and-steering', B.SUSPENSION),
-  filed('s_shock', 'shock-absorbers', B.SUSPENSION, {
+  // A STALE stored bucket: filed on shock-absorbers, still carrying the BRAKES
+  // an earlier write left on it. The tree, not this copy, decides its bucket.
+  filed('s_shock', 'shock-absorbers', B.BRAKES, {
     title: 'Shock absorber KYB',
   }),
   filed('s_hubs', 'wheel-hubs-bearings', B.SUSPENSION, {
@@ -121,6 +127,7 @@ interface PageQuery {
 function makeService() {
   const calls: { count?: { where: unknown }; findMany?: PageQuery } = {};
   const prisma = {
+    partCategory: { findMany: partCategoryFindMany(edgesOf(PARENT)) },
     catalogPart: {
       count: jest.fn((args: { where: unknown }) => {
         calls.count = args;
@@ -223,10 +230,10 @@ describe('other category requests keep their meaning', () => {
     ]);
   });
 
-  it('a bucket slug still rolls up by main_category', async () => {
+  it('a bucket slug rolls up through the tree, never the stored main_category', async () => {
     const { ids, page } = await listing({ category: 'brakes' });
-    expect(JSON.stringify(page.where)).toContain('"mainCategory":"BRAKES"');
-    // Every listed BRAKES part, wherever in the tree it is filed.
+    expect(JSON.stringify(page.where)).not.toContain('mainCategory');
+    // Every listed part the tree files under BRAKES, wherever it sits.
     expect(ids).toEqual([
       'b_root',
       'b_bucket',
@@ -237,6 +244,27 @@ describe('other category requests keep their meaning', () => {
       'b_cylinders',
       'b_hoses',
     ]);
+  });
+
+  it('a stale stored bucket moves nothing: the part lists where the tree files it', async () => {
+    expect((await listing({ category: 'brakes' })).ids).not.toContain('s_shock');
+    expect((await listing({ mainCategory: 'BRAKES' })).ids).not.toContain(
+      's_shock',
+    );
+    expect((await listing({ category: 'suspension' })).ids).toEqual([
+      's_root',
+      's_shock',
+      's_hubs',
+      's_ball',
+      's_roller',
+      's_bucket',
+    ]);
+  });
+
+  it('a vehicle system lists its root subtree, never the stored vehicle_category', async () => {
+    const { ids, page } = await listing({ vehicle_category: 'BRAKE_SYSTEM' });
+    expect(JSON.stringify(page.where)).not.toContain('vehicleCategory');
+    expect(ids).toEqual((await listing({ category: 'brake-system' })).ids);
   });
 });
 

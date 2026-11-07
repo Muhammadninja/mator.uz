@@ -23,6 +23,7 @@ import { CategoriesService } from '../../catalog/categories/categories.service';
 import { MAIN_CATEGORIES } from '../../catalog/categories/part-categories.catalog';
 import {
   LIVE_TREE,
+  partCategoryFindMany,
   type TreeRow,
 } from '../../catalog/categories/seeded-category-tree.test-util';
 import { matchesWhere } from '../../catalog/compatibility/where-eval.test-util';
@@ -157,23 +158,25 @@ function catalog(rows: PartRow[]) {
   const selected = (where: unknown) =>
     rows.filter((r) => matchesWhere(r, where));
   const prisma = {
-    partCategory: { findMany: jest.fn().mockResolvedValue(GRID_ROWS) },
+    partCategory: {
+      findMany: jest.fn(partCategoryFindMany(LIVE_TREE, () => GRID_ROWS)),
+    },
     catalogPart: {
       count: jest.fn(({ where }: { where: unknown }) =>
         Promise.resolve(selected(where).length),
       ),
       findMany: jest.fn().mockResolvedValue([]),
       groupBy: jest.fn(({ by, where }: { by: string[]; where: unknown }) => {
-        if (by.length !== 1 || by[0] !== 'mainCategory') {
+        if (by.length !== 1 || by[0] !== 'categoryId') {
           return Promise.resolve([]);
         }
-        const counts = new Map<B | null, number>();
+        const counts = new Map<string, number>();
         for (const r of selected(where)) {
-          counts.set(r.mainCategory, (counts.get(r.mainCategory) ?? 0) + 1);
+          counts.set(r.categoryId, (counts.get(r.categoryId) ?? 0) + 1);
         }
         return Promise.resolve(
-          [...counts].map(([mainCategory, n]) => ({
-            mainCategory,
+          [...counts].map(([categoryId, n]) => ({
+            categoryId,
             _count: { _all: n },
           })),
         );
@@ -573,10 +576,12 @@ describe('bulk-move — the part shows on the tile of its new category', () => {
     const { service } = adminWorld(rows);
     const buyer = catalog(rows);
 
+    // p4's stored ENGINE is a copy the tree contradicts (cat_uncategorized has
+    // no bucket), so the buyer side already shows it on no tile.
     expect(await buyer.tiles()).toMatchObject({
       brakes: 3,
       filters: 0,
-      engine: 1,
+      engine: 0,
       suspension: 1,
     });
 

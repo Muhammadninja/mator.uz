@@ -14,6 +14,23 @@ import {
 } from '../compatibility/vehicle-fitment';
 import { VEHICLE_CATEGORIES } from './part-categories.catalog';
 import { buyerListed } from '../buyer-visibility';
+import { loadCategoryTreeScope } from './category-tree-scope';
+
+/**
+ * Per-category part counts summed under the key each category resolves to;
+ * a category that resolves to none (null) is on no tile.
+ */
+function tally<K>(
+  grouped: { categoryId: string; _count: { _all: number } }[],
+  keyOf: (categoryId: string) => K | null,
+): Map<K, number> {
+  const counts = new Map<K, number>();
+  for (const g of grouped) {
+    const key = keyOf(g.categoryId);
+    if (key !== null) counts.set(key, (counts.get(key) ?? 0) + g._count._all);
+  }
+  return counts;
+}
 
 /**
  * Serves the two-level part category hierarchy with LIVE per-category inventory
@@ -40,17 +57,24 @@ export class CategoriesService {
     // Counts cover exactly what the listing can show: buyer-listed parts (no
     // suspended dealer, a ready photo), scoped to the garage vehicle when one
     // is given.
-    const vehicleWhere = buyerListed(
-      await this.vehicleScopeWhere(query.vehicle_id, userId),
-    );
+    const [scopeWhere, tree] = await Promise.all([
+      this.vehicleScopeWhere(query.vehicle_id, userId),
+      loadCategoryTreeScope(this.prisma),
+    ]);
+    const vehicleWhere = buyerListed(scopeWhere);
+
+    // Both scopes count parts per `category_id` and attribute each category to
+    // its bucket / system through the live tree — the same derivation
+    // GET /v1/catalog/parts filters by — never through the stored
+    // main_category / vehicle_category copies (see category-tree-scope.ts).
+    const grouped = await this.prisma.catalogPart.groupBy({
+      by: ['categoryId'],
+      where: vehicleWhere,
+      _count: { _all: true },
+    });
 
     if (scope === 'vehicle') {
-      const grouped = await this.prisma.catalogPart.groupBy({
-        by: ['vehicleCategory'],
-        where: vehicleWhere,
-        _count: { _all: true },
-      });
-      const counts = new Map(grouped.map((g) => [g.vehicleCategory, g._count._all]));
+      const counts = tally(grouped, (id) => tree.vehicleCategoryOf(id));
       return {
         items: VEHICLE_CATEGORIES.map((c) => ({
           id: c.id,
@@ -69,12 +93,12 @@ export class CategoriesService {
       };
     }
 
-    // Main scope is now served from PartCategory — the single editable source of
+    // Main scope is served from PartCategory — the single editable source of
     // truth (the 12 canonical rows, isActive + mainCategory NOT NULL), NOT the
-    // hardcoded MAIN_CATEGORIES. Counts are still LIVE: parts group by their
-    // category_id FK (kept in sync with main_category by backfill + ingest), and
+    // hardcoded MAIN_CATEGORIES. Counts are LIVE: parts group by their
+    // category_id, each category rolls up to its bucket through the tree, and
     // when a garage vehicle is supplied we scope to fitting parts. The wire shape
-    // (id, name, slug, count, iconKey, color) is unchanged; `id` is now the slug.
+    // (id, name, slug, count, iconKey, color) is unchanged; `id` is the slug.
     const categories = await this.prisma.partCategory.findMany({
       where: { isActive: true, mainCategory: { not: null } },
       orderBy: { sortOrder: 'asc' },
@@ -91,16 +115,9 @@ export class CategoriesService {
       },
     });
 
-    // Count by mainCategory, NOT by exact categoryId: a part filed on a
-    // SUBCATEGORY (e.g. 'oil-filters') still carries mainCategory FILTERS, so it
-    // rolls up to the Filters bucket here. Grouping by categoryId would drop
-    // every sub-filed part from the home grid the moment reclassification runs.
-    const grouped = await this.prisma.catalogPart.groupBy({
-      by: ['mainCategory'],
-      where: vehicleWhere,
-      _count: { _all: true },
-    });
-    const counts = new Map(grouped.map((g) => [g.mainCategory, g._count._all]));
+    // A part filed on a SUBCATEGORY (e.g. 'oil-filters') rolls up to the
+    // Filters bucket through the tree, exactly as ?category=filters lists it.
+    const counts = tally(grouped, (id) => tree.mainCategoryOf(id));
 
     return {
       items: categories.map((c) => ({

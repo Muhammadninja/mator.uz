@@ -18,7 +18,10 @@ import {
   catalogRootProductCounts,
   type CountedNode,
 } from './part-category.service';
-import { LIVE_TREE } from './seeded-category-tree.test-util';
+import {
+  LIVE_TREE,
+  partCategoryFindMany,
+} from './seeded-category-tree.test-util';
 
 const ROOTS = [
   'brake-system',
@@ -160,6 +163,7 @@ async function countsOf(parts = ALL_PARTS, nodes = NODES) {
 /** What GET /v1/catalog/parts?category=<root> answers over `parts`. */
 async function listingTotal(category: string, parts = ALL_PARTS) {
   const prisma = {
+    partCategory: { findMany: partCategoryFindMany(EDGES) },
     catalogPart: {
       count: jest.fn(({ where }: { where: unknown }) =>
         Promise.resolve(parts.filter((p) => matchesWhere(p, where)).length),
@@ -244,17 +248,19 @@ describe('the count against the root listing', () => {
     );
   });
 
-  it('follows the tree for transmission, whose listing goes by vehicle_category', async () => {
-    // 'transmission' is also a PartVehicleCategory value, so its listing
-    // filters on that column; the two agree while a part's vehicle_category
-    // matches its place in the tree.
-    const misfiled = {
+  it('transmission lists what it counts, whatever vehicle_category a part still carries', async () => {
+    // 'transmission' also spells a PartVehicleCategory value. Its listing goes
+    // through that system, which the TREE resolves to the transmission root's
+    // subtree — so a stale stored vehicle_category moves nothing.
+    const staleCopy = {
       ...filed('t_engine', 'flywheels'),
       vehicleCategory: PartVehicleCategory.ENGINE,
     };
-    const counts = await countsOf([...PARTS, misfiled]);
+    const parts = [...PARTS, staleCopy];
+    const counts = await countsOf(parts);
     expect(counts.transmission).toBe(2);
-    expect(await listingTotal('transmission', [...PARTS, misfiled])).toBe(1);
+    expect(await listingTotal('transmission', parts)).toBe(2);
+    expect(await listingTotal('engine-system', parts)).toBe(counts['engine-system']);
   });
 });
 

@@ -11,6 +11,7 @@
 
 import {
   OilType,
+  PartMainCategory,
   PartOriginRegion,
   PartVehicleCategory,
   ProductKind,
@@ -20,6 +21,22 @@ import { ListPartsQueryDto } from './dto/list-parts.query.dto';
 import { normalizeOem } from '../../common/normalize-oem.util';
 import { selectIds } from '../compatibility/where-eval.test-util';
 import * as fx from '../compatibility/fitment-fixtures.test-util';
+import {
+  LIVE_TREE,
+  partCategoryFindMany,
+} from '../categories/seeded-category-tree.test-util';
+import { categoryTreeScope } from '../categories/category-tree-scope';
+
+/** The tree every listing below resolves buckets and systems through. */
+const TREE = categoryTreeScope(LIVE_TREE);
+/** The predicate a bucket rollup builds: every node the tree files under it. */
+const inBucket = (bucket: PartMainCategory) => ({
+  categoryId: { in: TREE.idsInMainCategory(bucket) },
+});
+/** The predicate a vehicle-system filter builds: every node of that system. */
+const inSystem = (system: PartVehicleCategory) => ({
+  categoryId: { in: TREE.idsInVehicleCategory(system) },
+});
 
 /**
  * Prisma stub that records the arguments of every catalogPart call. `findMany`
@@ -31,6 +48,7 @@ function makePrisma() {
   };
   return {
     calls,
+    partCategory: { findMany: jest.fn(partCategoryFindMany()) },
     catalogPart: {
       count: jest.fn().mockImplementation((args: unknown) => {
         calls.count = args;
@@ -224,9 +242,13 @@ describe('PartsService — search and sort survive ProductKind', () => {
   it('mainCategory rolls up the whole system and defaults to bestseller sort', async () => {
     const { svc, prisma } = makeService();
     const res = await svc.list({ mainCategory: 'BRAKES' });
-    const args = prisma.calls.findMany as { orderBy: any[]; where: unknown };
-    // rollup filter across all subcategories
-    expect(JSON.stringify(args.where)).toContain('"mainCategory":"BRAKES"');
+    const args = prisma.calls.findMany as { orderBy: any[]; where: { AND: unknown[] } };
+    // rollup filter across all subcategories, resolved through the tree
+    expect(hasCond(args.where.AND as never, inBucket(PartMainCategory.BRAKES))).toBe(true);
+    expect(TREE.idsInMainCategory(PartMainCategory.BRAKES)).toEqual(
+      expect.arrayContaining(['brakes', 'brake-system', 'front-brake-pads']),
+    );
+    expect(JSON.stringify(args.where)).not.toContain('mainCategory');
     // default order is bestseller-first (composite starts with isBestseller)
     expect(args.orderBy[0]).toEqual({ isBestseller: 'desc' });
     expect(args.orderBy[1]).toEqual({ salesCount: 'desc' });
@@ -237,19 +259,22 @@ describe('PartsService — search and sort survive ProductKind', () => {
   it('mainCategory is case-insensitive and an explicit sort overrides bestseller', async () => {
     const { svc, prisma } = makeService();
     await svc.list({ mainCategory: 'brakes', sort: 'price_asc' });
-    const args = prisma.calls.findMany as { orderBy: any[]; where: unknown };
-    expect(JSON.stringify(args.where)).toContain('"mainCategory":"BRAKES"');
+    const args = prisma.calls.findMany as { orderBy: any[]; where: { AND: unknown[] } };
+    expect(hasCond(args.where.AND as never, inBucket(PartMainCategory.BRAKES))).toBe(true);
     expect(args.orderBy).toEqual([{ priceUzs: 'asc' }, { id: 'asc' }]);
   });
 
   it('a multi-word main-category SLUG rolls up the whole system (not an exact categoryId)', async () => {
     // Regression: the home grid ships buckets by slug ('belts-and-hoses'), whose
     // UPPERCASE doesn't match the enum ('BELTS_AND_HOSES'). It must still roll up
-    // by mainCategory (incl. subcategory-filed parts) so the listing count equals
+    // the whole bucket (incl. subcategory-filed parts) so the listing count equals
     // the grid count — otherwise "count 2, list empty". It must NOT add an exact
     // categoryId clause that drops sub-filed parts.
     const { and } = await whereFor({ category: 'belts-and-hoses' });
-    expect(hasCond(and, { mainCategory: 'BELTS_AND_HOSES' })).toBe(true);
+    expect(hasCond(and, inBucket(PartMainCategory.BELTS_AND_HOSES))).toBe(true);
+    expect(TREE.idsInMainCategory(PartMainCategory.BELTS_AND_HOSES)).toEqual(
+      expect.arrayContaining(['belts-and-hoses', 'timing-belt-kits']),
+    );
     expect(hasCond(and, { categoryId: 'belts-and-hoses' })).toBe(false);
   });
 
@@ -268,7 +293,7 @@ describe('PartsService — search and sort survive ProductKind', () => {
     ];
     const { and, where } = await whereFor({ category: 'v-belts' });
     expect(selectIds(rows, where)).toEqual(['on_v_belts']);
-    expect(hasCond(and, { mainCategory: 'BELTS_AND_HOSES' })).toBe(false);
+    expect(hasCond(and, inBucket(PartMainCategory.BELTS_AND_HOSES))).toBe(false);
   });
 
   it('a non-rollup listing omits subcategory chips (null) and stays newest-first', async () => {
@@ -391,10 +416,8 @@ describe('PartsService — spare-part queries do not silently change', () => {
       oem_only: 'true',
       in_stock_only: 'true',
     });
-    expect(hasCond(and, { mainCategory: 'BRAKES' })).toBe(true);
-    expect(
-      hasCond(and, { vehicleCategory: PartVehicleCategory.BRAKE_SYSTEM }),
-    ).toBe(true);
+    expect(hasCond(and, inBucket(PartMainCategory.BRAKES))).toBe(true);
+    expect(hasCond(and, inSystem(PartVehicleCategory.BRAKE_SYSTEM))).toBe(true);
     expect(hasCond(and, { brandId: { in: ['brand_gates'] } })).toBe(true);
     expect(
       hasCond(and, { originRegion: { in: [PartOriginRegion.KOREA] } }),
@@ -568,5 +591,49 @@ describe('PartsService — curated fitment (fitment_bindings) reaches GET /v1/ca
     await svc.list({ make: 'Chevrolet' });
     const where = (prisma.calls.findMany as { where: unknown }).where;
     expect(selectIds(parts, where)).toEqual(['curated_cobalt']);
+  });
+});
+
+describe('PartsService — the payload states the tree, not a stored copy', () => {
+  // Filed on air-filters, still carrying the ENGINE / ENGINE an earlier write
+  // left on it. The tree files it under FILTERS in MAINTENANCE_AND_FLUIDS.
+  const stale = {
+    ...fx.part({ id: 'part_stale' }),
+    title: 'Air filter',
+    kind: ProductKind.SPARE_PART,
+    priceUzs: 100_000,
+    oemNumbers: [],
+    gmNumbers: [],
+    categoryId: 'air-filters',
+    category: {
+      id: 'air-filters',
+      name: 'Air Filters',
+      nameRu: 'Воздушные фильтры',
+      nameUz: 'Havo filtrlari',
+      nameEn: 'Air Filters',
+    },
+    mainCategory: PartMainCategory.ENGINE,
+    vehicleCategory: PartVehicleCategory.ENGINE,
+    brand: null,
+    seller: { id: 'seller_1', name: 'AutoPro', status: 'ACTIVE' },
+  };
+  const fromTree = {
+    main_category: PartMainCategory.FILTERS,
+    vehicle_category: PartVehicleCategory.MAINTENANCE_AND_FLUIDS,
+  };
+
+  it('in the listing', async () => {
+    const { svc, prisma } = makeService();
+    prisma.catalogPart.findMany.mockResolvedValue([stale]);
+    const res = await svc.list({});
+    expect(res.items[0]).toMatchObject(fromTree);
+  });
+
+  it('in the detail', async () => {
+    const { svc, prisma } = makeService();
+    (prisma.catalogPart as unknown as { findFirst: jest.Mock }).findFirst = jest
+      .fn()
+      .mockResolvedValue(stale);
+    expect(await svc.detail('part_stale')).toMatchObject(fromTree);
   });
 });

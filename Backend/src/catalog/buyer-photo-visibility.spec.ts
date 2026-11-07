@@ -12,6 +12,10 @@ import { SearchService } from './search/search.service';
 import { BUYER_LISTED_PART, BUYER_VISIBLE_PART } from './buyer-visibility';
 import { matchesWhere, selectIds } from './compatibility/where-eval.test-util';
 import * as fx from './compatibility/fitment-fixtures.test-util';
+import {
+  LIVE_TREE,
+  partCategoryFindMany,
+} from './categories/seeded-category-tree.test-util';
 import { ListPartsQueryDto } from './parts/dto/list-parts.query.dto';
 import { RagSearchService } from '../ai-chat/rag-search.service';
 import { CatalogToolsService } from '../ai-advisor/catalog-tools.service';
@@ -121,7 +125,11 @@ function catalogStore(rows: Row[]) {
       }),
     },
     partBrand: { findMany: jest.fn().mockResolvedValue([]) },
-    partCategory: { findMany: jest.fn().mockResolvedValue([BRAKES]) },
+    // The tree read gets the production tree ('brakes' under 'brake-system');
+    // the grid's read of its rows gets the one bucket these parts sit on.
+    partCategory: {
+      findMany: jest.fn(partCategoryFindMany(LIVE_TREE, () => [BRAKES])),
+    },
     // The garage Cobalt resolves only for its owner, like the database.
     vehicle: {
       findFirst: jest.fn((a: { where: { userId?: string } }) =>

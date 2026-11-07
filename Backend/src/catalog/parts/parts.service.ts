@@ -40,6 +40,10 @@ import {
   vehicleFitWhere,
 } from '../compatibility/vehicle-fitment';
 import { BUYER_LISTED_PART } from '../buyer-visibility';
+import {
+  CategoryTreeScope,
+  loadCategoryTreeScope,
+} from '../categories/category-tree-scope';
 
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 100;
@@ -59,8 +63,9 @@ const VEHICLE_CATEGORY_VALUES = new Set(Object.values(PartVehicleCategory));
 // Reverse of MAIN_CATEGORY_TO_SLUG: the home grid ships each bucket by its slug
 // id ('belts-and-hoses'), whose UPPERCASE ('BELTS-AND-HOSES') does NOT match the
 // underscored enum ('BELTS_AND_HOSES'). This map lets the listing recognise a
-// main-category SLUG and roll up the whole system (all subcategories), so the
-// listing count matches the home grid's mainCategory-grouped count.
+// main-category SLUG and roll up the whole bucket (all its subcategories), so
+// the listing count matches the home grid's tile count — both derived from the
+// tree (category-tree-scope.ts).
 const SLUG_TO_MAIN_CATEGORY = new Map<string, PartMainCategory>(
   (Object.entries(MAIN_CATEGORY_TO_SLUG) as [PartMainCategory, string][]).map(
     ([main, slug]) => [slug, main],
@@ -86,6 +91,30 @@ function categorySubtreeWhere(
     descendant = { parent: { is: descendant } };
   }
   return { OR: [{ categoryId }, { category: { is: { OR: beneath } } }] };
+}
+
+/**
+ * Parts filed on one of `categoryIds` — a bucket or a vehicle system, as the
+ * tree resolves it. An empty set matches nothing, which is the right answer
+ * for a bucket no node rolls up to.
+ */
+function inCategories(categoryIds: string[]): Prisma.CatalogPartWhereInput {
+  return { categoryId: { in: categoryIds } };
+}
+
+/**
+ * The part with its bucket and system as the TREE states them, for the
+ * payload: `main_category` / `vehicle_category` then always agree with the
+ * filters that listed the part, never with a stale stored copy.
+ */
+function withTreeClassification<
+  P extends {
+    categoryId: string;
+    mainCategory: PartMainCategory | null;
+    vehicleCategory: PartVehicleCategory | null;
+  },
+>(part: P, tree: CategoryTreeScope): P {
+  return { ...part, ...tree.classify(part.categoryId) };
 }
 
 /** Only the curated model ids — what a compatibility decision reads. */
@@ -125,13 +154,16 @@ export class PartsService {
     lang: AppLang = DEFAULT_APP_LANG,
     userId: string | null = null,
   ) {
-    const vehicle = await this.loadGarageVehicle(userId, query.vehicle_id);
-    const where = this.buildWhere(query, vehicle);
+    const [vehicle, tree] = await Promise.all([
+      this.loadGarageVehicle(userId, query.vehicle_id),
+      loadCategoryTreeScope(this.prisma),
+    ]);
+    const where = this.buildWhere(query, vehicle, tree);
     // The brand facet counts every brand the OTHER filters leave, so a picked
     // brand keeps the rest on offer — to swap it, or to add a second. Without
     // a brand filter that is `where` itself.
     const brandFacetWhere = query.brand
-      ? this.buildWhere({ ...query, brand: undefined }, vehicle)
+      ? this.buildWhere({ ...query, brand: undefined }, vehicle, tree)
       : where;
     const rollup = this.rollupMainCategory(query);
     // A macro-category rollup defaults to bestseller-first; an explicit sort wins.
@@ -169,7 +201,12 @@ export class PartsService {
 
     return {
       items: items.map((p) =>
-        presentPartItem(p, vehicle, this.discountFor(p, sales), lang),
+        presentPartItem(
+          withTreeClassification(p, tree),
+          vehicle,
+          this.discountFor(p, sales),
+          lang,
+        ),
       ),
       facets: {
         brands: await this.brandFacet(brandFacet),
@@ -206,9 +243,17 @@ export class PartsService {
       include: PART_INCLUDE,
     });
     if (!part) throw new NotFoundException('Part not found');
-    const vehicle = await this.loadGarageVehicle(userId, vehicleId);
-    const sales = await this.discounts.loadActiveSales();
-    return presentPartItem(part, vehicle, this.discountFor(part, sales), lang);
+    const [vehicle, sales, tree] = await Promise.all([
+      this.loadGarageVehicle(userId, vehicleId),
+      this.discounts.loadActiveSales(),
+      loadCategoryTreeScope(this.prisma),
+    ]);
+    return presentPartItem(
+      withTreeClassification(part, tree),
+      vehicle,
+      this.discountFor(part, sales),
+      lang,
+    );
   }
 
   async compatibility(
@@ -391,35 +436,36 @@ export class PartsService {
   private buildWhere(
     q: ListPartsQueryDto,
     vehicle: VehicleFitContext | null,
+    tree: CategoryTreeScope,
   ): Prisma.CatalogPartWhereInput {
     // Only buyer-listed parts: no suspended dealer, at least one ready photo
     // (see buyer-visibility.ts). Part of the one `where` the count, the page
     // and every facet share, so it applies before skip/take.
     const and: Prisma.CatalogPartWhereInput[] = [BUYER_LISTED_PART];
 
-    // Category filter — three-way, unified around PartCategory being the source
-    // of truth while staying fully back-compatible:
-    //   1. Value is a PartMainCategory enum (e.g. build 31 sends "BRAKES") →
-    //      filter mainCategory. Parts keep their bot-assigned main_category, so
-    //      this path is untouched.
-    //   2. Value is a PartVehicleCategory enum (BRAKE_SYSTEM, …) → filter
-    //      vehicleCategory.
-    //   3. Anything else → treat as a PartCategory id/slug on the categoryId FK,
-    //      widened to the node's subtree: a system root ('brake-system') lists
-    //      its whole system, a leaf matches exactly itself.
-    // The canonical category ids ARE the main-category slugs, so the new app can
-    // send either form and both resolve to the same parts: 'brakes' upshifts to
-    // enum BRAKES (path 1), while a non-enum slug like 'oil-and-fluids' falls to
-    // categoryId (path 3, correct because the migration backfilled category_id
-    // from main_category). A custom admin-created category id also lands on
-    // path 3. No value 404s.
+    // Category filter — three-way, and EVERY branch filters on `category_id`.
+    // The stored main_category / vehicle_category copies are never read here:
+    // a bucket or a system is the set of tree nodes it covers, derived from the
+    // live tree (category-tree-scope.ts), so a part is listed where the tree
+    // files it today, whatever was written on it earlier.
+    //   1. A PartMainCategory enum ('BRAKES', what build 31 sends) or a bucket
+    //      SLUG ('belts-and-hoses') → the rollup clause below: every node whose
+    //      bucket it is.
+    //   2. A PartVehicleCategory enum (BRAKE_SYSTEM, …; also the root id
+    //      'transmission', which spells one) → every node of that system.
+    //   3. Anything else → a PartCategory id on the categoryId FK, widened to
+    //      the node's subtree: a system root ('brake-system') lists its whole
+    //      system, a leaf matches exactly itself. An admin-created id lands
+    //      here too. No value 404s.
     if (q.category) {
       const up = q.category.toUpperCase();
       if (MAIN_CATEGORY_VALUES.has(up as PartMainCategory)) {
         // Main-category enum ('BRAKES') → handled by the rollup clause below so
-        // the whole system (incl. subcategory-filed parts) is returned.
+        // the whole bucket (incl. subcategory-filed parts) is returned.
       } else if (VEHICLE_CATEGORY_VALUES.has(up as PartVehicleCategory)) {
-        and.push({ vehicleCategory: up as PartVehicleCategory });
+        and.push(
+          inCategories(tree.idsInVehicleCategory(up as PartVehicleCategory)),
+        );
       } else if (SLUG_TO_MAIN_CATEGORY.has(q.category.toLowerCase())) {
         // Main-category SLUG ('belts-and-hoses') → also a rollup; the exact
         // categoryId path below would match only the bucket row itself and drop
@@ -430,15 +476,17 @@ export class PartsService {
         and.push(categorySubtreeWhere(q.category));
       }
     }
-    // Macro-category ROLLUP: filter every part in the system regardless of which
-    // subcategory it is filed under. Unknown values are ignored (never 400) —
+    // Macro-category ROLLUP: every part filed on a node of the bucket,
+    // whichever subcategory that is. Unknown values are ignored (never 400) —
     // the same lenient rule the other filters follow.
     const rollup = this.rollupMainCategory(q);
-    if (rollup) and.push({ mainCategory: rollup });
+    if (rollup) and.push(inCategories(tree.idsInMainCategory(rollup)));
     if (q.vehicle_category) {
       const up = q.vehicle_category.toUpperCase();
       if (VEHICLE_CATEGORY_VALUES.has(up as PartVehicleCategory)) {
-        and.push({ vehicleCategory: up as PartVehicleCategory });
+        and.push(
+          inCategories(tree.idsInVehicleCategory(up as PartVehicleCategory)),
+        );
       }
     }
 
