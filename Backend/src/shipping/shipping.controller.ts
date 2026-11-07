@@ -13,13 +13,39 @@ import { Throttle } from '@nestjs/throttler';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { ShippingService } from './shipping.service';
 import { ShippingQuoteDto } from './dto/shipping-quote.dto';
+import {
+  PickupPointsService,
+  presentCartPickupPoint,
+} from './pickup-points.service';
 
 @ApiTags('Shipping')
 @ApiBearerAuth('jwt')
 @Controller('v1/shipping')
 @UseGuards(JwtAuthGuard)
 export class ShippingController {
-  constructor(private readonly shipping: ShippingService) {}
+  constructor(
+    private readonly shipping: ShippingService,
+    private readonly pickupPoints: PickupPointsService,
+  ) {}
+
+  @Get('pickup-points')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      "Where the goods in the caller's cart are collected, dealer by dealer",
+    description:
+      'One entry per dealer the cart buys from, in cart order: { dealer_id, dealer_name, ' +
+      'address, landmark, location: { lat, lng } | null, items: [{ cart_item_id, part_id, ' +
+      'title, quantity }] }. Each dealer appears once, with its own lines only; no other ' +
+      "dealer's point is included. `address` and `location` are null when the dealer has " +
+      'none on record (the pickup point is not specified yet): never a default. `landmark` ' +
+      'is always null for now. Goods whose dealer cannot be found come last, with ' +
+      'dealer_id null. Services are not listed. An empty cart answers an empty list.',
+  })
+  async pickupPointsOfCart(@Request() req: { user: { id: string } }) {
+    const points = await this.pickupPoints.forCart(req.user.id);
+    return { pickup_points: points.map(presentCartPickupPoint) };
+  }
 
   @Get('coverage')
   @HttpCode(HttpStatus.OK)

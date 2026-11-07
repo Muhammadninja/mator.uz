@@ -4,8 +4,12 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { OrderStatus, Prisma } from '@prisma/client';
+import { DeliveryMethod, OrderStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import {
+  findPickupPoints,
+  isGoodsLine,
+} from '../../shipping/pickup-points.service';
 import { clampLimit } from '../../common/pagination.util';
 import { ORDER_STATUSES } from '../../orders/dto/list-orders.query.dto';
 import {
@@ -151,6 +155,24 @@ export class AdminOrdersService {
           select: { id: true, name: true },
         })
       : [];
+    // Only an order the buyer collects has pickup points. Each line goes to the dealer the
+    // order recorded for it when placed, never to one looked up again from the part.
+    const pickupPoints =
+      order.deliveryMethod === DeliveryMethod.PICKUP
+        ? await findPickupPoints(
+            this.prisma,
+            order.items.filter(isGoodsLine).map((it) => ({
+              storefrontId: it.sellerId,
+              offerSellerTgId: it.offerSellerTgId,
+              item: {
+                id: it.id,
+                productId: it.partId,
+                title: it.title,
+                quantity: it.quantity,
+              },
+            })),
+          )
+        : null;
     return {
       success: true,
       data: presentAdminOrderDetail(
@@ -158,6 +180,7 @@ export class AdminOrdersService {
         isOverOfflineSla(order, new Date(), this.offlinePolicy),
         isPastOperatorWarning(order, new Date(), this.offlinePolicy),
         new Map(sellers.map((seller) => [seller.id, seller.name])),
+        pickupPoints,
       ),
     };
   }

@@ -6,6 +6,15 @@ import {
 } from '@prisma/client';
 import { settleOrder } from '../../orders/order-settlement';
 import type { DeliveryDestination } from '../../shipping/delivery-quote.service';
+import type { PickupPoint } from '../../shipping/pickup-points.service';
+
+/** An order line under the dealer it is collected from. */
+export interface AdminPickupItem {
+  id: string;
+  productId: string | null;
+  title: string;
+  quantity: number;
+}
 
 /**
  * Prisma `select` for an admin list row — only the columns the row projection
@@ -86,6 +95,11 @@ export const ADMIN_ORDER_DETAIL_SELECT = {
       lineTotalUzs: true,
       sellerId: true,
       providerId: true,
+      // Which lines are goods, and the seller of an offer line: what a pickup order's
+      // points are found from.
+      offerId: true,
+      serviceId: true,
+      offerSellerTgId: true,
     },
     orderBy: { id: 'asc' },
   },
@@ -289,11 +303,16 @@ function presentSettlement(
   };
 }
 
+/**
+ * @param pickupPoints where a pickup order's goods are collected, dealer by dealer; null for
+ *   an order that is not collected (see AdminOrdersService.getOne).
+ */
 export function presentAdminOrderDetail(
   o: AdminOrderDetail,
   slaOverdue = false,
   operatorWarning = false,
   sellerNames: ReadonlyMap<string, string> = new Map(),
+  pickupPoints: PickupPoint<AdminPickupItem>[] | null = null,
 ) {
   const payment = paymentSummary(o.payments, o.paymentType);
 
@@ -346,6 +365,9 @@ export function presentAdminOrderDetail(
       o.deliveryAddress,
       o.deliveryDestination,
     ),
+    // Each dealer the buyer collects from: its address and location as on record now, and
+    // its own lines. The dealer of each line is the one the order recorded when placed.
+    pickupPoints,
     items: o.items.map((it) => ({
       id: it.id,
       productId: it.partId,
