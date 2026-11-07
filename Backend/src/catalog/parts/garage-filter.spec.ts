@@ -14,6 +14,7 @@ import { PartsService } from './parts.service';
 import { ListPartsQueryDto } from './dto/list-parts.query.dto';
 import { selectIds } from '../compatibility/where-eval.test-util';
 import * as fx from '../compatibility/fitment-fixtures.test-util';
+import { partCategoryFindMany } from '../categories/seeded-category-tree.test-util';
 
 const OWNER = 'usr_owner';
 
@@ -22,6 +23,7 @@ function makePrisma(garage: fx.VehicleKey = 'cobalt') {
   const calls: { where?: unknown } = {};
   return {
     calls,
+    partCategory: { findMany: jest.fn(partCategoryFindMany()) },
     catalogPart: {
       count: jest.fn().mockResolvedValue(0),
       findMany: jest.fn().mockImplementation((args: { where: unknown }) => {

@@ -12,6 +12,10 @@ import { vehicleFitWhere } from '../compatibility/vehicle-fitment';
 import { buyerListed } from '../buyer-visibility';
 import { selectIds } from '../compatibility/where-eval.test-util';
 import * as fx from '../compatibility/fitment-fixtures.test-util';
+import {
+  isTreeEdgeRead,
+  partCategoryFindMany,
+} from './seeded-category-tree.test-util';
 
 const ROWS = [
   {
@@ -38,6 +42,25 @@ const ROWS = [
   },
 ];
 
+/** The tree the two grid rows hang in — what category-tree-scope reads. */
+const TREE = [
+  { id: 'brake-system', parentId: null },
+  { id: 'brakes', parentId: 'brake-system' },
+  { id: 'front-brake-pads', parentId: 'brake-system' },
+  { id: 'engine-system', parentId: null },
+  { id: 'engine', parentId: 'engine-system' },
+];
+
+/** The grid rows for the names read, the tree for the tree read. */
+const findCategories = partCategoryFindMany(TREE, () => ROWS);
+
+/** The grid's own read of the 12 rows (not the tree read beside it). */
+function rowsRead(prisma: PrismaMock) {
+  return prisma.partCategory.findMany.mock.calls
+    .map((c: unknown[]) => c[0])
+    .find((args: unknown) => !isTreeEdgeRead(args));
+}
+
 const LABELS = {
   ru: ['Тормоза', 'Двигатель'],
   uz: ['Tormozlar', 'Dvigatel'],
@@ -51,10 +74,12 @@ describe('CategoriesService — grid localization', () => {
   beforeEach(() => {
     prisma = createPrismaMock();
     svc = new CategoriesService(prisma);
-    prisma.partCategory.findMany.mockResolvedValue(ROWS);
+    prisma.partCategory.findMany.mockImplementation(findCategories);
+    // Per category_id, as the grid groups: front-brake-pads rolls up to BRAKES.
     prisma.catalogPart.groupBy.mockResolvedValue([
-      { mainCategory: 'BRAKES', _count: { _all: 12 } },
-      { mainCategory: 'ENGINE', _count: { _all: 25 } },
+      { categoryId: 'brakes', _count: { _all: 5 } },
+      { categoryId: 'front-brake-pads', _count: { _all: 7 } },
+      { categoryId: 'engine', _count: { _all: 25 } },
     ]);
   });
 
@@ -124,7 +149,7 @@ describe('CategoriesService — grid localization', () => {
     // is what would make a cached payload language-specific.
     it('selects all three name columns regardless of the language asked for', async () => {
       await svc.list({} as never, 'uz');
-      expect(prisma.partCategory.findMany.mock.calls[0][0].select).toMatchObject(
+      expect(rowsRead(prisma).select).toMatchObject(
         { nameRu: true, nameUz: true, nameEn: true },
       );
     });
@@ -133,10 +158,10 @@ describe('CategoriesService — grid localization', () => {
       const calls: unknown[] = [];
       for (const lang of ['ru', 'uz', 'en'] as const) {
         prisma = createPrismaMock();
-        prisma.partCategory.findMany.mockResolvedValue(ROWS);
+        prisma.partCategory.findMany.mockImplementation(findCategories);
         prisma.catalogPart.groupBy.mockResolvedValue([]);
         await new CategoriesService(prisma).list({} as never, lang);
-        calls.push(prisma.partCategory.findMany.mock.calls[0][0]);
+        calls.push(prisma.partCategory.findMany.mock.calls);
       }
       expect(calls[0]).toEqual(calls[1]);
       expect(calls[1]).toEqual(calls[2]);
@@ -151,7 +176,7 @@ describe('CategoriesService — grid localization', () => {
  * what that predicate would count, not a canned value.
  */
 describe('CategoriesService — garage-scoped counts', () => {
-  const PARTS = fx.PARTS.map((p) => ({ ...p, mainCategory: 'BRAKES' }));
+  const PARTS = fx.PARTS.map((p) => ({ ...p, categoryId: 'brakes' }));
 
   const OWNER = 'usr_owner';
 
@@ -161,7 +186,7 @@ describe('CategoriesService — garage-scoped counts', () => {
     userId: string | null = OWNER,
   ) {
     const prisma: PrismaMock = createPrismaMock();
-    prisma.partCategory.findMany.mockResolvedValue(ROWS);
+    prisma.partCategory.findMany.mockImplementation(findCategories);
     // Like the database: the row comes back only for its (live) owner.
     prisma.vehicle.findFirst.mockImplementation(
       ({ where }: { where: { userId?: string; deletedAt?: null } }) =>
@@ -175,7 +200,7 @@ describe('CategoriesService — garage-scoped counts', () => {
       ({ where }: { where: unknown }) =>
         Promise.resolve([
           {
-            mainCategory: 'BRAKES',
+            categoryId: 'brakes',
             _count: { _all: selectIds(PARTS, where).length },
           },
         ]),

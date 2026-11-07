@@ -12,7 +12,11 @@ import { MAIN_CATEGORIES } from './part-categories.catalog';
 import { PartsService } from '../parts/parts.service';
 import { CatalogProjectionService } from '../projection/catalog-projection.service';
 import { matchesWhere } from '../compatibility/where-eval.test-util';
-import { LIVE_PARENTS } from './seeded-category-tree.test-util';
+import {
+  LIVE_PARENTS,
+  LIVE_TREE,
+  partCategoryFindMany,
+} from './seeded-category-tree.test-util';
 
 interface SupplyProduct {
   id: string;
@@ -41,7 +45,8 @@ const SUPPLY: SupplyProduct[] = [
   { id: 'p16', categoryId: 'skid-plates', mainCategory: null },
   // Filed on a bucket row itself.
   { id: 'p17', categoryId: 'batteries', mainCategory: null },
-  // An assigned bucket wins over the tree: counted under ENGINE, not FILTERS.
+  // A stored bucket that contradicts the tree (ENGINE on an air filter) is a
+  // stale copy: the buyer side follows the tree, so it counts under FILTERS.
   { id: 'p18', categoryId: 'air-filters', mainCategory: B.ENGINE },
   // No home bucket: on no tile, still reachable by their own category.
   { id: 'p19', categoryId: 'clutch-kits', mainCategory: null },
@@ -61,9 +66,9 @@ const SUPPLY: SupplyProduct[] = [
 const EXPECTED_TILE_COUNTS: Record<string, number> = {
   brakes: 3,
   batteries: 1,
-  filters: 3,
+  filters: 4,
   ignition: 1,
-  engine: 2,
+  engine: 1,
   'electrical-parts': 1,
   'oil-and-fluids': 2,
   'belts-and-hoses': 1,
@@ -123,23 +128,27 @@ function catalogDb() {
   const selected = (where: unknown) =>
     PARTS.filter((p) => matchesWhere(p, where));
   return {
-    partCategory: { findMany: jest.fn().mockResolvedValue(GRID_ROWS) },
+    partCategory: {
+      findMany: jest.fn(partCategoryFindMany(LIVE_TREE, () => GRID_ROWS)),
+    },
     catalogPart: {
       count: jest.fn(({ where }: { where: unknown }) =>
         Promise.resolve(selected(where).length),
       ),
       findMany: jest.fn().mockResolvedValue([]),
       groupBy: jest.fn(({ by, where }: { by: string[]; where: unknown }) => {
-        if (by.length !== 1 || by[0] !== 'mainCategory') {
+        // The grid groups by category_id only; the listing's other facets
+        // (brands, chips) are not compared here.
+        if (by.length !== 1 || by[0] !== 'categoryId') {
           return Promise.resolve([]);
         }
-        const counts = new Map<B | null, number>();
+        const counts = new Map<string, number>();
         for (const p of selected(where)) {
-          counts.set(p.mainCategory, (counts.get(p.mainCategory) ?? 0) + 1);
+          counts.set(p.categoryId, (counts.get(p.categoryId) ?? 0) + 1);
         }
         return Promise.resolve(
-          [...counts].map(([mainCategory, n]) => ({
-            mainCategory,
+          [...counts].map(([categoryId, n]) => ({
+            categoryId,
             _count: { _all: n },
           })),
         );

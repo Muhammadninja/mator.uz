@@ -11,6 +11,7 @@ import { BUYER_LISTED_PART } from './buyer-visibility';
 import { selectIds } from './compatibility/where-eval.test-util';
 import * as fx from './compatibility/fitment-fixtures.test-util';
 import { createPrismaMock, PrismaMock } from '../../test/utils/harness';
+import { partCategoryFindMany } from './categories/seeded-category-tree.test-util';
 
 const PARTS = [
   fx.part({ id: 'pending_dealer_part', isUniversal: true }),
@@ -24,7 +25,7 @@ const PARTS = [
     isUniversal: true,
     sellerStatus: 'SUSPENDED',
   }),
-].map((p) => ({ ...p, mainCategory: 'BRAKES' }));
+].map((p) => ({ ...p, categoryId: 'brakes' }));
 
 const noDiscounts = {
   loadActiveSales: jest.fn().mockResolvedValue([]),
@@ -42,6 +43,7 @@ describe('buyer visibility — suspended dealers', () => {
   beforeEach(() => {
     prisma = createPrismaMock();
     prisma.catalogPart.aggregate.mockResolvedValue({ _min: {}, _max: {} });
+    prisma.partCategory.findMany.mockImplementation(partCategoryFindMany());
   });
 
   it('GET /v1/catalog/parts never lists a suspended dealer part', async () => {
@@ -93,7 +95,7 @@ describe('buyer visibility — suspended dealers', () => {
       ({ where }: { where: unknown }) =>
         Promise.resolve([
           {
-            mainCategory: 'BRAKES',
+            categoryId: 'brakes',
             _count: { _all: selectIds(PARTS, where).length },
           },
         ]),
