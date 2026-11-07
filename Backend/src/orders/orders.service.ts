@@ -51,6 +51,7 @@ import {
 } from './order-availability';
 import { findLineSellers } from './order-settlement';
 import {
+  OrderCharges,
   PricedLine,
   computeOrderCharges,
   linesSubtotalUzs,
@@ -58,6 +59,22 @@ import {
 } from './service-fee.util';
 
 const DEFAULT_ORDER_LIMIT = 20;
+
+/**
+ * What an order placed now would charge, as a 409 states it beside its code: the same figures,
+ * named as the order and the cart name them. `delivery_quote_id` is the quote those figures
+ * were computed with, or null when nothing is delivered by courier.
+ */
+function currentCharges(charges: OrderCharges, delivery: DeliveryQuote | null) {
+  return {
+    subtotal_uzs: charges.subtotalUzs,
+    discount_uzs: charges.discountUzs,
+    service_fee_uzs: charges.serviceFeeUzs,
+    delivery_uzs: charges.deliveryUzs,
+    total_uzs: charges.totalUzs,
+    delivery_quote_id: delivery?.quoteId ?? null,
+  };
+}
 
 /** Roles that may record an online payment by hand; see assertCanMarkPaid. */
 const MANUAL_ONLINE_PAYMENT_ROLES: readonly AdminRole[] = [
@@ -197,43 +214,51 @@ export class OrdersService {
         snap.delivery_address_id,
         cart.items,
       );
-      if (delivery.quoteId !== dto.delivery_quote_id) {
-        throw new ConflictException({
-          code: DELIVERY_QUOTE_STALE,
-          message:
-            'The delivery details have changed. Check the new price and confirm the order again.',
-        });
-      }
-      if (delivery.priceUzs !== dto.confirmed_delivery_uzs) {
-        throw new ConflictException({
-          code: DELIVERY_PRICE_CHANGED,
-          message:
-            'The delivery price has changed. Check the new price and confirm the order again.',
-        });
-      }
     }
     const discount = cart.promoCode
       ? resolvePromo(cart.promoCode, linesSubtotalUzs(pricedLines)).discountUzs
       : 0;
     // Every amount on the order comes from here, from the server's own cart. Nothing in the
     // request can state one: `confirmed_total_uzs` only says what the buyer was shown. A total
-    // that no longer matches means the cart, a sale or the tariff moved since, so the buyer
-    // agrees to the new one or not at all. A client stating no total (an older build) has
-    // shown none, and is charged what is computed here all the same.
+    // that no longer matches means the cart, a sale, the fee or the delivery tariff moved
+    // since, so the buyer agrees to the new one or not at all. A client stating no total (an
+    // older build) has shown none, and is charged what is computed here all the same.
     const charges = computeOrderCharges({
       lines: pricedLines,
       discountUzs: discount,
       deliveryUzs: delivery?.priceUzs ?? 0,
     });
+    // Each refusal of an out-of-date confirmation says what an order placed now would charge,
+    // so the buyer is shown the new figures and confirms them, or not. The total is compared
+    // first: whatever moved it (rates that changed between the quote and now included), what
+    // the buyer agreed to is no longer the total. The quote and the price are compared after,
+    // so a different destination or set of pickups is refused even at the same total.
+    const outOfDate = (code: string, message: string) =>
+      new ConflictException({
+        code,
+        message,
+        details: currentCharges(charges, delivery),
+      });
     if (
       dto.confirmed_total_uzs != null &&
       toTiyin(dto.confirmed_total_uzs) !== toTiyin(charges.totalUzs)
     ) {
-      throw new ConflictException({
-        code: ORDER_TOTAL_CHANGED,
-        message:
-          'The order total has changed. Check the new total and confirm the order again.',
-      });
+      throw outOfDate(
+        ORDER_TOTAL_CHANGED,
+        'The order total has changed. Check the new total and confirm the order again.',
+      );
+    }
+    if (delivery && delivery.quoteId !== dto.delivery_quote_id) {
+      throw outOfDate(
+        DELIVERY_QUOTE_STALE,
+        'The delivery details have changed. Check the new price and confirm the order again.',
+      );
+    }
+    if (delivery && delivery.priceUzs !== dto.confirmed_delivery_uzs) {
+      throw outOfDate(
+        DELIVERY_PRICE_CHANGED,
+        'The delivery price has changed. Check the new price and confirm the order again.',
+      );
     }
 
     // Spread the promo discount INTO the line prices, in tiyin, so the charged

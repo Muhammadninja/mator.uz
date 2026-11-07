@@ -131,12 +131,35 @@ describe('POST /v1/shipping/quote (e2e)', () => {
   const post = (body: object) =>
     request(app.getHttpServer()).post('/v1/shipping/quote').send(body);
   const COURIER = { delivery_address_id: 'addr_1', delivery_method: 'courier' };
+  const PICKUP_OPTION = {
+    type: 'pickup',
+    label: 'Olib ketish',
+    available: true,
+    price_uzs: 0,
+    quote_id: null,
+    unavailable_reason: null,
+  };
+  /** The answer when no courier can be had: pickup as ever, and the courier with why. */
+  const expectCourierUnavailable = (body: any, code: string) => {
+    expect(body.options).toEqual([
+      PICKUP_OPTION,
+      {
+        type: 'courier',
+        label: 'Kuryer',
+        available: false,
+        price_uzs: null,
+        quote_id: null,
+        unavailable_reason: { code, message: expect.any(String) },
+      },
+    ]);
+    expect(body.currency).toBe('UZS');
+  };
 
   beforeEach(() => {
     routing.routeDistanceMeters.mockReset();
   });
 
-  it('answers a courier quote with the price alone', async () => {
+  it('answers both options: pickup, free, and the courier at its price alone', async () => {
     cartWithSeller(41.2995);
     routing.routeDistanceMeters.mockResolvedValue(7300);
 
@@ -144,15 +167,24 @@ describe('POST /v1/shipping/quote (e2e)', () => {
 
     expect(res.body).toEqual({
       options: [
+        PICKUP_OPTION,
         {
           type: 'courier',
           label: 'Kuryer',
+          available: true,
+          // 7.3 km of road is 8 billable km: the eighth tier.
           price_uzs: 24000,
           quote_id: expect.stringMatching(/^[0-9a-f]{64}$/),
+          unavailable_reason: null,
         },
       ],
       currency: 'UZS',
     });
+    // UzMaps is asked from the seller's pickup to the saved point, both exactly as stored.
+    expect(routing.routeDistanceMeters).toHaveBeenCalledWith(
+      { lat: 41.2995, lng: 69.2401 },
+      { lat: 41.3131, lng: 69.287 },
+    );
   });
 
   it('gives the box around the delivery area', async () => {
@@ -174,16 +206,16 @@ describe('POST /v1/shipping/quote (e2e)', () => {
     expect(routing.routeDistanceMeters).not.toHaveBeenCalled();
   });
 
-  it('422 with a code for a seller with no pickup location', async () => {
+  it('a seller with no pickup location: the courier is unavailable, with the code', async () => {
     cartWithSeller(null);
 
-    const res = await post(COURIER).expect(422);
+    const res = await post(COURIER).expect(200);
 
-    expect(res.body.code).toBe('PICKUP_LOCATION_MISSING');
+    expectCourierUnavailable(res.body, 'PICKUP_LOCATION_MISSING');
     expect(routing.routeDistanceMeters).not.toHaveBeenCalled();
   });
 
-  it('422 with a code for an address with no coordinates', async () => {
+  it('an address with no coordinates: the courier is unavailable, with the code', async () => {
     cartWithSeller(41.2995);
     prisma.address.findUnique.mockResolvedValue({
       userId: 'usr_1',
@@ -191,13 +223,12 @@ describe('POST /v1/shipping/quote (e2e)', () => {
       lng: null,
     });
 
-    const res = await post(COURIER).expect(422);
+    const res = await post(COURIER).expect(200);
 
-    expect(res.body.code).toBe('DELIVERY_ADDRESS_COORDINATES_MISSING');
-    expect(res.body.message).toEqual(expect.any(String));
+    expectCourierUnavailable(res.body, 'DELIVERY_ADDRESS_COORDINATES_MISSING');
   });
 
-  it('422 with a code for an address outside the delivery area', async () => {
+  it('an address outside the delivery area: unavailable, not free, and no route asked for', async () => {
     cartWithSeller(41.2995);
     prisma.address.findUnique.mockResolvedValue({
       userId: 'usr_1',
@@ -205,41 +236,47 @@ describe('POST /v1/shipping/quote (e2e)', () => {
       lng: 37.61,
     });
 
-    const res = await post(COURIER).expect(422);
+    const res = await post(COURIER).expect(200);
 
-    expect(res.body.code).toBe('DELIVERY_OUTSIDE_COVERAGE');
+    expectCourierUnavailable(res.body, 'DELIVERY_OUTSIDE_COVERAGE');
     expect(routing.routeDistanceMeters).not.toHaveBeenCalled();
   });
 
-  it('422 with a code when courier is asked for without an address', async () => {
+  it('courier asked for without an address: unavailable, with the code', async () => {
     cartWithSeller(41.2995);
 
-    const res = await post({ delivery_method: 'courier' }).expect(422);
+    const res = await post({ delivery_method: 'courier' }).expect(200);
 
-    expect(res.body.code).toBe('DELIVERY_ADDRESS_REQUIRED');
+    expectCourierUnavailable(res.body, 'DELIVERY_ADDRESS_REQUIRED');
   });
 
-  it('422 with a code when no road reaches the address', async () => {
+  it('no road reaches the address: unavailable, with the code', async () => {
     cartWithSeller(41.11);
     routing.routeDistanceMeters.mockRejectedValue(
       new RouteNotFoundError('no route found'),
     );
 
-    const res = await post(COURIER).expect(422);
+    const res = await post(COURIER).expect(200);
 
-    expect(res.body.code).toBe('DELIVERY_ROUTE_NOT_FOUND');
+    expectCourierUnavailable(res.body, 'DELIVERY_ROUTE_NOT_FOUND');
   });
 
-  it('503 with a code when the provider gives no answer, naming no internals', async () => {
+  it('the provider gives no answer: unavailable with the code, naming no internals, and pickup stays', async () => {
     cartWithSeller(41.12);
     routing.routeDistanceMeters.mockRejectedValue(
       new RoutingUnavailableError('UzMaps answered 401: unknown API key'),
     );
 
-    const res = await post(COURIER).expect(503);
+    const res = await post(COURIER).expect(200);
 
-    expect(res.body.code).toBe('DELIVERY_ROUTING_UNAVAILABLE');
+    expectCourierUnavailable(res.body, 'DELIVERY_ROUTING_UNAVAILABLE');
     expect(JSON.stringify(res.body)).not.toMatch(/uzmaps|api key/i);
+  });
+
+  it('400 for an empty cart, as before', async () => {
+    prisma.cart.findUnique.mockResolvedValue({ items: [] });
+
+    await post(COURIER).expect(400);
   });
 
   it("404 for an address that is not the caller's", async () => {
@@ -297,7 +334,7 @@ describe('With no delivery area configured (e2e)', () => {
     await app?.close();
   });
 
-  it('a courier is refused with a code, and no route is asked for', async () => {
+  it('the courier is unavailable with a code, pickup is offered, and no route is asked for', async () => {
     prisma.address.findUnique.mockResolvedValue({
       userId: 'usr_1',
       lat: 41.3131,
@@ -312,9 +349,17 @@ describe('With no delivery area configured (e2e)', () => {
     const res = await request(app.getHttpServer())
       .post('/v1/shipping/quote')
       .send({ delivery_address_id: 'addr_1', delivery_method: 'courier' })
-      .expect(422);
+      .expect(200);
 
-    expect(res.body.code).toBe('COURIER_DELIVERY_UNAVAILABLE');
+    expect(res.body.options.map((o: any) => [o.type, o.available])).toEqual([
+      ['pickup', true],
+      ['courier', false],
+    ]);
+    const courier = res.body.options[1];
+    expect(courier.price_uzs).toBeNull();
+    expect(courier.unavailable_reason.code).toBe(
+      'COURIER_DELIVERY_UNAVAILABLE',
+    );
     expect(routing.routeDistanceMeters).not.toHaveBeenCalled();
   });
 

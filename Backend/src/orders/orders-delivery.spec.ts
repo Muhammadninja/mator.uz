@@ -290,6 +290,128 @@ describe('Courier delivery on an order', () => {
     );
   });
 
+  describe('what the buyer confirmed, out of date by the time they order', () => {
+    // 185 000 of parts, the 5 000 fee, 37 500 of delivery: what the buyer was shown.
+    const CONFIRMED = { ...COURIER, confirmed_total_uzs: 227_500 };
+    const refusalOf = async (dto: object) => {
+      const err = await service.createFromCart('usr_1', dto as never).then(
+        () => null,
+        (e: unknown) => e as { status: number; response: Record<string, any> },
+      );
+      expect(err).not.toBeNull();
+      expect(prisma.order.create).not.toHaveBeenCalled();
+      expect(prisma.cartItem.deleteMany).not.toHaveBeenCalled();
+      return err!;
+    };
+
+    it('rates changed between the quote and the order: 409 ORDER_TOTAL_CHANGED, with the total now', async () => {
+      quotes.quote.mockResolvedValue({
+        ...QUOTE,
+        priceUzs: 40_000,
+        quoteId: 'quote_under_the_new_rates',
+        shipments: QUOTE.shipments.map((s) => ({
+          ...s,
+          tariffVersion: 'tariff_2',
+        })),
+      });
+
+      const err = await refusalOf(CONFIRMED);
+
+      expect(err.status).toBe(409);
+      expect(err.response).toMatchObject({
+        code: 'ORDER_TOTAL_CHANGED',
+        details: {
+          subtotal_uzs: 185_000,
+          discount_uzs: 0,
+          service_fee_uzs: 5_000,
+          delivery_uzs: 40_000,
+          total_uzs: 230_000,
+          delivery_quote_id: 'quote_under_the_new_rates',
+        },
+      });
+    });
+
+    it('a destination moved at the same total is still another quote, and says what it costs', async () => {
+      quotes.quote.mockResolvedValue({
+        ...QUOTE,
+        quoteId: 'quote_for_the_new_point',
+      });
+
+      const err = await refusalOf(CONFIRMED);
+
+      expect(err.response).toMatchObject({
+        code: 'DELIVERY_QUOTE_STALE',
+        details: {
+          total_uzs: 227_500,
+          delivery_uzs: 37_500,
+          delivery_quote_id: 'quote_for_the_new_point',
+        },
+      });
+    });
+
+    it('a price that moved, from a build that states no total, says the new figures too', async () => {
+      quotes.quote.mockResolvedValue({ ...QUOTE, priceUzs: 40_000 });
+
+      const err = await refusalOf(COURIER);
+
+      expect(err.response).toMatchObject({
+        code: 'DELIVERY_PRICE_CHANGED',
+        details: { delivery_uzs: 40_000, total_uzs: 230_000 },
+      });
+    });
+
+    it('a true total beside a delivery figure of its own is refused all the same', async () => {
+      const err = await refusalOf({ ...CONFIRMED, confirmed_delivery_uzs: 1 });
+
+      expect(err.response.code).toBe('DELIVERY_PRICE_CHANGED');
+    });
+
+    it('everything as confirmed places the order at the server figures', async () => {
+      await service.createFromCart('usr_1', CONFIRMED);
+
+      expect(created()).toMatchObject({
+        deliveryUzs: 37_500,
+        totalUzs: 227_500,
+      });
+    });
+  });
+
+  it.each([
+    ['payme', 'PAYME'],
+    ['cash', 'CASH'],
+    ['terminal', 'TERMINAL'],
+  ] as const)(
+    'paid by %s: the same delivery, priced the same way, in the same total',
+    async (payment_type, paymentType) => {
+      await service.createFromCart('usr_1', { ...COURIER, payment_type });
+
+      expect(quotes.quote).toHaveBeenCalledTimes(1);
+      expect(created()).toMatchObject({
+        paymentType,
+        deliveryMethod: 'COURIER',
+        deliveryUzs: 37_500,
+        serviceFeeUzs: 5_000,
+        totalUzs: 227_500,
+      });
+    },
+  );
+
+  it.each(['payme', 'cash', 'terminal'] as const)(
+    'paid by %s: a courier with no confirmed price is refused, never free',
+    async (payment_type) => {
+      await expect(
+        service.createFromCart('usr_1', {
+          cart_snapshot: COURIER.cart_snapshot,
+          payment_type,
+        }),
+      ).rejects.toMatchObject({
+        status: 409,
+        response: { code: 'DELIVERY_COST_UNAVAILABLE' },
+      });
+      expect(prisma.order.create).not.toHaveBeenCalled();
+    },
+  );
+
   describe('when no price can be had', () => {
     it.each([
       [new UnprocessableEntityException({ code: 'PICKUP_LOCATION_MISSING' })],

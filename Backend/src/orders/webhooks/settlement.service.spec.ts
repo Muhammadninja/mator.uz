@@ -388,7 +388,7 @@ describe('SettlementService.markPaid — concurrency and order state (in-memory 
 });
 
 describe('SettlementService.markCancelled — the refund registry (in-memory store)', () => {
-  function build() {
+  function build(orderOver: Record<string, unknown> = {}) {
     const store = settlementStore({
       payments: [
         pendingPaymePayment({
@@ -397,7 +397,7 @@ describe('SettlementService.markCancelled — the refund registry (in-memory sto
           providerTransactionId: 'pmt-xyz',
         }),
       ],
-      orders: [order(OrderStatus.CANCELLED)],
+      orders: [order(OrderStatus.CANCELLED, orderOver)],
     });
     const svc = new SettlementService(
       store.prisma as any,
@@ -426,6 +426,28 @@ describe('SettlementService.markCancelled — the refund registry (in-memory sto
     });
     expect(entry.providerConfirmedAt).toBeInstanceOf(Date);
     expect(entry.createdById).toBeUndefined();
+  });
+
+  it('reversing a courier order gives back the goods, the fee and the delivery, each as itself', async () => {
+    // 180 000 of one dealer's goods, Mator's 10 000 fee and 25 000 of its own delivery.
+    const { store, svc } = build({
+      totalUzs: 215000,
+      serviceFeeUzs: 10000,
+      deliveryUzs: 25000,
+      items: [{ sellerId: 7, lineTotalUzs: 180000 }],
+    });
+
+    await svc.markCancelled('pay_1', 5, true);
+
+    const [entry, ...rest] = store.refunds();
+    expect(rest).toEqual([]);
+    expect(entry).toMatchObject({
+      amountUzs: 215000,
+      deliveryUzs: 25000,
+      serviceFeeUzs: 10000,
+      // The dealer gets back exactly their goods: neither the fee nor delivery is theirs.
+      allocations: [{ sellerId: 7, amountUzs: 180000 }],
+    });
   });
 
   it('a repeated or concurrent callback enters it once', async () => {
