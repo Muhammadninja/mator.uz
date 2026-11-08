@@ -14,6 +14,7 @@ import { AdminProductsController } from './categories/admin-products.controller'
 import { AdminDealersController } from './dealers/admin-dealers.controller';
 import { AdminInventoryController } from './inventory/admin-inventory.controller';
 import { AdminManagementController } from './management/admin-management.controller';
+import { AdminPhotoCoverageController } from './photo-coverage/admin-photo-coverage.controller';
 import { AdminRefundsController } from './refunds/admin-refunds.controller';
 
 const guard = new AdminRoleGuard(new Reflector());
@@ -61,6 +62,8 @@ const EVERY_ROLE: [string, { prototype: object }, string][] = [
   ['edit a model', AdminModelsController, 'update'],
   ['move products', AdminProductsController, 'bulkMove'],
   ['edit inventory', AdminInventoryController, 'batchUpdate'],
+  ['read photo coverage totals', AdminPhotoCoverageController, 'summary'],
+  ['read the photo coverage list', AdminPhotoCoverageController, 'list'],
   ['read the refund registry', AdminRefundsController, 'list'],
   ["read an order's refunds", AdminRefundsController, 'forOrder'],
 ];
