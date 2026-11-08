@@ -3,6 +3,10 @@ import type { Registry } from 'prom-client';
 import type { MetricsConfig } from './metrics.config';
 import type { AppMetrics } from './metrics.definitions';
 import {
+  PUBLIC_POLLING_STATUSES,
+  type PollingSnapshot,
+} from '../telegram/polling-status';
+import {
   APP_METRICS,
   METRICS_CONFIG,
   METRICS_REGISTRY,
@@ -243,6 +247,26 @@ export class MetricsService {
     });
   }
 
+  // ── Telegram seller bot ─────────────────────────────────────────────────
+
+  /** Publish the bot's polling status, sampled by TelegramPollingCollector. */
+  setTelegramPolling(snapshot: PollingSnapshot): void {
+    this.safe(() => {
+      for (const status of PUBLIC_POLLING_STATUSES) {
+        this.metrics.telegramPollingStatus.set(
+          { status },
+          status === snapshot.status ? 1 : 0,
+        );
+      }
+      this.metrics.telegramPollingLastPoll.set(
+        unixSeconds(snapshot.lastPollAt),
+      );
+      this.metrics.telegramPollingLastUpdate.set(
+        unixSeconds(snapshot.lastUpdateAt),
+      );
+    });
+  }
+
   // ── Read access (alerting) ──────────────────────────────────────────────
   //
   // The alerting rules need to READ the series they alert on. Exposing the two
@@ -347,4 +371,9 @@ export function classifyFailure(err: unknown): string {
     return 'invalid_request';
   }
   return 'other';
+}
+
+/** Epoch ms → unix seconds; an unknown time reads as 0. */
+function unixSeconds(ms: number | null): number {
+  return ms === null ? 0 : Math.floor(ms / 1000);
 }

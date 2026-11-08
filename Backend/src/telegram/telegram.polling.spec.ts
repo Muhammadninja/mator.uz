@@ -9,8 +9,10 @@
 //   • a handler that throws, or outlives the handler timeout, costs only its update
 //   • an expired button tap no longer fails the action it asked for
 //   • a malformed offer deep link is answered, never queried
-//   • launch failures: transient → retried with backoff; 401/409 → reported, not retried
+//   • launch failures: transient → retried with backoff; 401 → reported, not
+//     retried; 409 → paused and re-checked on a slow backoff (polling-conflict.spec.ts)
 //   • nothing polls after shutdown, and shutdown never throws
+//   • Telegraf's launch() is never used, so deleteWebhook is never called
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -116,6 +118,8 @@ function stubBotApi(
         switch (method) {
           case 'getMe':
             return BOT_INFO;
+          case 'getWebhookInfo': // no webhook set: polling may start
+            return { url: '', pending_update_count: 0 };
           case 'getUpdates': {
             if (payload.limit === 1) return []; // the loop's final offset sync
             if (next < batches.length) return batches[next++];
@@ -280,6 +284,9 @@ describe('Seller bot on the real Telegraf pipeline', () => {
       "error Update 1 (message) failed: Can't reach database server",
     );
     expect(svc.polling.status).toBe('polling');
+    // Wired as in production: polling-only, the webhook is never touched.
+    expect(api.count('deleteWebhook')).toBe(0);
+    expect(api.count('setWebhook')).toBe(0);
     const polls = api.count('getUpdates');
     await waitFor(() => api.count('getUpdates') > polls, 'polling to go on');
     // The log names the update, never what is in it.
@@ -390,7 +397,7 @@ describe('Seller bot on the real Telegraf pipeline', () => {
     );
   });
 
-  it('stops on a 409 conflict with a diagnosis instead of fighting the other poller', async () => {
+  it('pauses on a 409 conflict with a diagnosis, and does not poll again before the re-check', async () => {
     const api = stubBotApi([], {
       getUpdates: () => {
         throw new TelegramError({
@@ -405,14 +412,18 @@ describe('Seller bot on the real Telegraf pipeline', () => {
     svc.onModuleInit();
 
     await waitFor(
-      () => svc.polling.status === 'failed',
+      () => svc.polling.status === 'conflict',
       'the 409 to be handled',
     );
     await sleep(50);
+    // Production's first re-check is 30 s away: nothing is retried meanwhile.
     expect(api.count('getUpdates')).toBe(1);
+    expect(api.count('getWebhookInfo')).toBe(1); // the connect's check only
     const report = logs.find((line) => line.includes('conflict'));
+    expect(report).toMatch(/^error Bot polling PAUSED/);
     expect(report).toContain('terminated by other getUpdates request');
     expect(report).toContain('TELEGRAM_POLLING_DISABLED=true');
+    expect(report).toContain('no webhook is deleted');
   });
 
   it('schedules a backed-off retry for a transient connect failure, and cancels it on shutdown', async () => {
@@ -501,6 +512,70 @@ describe('Seller bot on the real Telegraf pipeline', () => {
   });
 });
 
+describe('Seller bot with Redis not answering BullMQ (real Telegraf pipeline)', () => {
+  // Telegraf polls again only once every update of a batch is handled, so an
+  // update stuck on Redis used to hold up the next update of EVERY seller until
+  // the 90 s handler timeout. The handler timeout is set far above the test's
+  // wait here: only TelegramService.QUEUE_TIMEOUT_MS can let the next one through.
+  it('answers the next /start while an image re-enqueue is still waiting on Redis, and queues it late', async () => {
+    jest.replaceProperty(TelegramService, 'QUEUE_TIMEOUT_MS', 50);
+    const api = stubBotApi([[command(1, '/start')], [command(2, '/start')]]);
+    const held: ((job: { id: string }) => void)[] = [];
+    const reenqueueImage = jest.fn(
+      () => new Promise<{ id: string }>((resolve) => held.push(resolve)),
+    );
+    const setImageJobId = jest.fn().mockResolvedValue(undefined);
+    const stuckDraft = {
+      id: 'draft_1',
+      images: [
+        { id: 'img_1', status: 'PROCESSING', processedUrl: null },
+        { id: 'img_2', status: 'PROCESSING', processedUrl: null },
+      ],
+    };
+    const { svc, logs } = makeBotService({
+      queue: { reenqueueImage },
+      drafts: {
+        findAwaitingPreview: jest.fn().mockResolvedValue(null),
+        // The first /start finds a draft whose images never got a job.
+        findImagesInFlight: jest
+          .fn()
+          .mockResolvedValueOnce(stuckDraft)
+          .mockResolvedValue(null),
+        findResumable: jest.fn().mockResolvedValue(null),
+        setImageJobId,
+      },
+    });
+
+    svc.onModuleInit();
+    svc.bot.options.handlerTimeout = 60_000;
+
+    await waitFor(
+      () => api.texts().includes(PHOTOS_PROMPT),
+      'the next /start to be answered while Redis is not answering',
+    );
+    expect(api.texts()).toContain(t('ru', 'images.processing'));
+    // Both rows were handed to BullMQ; nothing timed out at the Telegraf level.
+    expect(reenqueueImage).toHaveBeenCalledTimes(2);
+    expect(logs.join('\n')).not.toContain('Promise timed out');
+    expect(logs).toContainEqual(
+      expect.stringContaining(
+        'Failed to re-enqueue stuck image img_1 (draft draft_1): ' +
+          'Redis reenqueue of image job for img_1 timed out after 50ms',
+      ),
+    );
+
+    // Redis answers again: the waiting adds land and the rows get their ids.
+    held.forEach((resolve, i) => resolve({ id: `image_draft_1_img_${i + 1}` }));
+    await waitFor(
+      () => setImageJobId.mock.calls.length === 2,
+      'the late job ids',
+    );
+    expect(setImageJobId).toHaveBeenCalledWith('img_1', 'image_draft_1_img_1');
+    expect(setImageJobId).toHaveBeenCalledWith('img_2', 'image_draft_1_img_2');
+    expect(svc.polling.status).toBe('polling');
+  });
+});
+
 describe('Telegraf version pin', () => {
   // The supervisor hooks a step of Telegraf's own launch(), verified on one
   // release: the pin, the lockfile, what is installed and the supervisor's
@@ -571,19 +646,24 @@ describe('BotPollingSupervisor', () => {
     );
   });
 
-  it('never runs two launches at once', () => {
+  it('never runs two connects at once', () => {
     const bot = {
-      launch: jest.fn(() => new Promise<void>(() => undefined)),
+      launch: jest.fn(),
       stop: jest.fn(),
       botInfo: undefined,
       startPolling: jest.fn(), // the step a compatible Telegraf has
+      telegram: {
+        getMe: jest.fn(() => new Promise(() => undefined)),
+        getWebhookInfo: jest.fn(),
+      },
     };
     const { supervisor } = supervise(bot);
 
     supervisor.start();
     supervisor.start();
 
-    expect(bot.launch).toHaveBeenCalledTimes(1);
+    expect(bot.telegram.getMe).toHaveBeenCalledTimes(1);
+    expect(bot.launch).not.toHaveBeenCalled();
   });
 
   it('does not restart after stop(), even with a retry pending', async () => {
@@ -620,14 +700,16 @@ describe('BotPollingSupervisor', () => {
     answerGetMe();
     await sleep(30);
 
+    expect(api.count('getWebhookInfo')).toBe(0);
     expect(api.count('deleteWebhook')).toBe(0);
     expect(api.count('getUpdates')).toBe(0);
     expect(supervisor.status).toBe('stopped');
   });
 
-  // What Telegraf 4.16.3 actually does — launch() = getMe → onLaunch →
-  // deleteWebhook → startPolling, its promise settling only when the loop ends —
-  // and the lifecycle edges the supervisor has to get right on top of it.
+  // The supervisor's own connect on the installed Telegraf — getMe → a
+  // read-only getWebhookInfo → Telegraf's startPolling, whose promise settles
+  // only when the loop ends — and the lifecycle edges it has to get right.
+  // Telegraf's launch() is never used: it would call deleteWebhook.
   describe('lifecycle edges on the installed Telegraf', () => {
     // main.ts turns any unhandled rejection into a process exit.
     const rejections: unknown[] = [];
@@ -654,23 +736,25 @@ describe('BotPollingSupervisor', () => {
       return { answer, release: () => release() };
     }
 
-    it('launch() stays pending while polling is healthy, and settles only once polling ends', async () => {
+    it('the loop stays pending while polling is healthy, and settles only once polling ends', async () => {
       const api = stubBotApi([]);
       const bot = new Telegraf(TOKEN);
       let settled = false;
-      const launch = bot.launch.bind(bot) as (
+      const startPolling = (bot as any).startPolling.bind(bot) as (
         ...args: unknown[]
       ) => Promise<void>;
+      // Spied BEFORE the supervisor wraps it, so the wrapper calls the spy.
       jest
-        .spyOn(bot as any, 'launch')
+        .spyOn(bot as any, 'startPolling')
         .mockImplementation((...args: unknown[]) => {
-          const polling = launch(...args);
+          const polling = startPolling(...args);
           void polling.then(
             () => (settled = true),
             () => (settled = true),
           );
           return polling;
         });
+      const launch = jest.spyOn(bot, 'launch');
       const { supervisor, logs } = supervise(bot);
 
       supervisor.start();
@@ -679,43 +763,40 @@ describe('BotPollingSupervisor', () => {
       expect(settled).toBe(false);
       expect(supervisor.status).toBe('polling');
       supervisor.stop();
-      await waitFor(() => settled, 'launch() to settle once polling ends');
+      await waitFor(() => settled, 'the loop to settle once polling ends');
       expect(logs).toContain('log Bot stopped (long polling ended)');
+      expect(launch).not.toHaveBeenCalled();
     });
 
-    it('Telegraf calls onLaunch after getMe — before deleteWebhook and before any getUpdates', async () => {
+    it('connects with getMe → getWebhookInfo → getUpdates, and never deleteWebhook', async () => {
       const api = stubBotApi([]);
-      const bot = new Telegraf(TOKEN);
-      let seenAtLaunch: string[] = [];
+      const { supervisor } = supervise(new Telegraf(TOKEN));
 
-      const polling = bot.launch(() => {
-        seenAtLaunch = api.methods();
-      });
+      supervisor.start();
       await waitFor(() => api.count('getUpdates') > 0, 'polling to begin');
-      bot.stop('test');
-      await polling;
 
-      expect(seenAtLaunch).toEqual(['getMe']);
       expect(api.methods().slice(0, 3)).toEqual([
         'getMe',
-        'deleteWebhook',
+        'getWebhookInfo',
         'getUpdates',
       ]);
+      expect(api.count('deleteWebhook')).toBe(0);
+      expect(api.count('setWebhook')).toBe(0);
     });
 
     it('does not report polling as active once getMe answers — only once the loop starts', async () => {
-      const deleteWebhook = heldAnswer(true);
-      const api = stubBotApi([], { deleteWebhook: deleteWebhook.answer });
+      const webhookCheck = heldAnswer({ url: '' });
+      const api = stubBotApi([], { getWebhookInfo: webhookCheck.answer });
       const { supervisor, logs } = supervise(new Telegraf(TOKEN));
 
       supervisor.start();
-      await waitFor(() => api.count('deleteWebhook') === 1, 'getMe to answer');
+      await waitFor(() => api.count('getWebhookInfo') === 1, 'getMe to answer');
 
       expect(supervisor.status).toBe('starting');
       expect(logs.some((line) => line.includes('long polling active'))).toBe(
         false,
       );
-      deleteWebhook.release();
+      webhookCheck.release();
       await waitFor(() => supervisor.status === 'polling', 'the loop to start');
       expect(logs).toContain(
         'log Bot connected as @mator_test_bot — long polling active',
@@ -725,9 +806,9 @@ describe('BotPollingSupervisor', () => {
     it('keeps backing off when failures follow a successful getMe', async () => {
       let failuresLeft = 3;
       const api = stubBotApi([], {
-        deleteWebhook: () => {
+        getWebhookInfo: () => {
           if (failuresLeft-- > 0) throw networkError();
-          return true;
+          return { url: '' };
         },
       });
       const attempts: number[] = [];
@@ -740,13 +821,14 @@ describe('BotPollingSupervisor', () => {
       await waitFor(() => supervisor.status === 'polling', 'polling at last');
 
       expect(attempts).toEqual([1, 2, 3]); // not [1, 1, 1]: getMe is not health
-      expect(api.count('getMe')).toBe(1); // Telegraf keeps botInfo across launches
+      expect(api.count('getMe')).toBe(1); // botInfo is kept across connects
+      expect(api.count('deleteWebhook')).toBe(0); // not on a retry either
     });
 
-    it('never starts the loop when shutdown lands while deleteWebhook is in flight', async () => {
-      const deleteWebhook = heldAnswer(true);
+    it('never starts the loop when shutdown lands while the webhook check is in flight', async () => {
+      const webhookCheck = heldAnswer({ url: '' });
       const api = stubBotApi([[command(1, '/start')]], {
-        deleteWebhook: deleteWebhook.answer,
+        getWebhookInfo: webhookCheck.answer,
       });
       const bot = new Telegraf(TOKEN);
       const handled = jest.fn();
@@ -754,13 +836,13 @@ describe('BotPollingSupervisor', () => {
       const { supervisor, logs } = supervise(bot);
 
       supervisor.start();
-      await waitFor(() => api.count('deleteWebhook') === 1, 'deleteWebhook');
+      await waitFor(() => api.count('getWebhookInfo') === 1, 'the check');
       // Telegraf's own stop() would throw: its polling loop does not exist yet.
       expect(() => supervisor.stop()).not.toThrow();
-      deleteWebhook.release();
+      webhookCheck.release();
       await waitFor(
         () => logs.some((line) => line.startsWith('log Bot stopped')),
-        'the pending launch to settle',
+        'the pending connect to settle',
       );
       await sleep(30);
 
@@ -769,17 +851,17 @@ describe('BotPollingSupervisor', () => {
       expect(supervisor.status).toBe('stopped');
     });
 
-    // On a RELAUNCH Telegraf still holds the dead loop, so its stop() does not
-    // throw — it quietly stops the stale one while the new launch carries on.
-    it('never starts a relaunched loop when shutdown lands during its deleteWebhook', async () => {
+    // On a RECONNECT Telegraf still holds the dead loop, so its stop() does not
+    // throw — it quietly stops the stale one while the new connect carries on.
+    it('never starts a reconnected loop when shutdown lands during its webhook check', async () => {
       let launches = 0;
       let releaseSecond: () => void = () => undefined;
       const api = stubBotApi([], {
-        deleteWebhook: () => {
+        getWebhookInfo: () => {
           launches += 1;
-          if (launches === 1) return true;
+          if (launches === 1) return { url: '' };
           return new Promise((resolve) => {
-            releaseSecond = () => resolve(true);
+            releaseSecond = () => resolve({ url: '' });
           });
         },
         getUpdates: (payload) => {
@@ -792,7 +874,7 @@ describe('BotPollingSupervisor', () => {
       supervisor.start();
       await waitFor(
         () => launches === 2,
-        'the relaunch to reach deleteWebhook',
+        'the reconnect to reach its webhook check',
       );
       const polls = api.count('getUpdates');
       expect(() => supervisor.stop()).not.toThrow();
@@ -844,7 +926,8 @@ describe('BotPollingSupervisor', () => {
       expect(supervisor.status).toBe('polling');
       expect(maxInFlight).toBe(1);
       expect(api.count('getMe')).toBe(1);
-      expect(api.count('deleteWebhook')).toBe(2); // one per launch
+      expect(api.count('getWebhookInfo')).toBe(2); // one per connect
+      expect(api.count('deleteWebhook')).toBe(0);
     });
 
     it.each([
@@ -864,21 +947,14 @@ describe('BotPollingSupervisor', () => {
           },
         },
       ],
-      [
-        'a 409 from getUpdates',
-        {
-          getUpdates: () => {
-            throw refusal(
-              409,
-              'Conflict: terminated by other getUpdates request; make sure that only one bot instance is running',
-            );
-          },
-        },
-      ],
+      // A 409 is not permanent any more: see polling-conflict.spec.ts.
     ])('%s is never retried, however long we wait', async (_case, answer) => {
       stubBotApi([], answer);
       const bot = new Telegraf(TOKEN);
-      const launch = jest.spyOn(bot as any, 'launch');
+      const connect = jest.spyOn(
+        BotPollingSupervisor.prototype as any,
+        'connect',
+      );
       // A retry, were one scheduled, would come almost at once.
       const { supervisor } = supervise(bot, () => 1);
 
@@ -886,22 +962,24 @@ describe('BotPollingSupervisor', () => {
       await waitFor(() => supervisor.status === 'failed', 'the failure');
       await sleep(50);
 
-      expect(launch).toHaveBeenCalledTimes(1);
+      expect(connect).toHaveBeenCalledTimes(1);
       expect(supervisor.status).toBe('failed');
     });
 
-    it('never launches once stopped', () => {
+    it('never connects once stopped', () => {
       const bot = {
-        launch: jest.fn(() => new Promise<void>(() => undefined)),
+        launch: jest.fn(),
         stop: jest.fn(),
         botInfo: undefined,
         startPolling: jest.fn(), // the step a compatible Telegraf has
+        telegram: { getMe: jest.fn(), getWebhookInfo: jest.fn() },
       };
       const { supervisor } = supervise(bot);
 
       supervisor.stop();
       supervisor.start();
 
+      expect(bot.telegram.getMe).not.toHaveBeenCalled();
       expect(bot.launch).not.toHaveBeenCalled();
       expect(supervisor.status).toBe('stopped');
     });

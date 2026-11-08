@@ -480,49 +480,144 @@ export class ProductDraftService {
     return count === 1;
   }
 
-  // ── Image-row writes (single-writer: the row's own worker job) ──────────────
-  /** Mark the row PROCESSING and bump its attempt counter (worker pickup). */
-  async markImageProcessing(imageId: string): Promise<ProductDraftImage> {
-    return this.prisma.productDraftImage.update({
+  // ── Image-row writes ────────────────────────────────────────────────────────
+  // Normally one writer: the row's own worker job. But BullMQ hands a job whose
+  // lock was lost (e.g. Redis unreachable for 30 s during FLUX) to a second run
+  // while the first is still going, so every write the worker makes is a
+  // CONDITIONAL updateMany on the row's current state, never a blind update:
+  // each transition happens at most once, a run that loses learns it from the
+  // count, and a result already written is never replaced. PostgreSQL makes the
+  // second of two concurrent UPDATEs re-check its WHERE against the first one's
+  // committed row, so exactly one of them matches.
+  //
+  // Ownership (fencing): `attempts` is the RUN's token. The pickup bumps it
+  // atomically and returns it (UPDATE … RETURNING); nothing else writes it, and
+  // it never goes down. Stage, READY and FAILED writes carry the token and match
+  // only while it is still the row's — a run that a newer pickup superseded can
+  // no longer touch the row. PostgreSQL alone decides; Redis plays no part.
+
+  /** A row that is READY with a result: nothing left to do for it. */
+  private static readonly FINISHED: Prisma.ProductDraftImageWhereInput = {
+    status: DraftImageStatus.READY,
+    processedUrl: { not: null },
+  };
+
+  /**
+   * The row's status, result and stored assets — read-only: the worker's
+   * duplicate guard, and how a run that lost a write learns what won.
+   * null when the row no longer exists.
+   */
+  async findImageState(
+    imageId: string,
+  ): Promise<Pick<
+    ProductDraftImage,
+    | 'status'
+    | 'processedUrl'
+    | 'processedPublicId'
+    | 'originalUrl'
+    | 'originalPublicId'
+    | 'attempts'
+  > | null> {
+    return this.prisma.productDraftImage.findUnique({
       where: { id: imageId },
-      data: {
-        status: DraftImageStatus.PROCESSING,
-        attempts: { increment: 1 },
+      select: {
+        attempts: true,
+        status: true,
+        processedUrl: true,
+        processedPublicId: true,
+        originalUrl: true,
+        originalPublicId: true,
       },
     });
   }
 
-  /** Advance only the technical `stage` (observability). Never changes `status`. */
+  /**
+   * Worker pickup: mark the row PROCESSING and bump its attempt counter —
+   * unless it is already READY with a result (a duplicate job: re-processing
+   * would replace that result). Returns the row as written, in ONE statement
+   * (UPDATE … RETURNING): its `attempts` is this run's ownership token, and the
+   * run that took it over from an older one. null when the row is finished or
+   * gone; the caller tells the two apart with findImageState.
+   */
+  async markImageProcessing(
+    imageId: string,
+  ): Promise<ProductDraftImage | null> {
+    try {
+      return await this.prisma.productDraftImage.update({
+        where: { id: imageId, NOT: ProductDraftService.FINISHED },
+        data: {
+          status: DraftImageStatus.PROCESSING,
+          attempts: { increment: 1 },
+        },
+      });
+    } catch (err) {
+      // P2025: no row matched — finished, or gone.
+      if (
+        err instanceof Prisma.PrismaClientKnownRequestError &&
+        err.code === 'P2025'
+      ) {
+        return null;
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Advance only the technical `stage` (observability). Never changes `status`,
+   * and only while the row is PROCESSING and still owned by run `owner`: a
+   * superseded run can neither move the current run's stage nor undo
+   * DONE⇔READY / FAILED⇔FAILED.
+   */
   async setImageStage(
     imageId: string,
     stage: ImageProcessingStage,
+    owner: number,
   ): Promise<void> {
-    await this.prisma.productDraftImage.update({
-      where: { id: imageId },
+    await this.prisma.productDraftImage.updateMany({
+      where: {
+        id: imageId,
+        status: DraftImageStatus.PROCESSING,
+        attempts: owner,
+      },
       data: { stage },
     });
   }
 
-  /** Record the stored ORIGINAL after phase A (ingest). Leaves status PROCESSING. */
+  /**
+   * Record the stored ORIGINAL after phase A (ingest), only if none is stored
+   * yet. Leaves status PROCESSING. false: another run stored one first — the
+   * caller uses that one, and its own upload is surplus.
+   */
   async setImageOriginal(
     imageId: string,
     originalUrl: string,
     originalPublicId: string,
-  ): Promise<ProductDraftImage> {
-    return this.prisma.productDraftImage.update({
-      where: { id: imageId },
+  ): Promise<boolean> {
+    const { count } = await this.prisma.productDraftImage.updateMany({
+      where: { id: imageId, originalUrl: null },
       data: { originalUrl, originalPublicId },
     });
+    return count === 1;
   }
 
-  /** Phase B success: READY + stage=DONE, with the processed asset. (DONE⇔READY.) */
+  /**
+   * Phase B success: READY + stage=DONE, with the processed asset (DONE⇔READY)
+   * — only from PROCESSING, and only by the run that owns the row (`owner`).
+   * false when the row left PROCESSING (finalized, marked FAILED, gone) or a
+   * newer run took it over: nothing is written and the result is not used.
+   */
   async markImageReady(
     imageId: string,
     processedUrl: string,
     processedPublicId: string,
-  ): Promise<void> {
-    await this.prisma.productDraftImage.update({
-      where: { id: imageId },
+    owner: number,
+  ): Promise<boolean> {
+    const { count } = await this.prisma.productDraftImage.updateMany({
+      where: {
+        id: imageId,
+        status: DraftImageStatus.PROCESSING,
+        attempts: owner,
+      },
       data: {
         status: DraftImageStatus.READY,
         stage: ImageProcessingStage.DONE,
@@ -530,18 +625,34 @@ export class ProductDraftService {
         processedPublicId,
       },
     });
+    return count === 1;
   }
 
-  /** Terminal failure: FAILED + stage=FAILED, keeping the last error. (FAILED⇔FAILED.) */
-  async markImageFailed(imageId: string, lastError: string): Promise<void> {
-    await this.prisma.productDraftImage.update({
-      where: { id: imageId },
+  /**
+   * Terminal failure: FAILED + stage=FAILED, keeping the last error
+   * (FAILED⇔FAILED) — only from PROCESSING, and only by run `owner`, the token
+   * that run got from markImageProcessing. A failed run never turns a row a
+   * newer run owns — or already finalized — into FAILED, and a run that never
+   * got a token cannot call this at all. false: not written.
+   */
+  async markImageFailed(
+    imageId: string,
+    lastError: string,
+    owner: number,
+  ): Promise<boolean> {
+    const { count } = await this.prisma.productDraftImage.updateMany({
+      where: {
+        id: imageId,
+        status: DraftImageStatus.PROCESSING,
+        attempts: owner,
+      },
       data: {
         status: DraftImageStatus.FAILED,
         stage: ImageProcessingStage.FAILED,
         lastError,
       },
     });
+    return count === 1;
   }
 
   /** Store the BullMQ job id on a row (set right after enqueue). */

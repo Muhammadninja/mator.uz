@@ -3,6 +3,7 @@ import {
   OnModuleInit,
   OnModuleDestroy,
   Logger,
+  Optional,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { OnEvent } from '@nestjs/event-emitter';
@@ -40,9 +41,17 @@ import {
 import { offeredPackageForms } from '../common/fiscal.util';
 import { QueueService } from '../queue/queue.service';
 import { DraftLock } from '../redis/draft-lock.service';
+import {
+  RedisTimeoutError,
+  RedisUnavailableError,
+  assertRedisBacklogRoom,
+  trackUnansweredRedisCommand,
+  withRedisTimeout,
+} from '../redis/redis.service';
 import { RedisKeys } from '../redis/redis.keys';
 import { MediaGroupBuffer, type FlushedGroup } from './media-group-buffer';
 import { BotPollingSupervisor, errorForLog } from './bot-polling';
+import { TelegramPollingStatus } from './polling-status';
 import { TelegramOfferService } from './telegram-offer.service';
 import { persistVehicleLinks } from './vehicle-links';
 import {
@@ -474,6 +483,17 @@ export function buildSessionFromDraft(
 
 @Injectable()
 export class TelegramService implements OnModuleInit, OnModuleDestroy {
+  /**
+   * Longest a bot handler waits on one BullMQ producer call (enqueue / remove
+   * an image job). BullMQ's connection waits out a Redis outage without limit
+   * (`maxRetriesPerRequest: null`, see queue.config.ts), and Telegraf polls
+   * again only once EVERY update of a batch is handled — so one handler
+   * waiting on Redis held up every seller's next update, until Telegraf's 90 s
+   * handler timeout. Far above a healthy round trip (a few ms). The command is
+   * not cancelled: it still lands once Redis answers (see withRedisTimeout).
+   */
+  static readonly QUEUE_TIMEOUT_MS: number = 5_000;
+
   private readonly logger = new Logger(TelegramService.name);
   private bot: Telegraf;
 
@@ -550,6 +570,9 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     // Driver's Village photo updates (album + caption `1C <code_1c>`): position
     // lookup and gallery replacement. Only reached for such a caption.
     private readonly dvPhotos: DriversVillagePhotoService,
+    // Where /health and the metrics read the polling status from. Optional so
+    // a module without TelegramPollingStatusModule still builds the bot.
+    @Optional() private readonly pollingStatus?: TelegramPollingStatus,
   ) {
     this.draftTtlMs = resolveDraftTtlMs(
       this.config.get<string>('DRAFT_TTL_HOURS'),
@@ -586,6 +609,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         'Bot long-polling DISABLED (TELEGRAM_POLLING_DISABLED=true) — this instance ' +
           'will NOT receive seller updates. Unset it on exactly one (prod) instance.',
       );
+      this.pollingStatus?.markDisabled();
       return;
     }
 
@@ -601,6 +625,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     // reports the permanent ones without retrying, and never starts again after
     // shutdown.
     this.polling = new BotPollingSupervisor(this.bot, this.logger);
+    this.pollingStatus?.attach(this.polling);
     this.polling.start();
   }
 
@@ -1391,7 +1416,12 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     });
 
     // Enqueue one job per image row (locked + deterministic jobId → idempotent).
+    let queueStalled = false;
     for (const img of draft.images) {
+      if (queueStalled) {
+        this.deferImageJob(draft.id, img.id, 'enqueue');
+        continue;
+      }
       try {
         const jobId = await this.enqueueImageJob(draft.id, img.id);
         if (jobId === null) continue; // a concurrent enqueue already covers this row
@@ -1410,6 +1440,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         this.logger.error(
           `Failed to enqueue image ${img.id}: ${err instanceof Error ? err.message : String(err)}`,
         );
+        queueStalled = err instanceof RedisUnavailableError;
       }
     }
 
@@ -1924,13 +1955,19 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     const stuck = draft.images.filter(
       (img) => img.status === 'PROCESSING' && !img.processedUrl,
     );
+    let queueStalled = false;
     for (const img of stuck) {
+      if (queueStalled) {
+        this.deferImageJob(draft.id, img.id, 'reenqueue');
+        continue;
+      }
       try {
         await this.enqueueImageJob(draft.id, img.id, 'reenqueue');
       } catch (err) {
         this.logger.error(
           `Failed to re-enqueue stuck image ${img.id} (draft ${draft.id}): ${err instanceof Error ? err.message : String(err)}`,
         );
+        queueStalled = err instanceof RedisUnavailableError;
       }
     }
   }
@@ -1963,7 +2000,12 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       await ctx.reply(t(lang, 'photos.noneToRetry'));
       return;
     }
+    let queueStalled = false;
     for (const img of toReenqueue) {
+      if (queueStalled) {
+        this.deferImageJob(draft.id, img.id, 'reenqueue');
+        continue;
+      }
       try {
         // 'reenqueue' (not 'enqueue'): the previous FAILED job is still in Redis
         // under the same deterministic id, so a plain add() would be a no-op.
@@ -1972,6 +2014,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         this.logger.error(
           `Failed to re-enqueue image ${img.id}: ${err instanceof Error ? err.message : String(err)}`,
         );
+        queueStalled = err instanceof RedisUnavailableError;
       }
     }
     // A holding line: the retried images end in a preview (or a fresh failure
@@ -2271,10 +2314,24 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       // Wrapped in an object so "lock busy" (withLock → undefined) stays
       // distinguishable from "enqueued a job that reported no id".
       async () => {
-        const job =
-          mode === 'reenqueue'
-            ? await this.queue.reenqueueImage({ draftId, imageId })
-            : await this.queue.enqueueImage({ draftId, imageId });
+        // At the cap of unanswered Redis commands: not issued (redis-backlog.ts).
+        assertRedisBacklogRoom(`${mode} of image job for ${imageId}`);
+        const command = this.imageJobCommand(draftId, imageId, mode);
+        let job: Awaited<typeof command>;
+        try {
+          job = await withRedisTimeout(
+            command,
+            TelegramService.QUEUE_TIMEOUT_MS,
+            `${mode} of image job for ${imageId}`,
+          );
+        } catch (err) {
+          // Not answered in time ≠ not queued: the add still lands once Redis
+          // answers, and the row is then given its job id like any other.
+          if (err instanceof RedisTimeoutError) {
+            this.recordLateImageJob(imageId, command);
+          }
+          throw err;
+        }
         if (job.id) await this.drafts.setImageJobId(imageId, job.id);
         return { jobId: job.id };
       },
@@ -2295,16 +2352,91 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     return enqueued.jobId;
   }
 
-  /** Best-effort removal of a draft's queued image jobs (already-gone/active is fine). */
+  /**
+   * Best-effort removal of a draft's queued image jobs (already-gone/active is
+   * fine). Each removal is waited for at most QUEUE_TIMEOUT_MS; once one is not
+   * answered, the rest are issued without waiting, and land once Redis answers —
+   * unless the cap of unanswered Redis commands is reached, in which case they
+   * are not issued (a job that then still runs belongs to a cancelled draft,
+   * as when a removal fails today).
+   */
   private async discardDraftJobs(draft: DraftWithImages): Promise<void> {
+    let queueStalled = false;
     for (const img of draft.images) {
       if (!img.jobId) continue;
+      const what = `removal of image job ${img.jobId}`;
       try {
-        await this.queue.removeImageJob(img.jobId);
-      } catch {
-        // already gone / active — ignore.
+        assertRedisBacklogRoom(what);
+        const removal = this.queue.removeImageJob(img.jobId);
+        if (queueStalled) {
+          trackUnansweredRedisCommand(removal);
+          void removal.catch(() => undefined);
+          continue;
+        }
+        await withRedisTimeout(removal, TelegramService.QUEUE_TIMEOUT_MS, what);
+      } catch (err) {
+        // already gone / active — ignore. Redis not answering: stop waiting.
+        queueStalled ||= err instanceof RedisUnavailableError;
       }
     }
+  }
+
+  /** The BullMQ call behind enqueueImageJob / deferImageJob. */
+  private imageJobCommand(
+    draftId: string,
+    imageId: string,
+    mode: 'enqueue' | 'reenqueue',
+  ) {
+    return mode === 'reenqueue'
+      ? this.queue.reenqueueImage({ draftId, imageId })
+      : this.queue.enqueueImage({ draftId, imageId });
+  }
+
+  /**
+   * Put a row on the queue WITHOUT waiting for Redis — for the rows after an
+   * enqueue that Redis did not answer: each would only hold the handler (and
+   * every seller's next update) for another QUEUE_TIMEOUT_MS. The command lands
+   * once Redis answers; until then the row is PROCESSING in Postgres, and if
+   * the process dies first — or the cap of unanswered Redis commands is reached,
+   * so it is not issued at all — the next /start re-enqueues it
+   * (reenqueueStuckImages). The deterministic jobId collapses it with a job of
+   * that id still in Redis. Skips the DraftLock: that is load-shedding only,
+   * and Redis is not answering it either.
+   */
+  private deferImageJob(
+    draftId: string,
+    imageId: string,
+    mode: 'enqueue' | 'reenqueue',
+  ): void {
+    try {
+      assertRedisBacklogRoom(`${mode} of image job for ${imageId}`);
+    } catch (err) {
+      this.logger.warn(
+        `Image ${imageId} (draft ${draftId}) left PROCESSING for the next /start: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return;
+    }
+    const command = this.imageJobCommand(draftId, imageId, mode);
+    trackUnansweredRedisCommand(command);
+    this.recordLateImageJob(imageId, command);
+  }
+
+  /** Give the row its job id once a late enqueue lands; failures are logged. */
+  private recordLateImageJob(
+    imageId: string,
+    command: Promise<{ id?: string }>,
+  ): void {
+    void command
+      .then((job) =>
+        job.id ? this.drafts.setImageJobId(imageId, job.id) : undefined,
+      )
+      .then(
+        () => undefined,
+        (err: unknown) =>
+          this.logger.error(
+            `Late enqueue of image ${imageId} failed: ${err instanceof Error ? err.message : String(err)}`,
+          ),
+      );
   }
 
   // ── Wizard plumbing ─────────────────────────────────────────────────────────
@@ -3085,7 +3217,12 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     });
 
     // The same guarded, idempotent enqueue as a new listing's photos.
+    let queueStalled = false;
     for (const img of draft.images) {
+      if (queueStalled) {
+        this.deferImageJob(draft.id, img.id, 'enqueue');
+        continue;
+      }
       try {
         const jobId = await this.enqueueImageJob(draft.id, img.id);
         if (jobId === null) continue;
@@ -3099,6 +3236,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         this.logger.error(
           `Failed to enqueue image ${img.id}: ${err instanceof Error ? err.message : String(err)}`,
         );
+        queueStalled = err instanceof RedisUnavailableError;
       }
     }
 

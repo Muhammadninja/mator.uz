@@ -10,6 +10,7 @@ import { metricsProviders } from './metrics.providers';
 import { MetricsService } from './metrics.service';
 import { QueueMetricsCollector } from './queue-metrics.collector';
 import { SmsCostCollector } from './sms-cost.collector';
+import { TelegramPollingCollector } from './telegram-polling.collector';
 
 /**
  * Phase A observability: Prometheus metrics for the API, the Node process, the
@@ -97,6 +98,8 @@ function buildMetricsModule() {
       // Reads the SMS accounting table on scrape. No import is needed for
       // PrismaService: PrismaModule is @Global, exactly like this module.
       SmsCostCollector,
+      // Reads the bot's polling status (TelegramPollingStatusModule is @Global).
+      TelegramPollingCollector,
       ...interceptor,
     ],
     exports: [MetricsService],

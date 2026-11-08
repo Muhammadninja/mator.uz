@@ -13,6 +13,7 @@ import { AuthModule } from './auth/auth.module';
 import { SellersModule } from './sellers/sellers.module';
 import { AdminModule } from './admin/admin.module';
 import { TelegramModule } from './telegram/telegram.module';
+import { TelegramPollingStatusModule } from './telegram/polling-status';
 import { GarageModule } from './garage/garage.module';
 import { CloudinaryModule } from './cloudinary/cloudinary.module';
 import { RetentionModule } from './retention/retention.module';
@@ -70,6 +71,8 @@ import { isBlueprintEnabled } from './blueprint/blueprint-auth';
     AuthModule,
     SellersModule,
     AdminModule,
+    // Global: the bot's polling status, read by /health and the metrics.
+    TelegramPollingStatusModule,
     TelegramModule,
     GarageModule,
     CloudinaryModule,

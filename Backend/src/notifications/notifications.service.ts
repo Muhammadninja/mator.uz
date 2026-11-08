@@ -6,6 +6,11 @@ import { UpdatePreferencesDto } from './dto/update-preferences.dto';
 import { ListNotificationsQuery } from './dto/list-notifications.query';
 import { presentNotification, presentPreferences } from './notification.presenter';
 import { QueueService } from '../queue/queue.service';
+import {
+  RedisTimeoutError,
+  assertRedisBacklogRoom,
+  withRedisTimeout,
+} from '../redis/redis.service';
 
 const DEFAULT_LIMIT = 20;
 
@@ -34,6 +39,16 @@ export interface EmitInput {
 
 @Injectable()
 export class NotificationsService {
+  /**
+   * Longest emit() waits for the push enqueue. BullMQ's connection waits out a
+   * Redis outage without limit (see queue.config.ts), and emit() runs inside
+   * requests and seller-bot handlers (a sourcing offer) — a bot handler that
+   * waits holds up every seller's next update. Past this the caller moves on;
+   * the enqueue is not cancelled and lands once Redis answers, still at most
+   * once (the jobId is the inbox row's id).
+   */
+  static readonly PUSH_ENQUEUE_TIMEOUT_MS: number = 5_000;
+
   private readonly logger = new Logger(NotificationsService.name);
 
   constructor(
@@ -77,7 +92,10 @@ export class NotificationsService {
 
     try {
       if (await this.pushAllowed(userId, input.type)) {
-        await this.queue.enqueueNotification({
+        // At the cap of unanswered Redis commands (redis-backlog.ts) the push is
+        // not enqueued at all — logged below; the inbox row stays saved.
+        assertRedisBacklogRoom(`push enqueue for ${notification.id}`);
+        const enqueue = this.queue.enqueueNotification({
           userId,
           type: input.type,
           // The committed row's id: both the fan-out target and the job's
@@ -87,6 +105,24 @@ export class NotificationsService {
           body: input.body,
           deeplinkPath: input.deeplinkPath,
           payload: input.data,
+        });
+        await withRedisTimeout(
+          enqueue,
+          NotificationsService.PUSH_ENQUEUE_TIMEOUT_MS,
+          `push enqueue for ${notification.id}`,
+        ).catch((err: unknown) => {
+          if (!(err instanceof RedisTimeoutError)) throw err;
+          this.logger.warn(
+            `Push enqueue for ${userId} not answered in ${NotificationsService.PUSH_ENQUEUE_TIMEOUT_MS}ms ` +
+              `(inbox row ${notification.id} is saved); it is queued once Redis answers.`,
+          );
+          enqueue.catch((late: unknown) =>
+            this.logger.warn(
+              `Late push enqueue failed for ${userId} (inbox row ${notification.id}): ${
+                late instanceof Error ? late.message : String(late)
+              }`,
+            ),
+          );
         });
       }
     } catch (err) {

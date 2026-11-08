@@ -1,5 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { RedisService, withRedisTimeout } from './redis.service';
+import {
+  RedisService,
+  assertRedisBacklogRoom,
+  withRedisTimeout,
+} from './redis.service';
 
 /**
  * The single, generic place for Redis-backed read-through caching. Every future
@@ -37,6 +41,7 @@ export class CacheService {
    */
   async get<T>(key: string): Promise<T | null> {
     try {
+      assertRedisBacklogRoom(`GET ${key}`);
       return await withRedisTimeout(
         this.redis.get<T>(key),
         CacheService.REDIS_TIMEOUT_MS,
@@ -55,6 +60,7 @@ export class CacheService {
    */
   async set<T>(key: string, value: T, ttlSeconds: number): Promise<void> {
     try {
+      assertRedisBacklogRoom(`SETEX ${key}`);
       await withRedisTimeout(
         this.redis.setEx(key, ttlSeconds, value),
         CacheService.REDIS_TIMEOUT_MS,
@@ -71,6 +77,7 @@ export class CacheService {
    */
   async delete(key: string): Promise<void> {
     try {
+      assertRedisBacklogRoom(`DEL ${key}`);
       await withRedisTimeout(
         this.redis.del(key),
         CacheService.REDIS_TIMEOUT_MS,

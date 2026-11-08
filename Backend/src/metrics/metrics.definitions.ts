@@ -81,6 +81,14 @@ export interface AppMetrics {
   imageProcessingDuration: Histogram<'result'>;
   /** Image jobs by terminal outcome — the counter beside the histogram. */
   imageProcessingTotal: Counter<'result'>;
+
+  // ── Telegram seller bot ─────────────────────────────────────────────────
+  /** Long-polling status as a state set: 1 for the current status, 0 else. */
+  telegramPollingStatus: Gauge<'status'>;
+  /** When getUpdates last answered (unix seconds; 0 = never). */
+  telegramPollingLastPoll: Gauge<string>;
+  /** When getUpdates last delivered an update (unix seconds; 0 = never). */
+  telegramPollingLastUpdate: Gauge<string>;
 }
 
 /**
@@ -257,6 +265,27 @@ export function createAppMetrics(
       name: `${prefix}image_processing_total`,
       help: 'Total image processing jobs by terminal outcome.',
       labelNames: ['result'] as const,
+      registers,
+    }),
+
+    // ── Telegram seller bot ───────────────────────────────────────────────
+    // Sampled at scrape time from the polling supervisor (see
+    // TelegramPollingCollector). The status label is a closed set of four.
+    // Staleness is for PromQL: `time() - …_last_poll_timestamp_seconds`.
+    telegramPollingStatus: new Gauge({
+      name: `${prefix}telegram_polling_status`,
+      help: 'Seller bot long-polling status: 1 for the current status (running, starting, error, stopped), 0 for the others.',
+      labelNames: ['status'] as const,
+      registers,
+    }),
+    telegramPollingLastPoll: new Gauge({
+      name: `${prefix}telegram_polling_last_poll_timestamp_seconds`,
+      help: 'Unix time the seller bot last got an answer to getUpdates (0 = never).',
+      registers,
+    }),
+    telegramPollingLastUpdate: new Gauge({
+      name: `${prefix}telegram_polling_last_update_timestamp_seconds`,
+      help: 'Unix time getUpdates last delivered at least one update to the seller bot (0 = never).',
       registers,
     }),
   };

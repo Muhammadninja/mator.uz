@@ -7,6 +7,18 @@ import {
 } from '@nestjs/common';
 import Redis from 'ioredis';
 import { REDIS_CLIENT, REDIS_STARTUP_TIMEOUT_MS } from './redis.constants';
+import {
+  RedisTimeoutError,
+  trackUnansweredRedisCommand,
+} from './redis-backlog';
+
+export {
+  RedisBacklogError,
+  RedisTimeoutError,
+  RedisUnavailableError,
+  assertRedisBacklogRoom,
+  trackUnansweredRedisCommand,
+} from './redis-backlog';
 
 /**
  * Bound ONE Redis command for a caller that must not wait out an outage.
@@ -22,7 +34,11 @@ import { REDIS_CLIENT, REDIS_STARTUP_TIMEOUT_MS } from './redis.constants';
  *
  * It does NOT cancel the command: ioredis keeps it queued and runs it once the
  * connection returns (exactly as its own `commandTimeout` would). Bound only
- * commands that are safe to complete late.
+ * commands that are safe to complete late. A command given up on is counted
+ * against the process-wide cap in redis-backlog.ts until it settles; callers
+ * check that cap (assertRedisBacklogRoom) before issuing. Rejects with
+ * RedisTimeoutError, so a caller can tell "Redis is not answering" from "Redis
+ * answered with an error".
  */
 export function withRedisTimeout<T>(
   command: Promise<T>,
@@ -31,10 +47,10 @@ export function withRedisTimeout<T>(
 ): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(
-      () => reject(new Error(`Redis ${what} timed out after ${ms}ms`)),
-      ms,
-    );
+    timer = setTimeout(() => {
+      trackUnansweredRedisCommand(command);
+      reject(new RedisTimeoutError(what, ms));
+    }, ms);
   });
   return Promise.race([command, timeout]).finally(() => clearTimeout(timer));
 }

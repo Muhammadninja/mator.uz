@@ -5,6 +5,7 @@ import type { Response } from 'express';
 import { MetricsService } from './metrics.service';
 import { QueueMetricsCollector } from './queue-metrics.collector';
 import { SmsCostCollector } from './sms-cost.collector';
+import { TelegramPollingCollector } from './telegram-polling.collector';
 
 /**
  * The Prometheus scrape endpoint.
@@ -37,6 +38,7 @@ export class MetricsController {
     private readonly metrics: MetricsService,
     private readonly queues: QueueMetricsCollector,
     private readonly smsCost: SmsCostCollector,
+    private readonly telegramPolling: TelegramPollingCollector,
   ) {}
 
   /**
@@ -57,6 +59,8 @@ export class MetricsController {
   @Header('Cache-Control', 'no-store')
   async scrape(@Res() res: Response): Promise<void> {
     await Promise.all([this.queues.collect(), this.smsCost.collect()]);
+    // In-memory, synchronous, never throws (MetricsService.safe).
+    this.telegramPolling.collect();
     const body = await this.metrics.scrape();
     res.setHeader('Content-Type', this.metrics.contentType);
     res.send(body);
