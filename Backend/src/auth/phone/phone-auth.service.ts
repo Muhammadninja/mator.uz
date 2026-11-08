@@ -81,7 +81,12 @@ export class PhoneAuthService {
 
   async verifyOtp(dto: VerifyOtpDto, context: LegalAcceptanceContext = {}) {
     const phoneE164 = dto.phone_e164.trim();
-    await this.otp.verify(dto.request_id, phoneE164, dto.otp_code);
+    await this.otp.verify(
+      dto.request_id,
+      phoneE164,
+      dto.otp_code,
+      OtpPurpose.LOGIN,
+    );
 
     const user = await this.findOrCreateByPhone(phoneE164, dto.legal, context);
     const device = await this.bindDevice(user.id, dto.device);

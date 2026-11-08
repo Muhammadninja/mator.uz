@@ -52,12 +52,14 @@ describe('IntegrationsService.syncInventory', () => {
     [UpdateManyArgs]
   >();
   const update = jest.fn<Promise<unknown>, [unknown]>();
-  const $transaction = jest.fn<Promise<{ count: number }[]>, [unknown[]]>();
+  const $transaction = jest.fn<Promise<unknown>, [unknown]>();
+  const $executeRaw = jest.fn(() => 1);
 
   const prisma = {
     catalogPart: { findMany, updateMany },
     catalogSeller: { update },
     $transaction,
+    $executeRaw,
   } as unknown as PrismaService;
 
   let service: IntegrationsService;
@@ -68,8 +70,10 @@ describe('IntegrationsService.syncInventory', () => {
     // updateMany returns a promise-like descriptor; $transaction resolves them
     // to one {count:1} per queued update, as Prisma does for a matched row.
     updateMany.mockImplementation(() => ({ count: 1 }));
-    $transaction.mockImplementation((ops: unknown[]) =>
-      Promise.resolve(ops as { count: number }[]),
+    $transaction.mockImplementation((ops: unknown) =>
+      typeof ops === 'function'
+        ? (ops as (tx: unknown) => Promise<unknown>)(prisma)
+        : Promise.resolve(ops),
     );
     update.mockResolvedValue({});
   });
@@ -333,16 +337,16 @@ describe('IntegrationsService.syncInventory', () => {
       { id: 'part_1', oemNumbers: ['A1'], gmNumbers: [] },
     ]);
     // The sweep is the only direct (non-transaction) updateMany.
-    updateMany.mockImplementationOnce(() => ({ count: 1 }));
     updateMany.mockResolvedValueOnce({ count: 7 });
 
     const result = await service.syncInventory(dealer, {
       mode: SyncMode.FULL,
+      expectedTotal: 1,
       items: [{ article: 'A1', title: 'X', quantity: 1, price: 1 }],
     });
 
     expect(result.zeroedCount).toBe(7);
-    const sweep = updateMany.mock.calls[1][0];
+    const sweep = updateMany.mock.calls[0][0];
     expect(sweep.where).toMatchObject({
       sellerId: 'dealer_1',
       id: { notIn: ['part_1'] },
@@ -359,6 +363,7 @@ describe('IntegrationsService.syncInventory', () => {
 
     const result = await service.syncInventory(dealer, {
       mode: SyncMode.FULL,
+      expectedTotal: 1,
       items: [{ article: 'TYPO-1', title: 'X', quantity: 5, price: 1 }],
     });
 
@@ -371,16 +376,16 @@ describe('IntegrationsService.syncInventory', () => {
     findMany.mockResolvedValue([
       { id: 'part_1', oemNumbers: ['A1'], gmNumbers: [] },
     ]);
-    updateMany.mockImplementationOnce(() => ({ count: 1 }));
     updateMany.mockResolvedValueOnce({ count: 42 });
 
     const result = await service.syncInventory(dealer, {
       mode: SyncMode.FULL,
+      expectedTotal: 1,
       items: [{ article: 'A1', title: 'X', quantity: 1, price: 1 }],
     });
 
     expect(result.zeroedCount).toBe(42);
-    expect(updateMany.mock.calls[1][0].where).toMatchObject({
+    expect(updateMany.mock.calls[0][0].where).toMatchObject({
       id: { notIn: ['part_1'] },
     });
   });
@@ -449,5 +454,177 @@ describe('IntegrationsService.syncInventory', () => {
 
     expect(result.skippedCount).toBe(120);
     expect(result.skipped).toHaveLength(50);
+  });
+});
+
+describe('FULL sync is one complete, atomic upload (ING-003)', () => {
+  const part = (id: string, oem: string) => ({
+    id,
+    oemNumbers: [oem],
+    gmNumbers: [],
+  });
+  const item = (article: string, quantity = 5) => ({
+    article,
+    title: 'T',
+    quantity,
+    price: 1000,
+  });
+
+  /** One in-memory dealer inventory; a FULL sync runs on a copy until it commits. */
+  function world() {
+    let stock: Record<string, number> = { a: 1, b: 2, c: 3 };
+    let queue: Promise<unknown> = Promise.resolve();
+    const articles: Record<string, string> = {
+      AAA111: 'a',
+      BBB222: 'b',
+      CCC333: 'c',
+    };
+    const tx = (draft: Record<string, number>) => ({
+      $executeRaw: jest.fn((sql: TemplateStringsArray, ...args: unknown[]) => {
+        if (sql.join('').includes('UPDATE catalog_parts')) {
+          const ids = args[0] as string[];
+          const quantities = args[1] as number[];
+          ids.forEach((id, i) => (draft[id] = quantities[i]));
+          return Promise.resolve(ids.length);
+        }
+        return Promise.resolve(1);
+      }),
+      catalogPart: {
+        findMany: jest.fn(() =>
+          Promise.resolve(
+            Object.entries(articles).map(([oem, id]) => part(id, oem)),
+          ),
+        ),
+        updateMany: jest.fn(({ where }: any) => {
+          let count = 0;
+          for (const id of Object.keys(draft)) {
+            if (!where.id.notIn.includes(id) && draft[id] > 0) {
+              draft[id] = 0;
+              count += 1;
+            }
+          }
+          return Promise.resolve({ count });
+        }),
+      },
+    });
+    const prisma = {
+      catalogSeller: { update: jest.fn().mockResolvedValue({}) },
+      $transaction: jest.fn((work: (t: unknown) => Promise<unknown>) => {
+        const run = queue.then(async () => {
+          const draft = { ...stock };
+          const result = await work(tx(draft));
+          stock = draft;
+          return result;
+        });
+        queue = run.catch(() => undefined);
+        return run;
+      }),
+    };
+    return {
+      service: new IntegrationsService(prisma as never),
+      prisma,
+      stock: () => stock,
+    };
+  }
+
+  it('keeps accepting a FULL upload that does not state its size', async () => {
+    const { service, stock } = world();
+    await service.syncInventory(dealer, {
+      mode: SyncMode.FULL,
+      items: [item('AAA111', 7), item('BBB222', 9), item('CCC333', 4)],
+    });
+    expect(stock()).toEqual({ a: 7, b: 9, c: 4 });
+  });
+
+  describe('Driver’s Village', () => {
+    const dv = { ...dealer, id: 'drivers-village' };
+
+    it.each([
+      ['full', SyncMode.FULL],
+      ['partial', SyncMode.PARTIAL],
+      ['the default', undefined],
+    ])('refuses %s mode before reading or writing anything', async (_n, mode) => {
+      const { service, prisma, stock } = world();
+      await expect(
+        service.syncInventory(dv, { mode, items: [item('AAA111', 7)] }),
+      ).rejects.toMatchObject({
+        status: 403,
+        response: { code: 'INVENTORY_SYNC_NOT_AVAILABLE' },
+      });
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+      expect(prisma.catalogSeller.update).not.toHaveBeenCalled();
+      expect(stock()).toEqual({ a: 1, b: 2, c: 3 });
+    });
+
+    it('applies to no other dealer', async () => {
+      const { service } = world();
+      await expect(
+        service.syncInventory(dealer, {
+          mode: SyncMode.FULL,
+          items: [item('AAA111', 7)],
+        }),
+      ).resolves.toMatchObject({ success: true });
+    });
+  });
+
+  it('a page that states the size of the longer export cannot zero the earlier ones', async () => {
+    const { service, prisma, stock } = world();
+    await expect(
+      service.syncInventory(dealer, {
+        mode: SyncMode.FULL,
+        expectedTotal: 3,
+        items: [item('AAA111')],
+      }),
+    ).rejects.toMatchObject({ response: { code: 'FULL_SYNC_INCOMPLETE' } });
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(stock()).toEqual({ a: 1, b: 2, c: 3 });
+  });
+
+  it('a complete upload produces the final inventory and zeroes the rest', async () => {
+    const { service, stock } = world();
+    const result = await service.syncInventory(dealer, {
+      mode: SyncMode.FULL,
+      expectedTotal: 2,
+      items: [item('AAA111', 7), item('BBB222', 9)],
+    });
+    expect(stock()).toEqual({ a: 7, b: 9, c: 0 });
+    expect(result.processedCount).toBe(2);
+    expect(result.zeroedCount).toBe(1);
+  });
+
+  it('commits nothing when the zeroing fails', async () => {
+    const { service, prisma, stock } = world();
+    const original = prisma.$transaction.getMockImplementation()!;
+    prisma.$transaction.mockImplementationOnce((work) =>
+      original(async (t: any) => {
+        t.catalogPart.updateMany.mockRejectedValue(new Error('deadlock'));
+        return work(t);
+      }),
+    );
+    await expect(
+      service.syncInventory(dealer, {
+        mode: SyncMode.FULL,
+        expectedTotal: 1,
+        items: [item('AAA111', 7)],
+      }),
+    ).rejects.toThrow('deadlock');
+    expect(stock()).toEqual({ a: 1, b: 2, c: 3 });
+  });
+
+  it('two FULL syncs leave one complete upload, never a mix', async () => {
+    const { service, stock } = world();
+    await Promise.all([
+      service.syncInventory(dealer, {
+        mode: SyncMode.FULL,
+        expectedTotal: 1,
+        items: [item('AAA111', 7)],
+      }),
+      service.syncInventory(dealer, {
+        mode: SyncMode.FULL,
+        expectedTotal: 1,
+        items: [item('BBB222', 9)],
+      }),
+    ]);
+    expect(stock()).toEqual({ a: 0, b: 9, c: 0 });
   });
 });

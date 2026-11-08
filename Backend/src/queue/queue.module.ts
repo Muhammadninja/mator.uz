@@ -4,6 +4,7 @@ import { BullModule } from '@nestjs/bullmq';
 import { DEFAULT_JOB_OPTIONS, QUEUE_NAMES } from './queue.constants';
 import { buildQueueConnection } from './queue.config';
 import { QueueService } from './queue.service';
+import { OtpJobSecretStore } from './otp-job-secret.store';
 import {
   ImageProcessingProcessor,
   NotificationsProcessor,
@@ -61,6 +62,7 @@ import { ApnsPushProvider } from '../notifications/push/providers/apns.provider'
   ],
   providers: [
     QueueService,
+    OtpJobSecretStore,
     ImageProcessingProcessor,
     SmsProcessor,
     NotificationsProcessor,

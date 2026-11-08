@@ -65,7 +65,13 @@ interface FakeStock {
   priceUzs: string;
   quantity: number;
   unit: string | null;
+  updatedAt?: number;
+  projectionPending?: unknown;
 }
+
+let clock = 0;
+/** Strictly increasing, standing in for the @updatedAt each write stamps. */
+export const writeClock = (): number => ++clock;
 
 export interface FakeState {
   catalogSellers: { id: string; name: string }[];
@@ -174,6 +180,7 @@ export class FakeDb {
             // The column default, as the database applies it (DEFAULT 1).
             quantity: (data.quantity as number | undefined) ?? 1,
             unit: data.unit as string,
+            updatedAt: writeClock(),
           };
           s().stocks.push(row);
           return { id: row.id };
@@ -203,6 +210,7 @@ export class FakeDb {
           // Like an UPDATE: only the columns the write names change.
           Object.assign(st, {
             ...data,
+            updatedAt: writeClock(),
             ...(data.priceUzs === undefined
               ? {}
               : { priceUzs: str(data.priceUzs) }),
@@ -359,6 +367,16 @@ export class FakeDriversVillageStore implements DriversVillageStore {
     return this.opts.schemaReady ?? true;
   }
 
+  async clearProjectionPending(stockIds: number[]) {
+    for (const s of this.db.state.stocks)
+      if (stockIds.includes(s.id)) s.projectionPending = null;
+  }
+
+  async keepProjectionPending(stockId: number, remaining: unknown) {
+    this.db.state.stocks.find((s) => s.id === stockId)!.projectionPending =
+      remaining;
+  }
+
   async findCatalogSeller(id: string) {
     return this.db.state.catalogSellers.find((c) => c.id === id) ?? null;
   }
@@ -407,6 +425,17 @@ export class FakeDriversVillageStore implements DriversVillageStore {
         sourcePartNumber: p.sourcePartNumber ?? null,
         oemNumbers: p.oemNumbers,
         categoryId: part?.categoryId ?? p.categoryId,
+        projectionPending:
+          (s.projectionPending as ExistingPosition['projectionPending']) ?? null,
+        catalogPart: part?.priceUzs !== undefined
+          ? {
+              priceUzs: String(part.priceUzs),
+              stockQty: part.stockQty as number,
+              inStock: part.inStock as boolean,
+              stale: ((s as { updatedAt?: number }).updatedAt ?? 0) >
+                ((part.updatedAt as number | undefined) ?? 0),
+            }
+          : null,
         isUniversal: p.isUniversal,
         models: models.sort(),
         makes: makes.sort(),
@@ -556,6 +585,10 @@ export class FakeProjector {
   ): Promise<string | null> {
     this.levels.push({ stockId, ...changed });
     return this.projectStock(stockId);
+  }
+
+  async repairStockLevels(stockId: number): Promise<boolean> {
+    return (await this.projectStock(stockId)) !== null;
   }
 
   async projectStock(stockId: number): Promise<string | null> {

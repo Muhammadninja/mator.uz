@@ -1,8 +1,10 @@
+import { randomUUID } from 'node:crypto';
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue, type Job, type JobsOptions } from 'bullmq';
 import { QUEUE_NAMES } from './queue.constants';
 import type { SmsLang } from '../sms/otp-message.i18n';
+import { OtpJobSecretStore } from './otp-job-secret.store';
 
 /**
  * Job payload shapes. These are intentionally minimal — this PR is queue
@@ -32,19 +34,30 @@ export interface SmsJobData {
 }
 
 /**
- * OTP delivery job. Carries the CODE and the LANGUAGE instead of a rendered
- * body, so the aggregator-approved template is rendered in exactly one place —
- * `SmsService.sendOtp` — at the moment of sending. Sensitivity is unchanged: a
- * rendered OTP body already contained the code in the payload.
+ * OTP delivery job. Holds a REFERENCE, never the code: BullMQ retains job data
+ * and Bull Board displays it. The worker resolves `ref` through
+ * OtpJobSecretStore, and `SmsService.sendOtp` renders the approved template at
+ * the moment of sending.
  */
 export interface SmsOtpJobData {
   /** E.164 destination number. */
   phone: string;
   otp: {
-    /** Plaintext OTP. Lives only in the job payload — never persisted. */
-    code: string;
+    /** Where the encrypted code waits; see OtpJobSecretStore. */
+    ref: string;
     /** Already normalized by the producer; see `resolveSmsLang`. */
     lang: SmsLang;
+  };
+}
+
+/** What a producer hands over for an OTP. Sealed by the queue, never enqueued. */
+export interface OtpSmsRequest {
+  phone: string;
+  otp: {
+    code: string;
+    lang: SmsLang;
+    /** Epoch ms after which the code cannot be used, so must not be sent. */
+    expiresAt: number;
   };
 }
 
@@ -102,6 +115,7 @@ export class QueueService {
     private readonly smsQueue: Queue<SmsQueuePayload>,
     @InjectQueue(QUEUE_NAMES.NOTIFICATIONS)
     private readonly notificationQueue: Queue<NotificationJobData>,
+    private readonly otpSecrets: OtpJobSecretStore,
   ) {}
 
   /**
@@ -203,13 +217,27 @@ export class QueueService {
    *
    * Idempotency is unchanged and still the caller's job — OtpService passes
    * `opts.jobId` from {@link otpSmsJobId}.
+   *
+   * The code is sealed first and the job holds only its reference, so if sealing
+   * fails no job exists at all. A completed job is removed at once; a failed one
+   * is kept for diagnosis, with nothing in it to recover.
    */
   async enqueueOtpSms(
-    data: SmsOtpJobData,
+    data: OtpSmsRequest,
     opts?: JobsOptions,
   ): Promise<Job<SmsQueuePayload>> {
-    this.logger.debug(`Enqueue otp sms job for ${data.phone}`);
-    return this.smsQueue.add('send', data, opts);
+    const ref = opts?.jobId ?? `sms_otp_${randomUUID()}`;
+    await this.otpSecrets.seal(
+      ref,
+      data.phone,
+      data.otp.code,
+      data.otp.expiresAt,
+    );
+    return this.smsQueue.add(
+      'send',
+      { phone: data.phone, otp: { ref, lang: data.otp.lang } },
+      { removeOnComplete: true, ...opts },
+    );
   }
 
   /**

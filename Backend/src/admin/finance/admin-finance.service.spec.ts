@@ -293,16 +293,20 @@ describe('AdminFinanceService.sellers', () => {
       providerConfirmedAt: null,
     };
     expect(PAYABLE_ORDER).toEqual({
-      statusHistory: { some: { status: OrderStatus.PAID } },
+      OR: TOOK_MONEY.OR,
       status: OrderStatus.DELIVERED,
       payoutHoldAt: null,
       financialRefunds: { none: unconfirmedPaymeRefund },
     });
     expect(BLOCKED_ORDER).toEqual({
-      statusHistory: { some: { status: OrderStatus.PAID } },
-      OR: [
-        { payoutHoldAt: { not: null } },
-        { financialRefunds: { some: unconfirmedPaymeRefund } },
+      AND: [
+        TOOK_MONEY,
+        {
+          OR: [
+            { payoutHoldAt: { not: null } },
+            { financialRefunds: { some: unconfirmedPaymeRefund } },
+          ],
+        },
       ],
     });
     expect(prisma.orderItem.groupBy).toHaveBeenCalledWith(

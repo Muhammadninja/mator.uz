@@ -4,6 +4,12 @@
  *   npm run admin:create -- --email=admin@example.com --name="Jane Doe" --password='…'
  *   npm run admin:create -- --email=ops@example.com --name="Ops" --role=OPERATOR
  *
+ * Each of those is a dry run and writes nothing. Repeat it with `--apply
+ * --confirm=<code>` to do it, and `--allow-database=<host/db>` for any non-local
+ * database. The code covers the account, not the password. Guarded by
+ * src/maintenance/maintenance-guard.ts, because re-running for an existing email
+ * resets that account's password.
+ *
  * There is no public admin registration endpoint by design, so THIS is how the
  * first SUPER_ADMIN comes into existence; afterwards a SUPER_ADMIN creates the
  * rest. Defaults to SUPER_ADMIN precisely because bootstrapping is its main job.
@@ -22,14 +28,14 @@
  * and it is re-activated), so a lost admin password is recoverable. Every
  * existing session of that account is revoked as part of the update.
  */
+import 'dotenv/config';
 import { AdminAuditAction, AdminRole, PrismaClient } from '@prisma/client';
+import { runMaintenance } from '../src/maintenance/maintenance-guard';
 import { randomBytes } from 'crypto';
 import { CLI_ACTOR_LABEL } from '../src/admin/auth/admin-audit.service';
 // Same Argon2id policy as the running app (src/auth/password.util.ts), so a
 // CLI-created account and a UI-created one are hashed identically.
 import { hashPassword } from '../src/auth/password.util';
-
-const prisma = new PrismaClient();
 
 const MIN_PASSWORD_LENGTH = 12;
 
@@ -57,16 +63,14 @@ function isValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
-
-  const email = (args.email ?? process.env.ADMIN_EMAIL ?? '')
+function readAccount(args: Record<string, string>, env: NodeJS.ProcessEnv) {
+  const email = (args.email ?? env.ADMIN_EMAIL ?? '')
     .trim()
     .toLowerCase();
-  const name = (args.name ?? process.env.ADMIN_NAME ?? '').trim();
+  const name = (args.name ?? env.ADMIN_NAME ?? '').trim();
   const roleInput = (
     args.role ??
-    process.env.ADMIN_ROLE ??
+    env.ADMIN_ROLE ??
     AdminRole.SUPER_ADMIN
   )
     .toString()
@@ -84,11 +88,19 @@ async function main() {
       `Invalid role "${roleInput}". Expected one of: ${Object.values(AdminRole).join(', ')}.`,
     );
   }
-  const role = roleInput as AdminRole;
+  return { email, name, role: roleInput as AdminRole };
+}
+
+async function applyAdmin(
+  prisma: PrismaClient,
+  args: Record<string, string>,
+  env: NodeJS.ProcessEnv,
+): Promise<void> {
+  const { email, name, role } = readAccount(args, env);
 
   // Generate when unsupplied, so the operator is never nudged into inventing a
   // weak bootstrap password.
-  const supplied = args.password ?? process.env.ADMIN_PASSWORD;
+  const supplied = args.password ?? env.ADMIN_PASSWORD;
   const generated = !supplied;
   const password = supplied ?? randomBytes(18).toString('base64url');
 
@@ -178,14 +190,46 @@ async function main() {
   }
 }
 
-main()
-  .then(async () => {
-    await prisma.$disconnect();
-  })
-  .catch(async (e: unknown) => {
-    console.error(`\n✖ ${e instanceof Error ? e.message : String(e)}\n`);
-    await prisma.$disconnect();
-    // Non-zero exit so a failed bootstrap cannot be mistaken for success in a
-    // `migrate deploy && admin:create` pipeline.
-    process.exit(1);
+export function runCreateAdmin(
+  prisma: PrismaClient,
+  argv: readonly string[],
+  env: NodeJS.ProcessEnv,
+) {
+  const args = parseArgs([...argv]);
+  return runMaintenance({
+    script: 'admin:create',
+    argv,
+    env,
+    buildPlan: async () => {
+      const { email, name, role } = readAccount(args, env);
+      const existing = await prisma.appAdmin.findUnique({
+        where: { email },
+        select: { id: true },
+      });
+      return {
+        summary: [
+          existing
+            ? `${email} EXISTS: its password is reset and its sessions revoked`
+            : `${email} would be created`,
+        ],
+        items: [{ email, name, role, existing: !!existing }],
+      };
+    },
+    apply: () => applyAdmin(prisma, args, env),
   });
+}
+
+if (require.main === module) {
+  const prisma = new PrismaClient();
+  runCreateAdmin(prisma, process.argv.slice(2), process.env)
+    .then(async () => {
+      await prisma.$disconnect();
+    })
+    .catch(async (e: unknown) => {
+      console.error(`\n✖ ${e instanceof Error ? e.message : String(e)}\n`);
+      await prisma.$disconnect();
+      // Non-zero exit so a failed bootstrap cannot be mistaken for success in a
+      // `migrate deploy && admin:create` pipeline.
+      process.exit(1);
+    });
+}

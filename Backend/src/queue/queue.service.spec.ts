@@ -69,6 +69,7 @@ function buildService() {
     imageQueue as never,
     smsQueue as never,
     notificationQueue as never,
+    { seal: jest.fn().mockResolvedValue(undefined) } as never,
   );
   jest
     .spyOn((service as any).logger, 'debug')
@@ -379,7 +380,7 @@ describe('Queue infrastructure', () => {
   describe('workers (consumers) start and log', () => {
     it('the processors have a callable process() and lifecycle handlers', async () => {
       const procs = [
-        new SmsProcessor({ sendSms: jest.fn() } as never),
+        new SmsProcessor({ sendSms: jest.fn() } as never, {} as never),
         new NotificationsProcessor({ sendToUser: jest.fn() } as never),
       ];
       for (const p of procs) {
@@ -400,7 +401,7 @@ describe('Queue infrastructure', () => {
     });
 
     it('failed handler tolerates an undefined job', () => {
-      const p = new SmsProcessor({ sendSms: jest.fn() } as never);
+      const p = new SmsProcessor({ sendSms: jest.fn() } as never, {} as never);
       jest
         .spyOn((p as any).logger, 'error')
         .mockImplementation(() => undefined);

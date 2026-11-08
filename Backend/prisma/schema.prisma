@@ -645,6 +645,10 @@ model Stock {
   // written into Product.gmNumber.
   sourceSystem StockSourceSystem? @map("source_system")
   sourceCode   String?            @map("source_code") @db.VarChar(64)
+  // Set with a 1C price or quantity write, cleared once the catalog part has it. Holds, per
+  // column, what the part held before, so a later repair can tell a projection that never
+  // ran from a value an administrator set: see drivers-village.planner.ts. NULL otherwise.
+  projectionPending Json?         @map("projection_pending")
   updatedAt    DateTime           @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
   product      Product            @relation(fields: [productId], references: [id], onDelete: Cascade)
   seller       Seller             @relation(fields: [sellerId], references: [id], onDelete: Cascade)
@@ -1742,11 +1746,41 @@ model Order {
   // operator. See AdminFinanceService.
   payoutHoldAt      DateTime?            @map("payout_hold_at") @db.Timestamptz(3)
   payoutHoldReason  String?              @map("payout_hold_reason") @db.VarChar(500)
+  // True on a cash or terminal order placed since offline collection was tracked. Such an
+  // order goes through processing and delivery without PAID, and its money counts as
+  // received once offlineCollection exists. False on every older row, which keeps its
+  // original reading (PAID means received): nothing is backfilled.
+  offlineCollectionRequired Boolean    @default(false) @map("offline_collection_required")
+  offlineCollection OfflineCollection?
 
   @@index([userId])
   @@index([status])
   @@index([createdAt])
   @@map("orders")
+}
+
+// Cash or terminal money actually collected for an order, written once by the operator who
+// records it. The unique order_id is what makes a repeated request unable to count it twice.
+model OfflineCollection {
+  id                String      @id @db.VarChar(64)
+  orderId           String      @unique @map("order_id") @db.VarChar(64)
+  method            PaymentType
+  amountUzs         Decimal     @map("amount_uzs") @db.Decimal(14, 2)
+  // The terminal slip or cash document, when there is one.
+  reference         String?     @db.VarChar(120)
+  // The number of a receipt issued outside Mator, as the operator states it. Optional: a
+  // collection neither needs one nor waits for one, and no fiscal provider is involved.
+  fiscalReference   String?     @map("fiscal_reference") @db.VarChar(120)
+  note              String?     @db.VarChar(500)
+  collectedAt       DateTime    @map("collected_at") @db.Timestamptz(3)
+  // Copied, so the record outlives the administrator's account.
+  collectedByAdminId String     @map("collected_by_admin_id") @db.VarChar(64)
+  collectedByName   String      @map("collected_by_name") @db.VarChar(255)
+  createdAt         DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
+  order             Order       @relation(fields: [orderId], references: [id], onDelete: Restrict)
+
+  @@index([collectedAt])
+  @@map("offline_collections")
 }
 
 // How the money went back to the customer. PROVIDER means through the payment

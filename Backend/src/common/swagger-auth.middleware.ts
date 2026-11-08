@@ -1,6 +1,12 @@
 import { Logger } from '@nestjs/common';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
+import {
+  BasicAuthThrottle,
+  basicAuthClient,
+  denyLockedOut,
+  denyUnavailable,
+} from './basic-auth-throttle';
 
 /**
  * Constant-time credential comparison.
@@ -54,12 +60,46 @@ export function resolveSwaggerCredentials(
 export function createSwaggerAuthMiddleware(
   credentials: SwaggerAuthCredentials,
   logger: Logger,
+  throttle: BasicAuthThrottle,
 ): RequestHandler {
   const deny = (res: Response): void => {
     res.setHeader('WWW-Authenticate', 'Basic realm="API Documentation"');
     // Docs must never be cached by an intermediary.
     res.setHeader('Cache-Control', 'no-store');
     res.status(401).send('Unauthorized');
+  };
+
+  const refuseOrAdmit = async (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+    valid: boolean,
+  ): Promise<void> => {
+    const client = basicAuthClient(req);
+    let wait: number;
+    try {
+      wait = valid
+        ? await throttle.lockedFor(client)
+        : await throttle.recordFailure(client);
+    } catch (err) {
+      logger.error(
+        `Swagger access refused, its failure limit could not be checked: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      denyUnavailable(res);
+      return;
+    }
+    if (wait > 0) {
+      denyLockedOut(res, wait);
+      return;
+    }
+    if (!valid) {
+      logger.warn(
+        `Rejected Swagger docs access attempt from ${req.ip ?? 'unknown'}`,
+      );
+      deny(res);
+      return;
+    }
+    next();
   };
 
   return (req: Request, res: Response, next: NextFunction): void => {
@@ -92,14 +132,6 @@ export function createSwaggerAuthMiddleware(
     // response time doesn't reveal which half was wrong.
     const userOk = safeEqual(user, credentials.user);
     const passwordOk = safeEqual(password, credentials.password);
-    if (!userOk || !passwordOk) {
-      logger.warn(
-        `Rejected Swagger docs access attempt from ${req.ip ?? 'unknown'}`,
-      );
-      deny(res);
-      return;
-    }
-
-    next();
+    void refuseOrAdmit(req, res, next, userOk && passwordOk);
   };
 }

@@ -10,7 +10,7 @@ import { OtpChannel } from '@prisma/client';
 import { OtpService, OtpPurpose } from './otp.service';
 import { FixedWindowRateLimiter } from '../../redis/rate-limiter.service';
 import { RedisKeys } from '../../redis/redis.keys';
-import type { SmsOtpJobData } from '../../queue/queue.service';
+import type { OtpSmsRequest } from '../../queue/queue.service';
 
 /**
  * Minimal in-memory RedisService stand-in. Values are stored JSON-parsed (as the
@@ -58,7 +58,7 @@ function makeRedisMock() {
  */
 type OtpEnqueueMock = jest.Mock<
   Promise<{ id: string }>,
-  [SmsOtpJobData, { jobId: string }]
+  [OtpSmsRequest, { jobId: string }]
 >;
 
 function makeQueueMock() {
@@ -133,9 +133,8 @@ describe('OtpService — AUTH_DEV_MODE', () => {
       expect(queue.enqueueOtpSms).toHaveBeenCalledTimes(1);
       const [data, opts] = queue.enqueueOtpSms.mock.calls[0];
       expect(data.phone).toBe('+998901234567');
-      // The job carries the plaintext code + language (both live only in the job
-      // payload, never on the API result). The approved template is rendered by
-      // SmsService.sendOtp on the worker.
+      // Handed to the queue, which seals it (see otp-job-secret.spec.ts); never on
+      // the API result. The approved template is rendered on the worker.
       expect(data.otp.code).toMatch(/\d{6}/);
       // No lang requested → the uz default.
       expect(data.otp.lang).toBe('uz');

@@ -12,6 +12,8 @@
  * constructed and before a single request is served.
  */
 
+import { OTP_JOB_KEY_ENV, parseOtpJobKey } from '../queue/otp-job-secret.store';
+
 const isProduction = (env: Record<string, unknown>) =>
   env.NODE_ENV === 'production';
 
@@ -32,6 +34,14 @@ export function collectAuthEnvErrors(env: Record<string, unknown>): string[] {
     errors.push(
       'AUTH_DEV_MODE=true is forbidden in production: it returns OTP codes in ' +
         'API responses (dev_otp_code) and skips SMS. Unset it.',
+    );
+  }
+  // The SMS worker cannot read a code without it, and nothing falls back to
+  // putting the code in the job, so a production process must not start without.
+  if (isProduction(env) && !parseOtpJobKey(env[OTP_JOB_KEY_ENV])) {
+    errors.push(
+      `${OTP_JOB_KEY_ENV} must be 32 bytes, as 64 hex characters or base64: ` +
+        'OTP codes queued for SMS are encrypted with it.',
     );
   }
   return errors;

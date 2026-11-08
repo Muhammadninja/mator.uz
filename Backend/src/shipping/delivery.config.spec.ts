@@ -14,6 +14,7 @@ const PROD = {
   PAYME_MERCHANT_ID: 'merchant-1',
   PAYME_MERCHANT_KEY: 'merchant-secret',
   UZMAPS_API_KEY: 'uzmaps-key',
+  OTP_JOB_ENCRYPTION_KEY: 'a'.repeat(64),
 };
 
 const AREA = JSON.stringify({

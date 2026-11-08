@@ -10,6 +10,7 @@ import { OrdersService } from './orders.service';
 import { OrderStatusService } from './order-status.service';
 import { OfflineOrderMonitorService } from './offline-order-monitor.service';
 import { OrdersController } from './orders.controller';
+import { OfflineCollectionService } from './offline-collection.service';
 import { PaymentsService } from './payments.service';
 import { PaymentsController } from './payments.controller';
 import { SettlementService } from './webhooks/settlement.service';
@@ -37,6 +38,7 @@ import { FinanceAlerts } from './finance-alerts';
   ],
   providers: [
     OrdersService,
+    OfflineCollectionService,
     OrderStatusService,
     OfflineOrderMonitorService,
     PaymentsService,

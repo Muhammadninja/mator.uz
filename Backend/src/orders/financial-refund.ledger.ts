@@ -64,6 +64,8 @@ const ORDER_SELECT = {
   totalUzs: true,
   serviceFeeUzs: true,
   deliveryUzs: true,
+  offlineCollectionRequired: true,
+  offlineCollection: { select: { amountUzs: true } },
   items: { select: { sellerId: true, lineTotalUzs: true } },
 } satisfies Prisma.OrderSelect;
 
@@ -77,9 +79,11 @@ const sum = (amounts: Prisma.Decimal.Value[]) =>
  * The arithmetic of the registry. Callers pass their transaction and hold the
  * order's row lock, or two writers could both spend the same remaining amount.
  *
- * What an order took in comes from its settled payments. Without one, an order that
- * ever reached PAID took its total: a cash or terminal order never has a payment
- * row, and neither does an online order confirmed by hand.
+ * What an order took in comes from its settled payments. Without one, a cash or
+ * terminal order that records collection took what was recorded as collected, and
+ * nothing until then, however far the order has got. Any other order that ever reached
+ * PAID took its total: an online order confirmed by hand has no payment row, and
+ * neither has a cash order placed before collection was recorded.
  *
  * A payment the provider reversed has gone back in full, whatever the registry says.
  * Reversals from before the registry have no entry, and without this they would read
@@ -106,8 +110,12 @@ export async function readRefundPosition(
   ]);
 
   let received = sum(payments.map((p) => p.amountUzs));
-  if (received.lte(0) && timesPaid > 0 && order) {
-    received = new Prisma.Decimal(order.totalUzs);
+  if (received.lte(0) && order) {
+    if (order.offlineCollectionRequired) {
+      received = new Prisma.Decimal(order.offlineCollection?.amountUzs ?? 0);
+    } else if (timesPaid > 0) {
+      received = new Prisma.Decimal(order.totalUzs);
+    }
   }
 
   const reversedWithoutEntry = payments

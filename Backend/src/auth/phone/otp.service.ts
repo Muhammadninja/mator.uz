@@ -60,8 +60,30 @@ const HOURLY_WINDOW_S = 60 * 60; // rolling hour for the per-MSISDN ceiling
 export const OtpPurpose = {
   LOGIN: 'login',
   PHONE_CHANGE: 'phone_change',
+  /** Proof of control of the number an account is moving away from. */
+  PHONE_CHANGE_CURRENT: 'phone_change_current',
 } as const;
 export type OtpPurpose = (typeof OtpPurpose)[keyof typeof OtpPurpose];
+
+/** One code to check; see {@link OtpService.verifyAll}. */
+export interface OtpProof {
+  requestId: string;
+  phoneE164: string;
+  code: string;
+  purpose: OtpPurpose;
+}
+
+/**
+ * Where a record and its limits live. The phone number itself, except for a proof of
+ * the current number, which is sent to a number that may be signing in at the same
+ * moment and has its own place: asking for it must neither replace a live login code
+ * nor spend that number's login allowance.
+ */
+function slotOf(phoneE164: string, purpose: string): string {
+  return purpose === OtpPurpose.PHONE_CHANGE_CURRENT
+    ? `${purpose}:${phoneE164}`
+    : phoneE164;
+}
 
 export interface OtpIssued {
   requestId: string;
@@ -130,7 +152,7 @@ export class OtpService {
       );
     }
     if (this.devMode) {
-      this.logger.warn('AUTH_DEV_MODE is ON — OTPs are logged and returned in the API, SMS is skipped. Do NOT enable in production.');
+      this.logger.warn('AUTH_DEV_MODE is ON — OTPs are returned in the API, SMS is skipped. Do NOT enable in production.');
     }
   }
 
@@ -148,11 +170,12 @@ export class OtpService {
    * initial issue and every resend.
    */
   private async persist(record: OtpRecord): Promise<void> {
-    await this.redis.setEx(RedisKeys.otp(record.phoneE164), OTP_KEY_TTL_S, record);
+    const slot = slotOf(record.phoneE164, record.purpose);
+    await this.redis.setEx(RedisKeys.otp(slot), OTP_KEY_TTL_S, record);
     await this.redis.setEx(
       RedisKeys.otpRequest(record.requestId),
       OTP_KEY_TTL_S,
-      record.phoneE164,
+      slot,
     );
   }
 
@@ -163,9 +186,9 @@ export class OtpService {
 
   /** Resolve a request_id to its phone, then load the record for that phone. */
   private async loadByRequestId(requestId: string): Promise<OtpRecord | null> {
-    const phone = await this.redis.get<string>(RedisKeys.otpRequest(requestId));
-    if (!phone) return null;
-    const record = await this.loadByPhone(phone);
+    const slot = await this.redis.get<string>(RedisKeys.otpRequest(requestId));
+    if (!slot) return null;
+    const record = await this.loadByPhone(slot);
     // Guard against a stale pointer outliving a superseded record.
     if (!record || record.requestId !== requestId) return null;
     return record;
@@ -177,9 +200,9 @@ export class OtpService {
    * the limit (`MAX_PER_HOUR`), window (`HOURLY_WINDOW_S`) and 429 error are
    * unchanged; only the counter mechanics moved into shared infrastructure.
    */
-  private async enforceHourlyCeiling(phoneE164: string): Promise<void> {
+  private async enforceHourlyCeiling(slot: string): Promise<void> {
     const { allowed } = await this.rateLimiter.consume(
-      RedisKeys.rateOtpRequest(phoneE164),
+      RedisKeys.rateOtpRequest(slot),
       MAX_PER_HOUR,
       HOURLY_WINDOW_S,
     );
@@ -202,9 +225,9 @@ export class OtpService {
    *
    * `jobId` is keyed on (requestId, sendCount) so a retried request cannot
    * double-send the same code while a genuine resend still delivers.
-   * The job carries the CODE and the LANGUAGE, not a rendered body: the
-   * aggregator-approved template is rendered by `SmsService.sendOtp` on the
-   * worker. The 'otp' template label it passes on is accounting-only — the
+   * The queue seals the code and the job carries only a reference to it (see
+   * OtpJobSecretStore): the aggregator-approved template is rendered by
+   * `SmsService.sendOtp` on the worker. The 'otp' template label it passes on is accounting-only — the
    * rendered text (and therefore the code) is never persisted by SmsService.
    */
   private async deliver(
@@ -213,16 +236,17 @@ export class OtpService {
     requestId: string,
     sendCount: number,
     lang: SmsLang,
+    expiresAt: number,
   ): Promise<void> {
     await this.queue.enqueueOtpSms(
-      { phone: phoneE164, otp: { code, lang } },
+      { phone: phoneE164, otp: { code, lang, expiresAt } },
       { jobId: this.queue.otpSmsJobId(requestId, sendCount) },
     );
   }
 
   /**
    * Route a freshly generated OTP to the user. In dev mode the SMS pipeline is
-   * skipped entirely — the code is logged and returned to the caller so the
+   * skipped entirely — the code is returned to the caller so the
    * frontend can complete auth without a provider. In every other case this
    * enqueues the delivery via {@link deliver}.
    * Returns the plaintext code only in dev mode; `undefined` otherwise.
@@ -237,13 +261,16 @@ export class OtpService {
     requestId: string,
     sendCount: number,
     lang: SmsLang,
+    expiresAt: number,
   ): Promise<string | undefined> {
     if (this.devMode) {
-      this.logger.warn(`[AUTH_DEV_MODE] OTP for ${phoneE164}: ${code} (SMS skipped)`);
+      this.logger.warn(
+        `[AUTH_DEV_MODE] OTP issued for ${maskPhone(phoneE164)} (SMS skipped)`,
+      );
       return code;
     }
     try {
-      await this.deliver(phoneE164, code, requestId, sendCount, lang);
+      await this.deliver(phoneE164, code, requestId, sendCount, lang, expiresAt);
     } catch (err) {
       this.logger.error(
         `Failed to enqueue OTP SMS for ${maskPhone(phoneE164)} (code is still valid; user can resend): ${
@@ -272,7 +299,7 @@ export class OtpService {
     purpose: OtpPurpose = OtpPurpose.LOGIN,
     lang?: string | null,
   ): Promise<OtpIssued> {
-    await this.enforceHourlyCeiling(phoneE164);
+    await this.enforceHourlyCeiling(slotOf(phoneE164, purpose));
 
     const code = this.generateCode();
     const now = Date.now();
@@ -299,6 +326,7 @@ export class OtpService {
       requestId,
       0,
       record.lang,
+      record.expiresAt,
     );
     this.logger.log(`OTP issued ${requestId} for ${maskPhone(phoneE164)}`);
     return {
@@ -337,7 +365,7 @@ export class OtpService {
         HttpStatus.TOO_MANY_REQUESTS,
       );
     }
-    await this.enforceHourlyCeiling(record.phoneE164);
+    await this.enforceHourlyCeiling(slotOf(record.phoneE164, record.purpose));
 
     const code = this.generateCode();
     const now = Date.now();
@@ -364,6 +392,7 @@ export class OtpService {
       // Re-resolved rather than trusted: a record issued by the previous release
       // carries no `lang`, and a resend must not crash on it.
       resolveSmsLang(record.lang),
+      updated.expiresAt,
     );
     return {
       requestId: record.requestId,
@@ -391,6 +420,32 @@ export class OtpService {
     code: string,
     purpose?: OtpPurpose,
   ): Promise<void> {
+    const record = await this.check(requestId, phoneE164, code, purpose);
+    await this.consume(record);
+  }
+
+  /**
+   * Validate several codes as one proof. Every code is checked before any is used,
+   * so a mistake in one does not burn the others. Each consume is atomic, so of any
+   * number of concurrent callers at most one can use all of them.
+   */
+  async verifyAll(proofs: readonly OtpProof[]): Promise<void> {
+    const records: OtpRecord[] = [];
+    for (const p of proofs) {
+      records.push(
+        await this.check(p.requestId, p.phoneE164, p.code, p.purpose),
+      );
+    }
+    for (const record of records) await this.consume(record);
+  }
+
+  /** Throws unless this code is right for this live request; consumes nothing. */
+  private async check(
+    requestId: string,
+    phoneE164: string,
+    code: string,
+    purpose?: OtpPurpose,
+  ): Promise<OtpRecord> {
     const record = await this.loadByRequestId(requestId);
     if (
       !record ||
@@ -410,13 +465,20 @@ export class OtpService {
     if (this.hash(code) !== record.codeHash) {
       throw new UnauthorizedException('Incorrect verification code');
     }
+    return record;
+  }
 
-    // Atomic single-use consume: delete the record keyed on this exact request.
-    // DEL returns the number of keys removed — 1 for the winner, 0 for a
-    // concurrent double-submit that already deleted it — so only the FIRST of
-    // two concurrent verifications succeeds; the loser is rejected. Closes the
-    // read-then-write race where a code could otherwise be redeemed twice.
-    const removed = await this.redis.del(RedisKeys.otp(record.phoneE164));
+  /**
+   * Atomic single-use consume: delete the record keyed on this exact request.
+   * DEL returns the number of keys removed — 1 for the winner, 0 for a
+   * concurrent double-submit that already deleted it — so only the FIRST of
+   * two concurrent verifications succeeds; the loser is rejected. Closes the
+   * read-then-write race where a code could otherwise be redeemed twice.
+   */
+  private async consume(record: OtpRecord): Promise<void> {
+    const removed = await this.redis.del(
+      RedisKeys.otp(slotOf(record.phoneE164, record.purpose)),
+    );
     await this.redis.del(RedisKeys.otpRequest(record.requestId));
     if (removed === 0) {
       throw new BadRequestException('Invalid or already-used verification request');
@@ -442,7 +504,7 @@ export class OtpService {
       );
     }
     const perPhone = await this.consumeLimit(
-      RedisKeys.rateOtpVerify(record.phoneE164),
+      RedisKeys.rateOtpVerify(slotOf(record.phoneE164, record.purpose)),
       MAX_VERIFY_PER_HOUR,
       HOURLY_WINDOW_S,
     );

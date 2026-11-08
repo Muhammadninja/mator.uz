@@ -243,7 +243,7 @@ export class UserController {
   @Throttle({ default: { limit: 10, ttl: 60 * 1000 } })
   @ApiOperation({
     summary:
-      'Confirm the OTP and move the account to the new phone number. Old sessions are revoked and a FRESH token pair is returned (seamless, no re-login).',
+      'Confirm the OTPs sent to the new and to the current number (`otp`, `current_phone_otp`) and move the account to the new phone number. Old sessions are revoked and a FRESH token pair is returned (seamless, no re-login).',
   })
   @ApiOkResponse({
     description:
@@ -254,7 +254,12 @@ export class UserController {
     @Request() req: { user: { id: string } },
     @Body() dto: ConfirmPhoneChangeDto,
   ) {
-    return this.phoneChange.confirm(req.user.id, dto.phone, dto.otp);
+    return this.phoneChange.confirm(
+      req.user.id,
+      dto.phone,
+      dto.otp,
+      dto.current_phone_otp,
+    );
   }
 
   // Notification preferences live in the Notifications domain; expose them here

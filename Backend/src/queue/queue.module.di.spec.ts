@@ -12,6 +12,7 @@ import { Test } from '@nestjs/testing';
 import { getQueueToken } from '@nestjs/bullmq';
 import { SmsProcessor, NotificationsProcessor } from './queue.processors';
 import { QUEUE_NAMES } from './queue.constants';
+import { OtpJobSecretStore } from './otp-job-secret.store';
 import { SmsService } from '../sms/sms.service';
 import { PushDispatchService } from '../notifications/push/push-dispatch.service';
 
@@ -34,6 +35,7 @@ async function buildWorkerSlice() {
       SmsProcessor,
       NotificationsProcessor,
       { provide: SmsService, useValue: { sendSms: jest.fn() } },
+      { provide: OtpJobSecretStore, useValue: { open: jest.fn() } },
       { provide: PushDispatchService, useValue: { sendToUser: jest.fn() } },
     ],
   }).compile();

@@ -284,6 +284,42 @@ export class CatalogProjectionService {
   }
 
   /**
+   * Apply a pending 1C price or quantity, only while the part still holds what it held
+   * before: one conditional UPDATE, so an operator's edit at this very moment wins.
+   *
+   * @returns false when the part no longer holds that, and nothing was written.
+   */
+  async repairStockLevels(
+    stockId: number,
+    expected: {
+      price?: string;
+      quantity?: { stockQty: number; inStock: boolean };
+    },
+  ): Promise<boolean> {
+    const stock = await this.prisma.stock.findUnique({
+      where: { id: stockId },
+      select: { priceUzs: true, quantity: true },
+    });
+    if (!stock) return false;
+    const { count } = await this.prisma.catalogPart.updateMany({
+      where: {
+        id: CatalogProjectionService.catalogPartId(stockId),
+        ...(expected.price !== undefined
+          ? { priceUzs: new Prisma.Decimal(expected.price) }
+          : {}),
+        ...(expected.quantity ?? {}),
+      },
+      data: {
+        ...(expected.price !== undefined ? { priceUzs: stock.priceUzs } : {}),
+        ...(expected.quantity
+          ? { stockQty: stock.quantity, inStock: stock.quantity > 0 }
+          : {}),
+      },
+    });
+    return count === 1;
+  }
+
+  /**
    * After the classification import changed a product: project its
    * classification and fitment onto its EXISTING catalog part, and nothing
    * else (price, stock, title, images and the admin-owned columns stay).

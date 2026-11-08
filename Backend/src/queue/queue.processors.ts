@@ -1,8 +1,13 @@
 import { Logger, Optional } from '@nestjs/common';
 import { OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq';
-import { type Job } from 'bullmq';
+import { UnrecoverableError, type Job } from 'bullmq';
 import { QUEUE_NAMES, resolveSmsWorkerConcurrency } from './queue.constants';
-import type { NotificationJobData, SmsQueuePayload } from './queue.service';
+import type {
+  NotificationJobData,
+  SmsOtpJobData,
+  SmsQueuePayload,
+} from './queue.service';
+import { OtpJobSecretError, OtpJobSecretStore } from './otp-job-secret.store';
 import { isSmsOtpJob } from './queue.service';
 import { SmsService } from '../sms/sms.service';
 import { PushDispatchService } from '../notifications/push/push-dispatch.service';
@@ -61,6 +66,7 @@ export class SmsProcessor extends WorkerHost {
 
   constructor(
     private readonly sms: SmsService,
+    private readonly otpSecrets: OtpJobSecretStore,
     @Optional() private readonly metrics?: MetricsService,
   ) {
     super();
@@ -71,13 +77,45 @@ export class SmsProcessor extends WorkerHost {
     this.logger.log(`Sending sms job ${job.id} to ${maskPhone(data.phone)}`);
     // Throwing here is what triggers BullMQ's retry/backoff — do not swallow.
     if (isSmsOtpJob(data)) {
-      // OTP jobs carry the code + language; SmsService renders the approved
-      // template. Jobs enqueued before this payload existed have no `otp` key
-      // and still take the rendered-text branch below.
-      await this.sms.sendOtp(data.phone, data.otp.code, data.otp.lang);
+      await this.deliverOtp(job.id, data);
       return;
     }
     await this.sms.sendSms(data.phone, data.message, data.template ?? null);
+  }
+
+  /**
+   * Resolve the job's reference and send. A code that has expired is simply not
+   * sent: it could not be used. The entry is dropped only after the provider took
+   * the message, so a failed send retries with the same code while it is valid.
+   *
+   * A job from before references existed has none and is dropped: the code may not
+   * be read from a job any more, and the user can ask for another one.
+   */
+  private async deliverOtp(
+    jobId: string | undefined,
+    data: SmsOtpJobData,
+  ): Promise<void> {
+    const { ref, lang } = data.otp;
+    if (!ref) {
+      this.logger.warn(`Sms job ${jobId}: OTP job without a reference, dropped`);
+      return;
+    }
+    let code: string | null;
+    try {
+      code = await this.otpSecrets.open(ref, data.phone);
+    } catch (err) {
+      // Retrying cannot repair a wrong key or a corrupt entry.
+      if (err instanceof OtpJobSecretError) {
+        throw new UnrecoverableError(err.message);
+      }
+      throw err;
+    }
+    if (code === null) {
+      this.logger.warn(`Sms job ${jobId}: OTP expired before sending, skipped`);
+      return;
+    }
+    await this.sms.sendOtp(data.phone, code, lang);
+    await this.otpSecrets.discard(ref);
   }
 
   @OnWorkerEvent('completed')

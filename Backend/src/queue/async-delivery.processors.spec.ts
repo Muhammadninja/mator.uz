@@ -59,7 +59,7 @@ const notifJob: NotificationJobData = {
 describe('SmsProcessor — the only caller of the SMS provider', () => {
   it('sends through SmsService with the job payload', async () => {
     const sms = { sendSms: jest.fn().mockResolvedValue(undefined) };
-    const p = new SmsProcessor(sms as never);
+    const p = new SmsProcessor(sms as never, {} as never);
     muteLogger(p);
 
     await p.process(makeJob(smsJob));
@@ -77,12 +77,16 @@ describe('SmsProcessor — the only caller of the SMS provider', () => {
       sendSms: jest.fn().mockResolvedValue(undefined),
       sendOtp: jest.fn().mockResolvedValue(undefined),
     };
-    const p = new SmsProcessor(sms as never);
+    const secrets = {
+      open: jest.fn().mockResolvedValue('123456'),
+      discard: jest.fn().mockResolvedValue(undefined),
+    };
+    const p = new SmsProcessor(sms as never, secrets as never);
     muteLogger(p);
 
     const otpJob: SmsOtpJobData = {
       phone: '+998901234567',
-      otp: { code: '123456', lang: 'ru' },
+      otp: { ref: 'sms_otp_x_0', lang: 'ru' },
     };
     await p.process(makeJob(otpJob));
 
@@ -98,7 +102,7 @@ describe('SmsProcessor — the only caller of the SMS provider', () => {
       sendSms: jest.fn().mockResolvedValue(undefined),
       sendOtp: jest.fn().mockResolvedValue(undefined),
     };
-    const p = new SmsProcessor(sms as never);
+    const p = new SmsProcessor(sms as never, {} as never);
     muteLogger(p);
 
     await p.process(makeJob(smsJob));
@@ -109,7 +113,7 @@ describe('SmsProcessor — the only caller of the SMS provider', () => {
 
   it('passes a null template when the job carries none', async () => {
     const sms = { sendSms: jest.fn().mockResolvedValue(undefined) };
-    const p = new SmsProcessor(sms as never);
+    const p = new SmsProcessor(sms as never, {} as never);
     muteLogger(p);
 
     await p.process(makeJob({ phone: '+998901112233', message: 'hi' }));
@@ -121,7 +125,7 @@ describe('SmsProcessor — the only caller of the SMS provider', () => {
     const sms = {
       sendSms: jest.fn().mockRejectedValue(new Error('gateway 500')),
     };
-    const p = new SmsProcessor(sms as never);
+    const p = new SmsProcessor(sms as never, {} as never);
     muteLogger(p);
 
     // Swallowing here would silently drop the SMS and mark the job complete.
@@ -130,7 +134,7 @@ describe('SmsProcessor — the only caller of the SMS provider', () => {
 
   it('is safe to retry: re-running the job just re-sends, touching no state', async () => {
     const sms = { sendSms: jest.fn().mockResolvedValue(undefined) };
-    const p = new SmsProcessor(sms as never);
+    const p = new SmsProcessor(sms as never, {} as never);
     muteLogger(p);
     const job = makeJob(smsJob, { attemptsMade: 1 });
 
@@ -145,7 +149,7 @@ describe('SmsProcessor — the only caller of the SMS provider', () => {
 
   describe('failure handling', () => {
     it('warns (not errors) while retries remain', () => {
-      const p = new SmsProcessor({ sendSms: jest.fn() } as never);
+      const p = new SmsProcessor({ sendSms: jest.fn() } as never, {} as never);
       muteLogger(p);
       const warn = jest.spyOn((p as any).logger, 'warn');
       const error = jest.spyOn((p as any).logger, 'error');
@@ -157,7 +161,7 @@ describe('SmsProcessor — the only caller of the SMS provider', () => {
     });
 
     it('errors once retries are exhausted', () => {
-      const p = new SmsProcessor({ sendSms: jest.fn() } as never);
+      const p = new SmsProcessor({ sendSms: jest.fn() } as never, {} as never);
       muteLogger(p);
       const error = jest.spyOn((p as any).logger, 'error');
 
@@ -167,7 +171,7 @@ describe('SmsProcessor — the only caller of the SMS provider', () => {
     });
 
     it('never throws on an undefined job (a throwing handler kills the worker)', () => {
-      const p = new SmsProcessor({ sendSms: jest.fn() } as never);
+      const p = new SmsProcessor({ sendSms: jest.fn() } as never, {} as never);
       muteLogger(p);
 
       expect(() => p.onFailed(undefined, new Error('boom'))).not.toThrow();

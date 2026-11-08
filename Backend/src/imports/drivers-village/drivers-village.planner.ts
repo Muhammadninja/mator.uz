@@ -10,6 +10,9 @@ import { PRICE_JUMP_REVIEW_RATIO } from './drivers-village.constants';
 import type {
   DuplicateCode,
   ExistingPosition,
+  ExpectedLevels,
+  ProjectionPending,
+  ProjectionRepair,
   ImportIssue,
   IssueSeverity,
   ParsedRow,
@@ -349,6 +352,7 @@ export function planStockSync(
     ...(price ? ['price'] : []),
     ...(quantity ? ['quantity'] : []),
   ];
+  const pending = pendingAfterWrite(e, price, quantity);
   return {
     changes,
     write: changes.length
@@ -358,8 +362,108 @@ export function planStockSync(
           stockId: e.stockId,
           priceUzs: price ? row.priceUzs : null,
           quantity: quantity ? row.quantity : null,
+          ...(pending ? { pending } : {}),
         }
       : null,
+  };
+}
+
+/**
+ * What the marker holds once this write commits: each column being written, against
+ * what the part holds now, plus whatever else was already pending.
+ */
+function pendingAfterWrite(
+  e: ExistingPosition,
+  price: boolean,
+  quantity: boolean,
+): ProjectionPending | null {
+  const part = e.catalogPart;
+  if (!part || (!price && !quantity)) return null;
+  return {
+    ...(e.projectionPending ?? {}),
+    ...(price ? { price: { base: part.priceUzs } } : {}),
+    ...(quantity
+      ? { quantity: { baseQty: part.stockQty, baseInStock: part.inStock } }
+      : {}),
+  };
+}
+
+/**
+ * Decide, column by column, what to do about a projection still pending. A column the
+ * file writes in this run is left out: that write decides it, as any file change does.
+ *
+ *   part already holds the value   → resolved, nothing to write;
+ *   part still holds the old value → nobody touched it, so repair it;
+ *   anything else                  → an administrator changed it: their value stands,
+ *                                    the conflict is reported, and it stays pending.
+ */
+export function planProjectionRepair(
+  row: ParsedRow,
+  e: ExistingPosition,
+  written: { price: boolean; quantity: boolean },
+): ProjectionRepair | null {
+  const pending = e.projectionPending;
+  const part = e.catalogPart;
+  if (!pending || !part) return null;
+
+  const expected: ExpectedLevels = {};
+  const remaining: ProjectionPending = {};
+  const conflicts: ProjectionRepair['conflicts'] = [];
+
+  if (pending.price && !written.price) {
+    const now = new Prisma.Decimal(part.priceUzs);
+    if (!now.eq(new Prisma.Decimal(row.priceUzs))) {
+      if (now.eq(new Prisma.Decimal(pending.price.base))) {
+        expected.price = part.priceUzs;
+      } else {
+        remaining.price = pending.price;
+        conflicts.push('price');
+      }
+    }
+  }
+  if (pending.quantity && !written.quantity) {
+    const quantity = row.quantity ?? e.quantity;
+    if (part.stockQty !== quantity || part.inStock !== quantity > 0) {
+      if (
+        part.stockQty === pending.quantity.baseQty &&
+        part.inStock === pending.quantity.baseInStock
+      ) {
+        expected.quantity = { stockQty: part.stockQty, inStock: part.inStock };
+      } else {
+        remaining.quantity = pending.quantity;
+        conflicts.push('quantity');
+      }
+    }
+  }
+  return {
+    expected: Object.keys(expected).length ? expected : null,
+    remaining: Object.keys(remaining).length ? remaining : null,
+    conflicts,
+  };
+}
+
+/**
+ * Where a stale catalog part disagrees with what this row states. A batch commits
+ * Stock first and projects afterwards, so a failed or interrupted projection leaves
+ * Stock equal to the file and buyers on the old values: comparing Stock alone would
+ * call that row unchanged for ever. Only price and availability are compared, and a
+ * row stating no quantity says nothing about it.
+ */
+export function projectionDrift(
+  row: ParsedRow,
+  e: ExistingPosition,
+): { price: boolean; quantity: boolean } {
+  const part = e.catalogPart;
+  if (!part?.stale || e.projectionPending) {
+    return { price: false, quantity: false };
+  }
+  return {
+    price: !new Prisma.Decimal(row.priceUzs).eq(
+      new Prisma.Decimal(part.priceUzs),
+    ),
+    quantity:
+      row.quantity !== null &&
+      (part.stockQty !== row.quantity || part.inStock !== row.quantity > 0),
   };
 }
 

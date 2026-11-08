@@ -103,6 +103,8 @@ export class AdminFinanceChecksService {
           select: { id: true },
           take: 1,
         },
+        offlineCollectionRequired: true,
+        offlineCollection: { select: { id: true } },
         payments: {
           select: {
             id: true,
@@ -395,6 +397,8 @@ function payoutBlockers(order: {
   status: OrderStatus;
   payoutHoldAt: Date | null;
   statusHistory: unknown[];
+  offlineCollectionRequired?: boolean;
+  offlineCollection?: unknown;
   financialRefunds: {
     method: RefundMethod;
     providerConfirmedAt: Date | null;
@@ -402,7 +406,10 @@ function payoutBlockers(order: {
   }[];
 }): PayoutBlocker[] {
   const blockers: PayoutBlocker[] = [];
-  if (order.statusHistory.length === 0) blockers.push('no_money_taken');
+  const tookMoney = order.offlineCollectionRequired
+    ? !!order.offlineCollection
+    : order.statusHistory.length > 0;
+  if (!tookMoney) blockers.push('no_money_taken');
   if (order.status !== OrderStatus.DELIVERED) blockers.push('not_delivered');
   if (order.payoutHoldAt) blockers.push('payout_hold');
   if (

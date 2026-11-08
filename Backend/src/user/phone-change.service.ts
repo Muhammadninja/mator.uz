@@ -1,24 +1,50 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
+  GoneException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { OtpChannel, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { OtpService, OtpPurpose } from '../auth/phone/otp.service';
+import { OtpService, OtpPurpose, type OtpProof } from '../auth/phone/otp.service';
 import { TokenService } from '../auth/tokens/token.service';
 import { presentMe } from './user.presenter';
+import { QueueService } from '../queue/queue.service';
+import { RedisService } from '../redis/redis.service';
+import { RedisKeys } from '../redis/redis.keys';
+import { maskPhone } from '../common/pii.util';
+
+/** A phone change is valid for as long as the codes that authorize it. */
+const OPERATION_TTL_S = 5 * 60;
+/** Kept a little longer, so a late confirm hears "expired" rather than "unknown". */
+const OPERATION_KEY_TTL_S = OPERATION_TTL_S + 60;
+
+const PHONE_CHANGED_NOTICE =
+  "Mator: hisobingiz telefon raqami o'zgartirildi. Agar bu siz bo'lmasangiz, darhol qo'llab-quvvatlash xizmatiga murojaat qiling.";
+
+/** The one phone change in progress for an account. A new request replaces it. */
+interface PendingPhoneChange {
+  newPhone: string;
+  newRequestId: string;
+  /** Null when the account has no number to prove. */
+  currentPhone: string | null;
+  currentRequestId: string | null;
+  expiresAt: number;
+}
 
 /**
  * Change-phone flow for an authenticated user, split into request + confirm:
  *
  *   1. request(userId, phone) — validates/normalizes the target number, rejects
  *      a no-op (same as current) or a number owned by someone else, then issues
- *      a `phone_change`-purpose OTP through the shared {@link OtpService}
- *      (same rate limits + delivery as sign-in).
- *   2. confirm(userId, phone, otp) — verifies that OTP, then does the whole
- *      state change in ONE transaction that opens by taking the account's row
+ *      one OTP to the new number and one to the number on the account, and
+ *      records the pair as this account's pending change. An access token alone
+ *      therefore cannot move an account: the current SIM has to agree.
+ *   2. confirm(userId, phone, otp, currentPhoneOtp) — verifies both codes against
+ *      that pending pair, then does the whole state change in ONE transaction that opens by taking the account's row
  *      lock: re-validate under the lock, move every phone-related field, and
  *      revoke all existing sessions — refresh tokens dropped AND the session
  *      version bumped, so live access tokens die too — meaning the old
@@ -33,10 +59,14 @@ import { presentMe } from './user.presenter';
  */
 @Injectable()
 export class PhoneChangeService {
+  private readonly logger = new Logger(PhoneChangeService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly otp: OtpService,
     private readonly tokens: TokenService,
+    private readonly redis: RedisService,
+    private readonly queue: QueueService,
   ) {}
 
   /**
@@ -67,14 +97,38 @@ export class PhoneChangeService {
 
     await this.assertAvailable(phoneE164, userId);
 
+    // Always the number on the account, never one the client names.
+    const currentPhone = user.phoneE164;
     const issued = await this.otp.request(
       phoneE164,
       OtpChannel.SMS,
       OtpPurpose.PHONE_CHANGE,
     );
+    const issuedCurrent = currentPhone
+      ? await this.otp.request(
+          currentPhone,
+          OtpChannel.SMS,
+          OtpPurpose.PHONE_CHANGE_CURRENT,
+        )
+      : null;
+
+    const pending: PendingPhoneChange = {
+      newPhone: phoneE164,
+      newRequestId: issued.requestId,
+      currentPhone,
+      currentRequestId: issuedCurrent?.requestId ?? null,
+      expiresAt: Date.now() + OPERATION_TTL_S * 1000,
+    };
+    await this.redis.setEx(
+      RedisKeys.phoneChange(userId),
+      OPERATION_KEY_TTL_S,
+      pending,
+    );
 
     return {
       phone: phoneE164,
+      current_phone_otp_required: !!currentPhone,
+      ...(currentPhone ? { current_phone_masked: maskPhone(currentPhone) } : {}),
       expires_at: issued.expiresAt.toISOString(),
       resend_after_seconds: issued.resendAfterSeconds,
       otp_length: issued.otpLength,
@@ -82,11 +136,19 @@ export class PhoneChangeService {
       // AUTH_DEV_MODE only: present so the client can auto-fill without an SMS
       // provider. Never set in production. Mirrors the sign-in OTP contract.
       ...(issued.devOtpCode ? { dev_otp_code: issued.devOtpCode } : {}),
+      ...(issuedCurrent?.devOtpCode
+        ? { dev_current_phone_otp_code: issuedCurrent.devOtpCode }
+        : {}),
     };
   }
 
-  /** Step 2 — verify the OTP and move the account to the new number. */
-  async confirm(userId: string, rawPhone: string, otp: string) {
+  /** Step 2 — verify both OTPs and move the account to the new number. */
+  async confirm(
+    userId: string,
+    rawPhone: string,
+    otp: string,
+    currentPhoneOtp?: string,
+  ) {
     const phoneE164 = this.normalize(rawPhone);
 
     const user = await this.prisma.appUser.findUnique({
@@ -100,13 +162,7 @@ export class PhoneChangeService {
       );
     }
 
-    // Verifies the newest active phone_change OTP for this number, applying
-    // expiry/attempt/single-use rules; throws on any failure.
-    await this.otp.verifyLatestForPhone(
-      phoneE164,
-      otp,
-      OtpPurpose.PHONE_CHANGE,
-    );
+    await this.verifyProofs(user.phoneE164, userId, phoneE164, otp, currentPhoneOtp);
 
     // The number move and the session revocation commit together or not at all:
     // a failure between them would leave the account on the new number with the
@@ -163,6 +219,7 @@ export class PhoneChangeService {
     // Post-commit: only now is the new version visible to other connections, so
     // a socket dropped here cannot immediately reconnect against stale state.
     this.tokens.notifySessionsRevoked(userId);
+    await this.notifyPreviousPhone(user.phoneE164);
 
     // Issue a fresh pair for the SAME user so the client swaps tokens
     // transparently — the phone change is seamless, with no forced re-login.
@@ -187,6 +244,85 @@ export class PhoneChangeService {
         token_type: session.tokenType,
       },
     };
+  }
+
+  /**
+   * Both codes must belong to this account's one pending change: the same target,
+   * the same current number, not expired, and not replaced by a later request. Each
+   * is checked before either is used, and the pending change is claimed last, so a
+   * request that fails here leaves the buyer free to correct a mistyped code.
+   */
+  private async verifyProofs(
+    accountPhone: string | null,
+    userId: string,
+    newPhone: string,
+    otp: string,
+    currentPhoneOtp?: string,
+  ): Promise<void> {
+    const key = RedisKeys.phoneChange(userId);
+    const pending = await this.redis.get<PendingPhoneChange>(key);
+    if (!pending || pending.newPhone !== newPhone) {
+      throw new BadRequestException({
+        code: 'PHONE_CHANGE_NOT_REQUESTED',
+        message: 'No phone change was requested for this number.',
+      });
+    }
+    if (pending.expiresAt <= Date.now()) {
+      throw new GoneException({
+        code: 'PHONE_CHANGE_EXPIRED',
+        message: 'This phone change has expired. Please start over.',
+      });
+    }
+    // The account moved since the codes were sent.
+    if (pending.currentPhone !== accountPhone) {
+      throw new ConflictException(
+        'The account phone number changed while this request was in flight. Please start over.',
+      );
+    }
+
+    const proofs: OtpProof[] = [
+      {
+        requestId: pending.newRequestId,
+        phoneE164: newPhone,
+        code: otp,
+        purpose: OtpPurpose.PHONE_CHANGE,
+      },
+    ];
+    if (accountPhone) {
+      if (!currentPhoneOtp || !pending.currentRequestId) {
+        throw new ForbiddenException({
+          code: 'CURRENT_PHONE_PROOF_REQUIRED',
+          message: 'Enter the code sent to your current phone number.',
+        });
+      }
+      proofs.push({
+        requestId: pending.currentRequestId,
+        phoneE164: accountPhone,
+        code: currentPhoneOtp,
+        purpose: OtpPurpose.PHONE_CHANGE_CURRENT,
+      });
+    }
+    await this.otp.verifyAll(proofs);
+    await this.redis.del(key);
+  }
+
+  /**
+   * Tell the number the account just left. Best effort: the change has committed, and
+   * this runs for a legitimate move as often as for a hostile one.
+   */
+  private async notifyPreviousPhone(phone: string | null): Promise<void> {
+    if (!phone) return;
+    try {
+      await this.queue.enqueueSms({
+        phone,
+        message: PHONE_CHANGED_NOTICE,
+        template: 'phone_changed',
+      });
+    } catch (err) {
+      this.logger.error(
+        `Could not queue the phone-change notice for ${maskPhone(phone)}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /**

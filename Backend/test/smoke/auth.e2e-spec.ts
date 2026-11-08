@@ -419,13 +419,13 @@ describe('Auth smoke', () => {
         expiresAt: new Date(Date.now() + 60_000),
         user: buildAppUser({ id: 'usr_v', tokenVersion: 2 }),
       });
-      prisma.refreshToken.update.mockResolvedValue({});
+      prisma.refreshToken.updateMany.mockResolvedValue({ count: 1 });
 
       const rotated = await tokens.rotate('rt_valid');
       expect(rotated.accessToken.split('.')).toHaveLength(3);
       expect(rotated.refreshToken).toMatch(/^rt_/);
       // Consumed (not deleted), so a later replay is still detectable as reuse.
-      expect(prisma.refreshToken.update).toHaveBeenCalledWith(
+      expect(prisma.refreshToken.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({ data: { consumedAt: expect.any(Date) } }),
       );
       // The replacement row carries the account's current version.
@@ -629,8 +629,24 @@ describe('Auth smoke', () => {
         tokenVersion: 0,
       });
 
-      const otp = { verifyLatestForPhone: jest.fn().mockResolvedValue(undefined) };
-      const phoneChange = new PhoneChangeService(prisma, otp as any, tokens);
+      const otp = { verifyAll: jest.fn().mockResolvedValue(undefined) };
+      const redis = {
+        get: jest.fn().mockResolvedValue({
+          newPhone: '+998907778899',
+          newRequestId: 'otp_new',
+          currentPhone: '+998901112233',
+          currentRequestId: 'otp_current',
+          expiresAt: Date.now() + 60_000,
+        }),
+        del: jest.fn().mockResolvedValue(1),
+      };
+      const phoneChange = new PhoneChangeService(
+        prisma,
+        otp as any,
+        tokens,
+        redis as any,
+        { enqueueSms: jest.fn().mockResolvedValue({}) } as any,
+      );
       const before = buildAppUser({ id: 'usr_v', phoneE164: '+998901112233' });
       prisma.appUser.findUnique
         .mockResolvedValueOnce(before) // caller, before the transaction
@@ -643,7 +659,12 @@ describe('Auth smoke', () => {
         .mockResolvedValueOnce({ tokenVersion: 1 }); // incrementTokenVersion
       prisma.refreshToken.deleteMany.mockResolvedValue({ count: 1 });
 
-      const res = await phoneChange.confirm('usr_v', '+998907778899', '123456');
+      const res = await phoneChange.confirm(
+        'usr_v',
+        '+998907778899',
+        '123456',
+        '654321',
+      );
 
       // The account is now at version 1 — that is what every later request reads.
       prisma.appUser.findUnique.mockResolvedValue(

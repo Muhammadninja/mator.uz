@@ -64,7 +64,9 @@ describe('Orders smoke', () => {
         }),
       }),
     );
-    expect(prisma.cartItem.deleteMany).toHaveBeenCalledWith({ where: { cartId: 'cart_1' } });
+    expect(prisma.cartItem.deleteMany).toHaveBeenCalledWith({
+      where: { cartId: 'cart_1', id: { in: expect.any(Array) } },
+    });
     expect(res.order_id).toBe('ord_1');
     expect(res.status).toBe('pending_payment');
     expect(res.service_fee_uzs).toBe(10000);

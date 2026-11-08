@@ -198,8 +198,8 @@ lives in `src/common/app-lang.util.ts` (`AppLang`, `toAppLang`/`toBotLanguage`,
 | Command | Does |
 |---|---|
 | `npm run seed:categories` | **dry-run** — the 52 subcategories against the tree; `-- --apply` creates what is missing, `-- --apply --overwrite` also resets existing rows |
-| `npm run seed:category-titles` | backfill `name_ru`/`name_uz`/`name_en` from the shared translation table (roots, buckets + subs) |
-| `npm run fix:category-slugs` | diagnose + repair root slugs to canonical unique values |
+| `npm run seed:category-titles` | backfill `name_ru`/`name_uz`/`name_en` from the shared translation table (roots, buckets + subs). Dry run by default; see DEPLOYMENT.md |
+| `npm run fix:category-slugs` | diagnose + repair root slugs to canonical unique values. Dry run by default; see DEPLOYMENT.md |
 | `npm run restore:buyer-buckets` | **dry-run** — the state of the 12 home-grid buckets; `-- --apply` reactivates/recreates them, ordered by importance |
 | `npm run reclassify:subcategories` | **dry-run** — re-file existing parts onto subcategories |
 | `npm run reclassify:subcategories -- --apply` | persist the reclassification |
