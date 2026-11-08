@@ -164,6 +164,16 @@ export interface BotStrings {
   'dv.previewNote': string;
   'btn.dvConfirm': string;
   'btn.dvCancel': string;
+  /** Start the costly processing of an album, after the position is confirmed. */
+  'btn.dvProcess': string;
+  /** `{code}`, `{title}`, `{count}`, `{current}` — asked before any processing. */
+  'dv.confirmStart': string;
+  /** The start button outlived its album, or was already used. */
+  'dv.confirmExpired': string;
+  /** Too many albums or code look-ups from this sender. */
+  'dv.rateLimited': string;
+  /** The limits cannot be checked right now, so nothing was started. */
+  'dv.unavailable': string;
   /** Confirmed: the position's gallery now shows the new photos. */
   'dv.photosUpdated': string;
   /** Cancelled: the position's photos are unchanged. */

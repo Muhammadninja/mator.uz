@@ -39,6 +39,36 @@ const PASSTHROUGH = new Set(['then', 'catch', 'finally', 'constructor', 'prototy
 
 export type PrismaMock = any;
 
+/**
+ * Make a test's price sources agree with the cart it set up: nothing has moved, so
+ * order creation proceeds. Services and offers follow this way by default; a part
+ * row a test builds states its own priceUzs (see partPriceFromCart).
+ */
+export function priceSourcesFollowCart(prisma: PrismaMock): void {
+  const priced = (field: 'serviceId' | 'offerId', column: string) =>
+    async ({ where }: { where: { id: { in: string[] } } }) => {
+      const cart = await prisma.cart.findUnique();
+      return where.id.in.flatMap((id) => {
+        const line = cart?.items?.find((i: any) => i[field] === id);
+        return line ? [{ id, [column]: Number(line.priceUzsSnapshot) }] : [];
+      });
+    };
+  prisma.providerServiceOffering.findMany.mockImplementation(
+    priced('serviceId', 'priceUzs'),
+  );
+  prisma.sourcingOffer.findMany.mockImplementation(priced('offerId', 'price'));
+}
+
+/** The price the cart's own line holds for a part: "nothing has moved". */
+export async function partPriceFromCart(
+  prisma: PrismaMock,
+  partId: string,
+): Promise<number | undefined> {
+  const cart = await prisma.cart.findUnique();
+  const line = cart?.items?.find((i: any) => i.partId === partId);
+  return line ? Number(line.priceUzsSnapshot) : undefined;
+}
+
 export function createPrismaMock(): PrismaMock {
   const cache: Record<string, any> = {};
   const proxy: any = new Proxy(

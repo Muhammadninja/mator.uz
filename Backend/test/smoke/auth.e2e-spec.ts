@@ -83,9 +83,9 @@ describe('Auth smoke', () => {
       await expect(otp.verify(issued.requestId, phone, '000000')).rejects.toBeInstanceOf(
         UnauthorizedException,
       );
-      // A wrong guess bumps the stored attempt counter in place (record survives).
-      const rec = redis.store.get(RedisKeys.otp(phone)) as { attempts: number };
-      expect(rec.attempts).toBe(1);
+      // A wrong guess is charged to the request's counter; the record survives.
+      expect(redis.store.get(RedisKeys.otpAttempts(issued.requestId))).toBe(1);
+      expect(redis.store.has(RedisKeys.otp(phone))).toBe(true);
     });
 
     it('verifyOtp creates a new phone account and issues a session', async () => {

@@ -1,7 +1,7 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { OrdersService } from '../../src/orders/orders.service';
 import { OrderStatusService } from '../../src/orders/order-status.service';
-import { createPrismaMock, fakeConfig, fakeNotifications, fakeRealtime, buildCart, buildCartItem, buildOrder, buildAppUser, fakeDiscounts, PrismaMock, fakeAudit, fakeDeliveryQuotes } from '../utils/harness';
+import { partPriceFromCart, createPrismaMock, fakeConfig, fakeNotifications, fakeRealtime, buildCart, buildCartItem, buildOrder, buildAppUser, fakeDiscounts, PrismaMock, fakeAudit, fakeDeliveryQuotes } from '../utils/harness';
 
 describe('Orders smoke', () => {
   let prisma: PrismaMock;
@@ -11,11 +11,12 @@ describe('Orders smoke', () => {
     // the availability gate (order-availability.ts) and the sale pricing both
     // read these rows. Tests about unavailable parts override this.
     prisma.catalogPart.findMany.mockImplementation(
-      ({ where }: { where?: { id?: { in?: string[] } } }) =>
-        Promise.resolve(
-          (where?.id?.in ?? []).map((id) => ({
+      async ({ where }: { where?: { id?: { in?: string[] } } }) =>
+        Promise.all(
+          (where?.id?.in ?? []).map(async (id) => ({
             id,
             inStock: true,
+            priceUzs: await partPriceFromCart(prisma, id),
             seller: { status: 'ACTIVE' },
             categoryId: 'cat_1',
             sellerId: 'seller_1',

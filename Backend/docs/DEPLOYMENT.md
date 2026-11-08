@@ -123,6 +123,21 @@ database.
 
 ---
 
+## Driver's Village photo limits
+
+The Driver's Village photo path is open to any Telegram user, so these per-sender
+limits apply to it. Both are optional environment variables; an unset or invalid
+value uses the default. Counters live in Redis. If Redis cannot answer, the bot
+refuses and says processing is temporarily unavailable.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DV_PHOTO_ALBUMS_PER_HOUR` | 20 | Albums one sender may send into the path per hour |
+| `DV_PHOTO_AMBIGUOUS_PER_HOUR` | 5 | Position lists shown to one sender per hour for an ambiguous code |
+
+Image processing starts only after the sender confirms the resolved position. There
+is no daily limit on the number of FLUX jobs.
+
 ## Health checks
 
 The app exposes probes (throttle-exempt, no auth):

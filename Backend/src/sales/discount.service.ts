@@ -99,8 +99,12 @@ export class DiscountService {
    * to `calculateDiscount`, which keeps an N-product page at one query rather
    * than N.
    */
-  async loadActiveSales(now: Date = new Date()): Promise<ActiveSale[]> {
-    return this.prisma.sale.findMany({
+  async loadActiveSales(
+    now: Date = new Date(),
+    // An order prices itself inside its transaction, on that transaction.
+    db: Pick<Prisma.TransactionClient, 'sale'> = this.prisma,
+  ): Promise<ActiveSale[]> {
+    return db.sale.findMany({
       where: this.activeWhere(now),
       include: { targets: { select: { targetType: true, targetId: true } } },
     });
@@ -149,7 +153,11 @@ export class DiscountService {
     if (!sale) return none;
 
     const discountAmount = this.discountAmountFor(sale, originalPrice);
-    if (discountAmount <= 0) return none;
+    // A sale may not take a product to nothing, whether by a FIXED amount above its
+    // price, a percentage that rounds up to all of it, or a price that fell after the
+    // sale was saved. The product keeps its price instead: there is no free-of-charge
+    // sale in the business, and a zero line would stop the order at checkout.
+    if (discountAmount <= 0 || discountAmount >= originalPrice) return none;
 
     const finalPrice = originalPrice - discountAmount;
 
@@ -271,9 +279,8 @@ export class DiscountService {
   }
 
   /**
-   * The discount in whole UZS, clamped to [0, originalPrice] so a fixed
-   * discount larger than the price yields a free item rather than a negative
-   * one — the "never negative" rule, enforced here rather than at each caller.
+   * The discount in whole UZS, clamped to [0, originalPrice]. A discount that
+   * reaches originalPrice is refused by calculateDiscount, the one caller.
    */
   private discountAmountFor(sale: ActiveSale, originalPrice: number): number {
     const value = sale.discountValue.toNumber();

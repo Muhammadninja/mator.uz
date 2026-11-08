@@ -216,6 +216,14 @@ export const EN: BotStrings = {
     "On confirm, the product's current photos are replaced with these. Title, price and all other data stay unchanged.",
   'btn.dvConfirm': '✅ Confirm',
   'btn.dvCancel': '❌ Cancel',
+  'btn.dvProcess': '▶️ Process photos',
+  'dv.confirmStart':
+    'Position {code}\n{title}\nPhotos received: {count} (the product has {current} now).\n\nTap "Process photos" to start. The product changes only after you confirm the result.',
+  'dv.confirmExpired':
+    'This request has expired. Send the photos with the 1C code again.',
+  'dv.rateLimited': 'Too many photo update requests. Please try again later.',
+  'dv.unavailable':
+    'Photo processing is temporarily unavailable. Please try again shortly.',
   'dv.photosUpdated': '✅ Photos of position {code} updated ({count}).',
   'dv.cancelled': "Photo update cancelled. The product's photos are unchanged.",
   'dv.positionGone':

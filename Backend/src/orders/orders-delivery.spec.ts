@@ -30,6 +30,7 @@ import {
   fakeRealtime,
   PrismaMock,
   stubFiscalizableOrderLines,
+  priceSourcesFollowCart,
 } from '../../test/utils/harness';
 
 const DESTINATION = {
@@ -474,6 +475,7 @@ describe('Courier delivery on an order', () => {
   });
 
   it('a cart of services alone needs no price, even sent by courier', async () => {
+    priceSourcesFollowCart(prisma);
     prisma.cart.findUnique.mockResolvedValue(
       buildCart({
         id: 'cart_1',

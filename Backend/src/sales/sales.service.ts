@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { Prisma, SaleDiscountType, SaleScopeType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { BUYER_VISIBLE_PART } from '../catalog/buyer-visibility';
 import { clampLimit } from '../common/pagination.util';
 import { IdPrefix, prefixedId } from '../common/ulid.util';
 import { DiscountService } from './discount.service';
@@ -149,6 +150,12 @@ export class SalesService {
     this.assertDiscountValue(dto.discountType, dto.discountValue);
     const targetIds = this.resolveTargetIds(scopeType, dto.targetIds);
     await this.assertTargetsExist(scopeType, targetIds);
+    await this.assertFixedBelowCheapest(
+      dto.discountType,
+      dto.discountValue,
+      scopeType,
+      targetIds,
+    );
 
     const saleId = prefixedId(IdPrefix.SALE);
     const sale = await this.prisma.$transaction(async (tx) => {
@@ -243,6 +250,28 @@ export class SalesService {
         requireIdsFor: scopeChanged ? scopeType : undefined,
       });
       await this.assertTargetsExist(scopeType, targetIds);
+    }
+
+    // Only when the edit touches what the discount covers or how much it takes: a
+    // renamed campaign must not be refused because a price has fallen since.
+    if (
+      dto.discountType !== undefined ||
+      dto.discountValue !== undefined ||
+      replaceTargets
+    ) {
+      await this.assertFixedBelowCheapest(
+        discountType,
+        discountValue,
+        scopeType,
+        replaceTargets
+          ? targetIds
+          : (
+              await this.prisma.saleTarget.findMany({
+                where: { saleId: id },
+                select: { targetId: true },
+              })
+            ).map((t) => t.targetId),
+      );
     }
 
     const data: Prisma.SaleUpdateInput = {};
@@ -373,6 +402,55 @@ export class SalesService {
       throw new BadRequestException(
         'discountValue must be below 100 for a PERCENT sale',
       );
+    }
+  }
+
+  /**
+   * A FIXED amount must leave something to pay on every product the sale covers, so
+   * it has to be below the cheapest of them: otherwise a store-wide sale would stop
+   * applying (or, before this rule, zero out and block checkout) for the low-priced
+   * lines. Prices move after this check; DiscountService holds the same line when a
+   * price is actually computed. A sale covering no priced product yet has no floor.
+   *
+   * A PERCENT sale is only held "below 100": the owner keeps 99.99% valid.
+   */
+  private async assertFixedBelowCheapest(
+    discountType: SaleDiscountType,
+    discountValue: number,
+    scopeType: SaleScopeType,
+    targetIds: string[],
+  ): Promise<void> {
+    if (discountType !== SaleDiscountType.FIXED) return;
+    const cheapest = await this.prisma.catalogPart.findFirst({
+      where: {
+        ...BUYER_VISIBLE_PART,
+        ...this.eligibleParts(scopeType, targetIds),
+        priceUzs: { gt: 0 },
+      },
+      orderBy: { priceUzs: 'asc' },
+      select: { priceUzs: true },
+    });
+    if (cheapest && Math.round(discountValue) >= Number(cheapest.priceUzs)) {
+      throw new BadRequestException(
+        `A FIXED discount must be below the cheapest product it covers (${Number(cheapest.priceUzs)} UZS).`,
+      );
+    }
+  }
+
+  /** The parts a scope covers, matching DiscountService's scope matchers. */
+  private eligibleParts(
+    scopeType: SaleScopeType,
+    targetIds: string[],
+  ): Prisma.CatalogPartWhereInput {
+    switch (scopeType) {
+      case SaleScopeType.PRODUCTS:
+        return { id: { in: targetIds } };
+      case SaleScopeType.CATEGORIES:
+        return { categoryId: { in: targetIds } };
+      case SaleScopeType.DEALERS:
+        return { sellerId: { in: targetIds } };
+      default:
+        return {};
     }
   }
 

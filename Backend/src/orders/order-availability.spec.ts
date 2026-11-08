@@ -26,6 +26,7 @@ import {
   fakeNotifications,
   fakeRealtime,
   PrismaMock,
+  priceSourcesFollowCart,
 } from '../../test/utils/harness';
 
 const row = (id: string, inStock: boolean, status = 'PENDING') => ({
@@ -38,7 +39,10 @@ const row = (id: string, inStock: boolean, status = 'PENDING') => ({
 
 describe('findUnavailableParts', () => {
   let prisma: PrismaMock;
-  beforeEach(() => (prisma = createPrismaMock()));
+  beforeEach(() => {
+    prisma = createPrismaMock();
+    priceSourcesFollowCart(prisma);
+  });
 
   it('names each unavailable line with its reason; services/offers are ignored', async () => {
     prisma.catalogPart.findMany.mockResolvedValue([
@@ -88,7 +92,10 @@ describe('findUnavailableParts', () => {
 
 describe('availability at each step', () => {
   let prisma: PrismaMock;
-  beforeEach(() => (prisma = createPrismaMock()));
+  beforeEach(() => {
+    prisma = createPrismaMock();
+    priceSourcesFollowCart(prisma);
+  });
 
   it('cart: an out-of-stock part cannot be added (409); nothing is written', async () => {
     prisma.cart.findUnique.mockResolvedValue(

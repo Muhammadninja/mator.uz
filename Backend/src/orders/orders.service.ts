@@ -23,7 +23,12 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
 import { prefixedId, IdPrefix } from '../common/ulid.util';
 import { resolvePromo } from '../cart/promo.util';
-import { priceCartLines } from '../cart/cart-pricing.util';
+import {
+  RepriceableLine,
+  chargedUnitPrices,
+  priceCartLines,
+  refreshCartLinePrices,
+} from '../cart/cart-pricing.util';
 import { allocatePromoDiscount } from './promo-allocation.util';
 import { DiscountService } from '../sales/discount.service';
 import {
@@ -75,6 +80,9 @@ function currentCharges(charges: OrderCharges, delivery: DeliveryQuote | null) {
     delivery_quote_id: delivery?.quoteId ?? null,
   };
 }
+
+/** A price on the order moved between its check and its transaction. */
+class CartPricesMovedError extends Error {}
 
 /** Roles that may record an online payment by hand; see assertCanMarkPaid. */
 const MANUAL_ONLINE_PAYMENT_ROLES: readonly AdminRole[] = [
@@ -132,6 +140,19 @@ export class OrdersService {
       ),
     );
 
+    // The catalog is the price; the cart only remembers one. Stored now, outside any
+    // transaction, because the 409 below must leave the cart showing the new prices.
+    const refreshed = await refreshCartLinePrices(this.prisma, cart.items);
+    cart.items = refreshed.items;
+    if (refreshed.withoutSource.length > 0) {
+      throw new ConflictException({
+        code: PART_UNAVAILABLE,
+        message: `No longer available: ${refreshed.withoutSource
+          .map((i) => `${i.title} (no_source)`)
+          .join('; ')}`,
+      });
+    }
+
     // Ownership: a caller may only attach their OWN vehicle / delivery address to
     // an order. Without these checks the ids are persisted verbatim, letting a
     // user reference another user's vehicle or address (cross-tenant reference).
@@ -140,7 +161,7 @@ export class OrdersService {
 
     // Apply active sales per line, so the order is charged the SAME discounted
     // price the buyer saw in the catalog and cart. A line's charged unit price is
-    // its sale price when a campaign applies, else its snapshot price.
+    // its sale price when a campaign applies, else its current price.
     const lineDiscounts = await priceCartLines(this.prisma, this.discounts, cart.items);
     const unitPriceOf = (i: (typeof cart.items)[number]): number => {
       const d = lineDiscounts.get(i.id);
@@ -240,8 +261,9 @@ export class OrdersService {
         details: currentCharges(charges, delivery),
       });
     if (
-      dto.confirmed_total_uzs != null &&
-      toTiyin(dto.confirmed_total_uzs) !== toTiyin(charges.totalUzs)
+      refreshed.changed ||
+      (dto.confirmed_total_uzs != null &&
+        toTiyin(dto.confirmed_total_uzs) !== toTiyin(charges.totalUzs))
     ) {
       throw outOfDate(
         ORDER_TOTAL_CHANGED,
@@ -284,6 +306,8 @@ export class OrdersService {
     const lineSellers = await findLineSellers(this.prisma, cart.items);
 
     const order = await this.prisma.$transaction(async (tx) => {
+      await this.assertPricesStillCurrent(tx, cart.items, unitPriceOf);
+
       const created = await tx.order.create({
         data: {
           id: prefixedId(IdPrefix.ORDER),
@@ -363,9 +387,83 @@ export class OrdersService {
         data: { promoCode: null, promoDiscountUzs: null },
       });
       return created;
+    }).catch((err: unknown) => {
+      if (err instanceof CartPricesMovedError) {
+        return this.refuseMovedPrices(cart, delivery);
+      }
+      throw err;
     });
 
     return presentOrder(order);
+  }
+
+  /**
+   * The last look at the prices, inside the transaction that freezes them. Each part
+   * row is held FOR SHARE until the order commits, so its price cannot change between
+   * this comparison and the order's commit, and the amounts written below are the
+   * amounts just verified. Throwing rolls the order back.
+   */
+  private async assertPricesStillCurrent<T extends RepriceableLine>(
+    tx: Prisma.TransactionClient,
+    items: readonly T[],
+    unitPriceOf: (item: T) => number,
+  ): Promise<void> {
+    const partIds = [
+      ...new Set(items.map((i) => i.partId).filter((x): x is string => !!x)),
+    ];
+    if (partIds.length > 0) {
+      await tx.$queryRaw`SELECT id FROM catalog_parts WHERE id IN (${Prisma.join(partIds)}) ORDER BY id FOR SHARE`;
+    }
+    const current = await chargedUnitPrices(tx, this.discounts, items);
+    for (const item of items) {
+      const price = current.get(item.id);
+      if (price === undefined || toTiyin(price) !== toTiyin(unitPriceOf(item))) {
+        throw new CartPricesMovedError();
+      }
+    }
+  }
+
+  /**
+   * A price moved in the moments the order was being written: nothing was created.
+   * Runs after the rollback, so the refreshed snapshots are kept, and answers with
+   * what an order placed now would charge. Always throws.
+   */
+  private async refuseMovedPrices<
+    T extends RepriceableLine & { quantity: number; title: string },
+  >(
+    cart: { items: T[]; promoCode: string | null },
+    delivery: DeliveryQuote | null,
+  ): Promise<never> {
+    const { items } = await refreshCartLinePrices(this.prisma, cart.items);
+    const sales = await priceCartLines(this.prisma, this.discounts, items);
+    const lines: PricedLine[] = items.map((i) => {
+      const sale = sales.get(i.id);
+      return {
+        partId: i.partId,
+        offerId: i.offerId,
+        serviceId: i.serviceId,
+        unitPriceUzs: sale?.appliedSale
+          ? sale.finalPrice
+          : Number(i.priceUzsSnapshot),
+        quantity: i.quantity,
+      };
+    });
+    const discountUzs = cart.promoCode
+      ? resolvePromo(cart.promoCode, linesSubtotalUzs(lines)).discountUzs
+      : 0;
+    throw new ConflictException({
+      code: ORDER_TOTAL_CHANGED,
+      message:
+        'The order total has changed. Check the new total and confirm the order again.',
+      details: currentCharges(
+        computeOrderCharges({
+          lines,
+          discountUzs,
+          deliveryUzs: delivery?.priceUzs ?? 0,
+        }),
+        delivery,
+      ),
+    });
   }
 
   /**

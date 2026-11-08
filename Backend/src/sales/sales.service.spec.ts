@@ -65,8 +65,15 @@ function makePrismaMock() {
     update: jest.fn<Promise<unknown>, [SaleUpdateArgs]>(),
     delete: jest.fn(),
   };
-  const saleTarget = { deleteMany: jest.fn(), createMany: jest.fn() };
-  const catalogPart = { count: jest.fn<Promise<number>, [CountArgs]>() };
+  const saleTarget = {
+    deleteMany: jest.fn(),
+    createMany: jest.fn(),
+    findMany: jest.fn().mockResolvedValue([]),
+  };
+  const catalogPart = {
+    count: jest.fn<Promise<number>, [CountArgs]>(),
+    findFirst: jest.fn<Promise<unknown>, [unknown]>().mockResolvedValue(null),
+  };
   const partCategory = { count: jest.fn<Promise<number>, [CountArgs]>() };
   const catalogSeller = { count: jest.fn<Promise<number>, [CountArgs]>() };
 

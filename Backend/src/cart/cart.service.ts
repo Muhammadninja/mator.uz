@@ -15,7 +15,7 @@ import {
   cartSubtotal,
   presentCart,
 } from './cart.presenter';
-import { priceCartLines } from './cart-pricing.util';
+import { priceCartLines, refreshCartLinePrices } from './cart-pricing.util';
 import { DiscountService } from '../sales/discount.service';
 import { BUYER_VISIBLE_PART } from '../catalog/buyer-visibility';
 import { PART_UNAVAILABLE } from '../orders/order-availability';
@@ -41,10 +41,17 @@ export class CartService {
     });
   }
 
-  /** Always re-reads the cart, applies active sales per line, and re-derives the
-   *  promo discount from the sale-adjusted subtotal. */
-  async snapshot(userId: string) {
+  /** The buyer's cart, its price snapshots brought up to date with their sources. */
+  private async withCurrentPrices(userId: string): Promise<CartWithItems> {
     const cart = await this.getOrCreate(userId);
+    const { items } = await refreshCartLinePrices(this.prisma, cart.items);
+    return { ...cart, items };
+  }
+
+  /** Always re-reads the cart and its current prices, applies active sales per
+   *  line, and re-derives the promo discount from the sale-adjusted subtotal. */
+  async snapshot(userId: string) {
+    const cart = await this.withCurrentPrices(userId);
     const lineDiscounts = await this.lineDiscounts(cart);
     const priced = await this.refreshPromo(cart, lineDiscounts);
     // Item set (and their ids) is unchanged by refreshPromo, so the line
@@ -102,7 +109,10 @@ export class CartService {
       if (existing) {
         await this.prisma.cartItem.update({
           where: { id: existing.id },
-          data: { quantity: Math.min(existing.quantity + qty, MAX_CART_ITEM_QUANTITY) },
+          data: {
+            quantity: Math.min(existing.quantity + qty, MAX_CART_ITEM_QUANTITY),
+            priceUzsSnapshot: part.priceUzs,
+          },
         });
       } else {
         await this.prisma.cartItem.create({
@@ -175,7 +185,7 @@ export class CartService {
   }
 
   async applyPromo(userId: string, code: string) {
-    const cart = await this.getOrCreate(userId);
+    const cart = await this.withCurrentPrices(userId);
     // Promo stacks on top of sales: validate/compute it against the sale-adjusted
     // subtotal, never the raw one.
     const lineDiscounts = await this.lineDiscounts(cart);
