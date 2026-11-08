@@ -13,6 +13,7 @@ import { ImageProcessingStage } from '@prisma/client';
 import axios from 'axios';
 import { UnrecoverableError } from 'bullmq';
 import { ImageEnhanceError } from '../ai/image-enhance.service';
+import { tagImageRunOwner } from './image-job.outcome';
 import { ImageProcessingProcessor } from './queue.processors';
 
 jest.mock('axios');
@@ -20,11 +21,17 @@ const mockedAxios = axios as jest.Mocked<typeof axios>;
 
 function build() {
   const drafts = {
+    // The duplicate guard's read: an in-flight row, so every existing case
+    // below runs the processing path as before (guard: image-processing.duplicate-guard.spec.ts).
+    findImageState: jest
+      .fn()
+      .mockResolvedValue({ status: 'PROCESSING', processedUrl: null }),
     markImageProcessing: jest.fn(),
     setImageStage: jest.fn().mockResolvedValue(undefined),
-    setImageOriginal: jest.fn().mockResolvedValue(undefined),
-    markImageReady: jest.fn().mockResolvedValue(undefined),
-    markImageFailed: jest.fn().mockResolvedValue(undefined),
+    // The conditional writes report whether this run won them: a lone run does.
+    setImageOriginal: jest.fn().mockResolvedValue(true),
+    markImageReady: jest.fn().mockResolvedValue(true),
+    markImageFailed: jest.fn().mockResolvedValue(true),
   };
   const coordinator = {
     onImageSettled: jest.fn().mockResolvedValue(undefined),
@@ -67,6 +74,7 @@ describe('ImageProcessingProcessor (two-phase)', () => {
     const ctx = build();
     // Row has no originalUrl yet → phase A runs.
     ctx.drafts.markImageProcessing.mockResolvedValue({
+      attempts: 1, // this run's ownership token
       id: 'dimg_1',
       tgFileId: 'tgfile',
       originalUrl: null,
@@ -103,6 +111,7 @@ describe('ImageProcessingProcessor (two-phase)', () => {
       'dimg_1',
       'https://cdn/processed.png',
       'proc_1',
+      1, // the run's ownership token
     );
     expect(ctx.coordinator.onImageSettled).toHaveBeenCalledWith('draft_1');
     // Stage progression.
@@ -117,6 +126,7 @@ describe('ImageProcessingProcessor (two-phase)', () => {
   it('retry with original already stored SKIPS phase A (no Telegram fetch)', async () => {
     const ctx = build();
     ctx.drafts.markImageProcessing.mockResolvedValue({
+      attempts: 1, // this run's ownership token
       id: 'dimg_1',
       tgFileId: 'tgfile',
       originalUrl: 'https://cdn/original.jpg', // already ingested
@@ -169,10 +179,33 @@ describe('ImageProcessingProcessor (two-phase)', () => {
         attemptsMade: 3,
         opts: { attempts: 3 },
       } as never,
-      new Error('boom'),
+      // As process() throws it: tagged with the run's ownership token.
+      tagImageRunOwner(new Error('boom'), 1) as Error,
     );
-    expect(ctx.drafts.markImageFailed).toHaveBeenCalledWith('dimg_1', 'boom');
+    expect(ctx.drafts.markImageFailed).toHaveBeenCalledWith(
+      'dimg_1',
+      'boom',
+      1,
+    );
     expect(ctx.coordinator.onImageSettled).toHaveBeenCalledWith('draft_1');
+  });
+
+  it('onFailed writes nothing for a run that never got an ownership token', async () => {
+    const ctx = build();
+    await ctx.proc.onFailed(
+      {
+        data: { draftId: 'draft_1', imageId: 'dimg_1' },
+        attemptsMade: 3,
+        opts: { attempts: 3 },
+      } as never,
+      new Error('connection reset'), // untagged: the run's read or pickup failed
+    );
+    expect(ctx.drafts.markImageFailed).not.toHaveBeenCalled();
+    expect(ctx.coordinator.onImageSettled).not.toHaveBeenCalled();
+    expect(ctx.telemetry.event).toHaveBeenCalledWith(
+      'image.failure_unowned',
+      expect.objectContaining({ imageId: 'dimg_1' }),
+    );
   });
 
   it('onFailed tolerates an undefined job', async () => {
@@ -187,6 +220,7 @@ describe('ImageProcessingProcessor (two-phase)', () => {
   function enhanceFailing(err: Error) {
     const ctx = build();
     ctx.drafts.markImageProcessing.mockResolvedValue({
+      attempts: 1, // this run's ownership token
       id: 'dimg_1',
       tgFileId: 'tgfile',
       originalUrl: 'https://cdn/original.jpg',
@@ -237,11 +271,15 @@ describe('ImageProcessingProcessor (two-phase)', () => {
         attemptsMade: 1,
         opts: { attempts: 3 },
       } as never,
-      new UnrecoverableError('FLUX.2 Pro edit failed — submit HTTP 401'),
+      tagImageRunOwner(
+        new UnrecoverableError('FLUX.2 Pro edit failed — submit HTTP 401'),
+        1,
+      ) as Error,
     );
     expect(ctx.drafts.markImageFailed).toHaveBeenCalledWith(
       'dimg_1',
       'FLUX.2 Pro edit failed — submit HTTP 401',
+      1,
     );
     expect(ctx.coordinator.onImageSettled).toHaveBeenCalledWith('draft_1');
   });

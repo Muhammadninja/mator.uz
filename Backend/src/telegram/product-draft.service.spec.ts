@@ -11,6 +11,7 @@ import {
   DraftImageStatus,
   DraftStatus,
   ImageProcessingStage,
+  Prisma,
 } from '@prisma/client';
 import { ProductDraftService } from './product-draft.service';
 
@@ -28,6 +29,7 @@ function makePrismaMock() {
       update: jest.fn(),
       updateMany: jest.fn(),
       findMany: jest.fn(),
+      findUnique: jest.fn(),
     },
     // Consulted by collectPublicIds to spare assets a live product already claims.
     // Default: nothing claimed, so every asset is reclaimable.
@@ -249,11 +251,23 @@ describe('ProductDraftService', () => {
   });
 
   describe('image-row writes keep the status/stage invariant', () => {
-    it('markImageReady sets READY + DONE with the processed asset', async () => {
-      prisma.productDraftImage.update.mockResolvedValue({});
-      await service.markImageReady('dimg_1', 'https://cdn/p.png', 'proc_1');
-      expect(prisma.productDraftImage.update).toHaveBeenCalledWith({
-        where: { id: 'dimg_1' },
+    // Every worker write is a CONDITIONAL updateMany: two runs of one job (a
+    // lost BullMQ lock) can both be writing, and only one may win each step.
+    // Stage, READY and FAILED also carry the run's ownership token (attempts):
+    // a run a newer pickup superseded can no longer write them.
+    const owned = (attempts: number) => ({
+      id: 'dimg_1',
+      status: DraftImageStatus.PROCESSING,
+      attempts,
+    });
+
+    it('markImageReady sets READY + DONE with the processed asset — only by the owning run, from PROCESSING', async () => {
+      prisma.productDraftImage.updateMany.mockResolvedValue({ count: 1 });
+      await expect(
+        service.markImageReady('dimg_1', 'https://cdn/p.png', 'proc_1', 2),
+      ).resolves.toBe(true);
+      expect(prisma.productDraftImage.updateMany).toHaveBeenCalledWith({
+        where: owned(2),
         data: {
           status: DraftImageStatus.READY,
           stage: ImageProcessingStage.DONE,
@@ -261,13 +275,23 @@ describe('ProductDraftService', () => {
           processedPublicId: 'proc_1',
         },
       });
+      expect(prisma.productDraftImage.update).not.toHaveBeenCalled();
     });
 
-    it('markImageFailed sets FAILED + FAILED with the error', async () => {
-      prisma.productDraftImage.update.mockResolvedValue({});
-      await service.markImageFailed('dimg_1', 'boom');
-      expect(prisma.productDraftImage.update).toHaveBeenCalledWith({
-        where: { id: 'dimg_1' },
+    it('markImageReady reports a lost finalization (count 0) instead of overwriting', async () => {
+      prisma.productDraftImage.updateMany.mockResolvedValue({ count: 0 });
+      await expect(
+        service.markImageReady('dimg_1', 'https://cdn/p.png', 'proc_1', 2),
+      ).resolves.toBe(false);
+    });
+
+    it('markImageFailed sets FAILED + FAILED with the error — only by the owning run, from PROCESSING', async () => {
+      prisma.productDraftImage.updateMany.mockResolvedValue({ count: 1 });
+      await expect(service.markImageFailed('dimg_1', 'boom', 2)).resolves.toBe(
+        true,
+      );
+      expect(prisma.productDraftImage.updateMany).toHaveBeenCalledWith({
+        where: owned(2),
         data: {
           status: DraftImageStatus.FAILED,
           stage: ImageProcessingStage.FAILED,
@@ -276,13 +300,65 @@ describe('ProductDraftService', () => {
       });
     });
 
-    it('setImageStage moves only the technical stage', async () => {
-      prisma.productDraftImage.update.mockResolvedValue({});
-      await service.setImageStage('dimg_1', ImageProcessingStage.ENHANCING);
-      expect(prisma.productDraftImage.update).toHaveBeenCalledWith({
-        where: { id: 'dimg_1' },
+    it('setImageStage moves only the technical stage — only for the owning run, while PROCESSING', async () => {
+      prisma.productDraftImage.updateMany.mockResolvedValue({ count: 1 });
+      await service.setImageStage('dimg_1', ImageProcessingStage.ENHANCING, 2);
+      expect(prisma.productDraftImage.updateMany).toHaveBeenCalledWith({
+        where: owned(2),
         data: { stage: ImageProcessingStage.ENHANCING },
       });
+    });
+
+    it('setImageOriginal stores the original only when none is stored yet', async () => {
+      prisma.productDraftImage.updateMany.mockResolvedValueOnce({ count: 1 });
+      await expect(
+        service.setImageOriginal('dimg_1', 'https://cdn/o.png', 'orig_1'),
+      ).resolves.toBe(true);
+      expect(prisma.productDraftImage.updateMany).toHaveBeenCalledWith({
+        where: { id: 'dimg_1', originalUrl: null },
+        data: { originalUrl: 'https://cdn/o.png', originalPublicId: 'orig_1' },
+      });
+      prisma.productDraftImage.updateMany.mockResolvedValueOnce({ count: 0 });
+      await expect(
+        service.setImageOriginal('dimg_1', 'https://cdn/o2.png', 'orig_2'),
+      ).resolves.toBe(false);
+    });
+
+    it('markImageProcessing claims any row but a READY one with a result, returning its new token in one statement', async () => {
+      prisma.productDraftImage.update.mockResolvedValueOnce({
+        id: 'dimg_1',
+        attempts: 3,
+      });
+      await expect(service.markImageProcessing('dimg_1')).resolves.toEqual({
+        id: 'dimg_1',
+        attempts: 3,
+      });
+      expect(prisma.productDraftImage.update).toHaveBeenCalledWith({
+        where: {
+          id: 'dimg_1',
+          NOT: {
+            status: DraftImageStatus.READY,
+            processedUrl: { not: null },
+          },
+        },
+        data: {
+          status: DraftImageStatus.PROCESSING,
+          attempts: { increment: 1 },
+        },
+      });
+      // No row matched (finished, or gone): Prisma's P2025.
+      prisma.productDraftImage.update.mockRejectedValueOnce(
+        new Prisma.PrismaClientKnownRequestError('No record was found', {
+          code: 'P2025',
+          clientVersion: 'test',
+        }),
+      );
+      await expect(service.markImageProcessing('dimg_1')).resolves.toBeNull();
+      // Any other failure is not swallowed.
+      prisma.productDraftImage.update.mockRejectedValueOnce(new Error('down'));
+      await expect(service.markImageProcessing('dimg_1')).rejects.toThrow(
+        'down',
+      );
     });
   });
 
