@@ -108,13 +108,13 @@ describe('DiscountService', () => {
       );
     });
 
-    it('a 100% sale makes the item free, never negative', () => {
+    it('a 100% sale leaves the item at its price, never free', () => {
       const sale = makeSale({ discountValue: new Prisma.Decimal(100) });
 
       const result = service.calculateDiscount(50_000, PRODUCT, [sale]);
 
-      expect(result.finalPrice).toBe(0);
-      expect(result.discountAmount).toBe(50_000);
+      expect(result.finalPrice).toBe(50_000);
+      expect(result.appliedSale).toBeNull();
     });
   });
 
@@ -132,7 +132,7 @@ describe('DiscountService', () => {
       expect(result.discountPercent).toBe(25);
     });
 
-    it('never drives the price below zero when it exceeds the price', () => {
+    it('does not apply when it exceeds the price, so the line stays payable', () => {
       const sale = makeSale({
         discountType: SaleDiscountType.FIXED,
         discountValue: new Prisma.Decimal(500_000),
@@ -140,9 +140,30 @@ describe('DiscountService', () => {
 
       const result = service.calculateDiscount(100_000, PRODUCT, [sale]);
 
-      expect(result.finalPrice).toBe(0);
-      expect(result.discountAmount).toBe(100_000);
-      expect(result.finalPrice).toBeGreaterThanOrEqual(0);
+      expect(result.finalPrice).toBe(100_000);
+      expect(result.discountAmount).toBe(0);
+      expect(result.appliedSale).toBeNull();
+    });
+
+    it('does not apply when it equals the price exactly', () => {
+      const sale = makeSale({
+        discountType: SaleDiscountType.FIXED,
+        discountValue: new Prisma.Decimal(100_000),
+      });
+
+      const result = service.calculateDiscount(100_000, PRODUCT, [sale]);
+
+      expect(result.finalPrice).toBe(100_000);
+      expect(result.appliedSale).toBeNull();
+    });
+
+    it('a percentage that rounds up to the whole price leaves it unchanged', () => {
+      const sale = makeSale({ discountValue: new Prisma.Decimal(99.99) });
+
+      const result = service.calculateDiscount(1, PRODUCT, [sale]);
+
+      expect(result.finalPrice).toBe(1);
+      expect(result.appliedSale).toBeNull();
     });
   });
 

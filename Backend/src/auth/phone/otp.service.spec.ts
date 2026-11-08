@@ -98,7 +98,6 @@ function storedRecord(redis: ReturnType<typeof makeRedisMock>, phone: string) {
   return redis.store.get(RedisKeys.otp(phone)) as {
     requestId: string;
     codeHash: string;
-    attempts: number;
     createdAt: number;
     expiresAt: number;
     purpose: string;
@@ -116,7 +115,6 @@ describe('OtpService — AUTH_DEV_MODE', () => {
       const persisted = storedRecord(redis, '+998901234567');
       expect(persisted.codeHash).toEqual(expect.any(String));
       expect(persisted.createdAt).toEqual(expect.any(Number));
-      expect(persisted.attempts).toBe(0);
 
       // Nothing is queued either — dev mode short-circuits before delivery.
       expect(queue.enqueueOtpSms).not.toHaveBeenCalled();
@@ -316,16 +314,14 @@ describe('OtpService — AUTH_DEV_MODE', () => {
         service.verify(issued.requestId, '+998901234567', '000000'),
       ).rejects.toThrow('Incorrect verification code');
 
-      expect(storedRecord(redis, '+998901234567').attempts).toBe(1);
+      expect(redis.store.get(RedisKeys.otpAttempts(issued.requestId))).toBe(1);
     });
 
     it('rejects after MAX_ATTEMPTS incorrect guesses', async () => {
       const { service, redis } = build(true);
       const issued = await service.request('+998901234567');
       // Force the attempt counter to the ceiling.
-      const rec = storedRecord(redis, '+998901234567') as Record<string, unknown>;
-      rec.attempts = 5;
-      redis.store.set(RedisKeys.otp('+998901234567'), rec);
+      redis.store.set(RedisKeys.otpAttempts(issued.requestId), 5);
 
       await expect(
         service.verify(issued.requestId, '+998901234567', issued.devOtpCode!),

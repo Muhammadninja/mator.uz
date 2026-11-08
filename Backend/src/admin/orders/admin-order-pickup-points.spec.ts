@@ -296,7 +296,7 @@ describe('A pickup order placed through checkout keeps its dealers and their pla
       id: 'part_dv_1',
       sellerId: 'drivers-village',
       inStock: true,
-      priceUzs: 200_000,
+      priceUzs: 100_000,
       categoryId: 'cat_1',
       seller: { status: 'ACTIVE' },
     },

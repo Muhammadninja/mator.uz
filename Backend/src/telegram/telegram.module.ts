@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TelegramService } from './telegram.service';
 import { TelegramOfferService } from './telegram-offer.service';
 import { DriversVillagePhotoService } from './drivers-village-photo.service';
+import { DvPhotoLimits } from './dv-photo-limits.service';
 import { SellersModule } from '../sellers/sellers.module';
 import { CatalogModule } from '../catalog/catalog.module';
 import { PartCategoryModule } from '../catalog/categories/part-category.module';
@@ -30,6 +31,7 @@ import { SourcingModule } from '../sourcing/sourcing.module';
     TelegramService,
     TelegramOfferService,
     DriversVillagePhotoService,
+    DvPhotoLimits,
   ],
 })
 export class TelegramModule {}

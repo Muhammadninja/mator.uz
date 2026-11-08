@@ -7,6 +7,7 @@ import {
   GoneException,
   HttpException,
   HttpStatus,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash, randomInt } from 'crypto';
@@ -14,8 +15,15 @@ import { OtpChannel } from '@prisma/client';
 import { QueueService } from '../../queue/queue.service';
 import { prefixedId, IdPrefix } from '../../common/ulid.util';
 import { maskPhone } from '../../common/pii.util';
-import { RedisService } from '../../redis/redis.service';
-import type { RateLimiter } from '../../redis/rate-limiter.service';
+import {
+  RedisService,
+  assertRedisBacklogRoom,
+  withRedisTimeout,
+} from '../../redis/redis.service';
+import type {
+  RateLimiter,
+  RateLimitResult,
+} from '../../redis/rate-limiter.service';
 import { RATE_LIMITER } from '../../redis/rate-limiter.service';
 import { RedisKeys } from '../../redis/redis.keys';
 import { resolveSmsLang, type SmsLang } from '../../sms/otp-message.i18n';
@@ -24,7 +32,15 @@ const OTP_LENGTH = 6;
 const OTP_TTL_MS = 5 * 60 * 1000; // 5 min
 const RESEND_COOLDOWN_S = 60;
 const MAX_PER_HOUR = 5; // per MSISDN
-const MAX_ATTEMPTS = 5; // verify attempts per request
+const MAX_ATTEMPTS = 5; // code comparisons per request_id, ever
+/**
+ * Code comparisons per phone per hour, across every request_id. Two codes' worth
+ * of attempts: the most a person mistyping needs, and a fifth of what the issue
+ * ceiling (5 codes x 5 attempts) would otherwise allow a guesser.
+ */
+const MAX_VERIFY_PER_HOUR = 10;
+/** How long a verification waits for the limiter before refusing with a 503. */
+const VERIFY_LIMITER_TIMEOUT_MS = 2_000;
 
 const OTP_TTL_S = OTP_TTL_MS / 1000;
 // Redis TTL for the OTP record. Kept slightly longer than the logical lifetime
@@ -85,7 +101,6 @@ interface OtpRecord {
    * `undefined` and are re-resolved to the default on use.
    */
   lang: SmsLang;
-  attempts: number;
   resendCount: number;
   createdAt: number; // epoch ms
   expiresAt: number; // epoch ms
@@ -270,7 +285,6 @@ export class OtpService {
       channel,
       purpose,
       lang: resolveSmsLang(lang),
-      attempts: 0,
       resendCount: 0,
       createdAt: now,
       expiresAt: expiresAt.getTime(),
@@ -313,6 +327,16 @@ export class OtpService {
         HttpStatus.TOO_MANY_REQUESTS,
       );
     }
+    // The five attempts belong to the request_id and a resend keeps it, so a
+    // spent request cannot be reopened, and an SMS for it could never be used.
+    const attemptsKey = RedisKeys.otpAttempts(requestId);
+    const { remaining } = await this.rateLimiter.check(attemptsKey, MAX_ATTEMPTS);
+    if (remaining === 0) {
+      throw new HttpException(
+        'Too many incorrect attempts. Please request a new code.',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
     await this.enforceHourlyCeiling(record.phoneE164);
 
     const code = this.generateCode();
@@ -323,9 +347,11 @@ export class OtpService {
       codeHash: this.hash(code),
       expiresAt: expiresAt.getTime(),
       lastSentAt: now,
-      attempts: 0,
       resendCount: record.resendCount + 1,
     };
+    // The new code lives longer than the counter was armed for: keep the counter
+    // alive with it, or attempts already spent would be forgiven when it lapses.
+    await this.redis.expire(attemptsKey, OTP_KEY_TTL_S);
     await this.persist(updated);
 
     // A resend mints a NEW code, so it must reach the user: keying the job on
@@ -376,17 +402,12 @@ export class OtpService {
     if (record.expiresAt < Date.now()) {
       throw new GoneException('Verification code has expired. Please request a new one.');
     }
-    if (record.attempts >= MAX_ATTEMPTS) {
-      throw new HttpException(
-        'Too many incorrect attempts. Please request a new code.',
-        HttpStatus.TOO_MANY_REQUESTS,
-      );
-    }
+    // Charged BEFORE the comparison and by an atomic counter: however many guesses
+    // arrive at once, each one gets its own count, and a correct code that comes
+    // after the limit is refused like any other.
+    await this.reserveAttempt(record);
 
     if (this.hash(code) !== record.codeHash) {
-      // Increment attempts in place, preserving the remaining TTL so a wrong
-      // guess can never extend the code's lifetime.
-      await this.bumpAttempts(record);
       throw new UnauthorizedException('Incorrect verification code');
     }
 
@@ -403,16 +424,60 @@ export class OtpService {
   }
 
   /**
-   * Increment the stored attempt counter without extending the code's lifetime.
-   * Re-reads under the current TTL and writes back with that same remaining TTL,
-   * so a burst of wrong guesses cannot keep a stale code alive.
+   * Take one comparison from the request's five and from the phone's hourly
+   * allowance. The request's own limit goes first, so a request already spent
+   * stops costing the phone anything. Only a caller naming a live request_id for
+   * this phone reaches here: a made-up one cannot use up the owner's allowance.
    */
-  private async bumpAttempts(record: OtpRecord): Promise<void> {
-    const remainingTtl = await this.redis.ttl(RedisKeys.otp(record.phoneE164));
-    const updated: OtpRecord = { ...record, attempts: record.attempts + 1 };
-    // ttl <= 0 means the key is gone/expiring; skip rather than resurrect it.
-    if (remainingTtl > 0) {
-      await this.redis.setEx(RedisKeys.otp(record.phoneE164), remainingTtl, updated);
+  private async reserveAttempt(record: OtpRecord): Promise<void> {
+    const perRequest = await this.consumeLimit(
+      RedisKeys.otpAttempts(record.requestId),
+      MAX_ATTEMPTS,
+      OTP_KEY_TTL_S,
+    );
+    if (!perRequest.allowed) {
+      throw new HttpException(
+        'Too many incorrect attempts. Please request a new code.',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+    const perPhone = await this.consumeLimit(
+      RedisKeys.rateOtpVerify(record.phoneE164),
+      MAX_VERIFY_PER_HOUR,
+      HOURLY_WINDOW_S,
+    );
+    if (!perPhone.allowed) {
+      throw new HttpException(
+        'Too many verification attempts. Please try again later.',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+  }
+
+  /**
+   * Fail closed. With no working counter the guess cannot be charged, so it is
+   * refused without being compared. Bounded because the shared client otherwise
+   * waits out a Redis outage; a command that lands late only over-counts.
+   */
+  private async consumeLimit(
+    key: string,
+    limit: number,
+    windowSeconds: number,
+  ): Promise<RateLimitResult> {
+    try {
+      assertRedisBacklogRoom('OTP verification limit');
+      return await withRedisTimeout(
+        this.rateLimiter.consume(key, limit, windowSeconds),
+        VERIFY_LIMITER_TIMEOUT_MS,
+        'OTP verification limit',
+      );
+    } catch (err) {
+      this.logger.error(
+        `OTP verification refused, its limit could not be checked: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      throw new ServiceUnavailableException(
+        'Verification is temporarily unavailable. Please try again shortly.',
+      );
     }
   }
 

@@ -61,6 +61,7 @@ import {
   type DraftWithImages,
   type QuestionnaireSnapshot,
 } from './product-draft.service';
+import { DvPhotoLimits } from './dv-photo-limits.service';
 import {
   DriversVillagePhotoService,
   escapeMarkdown,
@@ -223,6 +224,10 @@ const CONFIRM_CHANGE_PHOTOS = 'product:change_photos';
 // in the payload (≤ 40 bytes, inside Telegram's 64-byte limit), so a tap always
 // names the exact preview it was sent with — independent of the ordinary
 // listing's single `pending` slot, which these never touch.
+const DV_PHOTO_START_PREFIX = 'dvph:go:';
+const DV_PHOTO_DROP_PREFIX = 'dvph:drop:';
+const DV_PHOTO_START = /^dvph:go:(.+)$/;
+const DV_PHOTO_DROP = /^dvph:drop:(.+)$/;
 const DV_PHOTO_CONFIRM_PREFIX = 'dvph:ok:';
 const DV_PHOTO_CANCEL_PREFIX = 'dvph:no:';
 const DV_PHOTO_CONFIRM = /^dvph:ok:(.+)$/;
@@ -570,6 +575,8 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     // Driver's Village photo updates (album + caption `1C <code_1c>`): position
     // lookup and gallery replacement. Only reached for such a caption.
     private readonly dvPhotos: DriversVillagePhotoService,
+    // Per-sender rate limits and the pending albums of Driver's Village updates.
+    private readonly dvLimits: DvPhotoLimits,
     // Where /health and the metrics read the polling status from. Optional so
     // a module without TelegramPollingStatusModule still builds the bot.
     @Optional() private readonly pollingStatus?: TelegramPollingStatus,
@@ -1173,6 +1180,20 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       await this.consumeCallbackMessage(ctx);
       const from = ctx.from;
       if (from) await this.replaceDraftPhotos(ctx, from.id);
+    });
+
+    // ── Driver's Village photo update: start (before any FLUX job exists) ────
+    this.bot.action(DV_PHOTO_START, async (ctx) => {
+      await this.ackCallback(ctx);
+      await this.consumeDvPreviewMessage(ctx);
+      const from = ctx.from;
+      if (from) await this.startDvPhotos(ctx, from.id, ctx.match[1]);
+    });
+    this.bot.action(DV_PHOTO_DROP, async (ctx) => {
+      await this.ackCallback(ctx);
+      await this.consumeDvPreviewMessage(ctx);
+      const from = ctx.from;
+      if (from) await this.dropDvPhotos(ctx, from.id, ctx.match[1]);
     });
 
     // ── Driver's Village photo-update preview ───────────────────────────────
@@ -3154,11 +3175,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Start a photo update: resolve the position by its Stock source fields, then
-   * create a PHOTO-UPDATE draft and queue its images exactly like
-   * {@link handlePhotos} does. An unknown or ambiguous code, or a failed
-   * lookup, is answered and NOTHING is written — no draft, no job, no upload —
-   * and the photos never reach the listing wizard.
+   * First step of a photo update: resolve the position and ask its sender to
+   * confirm. Nothing costly happens here. No draft, no job and no upload exist
+   * until {@link startDvPhotos}; an unknown or ambiguous code, or a failed lookup,
+   * is answered and stops. The photos never reach the listing wizard.
    */
   private async handleDvPhotos(
     ctx: Context,
@@ -3170,6 +3190,14 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     const images = fileIds.slice(0, MAX_IMAGES_PER_LISTING);
     if (images.length === 0) return;
 
+    const admission = await this.dvLimits.admitAlbum(tgUserId);
+    if (admission !== 'allowed') {
+      await ctx.reply(
+        t(lang, admission === 'limited' ? 'dv.rateLimited' : 'dv.unavailable'),
+      );
+      return;
+    }
+
     let lookup: DvLookup;
     try {
       lookup = await this.dvPhotos.resolvePosition(code1c);
@@ -3178,6 +3206,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       this.logger.error(
         `Driver's Village lookup failed for ${code1c} (tg ${tgUserId}): ${err instanceof Error ? err.message : String(err)}`,
       );
+      await this.dvLimits.returnAlbum(tgUserId);
       await ctx.reply(t(lang, 'photos.notAccepted'));
       return;
     }
@@ -3186,6 +3215,13 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       return;
     }
     if (lookup.kind === 'ambiguous') {
+      const listing = await this.dvLimits.admitAmbiguousListing(tgUserId);
+      if (listing !== 'allowed') {
+        await ctx.reply(
+          t(lang, listing === 'limited' ? 'dv.rateLimited' : 'dv.unavailable'),
+        );
+        return;
+      }
       await ctx.reply(
         t(lang, 'dv.ambiguous', {
           code: code1c,
@@ -3196,8 +3232,72 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     }
     const { position } = lookup;
 
+    const token = await this.dvLimits.savePending({
+      tgUserId,
+      stockId: position.stockId,
+      code1c: position.code1c,
+      fileIds: images,
+    });
+    if (!token) {
+      await ctx.reply(t(lang, 'dv.unavailable'));
+      return;
+    }
+    await ctx.reply(
+      t(lang, 'dv.confirmStart', {
+        code: position.code1c,
+        title: position.title,
+        count: images.length,
+        current: position.imageCount,
+      }),
+      Markup.inlineKeyboard([
+        [
+          Markup.button.callback(
+            t(lang, 'btn.dvProcess'),
+            `${DV_PHOTO_START_PREFIX}${token}`,
+          ),
+          Markup.button.callback(
+            t(lang, 'btn.dvCancel'),
+            `${DV_PHOTO_DROP_PREFIX}${token}`,
+          ),
+        ],
+      ]),
+    );
+  }
+
+  /**
+   * The sender confirmed the position: create the PHOTO-UPDATE draft and queue its
+   * images exactly like {@link handlePhotos}. The claim comes first so that a
+   * repeated tap cannot start the album twice.
+   */
+  private async startDvPhotos(
+    ctx: Context,
+    tgUserId: number,
+    token: string,
+  ): Promise<void> {
+    const lang = await this.langOf(tgUserId);
+    const claim = await this.dvLimits.claimPending(token, tgUserId);
+    if (claim.kind === 'unavailable') {
+      await ctx.reply(t(lang, 'dv.unavailable'));
+      return;
+    }
+    if (claim.kind === 'not_yours') {
+      await ctx.reply(t(lang, 'confirm.nothingPending'));
+      return;
+    }
+    if (claim.kind === 'gone') {
+      await ctx.reply(t(lang, 'dv.confirmExpired'));
+      return;
+    }
+    const images = claim.album.fileIds.slice(0, MAX_IMAGES_PER_LISTING);
+
+    let position: DvPosition | null;
     let draft: DraftWithImages;
     try {
+      position = await this.dvPhotos.describeTarget(claim.album.stockId);
+      if (!position) {
+        await ctx.reply(t(lang, 'dv.positionGone'));
+        return;
+      }
       draft = await this.dvPhotos.createPhotoDraft({
         position,
         tgUserId,
@@ -3206,7 +3306,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       });
     } catch (err) {
       this.logger.error(
-        `Failed to create photo-update draft for ${code1c} (tg ${tgUserId}): ${err instanceof Error ? err.message : String(err)}`,
+        `Failed to create photo-update draft for ${claim.album.code1c} (tg ${tgUserId}): ${err instanceof Error ? err.message : String(err)}`,
       );
       await ctx.reply(t(lang, 'photos.notAccepted'));
       return;
@@ -3253,6 +3353,16 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       // Mid-questionnaire: never retire the listing question on screen.
       await ctx.reply(receipt);
     }
+  }
+
+  /** The sender declined before any processing: forget the pending album. */
+  private async dropDvPhotos(
+    ctx: Context,
+    tgUserId: number,
+    token: string,
+  ): Promise<void> {
+    await this.dvLimits.claimPending(token, tgUserId);
+    await ctx.reply(t(await this.langOf(tgUserId), 'dv.cancelled'));
   }
 
   /**

@@ -52,7 +52,10 @@ describe('Cart smoke', () => {
     await svc.addItem('usr_1', { part_id: 'part_belt', quantity: 2 } as any);
 
     expect(prisma.cartItem.update).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { id: 'item_1' }, data: { quantity: 3 } }),
+      expect.objectContaining({
+        where: { id: 'item_1' },
+        data: { quantity: 3, priceUzsSnapshot: 185000 },
+      }),
     );
   });
 

@@ -4,6 +4,9 @@ export const RedisKeys = {
   // API paths can resolve back to the phone-keyed OTP record above without
   // changing their public signatures.
   otpRequest: (requestId: string): string => `otp:req:${requestId}`,
+  // Codes compared so far for one request_id, counted by the RateLimiter. Its own
+  // key because the record above is a JSON value that cannot be incremented.
+  otpAttempts: (requestId: string): string => `otp:attempts:${requestId}`,
   jwtBlacklist: (jti: string): string => `jwt:blacklist:${jti}`,
 
   // ── Cache (read-through, TTL-only invalidation) ───────────────────────────
@@ -58,6 +61,12 @@ export const RedisKeys = {
   // being enforced is model spend, so opening a second session must not grant a
   // second allowance.
   rateAiMessage: (userId: string): string => `rate:ai:message:${userId}`,
+  // Driver's Village photo updates (see DvPhotoLimits).
+  rateDvAlbum: (tgUserId: number): string => `rate:dv:album:${tgUserId}`,
+  rateDvAmbiguous: (tgUserId: number): string =>
+    `rate:dv:ambiguous:${tgUserId}`,
+  // An album waiting for its sender to confirm, before any FLUX job exists.
+  dvPhotoPending: (token: string): string => `dv:photo:pending:${token}`,
 
   // ── Draft-flow locks (DraftLock) ──────────────────────────────────────────
   // Short-lived mutexes that collapse duplicate taps on the draft/preview flow

@@ -223,6 +223,15 @@ export const UZ: BotStrings = {
     'Tasdiqlangandan so‘ng mahsulotning joriy rasmlari shu rasmlar bilan almashtiriladi. Nomi, narxi va boshqa ma’lumotlar o‘zgarmaydi.',
   'btn.dvConfirm': '✅ Tasdiqlash',
   'btn.dvCancel': '❌ Bekor qilish',
+  'btn.dvProcess': '▶️ Rasmlarga ishlov berish',
+  'dv.confirmStart':
+    'Pozitsiya {code}\n{title}\nQabul qilingan rasmlar: {count} (hozir mahsulotda: {current}).\n\nBoshlash uchun «Rasmlarga ishlov berish» tugmasini bosing. Mahsulot faqat natijani tasdiqlaganingizdan keyin o‘zgaradi.',
+  'dv.confirmExpired':
+    'Bu so‘rov eskirgan. Rasmlarni 1C kodi bilan qayta yuboring.',
+  'dv.rateLimited':
+    'Rasmlarni yangilash so‘rovlari juda ko‘p. Keyinroq urinib ko‘ring.',
+  'dv.unavailable':
+    'Rasmlarga ishlov berish vaqtincha mavjud emas. Birozdan keyin urinib ko‘ring.',
   'dv.photosUpdated':
     '✅ {code} pozitsiyasining rasmlari yangilandi ({count}).',
   'dv.cancelled':

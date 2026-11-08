@@ -18,6 +18,8 @@ import {
   fakeDiscounts,
   fakeNotifications,
   fakeRealtime,
+  partPriceFromCart,
+  priceSourcesFollowCart,
   PrismaMock,
 } from '../../test/utils/harness';
 
@@ -84,13 +86,15 @@ describe('The service fee on an order', () => {
       userId: 'usr_1',
     });
     prisma.catalogPart.findMany.mockImplementation(
-      ({ where }: { where: { id: { in: string[] } } }) =>
-        Promise.resolve(
-          where.id.in.map((id) =>
-            catalogPart(id, id === 'part_b' ? 'dealer_b' : 'dealer_a'),
-          ),
+      async ({ where }: { where: { id: { in: string[] } } }) =>
+        Promise.all(
+          where.id.in.map(async (id) => ({
+            ...catalogPart(id, id === 'part_b' ? 'dealer_b' : 'dealer_a'),
+            priceUzs: await partPriceFromCart(prisma, id),
+          })),
         ),
     );
+    priceSourcesFollowCart(prisma);
     prisma.seller.findMany.mockResolvedValue([
       { id: 7, tgId: BigInt(555), catalogSellerId: null },
     ]);

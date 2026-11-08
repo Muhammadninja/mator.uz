@@ -13,13 +13,16 @@ import {
   FakeDrafts,
   FakePrisma,
 } from '../../test/utils/dv-photo-world';
+import { makeFakeRedis } from '../../test/utils/fake-redis';
 import { createPrismaMock } from '../../test/utils/harness';
+import { FixedWindowRateLimiter } from '../redis/rate-limiter.service';
 import { matchesWhere } from '../catalog/compatibility/where-eval.test-util';
 import { PartsService } from '../catalog/parts/parts.service';
 import { CatalogProjectionService } from '../catalog/projection/catalog-projection.service';
 import { DraftCoordinator } from './draft-coordinator';
 import { DraftEvent } from './draft-events';
 import { DriversVillagePhotoService } from './drivers-village-photo.service';
+import { DvPhotoLimits } from './dv-photo-limits.service';
 import { makeFakeLock } from './draft-lock.test-util';
 import { MediaGroupBuffer } from './media-group-buffer';
 import type { ProductDraftService } from './product-draft.service';
@@ -28,7 +31,8 @@ import { TelegramService } from './telegram.service';
 
 const USER = 42;
 
-function setup() {
+function setup(config: Record<string, string> = {}, autoStart = true) {
+  const redis = makeFakeRedis();
   const world = new FakePrisma();
   const drafts = new FakeDrafts(world);
   const pendingEvents: Promise<void>[] = [];
@@ -104,6 +108,11 @@ function setup() {
       world.prisma,
       drafts as unknown as ProductDraftService,
     ),
+    dvLimits: new DvPhotoLimits(
+      redis as never,
+      new FixedWindowRateLimiter(redis as never),
+      { get: (key: string) => config[key] } as never,
+    ),
     bot: {
       action: (trigger: unknown, fn: (ctx: any) => Promise<void>) =>
         actions.push({ trigger, fn }),
@@ -117,11 +126,24 @@ function setup() {
   svc.registerHandlers();
 
   const replies: string[] = [];
+  /** Start buttons shown so far, newest last: `{data, from}`. */
+  const startPrompts: { data: string; from: number }[] = [];
   const ctxFor = (extra: Record<string, unknown> = {}) => ({
     from: { id: USER },
     chat: { id: USER },
-    reply: jest.fn(async (text: string) => {
+    reply: jest.fn(async (text: string, markup?: any) => {
       replies.push(text);
+      const start = markup?.reply_markup?.inline_keyboard
+        ?.flat()
+        .find((b: { callback_data: string }) =>
+          b.callback_data.startsWith('dvph:go:'),
+        );
+      if (start) {
+        startPrompts.push({
+          data: start.callback_data,
+          from: (extra.from as { id: number } | undefined)?.id ?? USER,
+        });
+      }
       return { message_id: ++nextId, chat: { id: USER } };
     }),
     answerCbQuery: jest.fn(),
@@ -140,6 +162,7 @@ function setup() {
     };
     if (caption !== undefined) msg.caption = caption;
     await photoHandlers[0]({ ...ctxFor({ from: { id: from } }), message: msg });
+    await startIfPrompted();
   }
 
   /** One album photo through the real handler, into the installed buffer. */
@@ -175,6 +198,15 @@ function setup() {
       caption: (mediaAdds.find((a) => a[2]) ?? [])[2] ?? null,
       ctx: mediaAdds.at(-1)![4],
     });
+    await startIfPrompted();
+  }
+
+  /** Most specs are about what follows the start button, so it is tapped for them. */
+  async function startIfPrompted() {
+    if (!autoStart) return;
+    for (const prompt of startPrompts.splice(0)) {
+      await tap(prompt.data, prompt.from);
+    }
   }
 
   /**
@@ -186,7 +218,12 @@ function setup() {
     svc.mediaBuffer = new MediaGroupBuffer(1500, 10, (group) =>
       flushes.push(svc.flushAlbum(group)),
     );
-    return { settle: () => Promise.all(flushes.splice(0)) };
+    return {
+      settle: async () => {
+        await Promise.all(flushes.splice(0));
+        await startIfPrompted();
+      },
+    };
   }
 
   /** The image worker finished every photo of the latest draft. */
@@ -238,6 +275,8 @@ function setup() {
     finishImages,
     tap,
     previewButtons,
+    redis,
+    startPrompts,
     mediaAdds,
   };
 }
@@ -832,5 +871,263 @@ describe("Driver's Village photo update → buyer catalog: only READY photos lis
       'https://old/dv-1.jpg',
     ]);
     expect(await catalogLists(t.world, 500)).toBe(true);
+  });
+});
+
+describe("Driver's Village photo update: rate limits and confirmation (SEC-004)", () => {
+  const CODE = '96273708';
+  const ALBUM = `1C ${CODE}`;
+  const position = (config: Record<string, string> = {}, autoStart = false) => {
+    const t = setup(config, autoStart);
+    t.world.addDvPosition({
+      stockId: 501,
+      productId: 101,
+      code: CODE,
+      title: 'Фильтр масляный',
+    });
+    return t;
+  };
+  it('stays open: an unregistered Telegram user gets through to the gallery', async () => {
+    const t = position({}, true);
+    t.svc.sellers.findByTgId.mockResolvedValue(null);
+
+    await t.sendPhoto('p1', ALBUM, 777);
+    const draftId = await t.finishImages('READY');
+    await t.tap(`dvph:ok:${draftId}`, 777);
+
+    expect(t.replies.at(-1)).toContain('обновлены (1)');
+    expect(t.svc.catalogProjection.projectStock).toHaveBeenCalledWith(501, {});
+  });
+
+  describe('before the sender confirms', () => {
+    it('shows the resolved position and queues nothing', async () => {
+      const t = position();
+
+      await t.sendAlbum(['p1', 'p2'], ALBUM, 0);
+
+      expect(t.replies.at(-1)).toContain(CODE);
+      expect(t.replies.at(-1)).toContain('Фильтр масляный');
+      expect(t.startPrompts).toHaveLength(1);
+      expect(t.svc.queue.enqueueImage).not.toHaveBeenCalled();
+      expect(t.drafts.createWithImages).not.toHaveBeenCalled();
+    });
+
+    it('an unknown code never reaches a confirm button', async () => {
+      const t = setup({}, false);
+
+      await t.sendPhoto('p1', '1C 11112222');
+
+      expect(t.startPrompts).toHaveLength(0);
+      expect(t.svc.queue.enqueueImage).not.toHaveBeenCalled();
+    });
+
+    it('declining queues nothing and the button cannot start it later', async () => {
+      const t = position();
+      await t.sendAlbum(['p1', 'p2'], ALBUM, 0);
+      const { data } = t.startPrompts[0];
+
+      await t.tap(data.replace('dvph:go:', 'dvph:drop:'));
+      await t.tap(data);
+
+      expect(t.svc.queue.enqueueImage).not.toHaveBeenCalled();
+      expect(t.replies.at(-1)).toContain('устарел');
+    });
+  });
+
+  describe('after the sender confirms', () => {
+    it('queues every photo of the album', async () => {
+      const t = position();
+      await t.sendAlbum(['p1', 'p2', 'p3'], ALBUM, 0);
+
+      await t.tap(t.startPrompts[0].data);
+
+      expect(t.svc.queue.enqueueImage).toHaveBeenCalledTimes(3);
+    });
+
+    it('sets no daily FLUX quota: job counts never stop a sender', async () => {
+      const t = position({ DV_PHOTO_ALBUMS_PER_HOUR: '100' });
+      // 310 images, past both of the removed caps (60 per sender, 300 in all).
+      for (let i = 0; i < 31; i++) {
+        await t.svc.handleDvPhotos(
+          t.ctxFor(),
+          USER,
+          Array.from({ length: 10 }, (_, n) => `p${i}_${n}`),
+          CODE,
+        );
+      }
+
+      for (const prompt of t.startPrompts) await t.tap(prompt.data);
+
+      expect(t.svc.queue.enqueueImage).toHaveBeenCalledTimes(310);
+      expect(
+        [...t.redis.store.keys()].filter((k) => k.includes('flux')),
+      ).toEqual([]);
+    });
+
+    it('a double tap starts one draft', async () => {
+      const t = position();
+      await t.sendAlbum(['p1', 'p2'], ALBUM, 0);
+      const { data } = t.startPrompts[0];
+
+      await Promise.all([t.tap(data), t.tap(data), t.tap(data)]);
+
+      expect(t.drafts.createWithImages).toHaveBeenCalledTimes(1);
+      expect(t.svc.queue.enqueueImage).toHaveBeenCalledTimes(2);
+    });
+
+    it('a redelivered tap after the start changes nothing', async () => {
+      const t = position();
+      await t.sendAlbum(['p1'], ALBUM, 0);
+      const { data } = t.startPrompts[0];
+      await t.tap(data);
+
+      await t.tap(data);
+
+      expect(t.svc.queue.enqueueImage).toHaveBeenCalledTimes(1);
+    });
+
+    it('someone else cannot start the album or use it up', async () => {
+      const t = position();
+      await t.sendAlbum(['p1'], ALBUM, 0);
+      const { data } = t.startPrompts[0];
+
+      await t.tap(data, 999);
+      expect(t.svc.queue.enqueueImage).not.toHaveBeenCalled();
+
+      await t.tap(data);
+      expect(t.svc.queue.enqueueImage).toHaveBeenCalledTimes(1);
+    });
+
+    it('a confirmed album never exceeds the image limit', async () => {
+      const t = position();
+      await t.svc.handleDvPhotos(
+        t.ctxFor(),
+        USER,
+        Array.from({ length: 15 }, (_, i) => `p${i}`),
+        CODE,
+      );
+
+      await t.tap(t.startPrompts[0].data);
+
+      expect(t.svc.queue.enqueueImage).toHaveBeenCalledTimes(10);
+    });
+
+    it('still replaces the gallery after the result is confirmed', async () => {
+      const t = position();
+      await t.sendAlbum(['p1', 'p2'], ALBUM, 0);
+      await t.tap(t.startPrompts[0].data);
+
+      await t.tap(`dvph:ok:${await t.finishImages('READY')}`);
+
+      expect(t.replies.at(-1)).toContain('обновлены (2)');
+    });
+  });
+
+  describe('per-sender limits', () => {
+    it('throttles albums past the hourly limit, before any lookup', async () => {
+      const t = position({ DV_PHOTO_ALBUMS_PER_HOUR: '2' });
+      const lookup = jest.spyOn(t.svc.dvPhotos, 'resolvePosition');
+      await t.sendAlbum(['p1'], ALBUM, 0);
+      await t.sendAlbum(['p2'], ALBUM, 0);
+
+      await t.sendAlbum(['p3'], ALBUM, 0);
+
+      expect(t.replies.at(-1)).toContain('Слишком много');
+      expect(lookup).toHaveBeenCalledTimes(2);
+      expect(t.startPrompts).toHaveLength(2);
+    });
+
+    it('one sender’s albums do not limit another', async () => {
+      const t = position({ DV_PHOTO_ALBUMS_PER_HOUR: '1' });
+      await t.sendPhoto('p1', ALBUM, 100);
+      await t.sendPhoto('p2', ALBUM, 200);
+
+      expect(t.startPrompts.map((p) => p.from)).toEqual([100, 200]);
+    });
+
+    it('a failed lookup gives the album back', async () => {
+      const t = position({ DV_PHOTO_ALBUMS_PER_HOUR: '1' });
+      jest
+        .spyOn(t.svc.dvPhotos, 'resolvePosition')
+        .mockRejectedValueOnce(new Error('db down'));
+
+      await t.sendAlbum(['p1'], ALBUM, 0);
+      await t.sendAlbum(['p2'], ALBUM, 0);
+
+      expect(t.startPrompts).toHaveLength(1);
+    });
+
+    it('rate-limits the list shown for an ambiguous code', async () => {
+      const t = position({ DV_PHOTO_AMBIGUOUS_PER_HOUR: '1' });
+      jest.spyOn(t.svc.dvPhotos, 'resolvePosition').mockResolvedValue({
+        kind: 'ambiguous',
+        positions: [
+          { code1c: 'SECRET-A', title: 'A' },
+          { code1c: 'SECRET-B', title: 'B' },
+        ],
+      });
+
+      await t.sendAlbum(['p1'], ALBUM, 0);
+      expect(t.replies.at(-1)).toContain('SECRET-A');
+
+      await t.sendAlbum(['p2'], ALBUM, 0);
+      expect(t.replies.at(-1)).toContain('Слишком много');
+      expect(t.replies.at(-1)).not.toContain('SECRET');
+    });
+  });
+
+  describe('failures', () => {
+    it('Redis down at the album: nothing is looked up or queued', async () => {
+      const t = position();
+      t.redis.incr.mockRejectedValue(new Error('connection lost'));
+      const lookup = jest.spyOn(t.svc.dvPhotos, 'resolvePosition');
+
+      await t.sendAlbum(['p1'], ALBUM, 0);
+
+      expect(t.replies.at(-1)).toContain('временно недоступна');
+      expect(lookup).not.toHaveBeenCalled();
+    });
+
+    it('Redis down at the start: nothing is queued', async () => {
+      const t = position();
+      await t.sendAlbum(['p1'], ALBUM, 0);
+      t.redis.get.mockRejectedValue(new Error('connection lost'));
+
+      await t.tap(t.startPrompts[0].data);
+
+      expect(t.replies.at(-1)).toContain('временно недоступна');
+      expect(t.svc.queue.enqueueImage).not.toHaveBeenCalled();
+      expect(t.drafts.createWithImages).not.toHaveBeenCalled();
+    });
+
+    it('a draft that cannot be created queues nothing', async () => {
+      const t = position();
+      await t.sendAlbum(['p1', 'p2'], ALBUM, 0);
+      t.drafts.createWithImages.mockRejectedValueOnce(new Error('db down'));
+
+      await t.tap(t.startPrompts[0].data);
+
+      expect(t.svc.queue.enqueueImage).not.toHaveBeenCalled();
+    });
+
+    it('a position gone by the start queues nothing', async () => {
+      const t = position();
+      await t.sendAlbum(['p1'], ALBUM, 0);
+      jest.spyOn(t.svc.dvPhotos, 'describeTarget').mockResolvedValue(null);
+
+      await t.tap(t.startPrompts[0].data);
+
+      expect(t.replies.at(-1)).toContain('больше не найдена');
+      expect(t.svc.queue.enqueueImage).not.toHaveBeenCalled();
+    });
+  });
+
+  it('an ordinary listing photo never touches these limits', async () => {
+    const t = setup();
+    t.svc.wizard.start(USER, 'ru');
+
+    await t.sendPhoto('p1');
+
+    expect(t.redis.incr).not.toHaveBeenCalled();
   });
 });
