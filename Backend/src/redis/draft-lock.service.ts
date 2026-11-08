@@ -1,5 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { RedisService, withRedisTimeout } from './redis.service';
+import {
+  RedisService,
+  assertRedisBacklogRoom,
+  withRedisTimeout,
+} from './redis.service';
 
 /**
  * DraftLock — a short-lived, self-expiring mutex for the draft/preview flow.
@@ -97,6 +101,7 @@ export class DraftLock {
     const token = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
     let command: Promise<'OK' | null> | undefined;
     try {
+      assertRedisBacklogRoom(`SET ${key}`); // at the cap: fail open at once
       command = this.redis.getClient().set(key, token, 'EX', ttlSeconds, 'NX');
       const res = await withRedisTimeout(
         command,
@@ -149,6 +154,7 @@ export class DraftLock {
    */
   private async release(key: string, token: string): Promise<void> {
     try {
+      assertRedisBacklogRoom(`release of ${key}`);
       await withRedisTimeout(
         this.redis.getClient().eval(DraftLock.RELEASE_SCRIPT, 1, key, token),
         DraftLock.REDIS_TIMEOUT_MS,
