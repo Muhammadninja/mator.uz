@@ -282,7 +282,7 @@ code_1c)`) is synchronized, nothing more:
 | Target | Value |
 |---|---|
 | `stocks` | `price_uzs` when it changed; `quantity` only when the file states one (§2) and it changed. |
-| `catalog_parts` | only the columns those feed (`CatalogProjectionService.projectStockLevels`): `price_uzs` when the price changed, `stock_qty` / `in_stock` when the quantity changed. A retail price or stock count an operator set stays when the file does not change it. |
+| `catalog_parts` | only the columns those feed (`CatalogProjectionService.projectStockLevels`): `price_uzs` when the price changed, `stock_qty` / `in_stock` when the quantity changed. A retail price or stock count an operator set stays when the file does not change it. A projection that failed or never ran is repaired on the next run, unless the value was changed by hand in the meantime: then the manual value stays and `projection_conflict` is reported until the two agree or the file changes it. |
 | everything else | **never written**: name, part number, OEM/GM lists, unit, `part_models` / `part_makes` / `catalog_part_fits` (not deleted, not recreated), category, photos, rating, kind, sale form, `fitment_bindings`, purchase price, cashback. Where the file differs, the row lists it under `notApplied` (`name`, `unit`, `gm_number`, `part_number`, `vehicles`); the dry-run counts `rowsWithCardDifferences`. |
 
 Every 1C position gets its **own** product. Positions are never merged by name

@@ -23,6 +23,8 @@ import { OrdersService, StatusActor } from './orders.service';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { ListOrdersQueryDto } from './dto/list-orders.query.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
+import { RecordOfflineCollectionDto } from './dto/record-offline-collection.dto';
+import { OfflineCollectionService } from './offline-collection.service';
 
 @ApiTags('Orders')
 @ApiBearerAuth('jwt')
@@ -33,7 +35,10 @@ import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 // user strategy (RS256) before AdminJwtGuard was ever reached.
 @Controller('v1/orders')
 export class OrdersController {
-  constructor(private readonly orders: OrdersService) {}
+  constructor(
+    private readonly orders: OrdersService,
+    private readonly offlineCollections: OfflineCollectionService,
+  ) {}
 
   @Post()
   @UseGuards(JwtAuthGuard)
@@ -88,5 +93,24 @@ export class OrdersController {
       ip: req.ip,
       userAgent: req.get('user-agent'),
     });
+  }
+
+  // Records cash or terminal money actually received. Open to exactly the roles that
+  // may already confirm an offline order through the status route above.
+  @Post(':id/offline-collection')
+  @UseGuards(AdminJwtGuard, AdminRoleGuard)
+  @Roles(AdminRole.SUPER_ADMIN, AdminRole.MANAGER, AdminRole.OPERATOR)
+  @HttpCode(HttpStatus.OK)
+  recordOfflineCollection(
+    @Request() req: ExpressRequest & { user: AuthenticatedAdmin },
+    @Param('id') id: string,
+    @Body() dto: RecordOfflineCollectionDto,
+  ) {
+    return this.offlineCollections.record(
+      id,
+      dto,
+      { id: req.user.id, email: req.user.email, name: req.user.name },
+      { ip: req.ip, userAgent: req.get('user-agent') },
+    );
   }
 }

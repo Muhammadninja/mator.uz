@@ -1,4 +1,9 @@
-import { OrderStatus, Prisma, RefundMethod } from '@prisma/client';
+import {
+  OrderStatus,
+  PaymentStatus,
+  Prisma,
+  RefundMethod,
+} from '@prisma/client';
 import type { SellerBalance } from './admin-finance.presenter';
 
 /**
@@ -20,12 +25,26 @@ import type { SellerBalance } from './admin-finance.presenter';
  */
 
 /**
- * An order that took the buyer's money at some point. Every way of being paid writes PAID to
- * the order's history (a Payme payment, an operator confirming cash or a terminal), and a
- * refund leaves it there, so this is "took money" whatever happened since.
+ * An order that took the buyer's money at some point. A payment and an operator's confirmation
+ * write PAID to the order's history, and a refund leaves it there, so that is "took money"
+ * whatever happened since. A cash or terminal order that records collection took money once the
+ * collection is on record, or if a provider settled it after all, and its status plays no part.
+ * It is a filter, so older offline orders keep their original reading.
  */
 export const TOOK_MONEY: Prisma.OrderWhereInput = {
-  statusHistory: { some: { status: OrderStatus.PAID } },
+  OR: [
+    {
+      offlineCollectionRequired: false,
+      statusHistory: { some: { status: OrderStatus.PAID } },
+    },
+    { offlineCollectionRequired: true, offlineCollection: { isNot: null } },
+    {
+      offlineCollectionRequired: true,
+      payments: {
+        some: { status: { in: [PaymentStatus.PAID, PaymentStatus.REFUNDED] } },
+      },
+    },
+  ],
 };
 
 /** A refund through the provider that the provider has not confirmed yet. */
@@ -54,10 +73,14 @@ export const PAYABLE_ORDER: Prisma.OrderWhereInput = {
  * took money three ways, with no order in two of them.
  */
 export const BLOCKED_ORDER: Prisma.OrderWhereInput = {
-  ...TOOK_MONEY,
-  OR: [
-    { payoutHoldAt: { not: null } },
-    { financialRefunds: { some: UNCONFIRMED_PROVIDER_REFUND } },
+  AND: [
+    TOOK_MONEY,
+    {
+      OR: [
+        { payoutHoldAt: { not: null } },
+        { financialRefunds: { some: UNCONFIRMED_PROVIDER_REFUND } },
+      ],
+    },
   ],
 };
 

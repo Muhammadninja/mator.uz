@@ -102,6 +102,12 @@ export function createPrismaMock(): PrismaMock {
                 ? jest.fn().mockResolvedValue(0)
                 : jest.fn();
           }
+          // An order proves it deleted exactly the lines it named.
+          if (prop === 'cartItem') {
+            delegate.deleteMany.mockImplementation(async ({ where }: any) => ({
+              count: where?.id?.in?.length ?? 0,
+            }));
+          }
           cache[prop] = delegate;
         }
         return cache[prop];

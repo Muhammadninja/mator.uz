@@ -58,6 +58,27 @@ export function canTransition(from: OrderStatus, to: OrderStatus): boolean {
 }
 
 /**
+ * What an operator may do with this order. A cash or terminal order that records
+ * collection is paid when the money is received, usually at the door, so it goes to
+ * work from PENDING_PAYMENT and never takes PAID by hand: PAID always means paid, and
+ * for these orders the money is OfflineCollection, apart from the status. The table
+ * above is left alone for every other order and for payment settlement.
+ */
+export function canOperatorTransition(
+  from: OrderStatus,
+  to: OrderStatus,
+  order: { offlineCollectionRequired: boolean },
+): boolean {
+  if (order.offlineCollectionRequired) {
+    if (to === OrderStatus.PAID) return false;
+    if (from === OrderStatus.PENDING_PAYMENT && to === OrderStatus.PROCESSING) {
+      return true;
+    }
+  }
+  return canTransition(from, to);
+}
+
+/**
  * Statuses from which a successful payment may settle an order to PAID —
  * derived from the state machine, so it can never drift from it. Today this is
  * exactly `[PENDING_PAYMENT]`: a CANCELLED, EXPIRED, REFUNDED or already-PAID

@@ -44,8 +44,19 @@ import {
 import { CreateOrderDto } from './dto/create-order.dto';
 import { ListOrdersQueryDto } from './dto/list-orders.query.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
-import { SYSTEM_ONLY_ORDER_STATUSES, canTransition } from './order-transitions';
 import {
+  SYSTEM_ONLY_ORDER_STATUSES,
+  canOperatorTransition,
+} from './order-transitions';
+import {
+  CartChangedError,
+  CartSnapshotMovedError,
+  assertSameCart,
+  consumeOrderedLines,
+  lockCart,
+} from './order-cart-lock';
+import {
+  CART_CHANGED,
   DELIVERY_COST_UNAVAILABLE,
   DELIVERY_PRICE_CHANGED,
   DELIVERY_QUOTE_STALE,
@@ -55,6 +66,7 @@ import {
   findUnavailableParts,
 } from './order-availability';
 import { findLineSellers } from './order-settlement';
+import { OFFLINE_PAYMENT_TYPES } from './offline-order.policy';
 import {
   OrderCharges,
   PricedLine,
@@ -306,7 +318,19 @@ export class OrdersService {
     const lineSellers = await findLineSellers(this.prisma, cart.items);
 
     const order = await this.prisma.$transaction(async (tx) => {
-      await this.assertPricesStillCurrent(tx, cart.items, unitPriceOf);
+      // The authoritative read: everything below uses these locked lines.
+      const locked = await lockCart(tx, cart.id);
+      assertSameCart(cart, locked);
+      const lines = locked!.items;
+
+      await this.assertPricesStillCurrent(tx, lines, unitPriceOf);
+      // After the check above, whose FOR SHARE holds these parts until commit.
+      assertAllAvailable(
+        await findUnavailableParts(
+          tx,
+          lines.map((i) => ({ partId: i.partId, title: i.title })),
+        ),
+      );
 
       const created = await tx.order.create({
         data: {
@@ -337,11 +361,13 @@ export class OrdersService {
           deliveryAddressId: snap.delivery_address_id ?? undefined,
           deliveryMethod,
           paymentType,
+          offlineCollectionRequired:
+            !!paymentType && OFFLINE_PAYMENT_TYPES.includes(paymentType),
           contactPhoneE164: contactPhone,
           promoCode: cart.promoCode ?? undefined,
           expiresAt,
           items: {
-            create: cart.items.map((i) => {
+            create: lines.map((i) => {
               // Net of the promo share. `lineTotalUzs` is the authority — for a
               // multi-unit line the net total need not divide evenly, so
               // priceUzs is its (floored) per-unit view and the two can differ
@@ -380,16 +406,30 @@ export class OrdersService {
       // order can never exist without its opening audit row.
       await this.orderStatus.recordCreation(tx, created.id, OrderStatus.PENDING_PAYMENT);
 
-      // The cart is consumed by the order.
-      await tx.cartItem.deleteMany({ where: { cartId: cart.id } });
+      // The cart is consumed by the order: the lines ordered, and no others.
+      await consumeOrderedLines(
+        tx,
+        cart.id,
+        lines.map((i) => i.id),
+      );
       await tx.cart.update({
         where: { id: cart.id },
         data: { promoCode: null, promoDiscountUzs: null },
       });
       return created;
     }).catch((err: unknown) => {
-      if (err instanceof CartPricesMovedError) {
+      if (
+        err instanceof CartPricesMovedError ||
+        err instanceof CartSnapshotMovedError
+      ) {
         return this.refuseMovedPrices(cart, delivery);
+      }
+      if (err instanceof CartChangedError) {
+        throw new ConflictException({
+          code: CART_CHANGED,
+          message:
+            'Your cart changed while the order was being placed. Check the cart and try again.',
+        });
       }
       throw err;
     });
@@ -524,7 +564,14 @@ export class OrdersService {
 
     const from = order.status;
     const to = dto.status.toUpperCase() as OrderStatus;
-    if (from !== to && !canTransition(from, to)) {
+    if (from !== to && to === OrderStatus.PAID && order.offlineCollectionRequired) {
+      throw new ConflictException({
+        code: 'OFFLINE_PAYMENT_NEEDS_COLLECTION',
+        message:
+          'This order is paid in person: record the money as received instead of marking it paid.',
+      });
+    }
+    if (from !== to && !canOperatorTransition(from, to, order)) {
       throw new BadRequestException(
         `Illegal transition ${from.toLowerCase()} → ${to.toLowerCase()}`,
       );

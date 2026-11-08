@@ -34,6 +34,7 @@ import {
   IMPORT_LIMITS,
 } from './drivers-village.constants';
 import type {
+  ProjectionPending,
   BatchWrite,
   ExistingPosition,
   PositionWrite,
@@ -64,6 +65,7 @@ export interface WrittenPosition {
 export const REQUIRED_MIGRATIONS = [
   '20260923000000_drivers_village_1c_import',
   '20261009000000_drivers_village_source_part_number',
+  '20261108000100_stock_projection_pending',
 ] as const;
 
 export interface DriversVillageStore {
@@ -86,6 +88,13 @@ export interface DriversVillageStore {
     sellerId: number,
     writes: BatchWrite[],
   ): Promise<WrittenPosition[]>;
+  /** The catalog parts are up to date: these stocks have nothing pending. */
+  clearProjectionPending(stockIds: number[]): Promise<void>;
+  /** These columns stay pending, because an administrator changed them. */
+  keepProjectionPending(
+    stockId: number,
+    remaining: ProjectionPending,
+  ): Promise<void>;
 }
 
 /** Derive the legacy label + flags from the labeled number lists. */
@@ -170,6 +179,8 @@ export class PrismaDriversVillageStore implements DriversVillageStore {
           quantity: true,
           unit: true,
           productId: true,
+          updatedAt: true,
+          projectionPending: true,
           product: {
             select: {
               title: true,
@@ -202,13 +213,21 @@ export class PrismaDriversVillageStore implements DriversVillageStore {
                 ),
               },
             },
-            select: { id: true, categoryId: true },
+            select: {
+              id: true,
+              categoryId: true,
+              priceUzs: true,
+              stockQty: true,
+              inStock: true,
+              updatedAt: true,
+            },
           })
-        ).map((p) => [p.id, p.categoryId]),
+        ).map((p) => [p.id, p]),
       );
       for (const s of stocks) {
         if (!s.sourceCode) continue;
         const partId = CatalogProjectionService.catalogPartId(s.id);
+        const part = projected.get(partId);
         out.set(s.sourceCode, {
           stockId: s.id,
           productId: s.productId,
@@ -220,14 +239,23 @@ export class PrismaDriversVillageStore implements DriversVillageStore {
           gmNumbers: s.product.gmNumbers,
           sourcePartNumber: s.product.sourcePartNumber,
           oemNumbers: s.product.oemNumbers,
-          categoryId: projected.get(partId) ?? s.product.categoryId,
+          categoryId: part ? part.categoryId : s.product.categoryId,
           isUniversal: s.product.isUniversal,
           models: s.product.partModels
             .map((pm) => `${pm.model.brand.name}|${pm.model.name}`)
             .sort(),
           makes: s.product.partMakes.map((pm) => pm.brand.name).sort(),
           imageCount: s.product._count.images,
-          hasCatalogPart: projected.has(partId),
+          hasCatalogPart: !!part,
+          projectionPending: s.projectionPending as ProjectionPending | null,
+          catalogPart: part
+            ? {
+                priceUzs: part.priceUzs.toFixed(2),
+                stockQty: part.stockQty,
+                inStock: part.inStock,
+                stale: s.updatedAt > part.updatedAt,
+              }
+            : null,
         });
       }
     }
@@ -240,6 +268,20 @@ export class PrismaDriversVillageStore implements DriversVillageStore {
       select: { sourceCode: true },
     });
     return rows.map((r) => r.sourceCode).filter((c): c is string => !!c);
+  }
+
+  // Raw, so that updated_at stays as the stock write left it: settling a marker
+  // says nothing about the stock having changed.
+  async clearProjectionPending(stockIds: number[]): Promise<void> {
+    if (stockIds.length === 0) return;
+    await this.prisma.$executeRaw`UPDATE stocks SET projection_pending = NULL WHERE id = ANY(${stockIds}::int[])`;
+  }
+
+  async keepProjectionPending(
+    stockId: number,
+    remaining: ProjectionPending,
+  ): Promise<void> {
+    await this.prisma.$executeRaw`UPDATE stocks SET projection_pending = ${JSON.stringify(remaining)}::jsonb WHERE id = ${stockId}`;
   }
 
   applyBatch(
@@ -361,6 +403,9 @@ async function syncStock(
         ? {}
         : { priceUzs: new Prisma.Decimal(w.priceUzs) }),
       ...(w.quantity === null ? {} : { quantity: w.quantity }),
+      ...(w.pending
+        ? { projectionPending: w.pending as unknown as Prisma.InputJsonValue }
+        : {}),
     },
     select: { id: true },
   });

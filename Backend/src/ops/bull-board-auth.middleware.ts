@@ -1,7 +1,20 @@
-import { Injectable, Logger, type NestMiddleware } from '@nestjs/common';
+import {
+  Inject,
+  Injectable,
+  Logger,
+  type NestMiddleware,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import type { NextFunction, Request, Response } from 'express';
+import {
+  BasicAuthThrottle,
+  basicAuthClient,
+  denyLockedOut,
+  denyUnavailable,
+} from '../common/basic-auth-throttle';
+import { RATE_LIMITER } from '../redis/rate-limiter.service';
+import type { RateLimiter } from '../redis/rate-limiter.service';
 import { resolveBullBoardConfig, type BullBoardConfig } from './ops.config';
 
 /**
@@ -37,11 +50,17 @@ export class BullBoardAuthMiddleware implements NestMiddleware {
   private readonly logger = new Logger(BullBoardAuthMiddleware.name);
   private readonly config: BullBoardConfig;
 
-  constructor(config: ConfigService) {
+  private readonly throttle: BasicAuthThrottle;
+
+  constructor(
+    config: ConfigService,
+    @Inject(RATE_LIMITER) limiter: RateLimiter,
+  ) {
     this.config = resolveBullBoardConfig(config);
+    this.throttle = new BasicAuthThrottle(limiter, 'bull-board');
   }
 
-  use(req: Request, res: Response, next: NextFunction): void {
+  async use(req: Request, res: Response, next: NextFunction): Promise<void> {
     if (!this.config.user || !this.config.password) {
       // Misconfiguration must never mean "open" — refuse and say why in the log
       // (never in the response, which stays a generic 401).
@@ -73,7 +92,26 @@ export class BullBoardAuthMiddleware implements NestMiddleware {
     // response time doesn't reveal which half was wrong.
     const userOk = safeEqual(user, this.config.user);
     const passwordOk = safeEqual(password, this.config.password);
-    if (!userOk || !passwordOk) {
+    const valid = userOk && passwordOk;
+    const client = basicAuthClient(req);
+    let wait: number;
+    try {
+      wait = valid
+        ? await this.throttle.lockedFor(client)
+        : await this.throttle.recordFailure(client);
+    } catch (err) {
+      this.logger.error(
+        `Bull Board access refused, its failure limit could not be checked: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      denyUnavailable(res);
+      return;
+    }
+    if (wait > 0) {
+      this.logger.warn(`Bull Board locked out ${req.ip ?? 'unknown'}`);
+      denyLockedOut(res, wait);
+      return;
+    }
+    if (!valid) {
       this.logger.warn(
         `Rejected Bull Board access attempt from ${req.ip ?? 'unknown'}`,
       );

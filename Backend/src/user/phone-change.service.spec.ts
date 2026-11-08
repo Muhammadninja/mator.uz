@@ -79,8 +79,14 @@ function build() {
     prisma as never,
     otp as never,
     tokens as never,
+    { setEx: jest.fn().mockResolvedValue('OK') } as never,
+    { enqueueSms: jest.fn().mockResolvedValue({}) } as never,
   );
-  return { service, prisma, otp, tokens };
+  // The two-proof rules have their own spec, against the real OtpService.
+  const proofs = jest
+    .spyOn(service as never as { verifyProofs: () => Promise<void> }, 'verifyProofs')
+    .mockResolvedValue(undefined);
+  return { service, prisma, otp, tokens, proofs };
 }
 
 const CURRENT = '+998900000000';
@@ -170,7 +176,7 @@ describe('PhoneChangeService', () => {
     }
 
     it('verifies the OTP, updates all phone fields, rotates tokens (revoke → issue) and returns a fresh pair', async () => {
-      const { service, prisma, otp, tokens } = build();
+      const { service, prisma, proofs, tokens } = build();
       prisma.appUser.findUnique.mockResolvedValueOnce({
         id: 'u1',
         phoneE164: CURRENT,
@@ -198,11 +204,7 @@ describe('PhoneChangeService', () => {
 
       const res = await service.confirm('u1', NEW, '123456');
 
-      expect(otp.verifyLatestForPhone).toHaveBeenCalledWith(
-        NEW,
-        '123456',
-        OtpPurpose.PHONE_CHANGE,
-      );
+      expect(proofs).toHaveBeenCalledWith(CURRENT, 'u1', NEW, '123456', undefined);
       // The transaction opens by taking the account's row lock, before it reads
       // or writes anything — that is what serializes concurrent confirmations.
       expect(prisma.tx.$queryRaw).toHaveBeenCalled();
@@ -294,12 +296,12 @@ describe('PhoneChangeService', () => {
     });
 
     it('does not update or revoke when the OTP is invalid', async () => {
-      const { service, prisma, otp, tokens } = build();
+      const { service, prisma, proofs, tokens } = build();
       prisma.appUser.findUnique.mockResolvedValueOnce({
         id: 'u1',
         phoneE164: CURRENT,
       });
-      otp.verifyLatestForPhone.mockRejectedValue(
+      proofs.mockRejectedValue(
         new BadRequestException('bad'),
       );
 
@@ -353,7 +355,7 @@ describe('PhoneChangeService', () => {
     });
 
     it('rejects a no-op confirm (already the current number)', async () => {
-      const { service, prisma, otp } = build();
+      const { service, prisma, proofs } = build();
       prisma.appUser.findUnique.mockResolvedValueOnce({
         id: 'u1',
         phoneE164: NEW,
@@ -362,7 +364,7 @@ describe('PhoneChangeService', () => {
       await expect(service.confirm('u1', NEW, '123456')).rejects.toBeInstanceOf(
         BadRequestException,
       );
-      expect(otp.verifyLatestForPhone).not.toHaveBeenCalled();
+      expect(proofs).not.toHaveBeenCalled();
     });
   });
 
@@ -454,7 +456,12 @@ describe('PhoneChangeService', () => {
         prisma as never,
         otp as never,
         tokens as never,
+        {} as never,
+        { enqueueSms: jest.fn().mockResolvedValue({}) } as never,
       );
+      jest
+        .spyOn(service as never as { verifyProofs: () => Promise<void> }, 'verifyProofs')
+        .mockResolvedValue(undefined);
       return { service, prisma, row, tokens, locksTaken };
     }
 

@@ -1,3 +1,4 @@
+import { AWAITING_OFFLINE_MONEY } from '../../orders/offline-order.policy';
 import {
   BadRequestException,
   Injectable,
@@ -257,7 +258,7 @@ export class AdminOrdersService {
   }
 
   private async statusTotals() {
-    const [rows, feesReturned] = await Promise.all([
+    const [rows, feesReturned, awaitingMoney] = await Promise.all([
       this.prisma.order.groupBy({
         by: ['status'],
         _count: { _all: true },
@@ -272,13 +273,20 @@ export class AdminOrdersService {
         },
         _sum: { serviceFeeUzs: true },
       }),
+      // In progress, so in those statuses, with the buyer yet to pay.
+      this.prisma.order.aggregate({
+        where: { status: { in: REVENUE_STATUSES }, ...AWAITING_OFFLINE_MONEY },
+        _sum: { totalUzs: true, serviceFeeUzs: true },
+      }),
     ]);
     const counts = Object.fromEntries(
       ORDER_STATUSES.map((status) => [status, 0]),
     ) as Record<(typeof ORDER_STATUSES)[number], number>;
     let totalOrders = 0;
-    let revenueUzs = 0;
-    let serviceFeeRevenueUzs = -Number(feesReturned._sum.serviceFeeUzs ?? 0);
+    let revenueUzs = -Number(awaitingMoney._sum.totalUzs ?? 0);
+    let serviceFeeRevenueUzs =
+      -Number(feesReturned._sum.serviceFeeUzs ?? 0) -
+      Number(awaitingMoney._sum.serviceFeeUzs ?? 0);
     for (const row of rows) {
       const key = row.status.toLowerCase() as keyof typeof counts;
       counts[key] = row._count._all;

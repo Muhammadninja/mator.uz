@@ -158,6 +158,8 @@ export interface ImportReport {
       skippedUnchanged: number;
       projected: number;
       projectionFailures: number;
+      /** Values changed by hand that were kept instead of a pending 1C value. */
+      projectionConflicts?: number;
     } | null;
   };
   /** Per position, its vehicles merged over the rows of its code. */

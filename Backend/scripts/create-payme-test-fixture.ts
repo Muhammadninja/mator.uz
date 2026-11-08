@@ -2,9 +2,14 @@
  * Payme sandbox fixture: the minimum data test.paycom.uz needs to exercise the
  * Merchant API against this backend.
  *
- *   npm run payme:fixture
- *   npm run payme:fixture -- --amount=215000
- *   npm run payme:fixture -- --reset      # return the order to a fresh unpaid state
+ *   npm run payme:fixture                                # dry run: writes nothing
+ *   npm run payme:fixture -- --amount=215000             # dry run for that amount
+ *   npm run payme:fixture -- --reset                     # dry run of the reset
+ *   npm run payme:fixture -- [same options] --apply --confirm=<code>
+ *   … --allow-database=<host/db>                         # any non-local database
+ *
+ * `--reset` DELETES this order's payments, receipts and refund entries, so the code
+ * covers how many of each. Guarded by src/maintenance/maintenance-guard.ts.
  *
  * WHY SO LITTLE DATA: the Payme webhook resolves a payment by
  * `params.account.<field>` → `order.findUnique` → amount check → status check.
@@ -25,11 +30,14 @@
  * Idempotent — fixed ids, upserted. Re-running converges instead of piling up
  * users and orders.
  */
+import 'dotenv/config';
 import { OrderStatus, PrismaClient, Role } from '@prisma/client';
+import {
+  type MaintenancePlan,
+  runMaintenance,
+} from '../src/maintenance/maintenance-guard';
 import { buildPaymeCheckoutUrl } from '../src/orders/webhooks/payme-checkout.util';
 import { readPaymeConfig } from '../src/orders/webhooks/payme.config';
-
-const prisma = new PrismaClient();
 
 /**
  * Stable, unmistakably-test identifiers so the rows are easy to spot and the
@@ -59,14 +67,51 @@ function parseArgs(argv: string[]): Record<string, string> {
   return args;
 }
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
+function readAmount(args: Record<string, string>): number {
   const totalUzs = Number(args.amount ?? DEFAULT_TOTAL_UZS);
   if (!Number.isFinite(totalUzs) || totalUzs <= 0) {
     throw new Error(
       `--amount must be a positive number of UZS (got "${args.amount}")`,
     );
   }
+  return totalUzs;
+}
+
+/** What a real run would write and delete. Reads only. */
+export async function buildFixturePlan(
+  prisma: PrismaClient,
+  args: Record<string, string>,
+): Promise<MaintenancePlan> {
+  const totalUzs = readAmount(args);
+  const onOrder = { orderId: TEST_ORDER_ID };
+  const onItsPayments = { payment: onOrder };
+  const items: unknown[] = [
+    { upsertUser: TEST_USER_ID },
+    { upsertOrder: TEST_ORDER_ID, totalUzs, status: OrderStatus.PENDING_PAYMENT },
+  ];
+  if (args.reset) {
+    const [refunds, snapshots, receipts, payments] = await Promise.all([
+      prisma.financialRefund.count({ where: onOrder }),
+      prisma.paymeFiscalSnapshot.count({ where: onItsPayments }),
+      prisma.paymeFiscalReceipt.count({ where: onItsPayments }),
+      prisma.payment.count({ where: onOrder }),
+    ]);
+    items.push({ delete: { refunds, snapshots, receipts, payments } });
+  }
+  return {
+    summary: [
+      `fixture order ${TEST_ORDER_ID} for ${totalUzs} UZS`,
+      ...(args.reset ? ['--reset DELETES the rows counted below'] : []),
+    ],
+    items,
+  };
+}
+
+async function applyFixture(
+  prisma: PrismaClient,
+  args: Record<string, string>,
+): Promise<void> {
+  const totalUzs = readAmount(args);
   // Payme quotes every amount in tiyin: 1 UZS = 100 tiyin. This must match the
   // webhook's own check (Math.round(totalUzs * 100)) exactly, or
   // CheckPerformTransaction answers -31001.
@@ -177,12 +222,30 @@ async function main() {
   }
 }
 
-main()
-  .then(async () => {
-    await prisma.$disconnect();
-  })
-  .catch(async (e) => {
-    console.error(e);
-    await prisma.$disconnect();
-    process.exit(1);
+export function runFixture(
+  prisma: PrismaClient,
+  argv: readonly string[],
+  env: NodeJS.ProcessEnv,
+) {
+  const args = parseArgs([...argv]);
+  return runMaintenance({
+    script: 'payme:fixture',
+    argv,
+    env,
+    buildPlan: () => buildFixturePlan(prisma, args),
+    apply: () => applyFixture(prisma, args),
   });
+}
+
+if (require.main === module) {
+  const prisma = new PrismaClient();
+  runFixture(prisma, process.argv.slice(2), process.env)
+    .then(async () => {
+      await prisma.$disconnect();
+    })
+    .catch(async (e) => {
+      console.error(e);
+      await prisma.$disconnect();
+      process.exit(1);
+    });
+}

@@ -1,4 +1,9 @@
-import { OrderStatus, PaymentType, Prisma } from '@prisma/client';
+import {
+  OrderStatus,
+  PaymentStatus,
+  PaymentType,
+  Prisma,
+} from '@prisma/client';
 
 /**
  * Methods settled in person, on delivery. Such an order has no online payment
@@ -8,6 +13,19 @@ export const OFFLINE_PAYMENT_TYPES: PaymentType[] = [
   PaymentType.CASH,
   PaymentType.TERMINAL,
 ];
+
+/**
+ * A cash or terminal order whose money has not been received. It can be in progress
+ * or even delivered, and until an operator records the money it is not financially
+ * paid, so no figure of money may count it.
+ */
+export const AWAITING_OFFLINE_MONEY: Prisma.OrderWhereInput = {
+  offlineCollectionRequired: true,
+  offlineCollection: { is: null },
+  payments: {
+    none: { status: { in: [PaymentStatus.PAID, PaymentStatus.REFUNDED] } },
+  },
+};
 
 /**
  * How long a cash or terminal order may wait for an operator. All are hours and

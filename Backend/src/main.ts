@@ -12,6 +12,12 @@ import {
   createSwaggerAuthMiddleware,
   resolveSwaggerCredentials,
 } from './common/swagger-auth.middleware';
+import { BasicAuthThrottle } from './common/basic-auth-throttle';
+import { RATE_LIMITER, type RateLimiter } from './redis/rate-limiter.service';
+import {
+  SYNC_INVENTORY_PATH,
+  syncInventoryBodyMiddleware,
+} from './integrations/sync-inventory-body.middleware';
 import {
   PAYME_WEBHOOK_PATH,
   paymeRawBodyMiddleware,
@@ -96,6 +102,10 @@ async function bootstrap() {
   // standard parsing and validation.
   app.use(PAYME_WEBHOOK_PATH, paymeRawBodyMiddleware);
 
+  // A dealer's stock upload is the one JSON body that legitimately exceeds the
+  // default 100 KB. Scoped to its route, so every other endpoint keeps that limit.
+  app.use(SYNC_INVENTORY_PATH, syncInventoryBodyMiddleware);
+
   // Security headers. The API serves JSON (and SSE for the AI advisor), so the
   // restrictive CSP defaults don't apply; disable CSP to avoid breaking the
   // mobile client and keep the other protections (HSTS, noSniff, etc.).
@@ -161,7 +171,11 @@ async function bootstrap() {
       };
       express.use(
         ['/docs', '/docs-json', '/docs-yaml'],
-        createSwaggerAuthMiddleware(credentials, logger),
+        createSwaggerAuthMiddleware(
+          credentials,
+          logger,
+          new BasicAuthThrottle(app.get<RateLimiter>(RATE_LIMITER), 'swagger'),
+        ),
       );
     }
 

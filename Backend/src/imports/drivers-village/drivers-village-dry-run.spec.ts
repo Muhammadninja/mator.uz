@@ -48,6 +48,7 @@ function recordingPrisma(storedCodes = ['96273708', 'OLD-1']) {
               quantity: 3,
               unit: 'PCS',
               productId: 21,
+              updatedAt: new Date(1),
               product: {
                 title: 'Фильтр масляный',
                 gmNumbers: [],
@@ -65,7 +66,14 @@ function recordingPrisma(storedCodes = ['96273708', 'OLD-1']) {
           ]
         : storedCodes.map((sourceCode) => ({ sourceCode })),
     'catalogPart.findMany': () => [
-      { id: 'part_stock_11', categoryId: 'oil-filters' },
+      {
+        id: 'part_stock_11',
+        categoryId: 'oil-filters',
+        priceUzs: new Prisma.Decimal('100000'),
+        stockQty: 3,
+        inStock: true,
+        updatedAt: new Date(2),
+      },
     ],
   };
   const model = (name: string) =>
@@ -130,6 +138,10 @@ function setup(storedCodes?: string[]) {
         return Promise.reject(new Error('projection is a write'));
       },
       projectStockLevels: (id: number) => {
+        projected.push(id);
+        return Promise.reject(new Error('projection is a write'));
+      },
+      repairStockLevels: (id: number) => {
         projected.push(id);
         return Promise.reject(new Error('projection is a write'));
       },

@@ -16,6 +16,7 @@ const PROD = {
   PAYME_MERCHANT_ID: 'merchant-1',
   PAYME_MERCHANT_KEY: 'merchant-secret',
   UZMAPS_API_KEY: 'uzmaps-key',
+  OTP_JOB_ENCRYPTION_KEY: 'a'.repeat(64),
 };
 
 describe('AUTH_DEV_MODE production guard (boot-time validateEnv)', () => {
@@ -64,7 +65,11 @@ describe('AUTH_DEV_MODE production guard (boot-time validateEnv)', () => {
 
   it('reports a readable reason', () => {
     expect(
-      collectAuthEnvErrors({ NODE_ENV: 'production', AUTH_DEV_MODE: 'true' }),
+      collectAuthEnvErrors({
+        NODE_ENV: 'production',
+        AUTH_DEV_MODE: 'true',
+        OTP_JOB_ENCRYPTION_KEY: 'a'.repeat(64),
+      }),
     ).toHaveLength(1);
   });
 });

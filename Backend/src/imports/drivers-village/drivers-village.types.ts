@@ -142,6 +142,30 @@ export interface VehicleReference {
   models: string[];
 }
 
+/**
+ * What a catalog part held when a 1C write to its stock was still to be projected, per
+ * column. Equal to the part now: nobody touched it. Different: someone did.
+ */
+export interface ProjectionPending {
+  price?: { base: string };
+  quantity?: { baseQty: number; baseInStock: boolean };
+}
+
+/** The columns a repair writes, each only if the part still holds this. */
+export interface ExpectedLevels {
+  price?: string;
+  quantity?: { stockQty: number; inStock: boolean };
+}
+
+/** What to do about a position's pending projection in this run. */
+export interface ProjectionRepair {
+  /** Columns nobody has touched since: bring them up to date. Null when none. */
+  expected: ExpectedLevels | null;
+  /** Columns an administrator changed: left alone and still pending. */
+  remaining: ProjectionPending | null;
+  conflicts: ('price' | 'quantity')[];
+}
+
 /** The state of a position already in the database, as the sync reads it. */
 export interface ExistingPosition {
   stockId: number;
@@ -167,6 +191,21 @@ export interface ExistingPosition {
   makes: string[];
   imageCount: number;
   hasCatalogPart: boolean;
+  /** What buyers see now, or null when the position was never projected. */
+  catalogPart: {
+    priceUzs: string;
+    stockQty: number;
+    inStock: boolean;
+    /**
+     * Stock was written after this part last was: a projection that failed or never
+     * ran. A part written since is left alone, or the retail price and count an
+     * operator sets in admin inventory would be reverted by every import.
+     * Only for a stock with no `projectionPending`, which says this exactly.
+     */
+    stale: boolean;
+  } | null;
+  /** A projection not yet known to have happened; null almost always. */
+  projectionPending: ProjectionPending | null;
 }
 
 /**
@@ -207,6 +246,8 @@ export interface StockSync {
   priceUzs: string | null;
   /** The new quantity; null = unchanged or not stated, not written. */
   quantity: number | null;
+  /** Stored in the same transaction as the write. Absent: no catalog part yet. */
+  pending?: ProjectionPending;
 }
 
 export type BatchWrite = PositionWrite | StockSync;
@@ -221,4 +262,6 @@ export interface RowPlan {
   /** What the sync writes: 'price' / 'quantity' (update only). */
   changes: string[];
   existing: ExistingPosition | null;
+  /** Set when the position has a pending projection to deal with. */
+  repair?: ProjectionRepair | null;
 }

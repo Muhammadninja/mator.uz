@@ -26,6 +26,8 @@ export const ADMIN_ORDER_LIST_SELECT = {
   status: true,
   totalUzs: true,
   paymentType: true,
+  offlineCollectionRequired: true,
+  offlineCollection: { select: { method: true } },
   refundSettledAt: true,
   createdAt: true,
   updatedAt: true,
@@ -59,6 +61,17 @@ export const ADMIN_ORDER_DETAIL_SELECT = {
   serviceFeeUzs: true,
   deliveryUzs: true,
   paymentType: true,
+  offlineCollectionRequired: true,
+  offlineCollection: {
+    select: {
+      method: true,
+      amountUzs: true,
+      reference: true,
+      fiscalReference: true,
+      collectedAt: true,
+      collectedByName: true,
+    },
+  },
   refundSettledAt: true,
   deliveryMethod: true,
   deliveryDestination: true,
@@ -152,6 +165,7 @@ function customerName(u: CustomerFields): string | null {
 function paymentSummary(
   payments: { provider: string; status: string }[],
   chosen: string | null | undefined,
+  offline?: { offlineCollectionRequired: boolean; offlineCollection: unknown },
 ): {
   method: string | null;
   status: string | null;
@@ -161,14 +175,20 @@ function paymentSummary(
     method: latest
       ? latest.provider.toLowerCase()
       : (chosen?.toLowerCase() ?? null),
-    status: latest ? latest.status.toLowerCase() : null,
+    status: latest
+      ? latest.status.toLowerCase()
+      : offline?.offlineCollectionRequired
+        ? offline.offlineCollection
+          ? PaymentStatus.PAID.toLowerCase()
+          : PaymentStatus.PENDING.toLowerCase()
+        : null,
   };
 }
 
 /**
  * A cancelled order whose payment still reads paid: the money was taken and nothing
  * has given it back yet. The provider's refund callback moves both to REFUNDED, so
- * this clears itself the moment a refund really happens. A refund made outside the
+ * this clears itself the moment a refund really happens. A collected cash or terminal order counts as paid here too. A refund made outside the
  * provider sends no callback, so the refund registry clears it too, once its entries
  * account for everything the order took. Row-level twin of {@link REFUND_DUE_WHERE}.
  */
@@ -186,7 +206,10 @@ function isRefundDue(
 export const REFUND_DUE_WHERE = {
   status: OrderStatus.CANCELLED,
   refundSettledAt: null,
-  payments: { some: { status: PaymentStatus.PAID } },
+  OR: [
+    { payments: { some: { status: PaymentStatus.PAID } } },
+    { offlineCollectionRequired: true, offlineCollection: { isNot: null } },
+  ],
 } satisfies Prisma.OrderWhereInput;
 
 export function presentAdminOrderRow(
@@ -194,7 +217,7 @@ export function presentAdminOrderRow(
   slaOverdue = false,
   operatorWarning = false,
 ) {
-  const payment = paymentSummary(o.payments, o.paymentType);
+  const payment = paymentSummary(o.payments, o.paymentType, o);
   return {
     id: o.id,
     status: o.status.toLowerCase(),
@@ -314,7 +337,7 @@ export function presentAdminOrderDetail(
   sellerNames: ReadonlyMap<string, string> = new Map(),
   pickupPoints: PickupPoint<AdminPickupItem>[] | null = null,
 ) {
-  const payment = paymentSummary(o.payments, o.paymentType);
+  const payment = paymentSummary(o.payments, o.paymentType, o);
 
   // Every status change now writes a history row (creation included) via the
   // OrderStatusService chokepoint, so the stored rows ARE the authoritative,
@@ -350,6 +373,18 @@ export function presentAdminOrderDetail(
     deliveryMethod: o.deliveryMethod?.toLowerCase() ?? null,
     paymentMethod: payment.method,
     paymentStatus: payment.status,
+    // Whether this order's money is recorded apart from its status, and the record if any.
+    offlineCollectionRequired: o.offlineCollectionRequired,
+    offlineCollection: o.offlineCollection
+      ? {
+          method: o.offlineCollection.method.toLowerCase(),
+          amount: Number(o.offlineCollection.amountUzs),
+          reference: o.offlineCollection.reference,
+          fiscalReference: o.offlineCollection.fiscalReference,
+          collectedAt: o.offlineCollection.collectedAt.toISOString(),
+          collectedBy: o.offlineCollection.collectedByName,
+        }
+      : null,
     slaOverdue,
     operatorWarning,
     refundDue: isRefundDue(o, payment),

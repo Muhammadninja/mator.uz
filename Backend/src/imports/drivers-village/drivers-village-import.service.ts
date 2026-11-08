@@ -71,7 +71,9 @@ import {
   findLookAlikes,
   isPriceJump,
   isUnclassified,
+  planProjectionRepair,
   planStockSync,
+  projectionDrift,
   resolveDuplicateCodes,
   type SourceLine,
 } from './drivers-village.planner';
@@ -85,7 +87,9 @@ import type { DriversVillageStore } from './drivers-village.store';
 import type {
   BatchWrite,
   ExistingPosition,
+  ExpectedLevels,
   ParsedRow,
+  ProjectionPending,
   RowPlan,
   VehicleLinks,
 } from './drivers-village.types';
@@ -119,6 +123,8 @@ export interface StockProjector {
     stockId: number,
     changed: { price: boolean; quantity: boolean },
   ): Promise<string | null>;
+  /** Those columns, only while the part still holds what is expected. */
+  repairStockLevels(stockId: number, expected: ExpectedLevels): Promise<boolean>;
 }
 
 export class DriversVillageImportService {
@@ -330,7 +336,21 @@ export class DriversVillageImportService {
         });
       if (isUnclassified(prev.categoryId))
         report.summary.existingWithoutCategory += 1;
-      plans.push({ row, action, write, changes, existing: prev });
+      const repair = planProjectionRepair(row, prev, {
+        price: changes.includes('price'),
+        quantity: changes.includes('quantity'),
+      });
+      for (const field of repair?.conflicts ?? [])
+        rr.issues.push({
+          line: row.line,
+          code1c: row.code1c,
+          kind: 'data',
+          severity: 'warning',
+          code: 'projection_conflict',
+          field,
+          message: `the catalog ${field} was changed by hand while the 1C value was waiting to be applied: the manual value is kept. It stops being reported once the two agree or the file changes it`,
+        });
+      plans.push({ row, action, write, changes, existing: prev, repair });
     }
     // Fitment is written for new positions only: check those against the
     // buyer vehicle reference.
@@ -386,6 +406,10 @@ export class DriversVillageImportService {
       skippedUnchanged: 0,
       projected: 0,
       projectionFailures: 0,
+      projectionConflicts: plans.reduce(
+        (n, p) => n + (p.repair?.conflicts.length ?? 0),
+        0,
+      ),
     };
     report.summary.written = written;
     const toWrite = plans.filter(
@@ -396,18 +420,48 @@ export class DriversVillageImportService {
     // projection (a new position, or one whose part is missing).
     const toProject = new Map<
       string,
-      { stockId: number; levels: { price: boolean; quantity: boolean } | null }
+      {
+        stockId: number;
+        levels: { price: boolean; quantity: boolean } | null;
+        /** A pending projection, repaired only where nobody changed the part. */
+        expected?: ExpectedLevels | null;
+        /** The stock carries a marker to settle once this has succeeded. */
+        marked?: boolean;
+        remaining?: ProjectionPending | null;
+      }
     >();
 
     for (const p of plans) {
       if (p.action !== 'unchanged') continue;
       rows.get(p.row.line)!.written = 'skipped_unchanged';
       written.skippedUnchanged += 1;
-      // Resume path: a batch committed but its projection never ran.
-      if (p.existing && !p.existing.hasCatalogPart)
+      if (!p.existing) continue;
+      // Resume path: a batch committed but its projection never ran, or failed
+      // partway, so Stock matches the file and the catalog part does not.
+      if (!p.existing.hasCatalogPart) {
         toProject.set(p.row.code1c, {
           stockId: p.existing.stockId,
           levels: null,
+        });
+        continue;
+      }
+      if (p.repair) {
+        // A pure conflict has nothing to do until the part or the file changes.
+        if (p.repair.expected || !p.repair.remaining)
+          toProject.set(p.row.code1c, {
+            stockId: p.existing.stockId,
+            levels: { price: false, quantity: false },
+            expected: p.repair.expected,
+            marked: true,
+            remaining: p.repair.remaining,
+          });
+        continue;
+      }
+      const drift = projectionDrift(p.row, p.existing);
+      if (drift.price || drift.quantity)
+        toProject.set(p.row.code1c, {
+          stockId: p.existing.stockId,
+          levels: drift,
         });
     }
     for (const p of toWrite) rows.get(p.row.line)!.written = 'not_written';
@@ -424,15 +478,23 @@ export class DriversVillageImportService {
           rows.get(plan.row.line)!.written = w.created ? 'created' : 'updated';
           if (w.created) written.created += 1;
           else written.updated += 1;
+          // A column the file did not change may still be stale from a run
+          // that failed earlier, so it is repaired along with the rest.
+          const drift = plan.existing
+            ? projectionDrift(plan.row, plan.existing)
+            : { price: false, quantity: false };
           toProject.set(w.code1c, {
             stockId: w.stockId,
             levels:
               plan.write.kind === 'sync'
                 ? {
-                    price: plan.write.priceUzs !== null,
-                    quantity: plan.write.quantity !== null,
+                    price: plan.write.priceUzs !== null || drift.price,
+                    quantity: plan.write.quantity !== null || drift.quantity,
                   }
                 : null,
+            expected: plan.repair?.expected,
+            marked: plan.write.kind === 'sync' && !!plan.write.pending,
+            remaining: plan.repair?.remaining,
           });
         }
         this.log(
@@ -451,12 +513,30 @@ export class DriversVillageImportService {
     // is recorded, not fatal: supply data is committed, and re-running the
     // import re-projects anything missing.
     const lineByCode = new Map(plans.map((p) => [p.row.code1c, p.row.line]));
-    for (const [code1c, { stockId, levels }] of toProject) {
+    const settled: number[] = [];
+    for (const [code1c, entry] of toProject) {
+      const { stockId, levels, expected, marked, remaining } = entry;
+      const worked =
+        levels === null || levels.price || levels.quantity || !!expected;
       try {
-        if (levels) await this.projector.projectStockLevels(stockId, levels);
-        else await this.projector.projectStock(stockId);
-        written.projected += 1;
-        rows.get(lineByCode.get(code1c)!)!.projected = true;
+        if (!levels) await this.projector.projectStock(stockId);
+        else if (levels.price || levels.quantity)
+          await this.projector.projectStockLevels(stockId, levels);
+        const lost =
+          !!expected &&
+          !(await this.projector.repairStockLevels(stockId, expected));
+        if (worked) {
+          written.projected += 1;
+          rows.get(lineByCode.get(code1c)!)!.projected = true;
+        }
+        if (lost) {
+          // Changed since planning: the marker stays and the next run reports it.
+          written.projectionConflicts += 1;
+        } else if (marked && remaining) {
+          await this.store.keepProjectionPending(stockId, remaining);
+        } else if (marked) {
+          settled.push(stockId);
+        }
       } catch (error) {
         written.projectionFailures += 1;
         rows.get(lineByCode.get(code1c)!)!.projected = false;
@@ -467,6 +547,19 @@ export class DriversVillageImportService {
         });
       }
     }
+    // Once, at the end. Should this fail, the next run finds the parts up to date
+    // and settles them then.
+    try {
+      await this.store.clearProjectionPending(settled);
+    } catch (error) {
+      this.log(
+        `could not clear ${settled.length} projection marker(s); the next run will: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    if (written.projectionConflicts > 0)
+      this.log(
+        `${written.projectionConflicts} catalog value(s) changed by hand were kept; see projection_conflict in the report`,
+      );
   }
 
   /**

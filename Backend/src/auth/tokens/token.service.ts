@@ -173,10 +173,17 @@ export class TokenService {
     }
 
     // Soft-consume (keep the row so a future replay is detectable as reuse).
-    await this.prisma.refreshToken.update({
-      where: { id: stored.id },
+    // Conditional, because the check above is only a read: of any number of
+    // rotations that got this far with the same token, the database lets exactly
+    // one flip consumedAt. The others are a replay that merely arrived at the
+    // same moment, and are treated as one.
+    const claimed = await this.prisma.refreshToken.updateMany({
+      where: { id: stored.id, consumedAt: null },
       data: { consumedAt: new Date() },
     });
+    if (claimed.count !== 1) {
+      await this.refuseLostClaim(stored.id, stored.userId);
+    }
 
     return this.issueSession(
       {
@@ -187,6 +194,27 @@ export class TokenService {
       },
       { deviceId: opts?.deviceId ?? stored.deviceId },
     );
+  }
+
+  /**
+   * Another request changed this token between the read and the claim. Still
+   * there and consumed: another rotation won, which is reuse. Gone: a logout or a
+   * revocation deleted it, which says nothing about theft and must not sign the
+   * user out of every other device. Always throws.
+   */
+  private async refuseLostClaim(id: number, userId: string): Promise<never> {
+    const row = await this.prisma.refreshToken.findUnique({
+      where: { id },
+      select: { consumedAt: true },
+    });
+    if (!row?.consumedAt) {
+      throw new UnauthorizedException('Invalid refresh token');
+    }
+    await this.revokeAllSessions(userId);
+    this.logger.warn(
+      `Refresh reuse detected for user ${userId} (concurrent rotation); all sessions revoked`,
+    );
+    throw new UnauthorizedException('Refresh token reuse detected');
   }
 
   /** Revoke a single session (logout). */

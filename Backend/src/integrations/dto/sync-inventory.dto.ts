@@ -20,7 +20,7 @@ import {
 
 /**
  * Largest upload accepted in one request. A dealer with more positions pages
- * the export; the cap exists because the whole batch is validated and written
+ * the export with `mode=partial` (FULL cannot be paged); the cap exists because the whole batch is validated and written
  * in memory, and an unbounded body is a trivial memory-exhaustion vector on an
  * endpoint that authenticates with a single header.
  */
@@ -51,7 +51,8 @@ export enum SyncMode {
    * zeroed (`stockQty = 0`, `inStock = false`) rather than deleted — the part
    * stays in the catalog with its history, images and reviews, and simply reads
    * as out of stock until it comes back. Only correct when 1C sends the entire
-   * warehouse in one request.
+   * warehouse in one request. A request that states `expectedTotal` and carries a
+   * different number of rows (a page of a longer export) changes nothing.
    */
   FULL = 'full',
 }
@@ -200,6 +201,18 @@ export class SyncInventoryDto {
   @IsOptional()
   @IsEnum(SyncMode)
   mode?: SyncMode;
+
+  @ApiPropertyOptional({
+    description:
+      'Необязательно, для `mode=full`: сколько строк во всей выгрузке. Если указано и не ' +
+      'совпадает с длиной `items`, запрос отклоняется и ничего не меняется.',
+    example: 4200,
+    minimum: 1,
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  expectedTotal?: number;
 }
 
 /**

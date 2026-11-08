@@ -1,3 +1,4 @@
+import { writeClock } from './drivers-village-fake-db';
 /* eslint-disable @typescript-eslint/require-await -- the fake mirrors Prisma's
    async API; its in-memory bodies have nothing to await. */
 /**
@@ -102,7 +103,7 @@ export function fakeCatalogPrisma(db: FakeDb): FakeCatalogPrisma {
         lazy(() => {
           const row = st().catalogParts.find((c) => c.id === where.id);
           if (!row) throw new Error(`catalog part ${where.id} not found`);
-          Object.assign(row, data);
+          Object.assign(row, data, { updatedAt: writeClock() });
           return {};
         }),
       // The compare-and-set the classification projection uses.
@@ -110,17 +111,20 @@ export function fakeCatalogPrisma(db: FakeDb): FakeCatalogPrisma {
         where,
         data,
       }: {
-        where: { id: string; categoryId?: string };
+        where: { id: string; categoryId?: string } & Row;
         data: Row;
       }) =>
         lazy(() => {
-          const rows = st().catalogParts.filter(
-            (c) =>
-              c.id === where.id &&
-              (where.categoryId === undefined ||
-                c.categoryId === where.categoryId),
+          // Every column named must match, as the conditional UPDATE's WHERE does.
+          const rows = st().catalogParts.filter((c) =>
+            Object.entries(where).every(([key, want]) =>
+              key === 'priceUzs'
+                ? Number(c[key]) === Number(want)
+                : c[key] === want,
+            ),
           );
-          for (const row of rows) Object.assign(row, data);
+          for (const row of rows)
+            Object.assign(row, data, { updatedAt: writeClock() });
           return { count: rows.length };
         }),
       upsert: ({
@@ -136,8 +140,12 @@ export function fakeCatalogPrisma(db: FakeDb): FakeCatalogPrisma {
           const row = st().catalogParts.find((c) => c.id === where.id);
           // Like an UPSERT: an existing row changes only in the columns the
           // update names; everything else (an operator's edits) stays.
-          if (row) Object.assign(row, update);
-          else st().catalogParts.push({ ...create } as FakeCatalogPart);
+          if (row) Object.assign(row, update, { updatedAt: writeClock() });
+          else
+            st().catalogParts.push({
+              ...create,
+              updatedAt: writeClock(),
+            } as unknown as FakeCatalogPart);
           return {};
         }),
     },

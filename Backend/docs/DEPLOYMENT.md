@@ -255,3 +255,54 @@ Notes:
 - For subsequent deploys (not the first), repeat steps 1–3 and 5, replacing
   step 5 with `pm2 reload ecosystem.config.js --env production` for a
   zero-downtime restart, or `pm2 restart mator-backend` for a simple restart.
+
+## Maintenance scripts
+
+`backfill:catalog`, `fix:category-slugs`, `seed:category-titles`, `payme:fixture` and
+`admin:create` do nothing by default: they print what they would change and a code.
+
+    npm run backfill:catalog                                  # dry run
+    npm run backfill:catalog -- --apply --confirm=<code>      # local database
+
+Any database that is not a loopback host outside production also needs its own name,
+exactly as the dry run prints it: `--allow-database=<host/db>`. The code covers the
+script, the database and the plan, so a plan that changed needs a new dry run.
+`admin:create` bootstrapping therefore takes two runs.
+
+## Dealer inventory sync
+
+`POST /v1/integrations/dealers/sync-inventory` accepts up to 12,501,024 bytes (about
+12.5 MB), which is enough for 5,000 rows. The body is read before the API key is checked,
+so give this location its own size and connection limits in nginx:
+
+    # in the http block
+    limit_conn_zone $binary_remote_addr zone=dealer_sync:10m;
+
+    location = /v1/integrations/dealers/sync-inventory {
+        client_max_body_size 13m;
+        limit_conn dealer_sync 2;
+        # the usual proxy_pass settings
+    }
+
+This endpoint is refused for `drivers-village` in every mode (403): its stock comes from
+the 1C file through Telegram. For every other dealer, `mode=full` keeps its contract: the
+request is the whole warehouse, so a full export must not be split into pages (send pages
+with `mode=partial`). It may state `expectedTotal`, the number of rows in the whole
+export; when that differs from the length of `items` it answers 400 and changes nothing.
+
+## OTP SMS queue
+
+`OTP_JOB_ENCRYPTION_KEY` (32 bytes, as 64 hex characters or base64) is required in
+production, and the process refuses to start without it. Generate it with
+`openssl rand -hex 32`. Jobs from before this version carry the code in plaintext and are
+retained for up to 7 days: clear the `sms` queue's completed and failed jobs after
+deploying.
+
+## Cash and terminal collection
+
+An order placed from this version on goes from "awaiting payment" to processing and
+delivery without ever being marked paid by hand. After the buyer has paid and received the
+physical receipt, an operator records the money with the "Деньги получены" button on the order page of the admin panel
+(`POST /v1/orders/:id/offline-collection`). Until then it counts as received nowhere and
+cannot be refunded. Orders already placed keep their old reading. The receipt is issued
+outside Mator: its number can be entered, and nothing waits for it.

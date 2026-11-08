@@ -12,49 +12,83 @@
  * id is absent from the table are skipped with a note rather than created —
  * this only annotates existing rows.
  *
- * Run:  npm run seed:category-titles
- *   (= ts-node --compiler-options '{"module":"commonjs"}' prisma/seed-category-titles.ts)
+ * It overwrites names edited by hand, so it is guarded by
+ * src/maintenance/maintenance-guard.ts:
+ *
+ * Run:  npm run seed:category-titles                                  (dry run, writes nothing)
+ *       npm run seed:category-titles -- --apply --confirm=<code>
+ *       … --allow-database=<host/db>                                  (any non-local database)
  */
+import 'dotenv/config';
 import { PrismaClient } from '@prisma/client';
+import {
+  type MaintenancePlan,
+  runMaintenance,
+} from '../src/maintenance/maintenance-guard';
 import { CATEGORY_NAMES } from '../src/prisma/seed-data/category-names.seed';
 
-const prisma = new PrismaClient();
+/** The names a real run would overwrite. Reads only. */
+export async function buildTitlesPlan(
+  prisma: PrismaClient,
+): Promise<MaintenancePlan> {
+  const rows = await prisma.partCategory.findMany({
+    where: { id: { in: Object.keys(CATEGORY_NAMES) } },
+    select: { id: true, nameRu: true, nameUz: true, nameEn: true },
+    orderBy: { id: 'asc' },
+  });
+  const items = rows
+    .filter((r) => {
+      const { ru, uz, en } = CATEGORY_NAMES[r.id];
+      return r.nameRu !== ru || r.nameUz !== uz || r.nameEn !== en;
+    })
+    .map((r) => ({
+      id: r.id,
+      from: { ru: r.nameRu, uz: r.nameUz, en: r.nameEn },
+      to: CATEGORY_NAMES[r.id],
+    }));
+  const absent = Object.keys(CATEGORY_NAMES).length - rows.length;
+  return {
+    summary: [
+      `${items.length} categor(ies) would be renamed; ${absent} in the table are absent and skipped`,
+    ],
+    items,
+  };
+}
 
-async function main(): Promise<void> {
-  const ids = Object.keys(CATEGORY_NAMES);
-  console.log(`Backfilling localized names for ${ids.length} categories…\n`);
-  let updated = 0;
-  let missing = 0;
-
-  for (const id of ids) {
+async function applyTitles(prisma: PrismaClient): Promise<void> {
+  const { items } = await buildTitlesPlan(prisma);
+  for (const { id } of items as { id: string }[]) {
     const { ru, uz, en } = CATEGORY_NAMES[id];
-    const exists = await prisma.partCategory.findUnique({
-      where: { id },
-      select: { id: true },
-    });
-    if (!exists) {
-      console.log(`  · skip ${id} — not present`);
-      missing++;
-      continue;
-    }
     await prisma.partCategory.update({
       where: { id },
       data: { nameRu: ru, nameUz: uz, nameEn: en },
     });
-    updated++;
   }
-
-  console.log(
-    `\nDone. ${updated} categories localized, ${missing} skipped (absent).`,
-  );
   console.log(
     'Reference caches expire within 300s; force with: redis-cli DEL cache:reference:categories',
   );
 }
 
-main()
-  .catch((err) => {
-    console.error('seed-category-titles FAILED:', err);
-    process.exitCode = 1;
-  })
-  .finally(() => prisma.$disconnect());
+export function runSeedTitles(
+  prisma: PrismaClient,
+  argv: readonly string[],
+  env: NodeJS.ProcessEnv,
+) {
+  return runMaintenance({
+    script: 'seed:category-titles',
+    argv,
+    env,
+    buildPlan: () => buildTitlesPlan(prisma),
+    apply: () => applyTitles(prisma),
+  });
+}
+
+if (require.main === module) {
+  const prisma = new PrismaClient();
+  runSeedTitles(prisma, process.argv.slice(2), process.env)
+    .catch((err) => {
+      console.error('seed-category-titles FAILED:', err);
+      process.exitCode = 1;
+    })
+    .finally(() => prisma.$disconnect());
+}

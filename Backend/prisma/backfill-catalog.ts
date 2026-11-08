@@ -28,17 +28,27 @@
  *
  * This script does NOT modify the Telegram pipeline or any API endpoint.
  *
- * Run:  npm run backfill:catalog
- *   (= ts-node --compiler-options '{"module":"commonjs"}' prisma/backfill-catalog.ts)
+ * DESTRUCTIVE: it re-derives classification, rebuilds part_models from the listing
+ * text (erasing Driver's Village and seller-picked fitment) and re-projects price,
+ * stock and category. Guarded by src/maintenance/maintenance-guard.ts:
+ *
+ * Run:  npm run backfill:catalog                                  (dry run, writes nothing)
+ *       npm run backfill:catalog -- --apply --confirm=<code>
+ *       … --allow-database=<host/db>                              (any non-local database)
  */
 import { PrismaClient } from '@prisma/client';
+import 'dotenv/config';
+import {
+  type MaintenancePlan,
+  runMaintenance,
+} from '../src/maintenance/maintenance-guard';
 import { CatalogProjectionService } from '../src/catalog/projection/catalog-projection.service';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { classifyPart } from '../src/ai/part-classifier';
 import { deriveVehicleCompatibility } from '../src/ai/vehicle-catalog';
 import { persistVehicleLinks } from '../src/telegram/vehicle-links';
 
-const prisma = new PrismaClient();
+const SCRIPT = 'backfill:catalog';
 
 /**
  * Reclassify existing Products that predate the classifier so their stored
@@ -56,7 +66,7 @@ const prisma = new PrismaClient();
  * NOT consulted here (cleanup stays conservative; the live parse path is what
  * adds verified-OEM compatibility going forward).
  */
-async function reclassifyProducts() {
+async function reclassifyProducts(prisma: PrismaClient) {
   const products = await prisma.product.findMany({
     select: { id: true, title: true, description: true, partNumberType: true },
     orderBy: { id: 'asc' },
@@ -91,12 +101,101 @@ async function reclassifyProducts() {
   console.log(`[backfill] reclassified + reconciled fitment for ${updated} product(s)`);
 }
 
-async function main() {
+const CLASSIFIED = [
+  'mainCategory',
+  'vehicleCategory',
+  'partBrand',
+  'originRegion',
+  'isOem',
+  'isGm',
+] as const;
+
+/** What a real run would change. Reads only. */
+export async function buildBackfillPlan(
+  prisma: PrismaClient,
+): Promise<MaintenancePlan> {
+  const [products, stocks] = await Promise.all([
+    prisma.product.findMany({
+      select: {
+        id: true,
+        title: true,
+        description: true,
+        partNumberType: true,
+        mainCategory: true,
+        vehicleCategory: true,
+        partBrand: true,
+        originRegion: true,
+        isOem: true,
+        isGm: true,
+        partModels: {
+          select: {
+            model: { select: { name: true, brand: { select: { name: true } } } },
+          },
+        },
+      },
+      orderBy: { id: 'asc' },
+    }),
+    prisma.stock.findMany({ select: { id: true }, orderBy: { id: 'asc' } }),
+  ]);
+
+  const items: unknown[] = [];
+  let classified = 0;
+  let fitment = 0;
+  for (const p of products) {
+    const c = classifyPart(p.title, p.description, p.partNumberType);
+    const next = {
+      mainCategory: c.mainCategory,
+      vehicleCategory: c.vehicleCategory,
+      partBrand: c.make,
+      originRegion: c.originRegion,
+      isOem: c.isOem,
+      isGm: c.isGm,
+    };
+    const changed = CLASSIFIED.filter((key) => p[key] !== next[key]);
+    if (changed.length > 0) {
+      classified += 1;
+      items.push({
+        product: p.id,
+        classification: Object.fromEntries(
+          changed.map((key) => [key, { from: p[key], to: next[key] }]),
+        ),
+      });
+    }
+    const compat = deriveVehicleCompatibility([p.title, p.description]);
+    const before = p.partModels
+      .map((m) => `${m.model.brand.name}|${m.model.name}`)
+      .sort();
+    const after = compat.isUniversal
+      ? []
+      : compat.vehicles
+          .filter((v) => v.brand)
+          .map((v) => `${v.brand}|${v.model}`)
+          .sort();
+    if (before.join() !== after.join()) {
+      fitment += 1;
+      items.push({ product: p.id, fitment: { from: before, to: after } });
+    }
+  }
+  if (stocks.length > 0) {
+    items.push({ reproject: stocks.map((stock) => stock.id) });
+  }
+  return {
+    summary: [
+      `${products.length} product(s) read`,
+      `${classified} product(s) would be reclassified`,
+      `${fitment} product(s) would have their fitment replaced from listing text`,
+      `${stocks.length} stock(s) would be re-projected, resetting category, price and stock on their catalog parts`,
+    ],
+    items,
+  };
+}
+
+async function applyBackfill(prisma: PrismaClient) {
   console.log('[backfill] starting supply → buyer catalog backfill');
 
   // Populate the classified attributes on existing products first, so the
   // projection below copies real category/region/OEM/GM values (not nulls).
-  await reclassifyProducts();
+  await reclassifyProducts(prisma);
 
   // Reuse the single authoritative mapping. CatalogProjectionService only needs
   // a PrismaClient to build/run its projection ops; PrismaService extends
@@ -147,11 +246,29 @@ async function main() {
   });
 }
 
-main()
-  .catch((e) => {
-    console.error('[backfill] FAILED:', e);
-    process.exitCode = 1;
-  })
-  .finally(async () => {
-    await prisma.$disconnect();
+/** The entry point, separate from the CLI wrapper so that it can be exercised. */
+export function runBackfill(
+  prisma: PrismaClient,
+  argv: readonly string[],
+  env: NodeJS.ProcessEnv,
+) {
+  return runMaintenance({
+    script: SCRIPT,
+    argv,
+    env,
+    buildPlan: () => buildBackfillPlan(prisma),
+    apply: () => applyBackfill(prisma),
   });
+}
+
+if (require.main === module) {
+  const prisma = new PrismaClient();
+  runBackfill(prisma, process.argv.slice(2), process.env)
+    .catch((e) => {
+      console.error('[backfill] FAILED:', e);
+      process.exitCode = 1;
+    })
+    .finally(async () => {
+      await prisma.$disconnect();
+    });
+}

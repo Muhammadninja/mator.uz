@@ -1,3 +1,4 @@
+import { AWAITING_OFFLINE_MONEY } from '../../orders/offline-order.policy';
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, Role } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -166,7 +167,7 @@ export class AdminUsersService {
     const [totalOrders, spend] = await Promise.all([
       this.prisma.order.count({ where: { userId } }),
       this.prisma.order.aggregate({
-        where: { userId, status: { in: SPEND_STATUSES } },
+        where: { userId, status: { in: SPEND_STATUSES }, NOT: AWAITING_OFFLINE_MONEY },
         _sum: { totalUzs: true },
       }),
     ]);
@@ -199,7 +200,11 @@ export class AdminUsersService {
     const [spendRows, lastRows] = await Promise.all([
       this.prisma.order.groupBy({
         by: ['userId'],
-        where: { userId: { in: userIds }, status: { in: SPEND_STATUSES } },
+        where: {
+          userId: { in: userIds },
+          status: { in: SPEND_STATUSES },
+          NOT: AWAITING_OFFLINE_MONEY,
+        },
         _sum: { totalUzs: true },
       }),
       this.prisma.order.groupBy({

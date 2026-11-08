@@ -6,6 +6,7 @@
 // no-store headers, and that a valid credential passes through.
 
 import { Logger } from '@nestjs/common';
+import { BasicAuthThrottle } from './basic-auth-throttle';
 import type { Request, Response } from 'express';
 import {
   createSwaggerAuthMiddleware,
@@ -52,27 +53,42 @@ function quietLogger() {
   return logger;
 }
 
+/** A limiter that never trips: these tests are about the credentials. */
+const throttle = () =>
+  new BasicAuthThrottle(
+    {
+      consume: () => Promise.resolve({ allowed: true, retryAfter: 0 }),
+      check: () => Promise.resolve({ allowed: true, retryAfter: 0 }),
+    } as never,
+    'swagger',
+  );
+
+/** The limiter answers asynchronously: let it finish before asserting. */
+const settled = async (_: unknown): Promise<void> => {
+  await new Promise((resolve) => setImmediate(resolve));
+};
+
 describe('createSwaggerAuthMiddleware', () => {
-  it('passes a request with the correct credentials', () => {
+  it('passes a request with the correct credentials', async () => {
     const next = jest.fn();
     const res = makeRes();
-    createSwaggerAuthMiddleware(CREDS, quietLogger())(
+    await settled(createSwaggerAuthMiddleware(CREDS, quietLogger(), throttle())(
       makeReq(basic(CREDS.user, CREDS.password)),
       res,
       next,
-    );
+    ));
     expect(next).toHaveBeenCalledTimes(1);
     expect(res.statusCode).toBe(0); // untouched
   });
 
-  it('keeps a password containing colons intact', () => {
+  it('keeps a password containing colons intact', async () => {
     // Splitting on every colon would corrupt this password and lock the user out.
     const next = jest.fn();
-    createSwaggerAuthMiddleware(CREDS, quietLogger())(
+    await settled(createSwaggerAuthMiddleware(CREDS, quietLogger(), throttle())(
       makeReq(basic('docsuser', 's3cret:with:colons')),
       makeRes(),
       next,
-    );
+    ));
     expect(next).toHaveBeenCalled();
   });
 
@@ -86,14 +102,14 @@ describe('createSwaggerAuthMiddleware', () => {
     ['an empty Basic value', 'Basic '],
     ['the wrong password', basic('docsuser', 'wrong')],
     ['the wrong username', basic('someone', 's3cret:with:colons')],
-  ])('rejects %s with 401', (_label, header) => {
+  ])('rejects %s with 401', async (_label, header) => {
     const next = jest.fn();
     const res = makeRes();
-    createSwaggerAuthMiddleware(CREDS, quietLogger())(
+    await settled(createSwaggerAuthMiddleware(CREDS, quietLogger(), throttle())(
       makeReq(header),
       res,
       next,
-    );
+    ));
 
     expect(next).not.toHaveBeenCalled();
     expect(res.statusCode).toBe(401);
@@ -103,7 +119,7 @@ describe('createSwaggerAuthMiddleware', () => {
     expect(res.headers['Cache-Control']).toBe('no-store');
   });
 
-  it('FAILS CLOSED when credentials are not configured', () => {
+  it('FAILS CLOSED when credentials are not configured', async () => {
     // The critical case: a misconfiguration must deny, never publish the API map.
     for (const creds of [
       { user: '', password: '' },
@@ -112,35 +128,36 @@ describe('createSwaggerAuthMiddleware', () => {
     ]) {
       const next = jest.fn();
       const res = makeRes();
-      createSwaggerAuthMiddleware(creds, quietLogger())(
+      await settled(createSwaggerAuthMiddleware(creds, quietLogger(), throttle())(
         makeReq(basic('docsuser', 's3cret')),
         res,
         next,
-      );
+      ));
       expect(next).not.toHaveBeenCalled();
       expect(res.statusCode).toBe(401);
     }
   });
 
-  it('never reveals which half of the credential was wrong', () => {
-    const bodies = [
+  it('never reveals which half of the credential was wrong', async () => {
+    const answers = [
       basic('wrong-user', CREDS.password),
       basic(CREDS.user, 'wrong-pass'),
-    ].map((header) => {
+    ].map(async (header) => {
       const res = makeRes();
-      createSwaggerAuthMiddleware(CREDS, quietLogger())(
+      await settled(createSwaggerAuthMiddleware(CREDS, quietLogger(), throttle())(
         makeReq(header),
         res,
         jest.fn(),
-      );
+      ));
       return { status: res.statusCode, body: res.body };
     });
+    const bodies = await Promise.all(answers);
     expect(bodies[0]).toEqual(bodies[1]);
   });
 });
 
 describe('resolveSwaggerCredentials', () => {
-  it('reads and trims the username', () => {
+  it('reads and trims the username', async () => {
     expect(
       resolveSwaggerCredentials({
         SWAGGER_USERNAME: '  docsuser  ',
@@ -149,7 +166,7 @@ describe('resolveSwaggerCredentials', () => {
     ).toEqual({ user: 'docsuser', password: 's3cret' });
   });
 
-  it('preserves the password verbatim (whitespace may be significant)', () => {
+  it('preserves the password verbatim (whitespace may be significant)', async () => {
     expect(
       resolveSwaggerCredentials({
         SWAGGER_USERNAME: 'u',
@@ -158,7 +175,7 @@ describe('resolveSwaggerCredentials', () => {
     ).toBe(' pad ');
   });
 
-  it('yields empty strings when unset, which the middleware treats as fail-closed', () => {
+  it('yields empty strings when unset, which the middleware treats as fail-closed', async () => {
     expect(resolveSwaggerCredentials({})).toEqual({
       user: '',
       password: '',

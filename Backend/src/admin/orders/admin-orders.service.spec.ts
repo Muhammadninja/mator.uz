@@ -653,6 +653,7 @@ describe('AdminOrdersService — Mator’s money and the sellers’', () => {
   it('dashboard totals: the fee Mator kept, net of what refunds gave back', async () => {
     const prisma = {
       order: {
+        aggregate: jest.fn().mockResolvedValue({ _sum: {} }),
         groupBy: jest.fn().mockResolvedValue([
           {
             status: OrderStatus.DELIVERED,
@@ -697,6 +698,36 @@ describe('AdminOrdersService — Mator’s money and the sellers’', () => {
         },
       },
       _sum: { serviceFeeUzs: true },
+    });
+  });
+
+  it('dashboard totals: a delivered cash order counts only once its money is received', async () => {
+    const prisma = {
+      order: {
+        groupBy: jest.fn().mockResolvedValue([
+          {
+            status: OrderStatus.DELIVERED,
+            _count: { _all: 2 },
+            _sum: { totalUzs: 300_000, serviceFeeUzs: 30_000 },
+          },
+        ]),
+        aggregate: jest.fn().mockResolvedValue({
+          _sum: { totalUzs: 100_000, serviceFeeUzs: 10_000 },
+        }),
+        count: jest.fn().mockResolvedValue(0),
+      },
+      financialRefund: {
+        aggregate: jest.fn().mockResolvedValue({ _sum: {} }),
+      },
+    };
+    const service = new AdminOrdersService(prisma as never, config);
+
+    const { data } = await service.summary();
+
+    expect(data).toMatchObject({
+      revenueUzs: 200_000,
+      serviceFeeRevenueUzs: 20_000,
+      counts: expect.objectContaining({ delivered: 2 }),
     });
   });
 });

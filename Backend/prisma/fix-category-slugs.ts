@@ -22,12 +22,18 @@
  * values that must be entered by hand; the report only shows which roots still
  * lack them.
  *
- * Run:  npm run fix:category-slugs
- *   (= ts-node --compiler-options '{"module":"commonjs"}' prisma/fix-category-slugs.ts)
+ * Guarded by src/maintenance/maintenance-guard.ts:
+ *
+ * Run:  npm run fix:category-slugs                                  (dry run, writes nothing)
+ *       npm run fix:category-slugs -- --apply --confirm=<code>
+ *       … --allow-database=<host/db>                                (any non-local database)
  */
+import 'dotenv/config';
 import { PrismaClient } from '@prisma/client';
-
-const prisma = new PrismaClient();
+import {
+  type MaintenancePlan,
+  runMaintenance,
+} from '../src/maintenance/maintenance-guard';
 
 /** Root id → canonical slug. Values are unique across the set by construction. */
 const CANONICAL: Record<string, string> = {
@@ -49,7 +55,35 @@ function fiscalState(mxik: string | null, pkg: string | null): string {
   return 'not-set';
 }
 
-async function main(): Promise<void> {
+/** The slugs a real run would change. Reads only. */
+export async function buildSlugPlan(
+  prisma: PrismaClient,
+): Promise<MaintenancePlan> {
+  const ids = Object.keys(CANONICAL);
+  const rows = await prisma.partCategory.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, slug: true },
+    orderBy: { id: 'asc' },
+  });
+  const holders = await prisma.partCategory.findMany({
+    where: { slug: { in: Object.values(CANONICAL) }, NOT: { id: { in: ids } } },
+    select: { id: true, slug: true },
+  });
+  const held = new Map(holders.map((h) => [h.slug, h.id]));
+  const items = rows
+    .filter((r) => r.slug !== CANONICAL[r.id])
+    .map((r) => ({
+      id: r.id,
+      from: r.slug,
+      to: CANONICAL[r.id],
+      ...(held.has(CANONICAL[r.id])
+        ? { skippedBecauseHeldBy: held.get(CANONICAL[r.id]) }
+        : {}),
+    }));
+  return { summary: [`${items.length} root slug(s) differ`], items };
+}
+
+async function applySlugs(prisma: PrismaClient): Promise<void> {
   // ── 1. Raw snapshot (no cache, no id-fallback) ──────────────────────────────
   const roots = await prisma.partCategory.findMany({
     where: { level: 0 },
@@ -127,9 +161,26 @@ async function main(): Promise<void> {
   console.log('\nReference caches expire within 300s; force now with: redis-cli DEL cache:reference:categories');
 }
 
-main()
-  .catch((err) => {
-    console.error('fix-category-slugs FAILED:', err);
-    process.exitCode = 1;
-  })
-  .finally(() => prisma.$disconnect());
+export function runFixSlugs(
+  prisma: PrismaClient,
+  argv: readonly string[],
+  env: NodeJS.ProcessEnv,
+) {
+  return runMaintenance({
+    script: 'fix:category-slugs',
+    argv,
+    env,
+    buildPlan: () => buildSlugPlan(prisma),
+    apply: () => applySlugs(prisma),
+  });
+}
+
+if (require.main === module) {
+  const prisma = new PrismaClient();
+  runFixSlugs(prisma, process.argv.slice(2), process.env)
+    .catch((err) => {
+      console.error('fix-category-slugs FAILED:', err);
+      process.exitCode = 1;
+    })
+    .finally(() => prisma.$disconnect());
+}

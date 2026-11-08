@@ -1,7 +1,13 @@
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  Logger,
+} from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { normalizeOem } from '../common/normalize-oem.util';
+import { DRIVERS_VILLAGE_CATALOG_SELLER_ID } from '../imports/drivers-village/drivers-village.constants';
 import {
   SyncInventoryDto,
   SyncInventoryItemDto,
@@ -23,6 +29,18 @@ const MAX_REPORTED_SKIPS = 50;
 /** Rows written per transaction. Bounds the size and duration of any single
  *  database transaction so a large upload cannot hold locks for its entirety. */
 const WRITE_CHUNK_SIZE = 500;
+
+/** One FULL sync is one transaction; these bound how long it may wait and run. */
+const FULL_SYNC_TX = { timeout: 60_000, maxWait: 10_000 };
+
+type Db = Pick<Prisma.TransactionClient, 'catalogPart'>;
+
+/**
+ * The advisory lock of one dealer's inventory. A FULL sync takes it exclusively for
+ * its whole transaction and each PARTIAL chunk takes it shared, so a partial write
+ * can never land between a FULL sync's stock write and its zeroing.
+ */
+const dealerSyncLockKey = (dealerId: string) => `dealer_sync:${dealerId}`;
 
 /**
  * Dealer 1C inventory synchronization.
@@ -56,6 +74,17 @@ export class IntegrationsService {
     const startedAt = Date.now();
     const mode = dto.mode ?? SyncMode.PARTIAL;
     const receivedCount = dto.items.length;
+    // Driver's Village stock comes from its 1C file through Telegram, which goes
+    // through Stock. This endpoint writes the catalog behind that, and the next file
+    // would not undo it: Stock would say 8 and buyers would see 0.
+    if (dealer.id === DRIVERS_VILLAGE_CATALOG_SELLER_ID) {
+      throw new ForbiddenException({
+        code: 'INVENTORY_SYNC_NOT_AVAILABLE',
+        message:
+          'Inventory sync is not available for this dealer: its stock comes from the 1C file. Nothing was changed.',
+      });
+    }
+    if (mode === SyncMode.FULL) this.assertCompleteUpload(dto);
 
     this.logger.log(
       `Inventory sync started: dealer=${dealer.id} mode=${mode} received=${receivedCount}`,
@@ -70,11 +99,12 @@ export class IntegrationsService {
     // 2. Resolve articles to this dealer's catalog rows. Scoped to the dealer:
     //    the where-clause below is what makes it impossible for one dealer's key
     //    to move another dealer's stock, however the articles overlap.
-    const matches = await this.resolveParts(dealer.id, [...byArticle.keys()]);
-
-    // 3. Apply, chunked, so a large upload never becomes one huge transaction.
-    const { updates, mergedArticles } = this.buildUpdates(byArticle, matches);
-    const processedCount = await this.applyUpdates(dealer.id, updates);
+    // 3. Apply. PARTIAL is chunked, so a large upload never becomes one huge
+    //    transaction. FULL is all or nothing: see applyFull.
+    const { matches, updates, mergedArticles, processedCount, zeroedCount } =
+      mode === SyncMode.FULL
+        ? await this.applyFull(dealer.id, byArticle)
+        : await this.applyPartial(dealer.id, byArticle);
 
     // `processedCount` is what the DATABASE reports it changed, which can fall
     // short of what was resolved if a part was deleted or reassigned to another
@@ -87,17 +117,7 @@ export class IntegrationsService {
       );
     }
 
-    // 4. In FULL mode, everything the dealer has that the upload did NOT mention
-    //    is out of stock by definition.
-    const zeroedCount =
-      mode === SyncMode.FULL
-        ? await this.zeroMissing(
-            dealer.id,
-            updates.map((u) => u.partId),
-          )
-        : 0;
-
-    // 5. Record that this dealer's integration is alive. Best-effort: the sync
+    // 4. Record that this dealer's integration is alive. Best-effort: the sync
     //    itself has already succeeded, so a failure to stamp the timestamp must
     //    not turn a completed write into an error for the caller.
     await this.touchLastUsed(dealer.id);
@@ -138,6 +158,76 @@ export class IntegrationsService {
   }
 
   // ── steps ──────────────────────────────────────────────────────────────────
+
+  /**
+   * A sender that says how many rows its export has is refused, before anything is
+   * read or written, unless this request carries all of them. Stating it is optional:
+   * a FULL request without it means what it always has.
+   */
+  private assertCompleteUpload(dto: SyncInventoryDto): void {
+    if (
+      dto.expectedTotal !== undefined &&
+      dto.expectedTotal !== dto.items.length
+    ) {
+      throw new BadRequestException({
+        code: 'FULL_SYNC_INCOMPLETE',
+        message:
+          'mode=full must carry the whole export in one request. Nothing was changed. Use mode=partial to send pages.',
+      });
+    }
+  }
+
+  private async applyPartial(
+    dealerId: string,
+    byArticle: Map<string, CollapsedItem>,
+  ) {
+    const matches = await this.resolveParts(
+      this.prisma,
+      dealerId,
+      [...byArticle.keys()],
+    );
+    const { updates, mergedArticles } = this.buildUpdates(byArticle, matches);
+    const processedCount = await this.applyUpdates(dealerId, updates);
+    return { matches, updates, mergedArticles, processedCount, zeroedCount: 0 };
+  }
+
+  /**
+   * FULL mode, in one transaction under the dealer's lock: the stock write and the
+   * zeroing commit together or not at all, and two syncs of one dealer run one after
+   * the other, so the result is always one complete upload. The stock is written in
+   * a single statement, so 5,000 rows cost one round trip while the locks are held.
+   */
+  private applyFull(dealerId: string, byArticle: Map<string, CollapsedItem>) {
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${dealerSyncLockKey(dealerId)}))`;
+      const matches = await this.resolveParts(tx, dealerId, [
+        ...byArticle.keys(),
+      ]);
+      const { updates, mergedArticles } = this.buildUpdates(byArticle, matches);
+      const processedCount = updates.length
+        ? await tx.$executeRaw`
+            UPDATE catalog_parts AS p
+            SET stock_qty = v.qty,
+                in_stock = v.qty > 0,
+                purchase_price_uzs = v.price,
+                updated_at = now()
+            FROM unnest(
+              ${updates.map((u) => u.partId)}::text[],
+              ${updates.map((u) => u.quantity)}::int[],
+              ${updates.map((u) => String(u.price))}::text[]::numeric[]
+            ) AS v(id, qty, price)
+            WHERE p.id = v.id AND p.seller_id = ${dealerId}`
+        : 0;
+      // Everything the dealer has that the upload did NOT mention is out of stock
+      // by definition.
+      const zeroedCount = await this.zeroMissing(
+        tx,
+        dealerId,
+        updates.map((u) => u.partId),
+      );
+      return { matches, updates, mergedArticles, processedCount, zeroedCount };
+    }, FULL_SYNC_TX);
+  }
 
   /**
    * Group the upload by NORMALIZED article (see normalizeOem: uppercase,
@@ -199,6 +289,7 @@ export class IntegrationsService {
    * the GM number for the same part.
    */
   private async resolveParts(
+    db: Db,
     dealerId: string,
     articles: string[],
   ): Promise<Map<string, string>> {
@@ -208,7 +299,7 @@ export class IntegrationsService {
     // Chunked so the generated `IN`/array parameter stays a reasonable size on
     // a maximum-sized upload.
     for (const chunk of chunked(articles, WRITE_CHUNK_SIZE)) {
-      const parts = await this.prisma.catalogPart.findMany({
+      const parts = await db.catalogPart.findMany({
         where: {
           sellerId: dealerId,
           OR: [
@@ -293,8 +384,10 @@ export class IntegrationsService {
 
     for (const chunk of chunked(updates, WRITE_CHUNK_SIZE)) {
       try {
-        const results = await this.prisma.$transaction(
-          chunk.map((u) =>
+        const [, ...results] = await this.prisma.$transaction([
+          // Shared: partial chunks never wait for each other, only for a FULL sync.
+          this.prisma.$executeRaw`SELECT pg_advisory_xact_lock_shared(hashtext(${dealerSyncLockKey(dealerId)}))`,
+          ...chunk.map((u) =>
             this.prisma.catalogPart.updateMany({
               // sellerId is re-asserted on the WRITE, not just the read: even if
               // resolution were ever wrong, a dealer's key cannot write a row
@@ -309,7 +402,7 @@ export class IntegrationsService {
               },
             }),
           ),
-        );
+        ]);
         processed += results.reduce((sum, r) => sum + r.count, 0);
       } catch (error) {
         this.logger.error(
@@ -333,6 +426,7 @@ export class IntegrationsService {
    * Prices are left alone: absence from an export says nothing about cost.
    */
   private async zeroMissing(
+    db: Db,
     dealerId: string,
     touchedPartIds: string[],
   ): Promise<number> {
@@ -355,7 +449,7 @@ export class IntegrationsService {
     }
 
     try {
-      const { count } = await this.prisma.catalogPart.updateMany({
+      const { count } = await db.catalogPart.updateMany({
         where: {
           sellerId: dealerId,
           id: { notIn: touchedPartIds },

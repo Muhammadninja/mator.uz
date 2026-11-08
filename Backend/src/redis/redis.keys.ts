@@ -7,6 +7,10 @@ export const RedisKeys = {
   // Codes compared so far for one request_id, counted by the RateLimiter. Its own
   // key because the record above is a JSON value that cannot be incremented.
   otpAttempts: (requestId: string): string => `otp:attempts:${requestId}`,
+  // The one phone change in progress for an account; see PhoneChangeService.
+  phoneChange: (userId: string): string => `otp:phone_change:${userId}`,
+  // An OTP waiting for its SMS worker, encrypted; see OtpJobSecretStore.
+  otpSmsSecret: (ref: string): string => `otp:sms:${ref}`,
   jwtBlacklist: (jti: string): string => `jwt:blacklist:${jti}`,
 
   // ── Cache (read-through, TTL-only invalidation) ───────────────────────────
@@ -54,6 +58,9 @@ export const RedisKeys = {
   // than formatting keys at the call site.
   rateOtpRequest: (phone: string): string => `rate:otp:request:${phone}`,
   rateOtpVerify: (phone: string): string => `rate:otp:verify:${phone}`,
+  // Wrong passwords on a Basic Auth page, per client; see BasicAuthThrottle.
+  rateBasicAuth: (scope: string, client: string): string =>
+    `rate:basic-auth:${scope}:${client}`,
   rateLogin: (ip: string): string => `rate:login:${ip}`,
   rateRefresh: (userId: string): string => `rate:refresh:${userId}`,
   rateSms: (phone: string): string => `rate:sms:${phone}`,

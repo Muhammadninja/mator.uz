@@ -297,9 +297,11 @@ describe('an order uses current prices (BUG-001)', () => {
 
       await place(w.orders);
 
-      const [strings] = w.prisma.$queryRaw.mock.calls[0];
-      expect(strings.join('')).toContain('FOR SHARE');
-      const lockOrder = w.prisma.$queryRaw.mock.invocationCallOrder[0];
+      const lock = w.prisma.$queryRaw.mock.calls.findIndex(
+        ([sql]: [TemplateStringsArray]) => sql.join('').includes('FOR SHARE'),
+      );
+      expect(lock).toBeGreaterThanOrEqual(0);
+      const lockOrder = w.prisma.$queryRaw.mock.invocationCallOrder[lock];
       const writeOrder = w.prisma.order.create.mock.invocationCallOrder[0];
       expect(lockOrder).toBeLessThan(writeOrder);
     });
