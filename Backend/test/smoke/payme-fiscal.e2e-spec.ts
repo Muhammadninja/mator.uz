@@ -5,7 +5,7 @@
  * codes they were seeded with.
  *
  * A real request goes through the real route, PaymeService, the receipt builder, the
- * resolver and the admin category console, so a confirmation made through the API has
+ * resolver and the admin category console, so codes entered through the API have
  * to be what the receipt then reads. Prisma is mocked and keeps its rows in memory.
  *
  * What Check hands Payme is the receipt frozen on the invoice, so `check` does what a
@@ -15,7 +15,7 @@
  * That also bounds what this shows. It says nothing about PostgreSQL: no query here
  * reached a database, and no race can happen in a single process. It is not evidence
  * that production is ready, nor that any real code here is correct: every MXIK below
- * is fictional, except the seeded candidates, which nobody has confirmed.
+ * is fictional, except the seeded ones.
  */
 import {
   ExecutionContext,
@@ -34,7 +34,6 @@ import { AdminAuditService } from '../../src/admin/auth/admin-audit.service';
 import { AdminJwtGuard } from '../../src/admin/auth/guards/admin-jwt.guard';
 import { PartCategoryService } from '../../src/catalog/categories/part-category.service';
 import {
-  confirmableFiscalCodes,
   OIL_TYPE_FISCAL,
 } from '../../src/common/fiscal.util';
 import { HttpExceptionFilter } from '../../src/common/http-exception.filter';
@@ -327,24 +326,18 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
       mxik: null,
       packageCodeSingle: null,
       packageCodeSet: null,
-      fiscalConfirmedCodes: null,
       ...over,
     };
     categories.set(id, row);
     return row;
   };
-  /** Filed by hand: its own code, as an operator entered it, and not yet confirmed. */
+  /** Filed by hand: its own code, as an operator entered it. */
   const subcategory = (id: string, parentId: string, over: any = {}) =>
     category(id, parentId, {
       mxik: SUB_MXIK,
       packageCodeSingle: SUB_PACKAGE,
       ...over,
     });
-  /** What the fiscal-confirmation endpoint stores, without going through it. */
-  const confirmed = (row: any) => {
-    row.fiscalConfirmedCodes = confirmableFiscalCodes(row);
-    return row;
-  };
   const part = (id: string, categoryId: string, over: any = {}) =>
     parts.set(id, {
       id,
@@ -380,7 +373,7 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
     });
   /** A service with everything a receipt needs. */
   const classifiedService = (id = 'svc_1') => {
-    confirmed(subcategory('oil-change-service', 'other-services'));
+    subcategory('oil-change-service', 'other-services');
     offerings.set(id, {
       categoryId: 'oil-change-service',
       provider: { tin: '209876543', vatPercent: 12 },
@@ -444,9 +437,9 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
 
   // ── scenarios ─────────────────────────────────────────────────────────────
 
-  describe('1. a product on a subcategory with a confirmed MXIK', () => {
+  describe('1. a product on a subcategory with its own MXIK', () => {
     it('is allowed, and its line carries that subcategory’s codes and dealer', async () => {
-      confirmed(subcategory('brake-discs', 'brake-system'));
+      subcategory('brake-discs', 'brake-system');
       part('p1', 'brake-discs');
 
       const body = await check(orderOf([partLine('p1')]));
@@ -477,7 +470,7 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
       vatPercent: new Prisma.Decimal(rate),
     });
     const receiptAt = async (rate: string) => {
-      confirmed(subcategory('brake-discs', 'brake-system'));
+      subcategory('brake-discs', 'brake-system');
       part('p1', 'brake-discs', { seller: sellerAt(rate) });
       const amount = orderOf(
         [partLine('p1', { quantity: 2, lineTotalUzs: 200000 })],
@@ -525,7 +518,7 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
 
   describe('the service fee, from the order to what Payme is told', () => {
     beforeEach(() => {
-      confirmed(subcategory('brake-discs', 'brake-system'));
+      subcategory('brake-discs', 'brake-system');
       part('p1', 'brake-discs');
     });
     /** The brief's order: 600 000 of parts, a 20 000 fee and 25 000 of delivery. */
@@ -638,9 +631,9 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
     });
   });
 
-  describe('3. a product on a category nobody confirmed', () => {
-    it('is refused, however plausible the code', async () => {
-      subcategory('brake-discs', 'brake-system');
+  describe('3. a product on a category with no codes', () => {
+    it('is refused', async () => {
+      category('brake-discs', 'brake-system');
       part('p1', 'brake-discs');
 
       expect(refusedCode(await check(orderOf([partLine('p1')])))).toBe(REFUSED);
@@ -648,24 +641,24 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
   });
 
   describe('4. the parent’s code is not inherited', () => {
-    it('a subcategory with none is refused beside a confirmed parent', async () => {
-      confirmed(category('brake-system', null, { ...CODES_OF('brakes') }));
+    it('a subcategory with none is refused beside a parent that has them', async () => {
+      category('brake-system', null, { ...CODES_OF('brakes') });
       category('brake-discs', 'brake-system');
       part('p1', 'brake-discs');
 
       expect(refusedCode(await check(orderOf([partLine('p1')])))).toBe(REFUSED);
     });
 
-    it('a parent with active subcategories is not sold from, confirmed or not', async () => {
-      confirmed(category('brake-system', null, { ...CODES_OF('brakes') }));
-      confirmed(subcategory('brake-discs', 'brake-system'));
+    it('a parent with active subcategories is not sold from, whatever it holds', async () => {
+      category('brake-system', null, { ...CODES_OF('brakes') });
+      subcategory('brake-discs', 'brake-system');
       part('p1', 'brake-system');
 
       expect(refusedCode(await check(orderOf([partLine('p1')])))).toBe(REFUSED);
     });
 
     it('a parent whose only subcategory is deactivated is a leaf again', async () => {
-      confirmed(category('brake-system', null, { ...CODES_OF('brakes') }));
+      category('brake-system', null, { ...CODES_OF('brakes') });
       subcategory('brake-discs', 'brake-system', { isActive: false });
       part('p1', 'brake-system');
 
@@ -689,7 +682,7 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
     ])('%s', (_, subParent) => {
       beforeEach(() => {
         category(node, root, { ...CODES_OF(node) });
-        confirmed(subcategory(sub, subParent));
+        subcategory(sub, subParent);
       });
 
       it('a product on the subcategory carries the subcategory’s MXIK', async () => {
@@ -708,7 +701,7 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
         );
       });
 
-      it('the console says so, and refuses to confirm it', async () => {
+      it('the console says so', async () => {
         const row = await console_()
           .get(`/v1/admin/categories/${node}`)
           .expect(200);
@@ -716,27 +709,14 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
           mxik: CODES_OF(node).mxik,
           fiscalStatus: 'NOT_SELLABLE',
           fiscalConfigured: false,
-          fiscalCodesToConfirm: null,
         });
-
-        const refused = await console_()
-          .patch(`/v1/admin/categories/${node}/fiscal-confirmation`)
-          .send({
-            confirmed: true,
-            codes: `${CODES_OF(node).mxik}:${CODES_OF(node).packageCodeSingle}:`,
-          })
-          .expect(409);
-        expect(refused.body.code).toBe('CATEGORY_NOT_SELLABLE');
-        // Its stored code is left as it was.
-        expect(categories.get(node).mxik).toBe(CODES_OF(node).mxik);
-        expect(categories.get(node).fiscalConfirmedCodes).toBeNull();
       });
     });
   });
 
   describe('6. the sum of the receipt and the sum of the order', () => {
     it('agree, for several lines, quantities, delivery and the service fee', async () => {
-      confirmed(subcategory('brake-discs', 'brake-system'));
+      subcategory('brake-discs', 'brake-system');
       part('p1', 'brake-discs');
       part('p2', 'brake-discs');
 
@@ -758,7 +738,7 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
     });
 
     it('a stored total the lines do not add up to is refused', async () => {
-      confirmed(subcategory('brake-discs', 'brake-system'));
+      subcategory('brake-discs', 'brake-system');
       part('p1', 'brake-discs');
 
       const amount = orderOf([partLine('p1')], { totalUzs: 150000 });
@@ -767,7 +747,7 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
     });
 
     it('an amount other than the order’s is refused as such', async () => {
-      confirmed(subcategory('brake-discs', 'brake-system'));
+      subcategory('brake-discs', 'brake-system');
       part('p1', 'brake-discs');
       orderOf([partLine('p1')]);
 
@@ -778,7 +758,7 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
   describe('7. service lines and the order’s other charges', () => {
     it('a classified service, delivery and the fee are all on the receipt', async () => {
       classifiedService();
-      confirmed(subcategory('brake-discs', 'brake-system'));
+      subcategory('brake-discs', 'brake-system');
       part('p1', 'brake-discs');
 
       const amount = orderOf([partLine('p1'), serviceLine('svc_1')], {
@@ -802,7 +782,7 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
         categoryId: null,
         provider: { tin: '209876543', vatPercent: 12 },
       });
-      confirmed(subcategory('brake-discs', 'brake-system'));
+      subcategory('brake-discs', 'brake-system');
       part('p1', 'brake-discs');
 
       const amount = orderOf([partLine('p1'), serviceLine('svc_1')]);
@@ -812,7 +792,7 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
 
     it('a charge whose codes are not configured refuses the order', async () => {
       delete env.SERVICE_FEE_MXIK;
-      confirmed(subcategory('brake-discs', 'brake-system'));
+      subcategory('brake-discs', 'brake-system');
       part('p1', 'brake-discs');
 
       const amount = orderOf([partLine('p1')], { serviceFeeUzs: 5000 });
@@ -836,7 +816,7 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
     });
 
     it('goods are not affected', async () => {
-      confirmed(subcategory('brake-discs', 'brake-system'));
+      subcategory('brake-discs', 'brake-system');
       part('p1', 'brake-discs');
       const body = await check(orderOf([partLine('p1')]));
       expect(body.result.allow).toBe(true);
@@ -877,9 +857,9 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
           }),
       ],
       [
-        'a service whose category nobody confirmed',
+        'a service whose category has no codes',
         () => {
-          subcategory('oil-change-service', 'other-services');
+          category('oil-change-service', 'other-services');
           offerings.set('svc_1', {
             categoryId: 'oil-change-service',
             provider: { tin: '209876543', vatPercent: 12 },
@@ -931,9 +911,7 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
       });
 
       it('a part in the fallback bucket is refused', async () => {
-        confirmed(
-          category('cat_uncategorized', null, { ...CODES_OF('brakes') }),
-        );
+        category('cat_uncategorized', null, { ...CODES_OF('brakes') });
         part('p1', 'cat_uncategorized');
         expect(refusedCode(await check(orderOf([partLine('p1')])))).toBe(
           REFUSED,
@@ -957,7 +935,7 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
 
   describe('delivery, which the customer pays for through Payme', () => {
     const payableGoods = () => {
-      confirmed(subcategory('brake-discs', 'brake-system'));
+      subcategory('brake-discs', 'brake-system');
       part('p1', 'brake-discs');
       return partLine('p1');
     };
@@ -1114,14 +1092,17 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
       expect(JSON.stringify(items)).not.toContain('05320001001000000');
     });
 
-    it('needs no category and no confirmation, unlike the goods beside it', async () => {
-      subcategory('brake-discs', 'brake-system');
+    it('needs no category, unlike the goods beside it', async () => {
+      category('brake-discs', 'brake-system');
       part('p1', 'brake-discs');
       const amount = orderOf([partLine('p1')], { deliveryUzs: 25000 });
 
-      // The goods are what stops this order. Confirming them is all it takes.
+      // The goods are what stops this order. Giving them codes is all it takes.
       expect(refusedCode(await check(amount))).toBe(REFUSED);
-      confirmed(categories.get('brake-discs'));
+      Object.assign(categories.get('brake-discs'), {
+        mxik: SUB_MXIK,
+        packageCodeSingle: SUB_PACKAGE,
+      });
       expect((await check(amount)).result.allow).toBe(true);
     });
 
@@ -1170,7 +1151,7 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
 
   describe('one category, one code, whatever kind of line files on it', () => {
     it('a part, a sourcing offer and a service all carry the same MXIK', async () => {
-      const shared = confirmed(subcategory('shared-sub', 'a-root'));
+      const shared = subcategory('shared-sub', 'a-root');
       part('p1', 'shared-sub');
       offers.set('soff_1', { categoryId: 'shared-sub' });
       offerings.set('svc_1', {
@@ -1193,8 +1174,8 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
   describe('oils: kind, oil type and category have to agree', () => {
     const SYNTHETIC = 'synthetic-motor-oil';
 
-    it('a composition with its own confirmed code uses that code', async () => {
-      confirmed(subcategory(SYNTHETIC, 'motor-oil'));
+    it('a composition with its own code uses that code', async () => {
+      subcategory(SYNTHETIC, 'motor-oil');
       part('p1', SYNTHETIC, {
         kind: ProductKind.MOTOR_OIL,
         oilType: OilType.SYNTHETIC,
@@ -1206,7 +1187,7 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
     });
 
     it('a position an import left as a spare part can sit there', async () => {
-      confirmed(subcategory(SYNTHETIC, 'motor-oil'));
+      subcategory(SYNTHETIC, 'motor-oil');
       part('p1', SYNTHETIC);
 
       const body = await check(orderOf([partLine('p1')]));
@@ -1214,8 +1195,8 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
       expect(body.result.detail.items[0].code).toBe(SUB_MXIK);
     });
 
-    it('with no code of its own it takes the table’s, once confirmed', async () => {
-      confirmed(category(SYNTHETIC, 'motor-oil'));
+    it('with no code of its own it takes the table’s', async () => {
+      category(SYNTHETIC, 'motor-oil');
       part('p1', SYNTHETIC, {
         kind: ProductKind.MOTOR_OIL,
         oilType: OilType.SYNTHETIC,
@@ -1229,7 +1210,7 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
     });
 
     it('a stated oil type contradicting the category is refused', async () => {
-      confirmed(subcategory(SYNTHETIC, 'motor-oil'));
+      subcategory(SYNTHETIC, 'motor-oil');
       part('p1', SYNTHETIC, {
         kind: ProductKind.MOTOR_OIL,
         oilType: OilType.MINERAL,
@@ -1239,7 +1220,7 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
     });
 
     it('a motor oil on a brake category is refused, whatever its name says', async () => {
-      confirmed(subcategory('brake-discs', 'brake-system'));
+      subcategory('brake-discs', 'brake-system');
       part('p1', 'brake-discs', { kind: ProductKind.MOTOR_OIL });
       const amount = orderOf([partLine('p1', { title: 'Масло тормозное' })]);
 
@@ -1247,12 +1228,7 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
     });
   });
 
-  describe('the confirmation reaches the receipt, through the API', () => {
-    const CODES = `${SUB_MXIK}:${SUB_PACKAGE}:`;
-    const confirm = (codes: string) =>
-      console_()
-        .patch('/v1/admin/categories/brake-discs/fiscal-confirmation')
-        .send({ confirmed: true, codes });
+  describe('codes entered in the console reach the receipt', () => {
     const edit = (body: any) =>
       console_().patch('/v1/admin/categories/brake-discs').send(body);
     const listed = async (status: string) =>
@@ -1264,81 +1240,64 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
 
     beforeEach(() => {
       category('brake-system', null);
-      subcategory('brake-discs', 'brake-system');
+      category('brake-discs', 'brake-system');
       category('brake-pads', 'brake-system');
       part('p1', 'brake-discs');
     });
 
-    it('from waiting, to confirmed, to voided by an edit, to confirmed again', async () => {
+    it('from no codes to payable, by saving them and nothing else', async () => {
       const amount = orderOf([partLine('p1')]);
 
-      // Waiting: it has a code, and the receipt will not take it.
-      expect(await listed('NEEDS_CONFIRMATION')).toEqual(['brake-discs']);
-      expect(await listed('NEEDS_CODES')).toEqual(['brake-pads']);
+      expect(await listed('NEEDS_CODES')).toEqual([
+        'brake-discs',
+        'brake-pads',
+      ]);
       expect(await listed('NOT_SELLABLE')).toEqual(['brake-system']);
       expect(refusedCode(await check(amount))).toBe(REFUSED);
 
-      // Confirmed: stored, and the receipt reads it.
-      await confirm(CODES).expect(200);
-      expect(categories.get('brake-discs').fiscalConfirmedCodes).toBe(CODES);
+      await edit({
+        mxik: SUB_MXIK,
+        packageCodeSingle: SUB_PACKAGE,
+      }).expect(200);
+
+      expect(categories.get('brake-discs').mxik).toBe(SUB_MXIK);
       expect(await listed('READY')).toEqual(['brake-discs']);
       expect((await check(amount)).result.detail.items[0].code).toBe(SUB_MXIK);
+    });
 
-      // A new MXIK ends it, and an old confirmation is refused as out of date.
+    it('a changed code is the one on the next receipt', async () => {
+      const amount = orderOf([partLine('p1')]);
+      await edit({
+        mxik: SUB_MXIK,
+        packageCodeSingle: SUB_PACKAGE,
+      }).expect(200);
       await edit({ mxik: '09922222222222222' }).expect(200);
-      expect(categories.get('brake-discs').fiscalConfirmedCodes).toBeNull();
-      expect(refusedCode(await check(amount))).toBe(REFUSED);
-      const stale = await confirm(CODES).expect(409);
-      expect(stale.body.code).toBe('FISCAL_CODES_CHANGED');
 
-      // Changing it back does not bring the old confirmation back.
-      await edit({ mxik: SUB_MXIK }).expect(200);
-      expect(await listed('NEEDS_CONFIRMATION')).toEqual(['brake-discs']);
-      expect(refusedCode(await check(amount))).toBe(REFUSED);
+      const { result } = await check(amount);
 
-      await confirm(CODES).expect(200);
-      expect((await check(amount)).result.allow).toBe(true);
+      expect(result.allow).toBe(true);
+      expect(result.detail.items[0].code).toBe('09922222222222222');
     });
 
-    it('a new package code ends it too', async () => {
-      const amount = orderOf([partLine('p1')]);
-      await confirm(CODES).expect(200);
+    it.each(['MAYBE', 'NEEDS_CONFIRMATION'])(
+      'rejects the status %s, which does not exist',
+      async (status) => {
+        await console_()
+          .get(`/v1/admin/categories?fiscalStatus=${status}`)
+          .expect(400);
+      },
+    );
 
-      await edit({ packageCodeSingle: '1000099' }).expect(200);
-
-      expect(refusedCode(await check(amount))).toBe(REFUSED);
-    });
-
-    it('can be withdrawn', async () => {
-      const amount = orderOf([partLine('p1')]);
-      await confirm(CODES).expect(200);
-
+    it('no longer has a confirmation endpoint', async () => {
       await console_()
         .patch('/v1/admin/categories/brake-discs/fiscal-confirmation')
-        .send({ confirmed: false })
-        .expect(200);
-
-      expect(refusedCode(await check(amount))).toBe(REFUSED);
-    });
-
-    it('takes a manager or a super admin, not an operator', async () => {
-      admin.role = 'OPERATOR';
-      await confirm(CODES).expect(403);
-      expect(categories.get('brake-discs').fiscalConfirmedCodes).toBeNull();
-
-      admin.role = 'MANAGER';
-      await confirm(CODES).expect(200);
-    });
-
-    it('rejects a status it does not know', async () => {
-      await console_()
-        .get('/v1/admin/categories?fiscalStatus=MAYBE')
-        .expect(400);
+        .send({ confirmed: true, codes: 'x' })
+        .expect(404);
     });
   });
   describe('the receipt is frozen on the invoice', () => {
     const payable = () => {
-      confirmed(subcategory('brake-discs', 'brake-system'));
+      subcategory('brake-discs', 'brake-system');
       part('p1', 'brake-discs');
       return orderOf([partLine('p1')]);
     };
@@ -1354,8 +1313,7 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
       const amount = payable();
       const agreed = (await check(amount)).result.detail;
 
-      // Through the console, as an operator would: a new code ends the confirmation,
-      // which would refuse a receipt built from the catalog now.
+      // Through the console, as an operator would.
       await console_()
         .patch('/v1/admin/categories/brake-discs')
         .send({ mxik: '09922222222222222' })
@@ -1380,9 +1338,7 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
       const amount = payable();
       const agreed = (await check(amount)).result.detail;
 
-      confirmed(
-        subcategory('other-discs', 'brake-system', { mxik: '09933333333333333' }),
-      );
+      subcategory('other-discs', 'brake-system', { mxik: '09933333333333333' });
       parts.get('p1').categoryId = 'other-discs';
 
       expect((await checkAgain(amount)).result.detail).toEqual(agreed);
@@ -1438,7 +1394,7 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
     });
 
     it('a refused payment leaves no invoice behind for Check to find', async () => {
-      subcategory('brake-discs', 'brake-system');
+      category('brake-discs', 'brake-system');
       part('p1', 'brake-discs');
       const amount = orderOf([partLine('p1')]);
 
@@ -1467,7 +1423,7 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
     ) => rpc('SetFiscalData', { id, type, fiscal_data: data });
 
     beforeEach(async () => {
-      confirmed(subcategory('brake-discs', 'brake-system'));
+      subcategory('brake-discs', 'brake-system');
       part('p1', 'brake-discs');
       const amount = orderOf([partLine('p1')]);
       await check(amount);

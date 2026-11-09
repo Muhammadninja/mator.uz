@@ -156,7 +156,7 @@ export const CATEGORY_ID_TO_KIND: Readonly<Record<string, ProductKind>> = {
  * Whether a motor oil filed on this category takes its codes from OIL_TYPE_FISCAL
  * rather than from the category's own columns: a composition category an operator
  * has given no MXIK of its own, whose empty columns are therefore not a gap. A code
- * the operator did enter there wins over the table: it is the one they confirm.
+ * the operator did enter there wins over the table.
  *
  * Nothing else qualifies. The `motor-oil` parent names no composition, TRANSMISSION
  * oil denotes none, and a "Другое" child (industrial, motorcycle, agricultural …) is

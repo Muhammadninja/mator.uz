@@ -219,36 +219,32 @@ missing (read the dry-run first: a missing row may be one an operator removed on
 
 ## 9. Open items
 
-- **Payme MXIK/ИКПУ codes need entering and confirming against Tasnif.** Fiscal fields:
-  `mxik`, `packageCodeSingle`, `packageCodeSet`, `packageCodeBox`, `fiscalConfirmedCodes`. What a listing's
+- **Payme MXIK/ИКПУ codes are entered by an admin.** Fiscal fields:
+  `mxik`, `packageCodeSingle`, `packageCodeSet`, `packageCodeBox`. What a listing's
   receipt may carry is decided in one place, `resolveFiscalClassification` in
   `common/fiscal.util.ts`, which the Payme receipt and every console flag share:
   - A code must be the category's **own**. There is no inheritance, and a node with active
     children is refused: it is too broad to classify what sits on it. So are
     `transmission` and `heating-and-cooling`, whose seeded codes predate their
     subcategories.
-  - A non-empty `mxik` is not enough. An operator must confirm the exact codes as true of
-    **every** listing on the node (`PATCH /v1/admin/categories/:id/fiscal-confirmation`,
-    manager or super admin). Editing a code ends the confirmation, and changing it back
-    needs a new one.
-  - The seeded codes in `CATEGORY_FISCAL_DATA` are candidates, none of them confirmed. Four
+  - Four of the seeded codes in `CATEGORY_FISCAL_DATA`
     name one product of a broad bucket: a starter on `electrical-parts`, a headlight on
     `lighting`, a spark plug on `ignition`, rubber hoses on `belts-and-hoses`. None of those
     nodes has children in the seeded tree (the subcategories for those goods are their
     siblings), and new listings can land on them through `classificationOf`, so a node still
-    holding its code is treated like a parent: `NOT_SELLABLE`, and it cannot be confirmed
+    holding its code is treated like a parent: `NOT_SELLABLE`
     (`REPRESENTATIVE_ONLY_MXIK`). A different code entered by an operator lifts that.
   - `OIL_TYPE_FISCAL` supplies the codes of a composition category only while it has no MXIK
-    of its own, and needs confirming on each one. An operator's code there wins over the
+    of its own. An operator's code there wins over the
     table, and a position imported as `SPARE_PART` may sit on it; the table itself is for
     `MOTOR_OIL` only.
-  - Until then checkout refuses the listing. `GET /v1/admin/categories?fiscalStatus=NEEDS_CODES`
-    and `=NEEDS_CONFIRMATION` list what is left to do.
+  - Without codes checkout refuses the listing. `GET /v1/admin/categories?fiscalStatus=NEEDS_CODES`
+    lists what is left to do.
   - Package codes go to Payme as `package_code`, and Tasnif issues them **per MXIK**: there is
     no universal code for a piece, a set or a box. `PACKAGE_CODE_COLUMN` maps a sale form to
     the category's column, and nothing stands in for a missing code: a set or box with no
     code of its own is refused, not sold as a piece. A listing that states no form takes the
-    single code only where the category holds no other, because confirming that one code says
+    single code only where the category holds no other, because one code says
     everything filed there is sold that way. On a category holding more, it is refused until
     an operator states the form (`bulk-move` with `packageForm`, on the part alone).
 - **The receipt is frozen on the invoice.** `POST /v1/payments/payme/invoices` runs every rule

@@ -11,9 +11,8 @@ import { join, relative } from 'path';
 import {
   REPRESENTATIVE_ONLY_MXIK,
   categoryFiscalReadiness,
-  confirmableFiscalCodes,
   dealerFiscalGaps,
-  FISCAL_CODES_UNCONFIRMED,
+  hasUsableFiscalCodes,
   isCategoryFiscallyConfigured,
   listingFiscalGaps,
   offersPackageChoice,
@@ -34,7 +33,7 @@ import {
   isFiscalizedByOilType,
   kindFitsCategory,
 } from '../catalog/categories/category-map';
-import { confirmedCategory } from '../../test/utils/harness';
+import { configuredCategory } from '../../test/utils/harness';
 
 /** Brakes, as supplied: sold both as a single item and as a set. */
 const BOTH = {
@@ -173,7 +172,7 @@ describe('resolvePackageCode', () => {
   });
 
   it('answers an unstated form only where the category holds one code', () => {
-    // The operator who confirmed that one code said it is true of everything there.
+    // One code on a category says it is true of everything there.
     expect(resolvePackageCode(SINGLE_ONLY, null)).toBe('1499205');
     expect(resolvePackageCode(SINGLE_ONLY, undefined)).toBe('1499205');
   });
@@ -264,12 +263,11 @@ const bareCategory = (id: string, parentId: string | null = 'any-parent') => ({
   packageCodeSingle: null,
   packageCodeSet: null,
   packageCodeBox: null,
-  fiscalConfirmedCodes: null,
   _count: { children: 0 },
 });
 
 const composition = (id: string) =>
-  confirmedCategory({
+  configuredCategory({
     id,
     parentId: 'motor-oil',
     mxik: null,
@@ -288,10 +286,10 @@ describe('resolveFiscalClassification — the MXIK has to be the right one', () 
     ...over,
   });
 
-  it('gives a confirmed leaf its own codes, by the sale form', () => {
+  it('gives a leaf its own codes, by the sale form', () => {
     expect(
       resolveFiscalClassification(
-        sparePart(confirmedCategory(), { packageForm: PackageForm.SINGLE }),
+        sparePart(configuredCategory(), { packageForm: PackageForm.SINGLE }),
       ),
     ).toEqual({
       ok: true,
@@ -300,7 +298,7 @@ describe('resolveFiscalClassification — the MXIK has to be the right one', () 
     });
     expect(
       resolveFiscalClassification(
-        sparePart(confirmedCategory(), { packageForm: PackageForm.SET }),
+        sparePart(configuredCategory(), { packageForm: PackageForm.SET }),
       ),
     ).toEqual({
       ok: true,
@@ -310,7 +308,7 @@ describe('resolveFiscalClassification — the MXIK has to be the right one', () 
   });
 
   describe('how the listing is sold', () => {
-    const steering = confirmedCategory({ id: 'steering', ...STEERING });
+    const steering = configuredCategory({ id: 'steering', ...STEERING });
 
     it.each([
       [PackageForm.SINGLE, '1417728'],
@@ -328,14 +326,14 @@ describe('resolveFiscalClassification — the MXIK has to be the right one', () 
         gaps: [PACKAGE_FORM_NOT_STATED],
       });
       expect(
-        resolveFiscalClassification(sparePart(confirmedCategory())),
+        resolveFiscalClassification(sparePart(configuredCategory())),
       ).toEqual({ ok: false, gaps: [PACKAGE_FORM_NOT_STATED] });
     });
 
-    it('takes the one code of a confirmed single-form category for an unstated listing', () => {
+    it('takes the one code of a single-form category for an unstated listing', () => {
       expect(
         resolveFiscalClassification(
-          sparePart(confirmedCategory({ packageCodeSet: null })),
+          sparePart(configuredCategory({ packageCodeSet: null })),
         ),
       ).toEqual({
         ok: true,
@@ -348,7 +346,7 @@ describe('resolveFiscalClassification — the MXIK has to be the right one', () 
       'refuses a %s listing on a category with no code for it, not a piece instead',
       (packageForm) => {
         const result = resolveFiscalClassification(
-          sparePart(confirmedCategory({ packageCodeSet: null }), {
+          sparePart(configuredCategory({ packageCodeSet: null }), {
             packageForm,
           }),
         );
@@ -362,7 +360,7 @@ describe('resolveFiscalClassification — the MXIK has to be the right one', () 
     it('checks the code of the form sold, not only the single one', () => {
       const result = resolveFiscalClassification(
         sparePart(
-          confirmedCategory({ packageCodeBox: 'one-box' }),
+          configuredCategory({ packageCodeBox: 'one-box' }),
           { packageForm: PackageForm.BOX },
         ),
       );
@@ -372,26 +370,10 @@ describe('resolveFiscalClassification — the MXIK has to be the right one', () 
       });
     });
 
-    it('editing the box code voids the confirmation with no further write', () => {
-      expect(
-        resolveFiscalClassification(
-          sparePart(
-            { ...steering, packageCodeBox: '1533558' },
-            { packageForm: PackageForm.SINGLE },
-          ),
-        ),
-      ).toEqual({ ok: false, gaps: [FISCAL_CODES_UNCONFIRMED] });
-    });
-
     it.each([PackageForm.SET, PackageForm.BOX])(
       'the oil table holds no code for oil sold as %s',
       (packageForm) => {
-        const composition = {
-          ...bareCategory(SYNTHETIC_CATEGORY),
-          fiscalConfirmedCodes: confirmableFiscalCodes(
-            bareCategory(SYNTHETIC_CATEGORY),
-          ),
-        };
+        const composition = bareCategory(SYNTHETIC_CATEGORY);
         const result = resolveFiscalClassification({
           kind: ProductKind.MOTOR_OIL,
           oilType: OilType.SYNTHETIC,
@@ -410,36 +392,35 @@ describe('resolveFiscalClassification — the MXIK has to be the right one', () 
     });
   });
 
-  it('a code nobody confirmed does not reach a receipt, however plausible', () => {
-    // The seed’s representative-product codes are exactly this state.
-    expect(
-      resolveFiscalClassification(
-        sparePart(
-          { ...confirmedCategory(), fiscalConfirmedCodes: null },
-          { packageForm: PackageForm.SINGLE },
-        ),
-      ),
-    ).toEqual({ ok: false, gaps: [FISCAL_CODES_UNCONFIRMED] });
-  });
-
   it.each([
-    ['the MXIK', { mxik: '08708005011999999' }],
-    ['the single package code', { packageCodeSingle: '1417799' }],
-    ['the set package code', { packageCodeSet: '1417799' }],
-  ])('editing %s voids the confirmation with no further write', (_, change) => {
-    expect(
-      resolveFiscalClassification(
-        sparePart(
-          { ...confirmedCategory(), ...change },
-          { packageForm: PackageForm.SINGLE },
+    [
+      'the MXIK',
+      { mxik: '08708005011999999' },
+      '08708005011999999',
+      '1417722',
+    ],
+    [
+      'the single code',
+      { packageCodeSingle: '1417799' },
+      '08708005011000000',
+      '1417799',
+    ],
+  ])(
+    'editing %s reaches the next receipt with no other step',
+    (_, change, mxik, packageCode) => {
+      expect(
+        resolveFiscalClassification(
+          sparePart(
+            { ...configuredCategory(), ...change },
+            { packageForm: PackageForm.SINGLE },
+          ),
         ),
-      ),
-    ).toEqual({ ok: false, gaps: [FISCAL_CODES_UNCONFIRMED] });
-  });
+      ).toEqual({ ok: true, mxik, packageCode });
+    },
+  );
 
-  it('two nulls are no confirmation: a set code alone never reaches a receipt', () => {
-    // A legacy or directly written row: the admin API refuses this shape. There is
-    // nothing confirmable and nothing confirmed, and that must not read as a match.
+  it('a set code alone never reaches a receipt', () => {
+    // A legacy or directly written row: the admin API refuses this shape.
     const setOnly = {
       ...bareCategory('brakes'),
       mxik: '08708005011000000',
@@ -469,7 +450,7 @@ describe('resolveFiscalClassification — the MXIK has to be the right one', () 
   it('refuses a parent as a filing: too broad to classify what sits on it', () => {
     const result = resolveFiscalClassification(
       sparePart(
-        confirmedCategory({ id: 'transmission', _count: { children: 5 } }),
+        configuredCategory({ id: 'transmission', _count: { children: 5 } }),
       ),
     );
     expect(result.ok).toBe(false);
@@ -481,7 +462,7 @@ describe('resolveFiscalClassification — the MXIK has to be the right one', () 
     expect(
       resolveFiscalClassification(
         sparePart(
-          confirmedCategory({ id: 'cat_uncategorized', parentId: null }),
+          configuredCategory({ id: 'cat_uncategorized', parentId: null }),
         ),
       ),
     ).toEqual({ ok: false, gaps: ['listing is not classified yet'] });
@@ -489,7 +470,7 @@ describe('resolveFiscalClassification — the MXIK has to be the right one', () 
 
   it('refuses a malformed code rather than sending it', () => {
     const result = resolveFiscalClassification(
-      sparePart(confirmedCategory({ mxik: '123' })),
+      sparePart(configuredCategory({ mxik: '123' })),
     );
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.gaps[0]).toMatch(/malformed/);
@@ -523,14 +504,6 @@ describe('resolveFiscalClassification — oils', () => {
     });
   });
 
-  it('the oil table needs confirming too: being in the code is no proof', () => {
-    expect(
-      resolveFiscalClassification(
-        oil(OilType.SYNTHETIC, bareCategory(SYNTHETIC_CATEGORY, 'motor-oil')),
-      ),
-    ).toEqual({ ok: false, gaps: [FISCAL_CODES_UNCONFIRMED] });
-  });
-
   it('refuses a motor oil with no type, never picking one', () => {
     expect(
       resolveFiscalClassification(oil(null, composition(SYNTHETIC_CATEGORY))),
@@ -555,12 +528,12 @@ describe('resolveFiscalClassification — oils', () => {
       ok: false,
       gaps: ['category has no MXIK', 'category has no package code'],
     });
-    // With its own confirmed code, that code is the one used.
+    // With its own code, that code is the one used.
     expect(
       resolveFiscalClassification(
         oil(
           OilType.SYNTHETIC,
-          confirmedCategory({
+          configuredCategory({
             id: 'industrial-oil',
             parentId: 'other',
             mxik: '02710005009000000',
@@ -576,7 +549,7 @@ describe('resolveFiscalClassification — oils', () => {
     });
   });
 
-  it('transmission oil takes its OWN confirmed codes, with no oil type', () => {
+  it('transmission oil takes its OWN codes, with no oil type', () => {
     const transmission = {
       id: 'transmission-oil',
       parentId: 'motor-oil',
@@ -585,29 +558,19 @@ describe('resolveFiscalClassification — oils', () => {
       packageCodeSet: null,
     };
     expect(
-      resolveFiscalClassification(oil(null, confirmedCategory(transmission))),
+      resolveFiscalClassification(oil(null, configuredCategory(transmission))),
     ).toEqual({
       ok: true,
       mxik: '02710005005000000',
       packageCode: '1282593',
     });
-    // …and stays blocked until somebody confirms them.
-    expect(
-      resolveFiscalClassification(
-        oil(null, {
-          ...transmission,
-          fiscalConfirmedCodes: null,
-          _count: { children: 0 },
-        }),
-      ),
-    ).toEqual({ ok: false, gaps: [FISCAL_CODES_UNCONFIRMED] });
   });
 
   it('a motor oil on the `motor-oil` parent names no composition', () => {
     const result = resolveFiscalClassification(
       oil(
         OilType.SYNTHETIC,
-        confirmedCategory({
+        configuredCategory({
           id: 'motor-oil',
           parentId: null,
           mxik: null,
@@ -627,7 +590,7 @@ describe('resolveFiscalClassification — oils', () => {
         kind: ProductKind.SPARE_PART,
         oilType: OilType.MINERAL,
         packageForm: null,
-        category: confirmedCategory({ packageCodeSet: null }),
+        category: configuredCategory({ packageCodeSet: null }),
       }),
     ).toMatchObject({ ok: true, mxik: '08708005011000000' });
     // …and on a composition, which only holds motor oil, it is refused outright.
@@ -646,7 +609,7 @@ describe('resolveFiscalClassification — oils', () => {
 
   it('a motor oil on a brake category is refused: that MXIK does not describe it', () => {
     expect(
-      resolveFiscalClassification(oil(OilType.MINERAL, confirmedCategory())),
+      resolveFiscalClassification(oil(OilType.MINERAL, configuredCategory())),
     ).toMatchObject({ ok: false });
   });
 
@@ -662,7 +625,7 @@ describe('resolveFiscalClassification — oils', () => {
         kind: ProductKind.ANTIFREEZE,
         oilType: null,
         packageForm: null,
-        category: confirmedCategory(),
+        category: configuredCategory(),
       }),
     ).toMatchObject({ ok: false });
   });
@@ -671,7 +634,7 @@ describe('resolveFiscalClassification — oils', () => {
 describe('a composition category with a code of its own', () => {
   const SYNTHETIC = 'synthetic-motor-oil';
   const OWN = '02710005999000000';
-  const withOwnCode = confirmedCategory({
+  const withOwnCode = configuredCategory({
     id: SYNTHETIC,
     parentId: 'motor-oil',
     mxik: OWN,
@@ -694,23 +657,10 @@ describe('a composition category with a code of its own', () => {
     ).toEqual(OWN_CODES);
   });
 
-  it('that is the code an operator confirms', () => {
-    expect(confirmableFiscalCodes(withOwnCode)).toBe(`${OWN}:1282999:`);
+  it('that is the code the category is judged by', () => {
+    expect(hasUsableFiscalCodes(withOwnCode)).toBe(true);
     expect(isFiscalizedByOilType(withOwnCode)).toBe(false);
     expect(categoryFiscalReadiness(withOwnCode).status).toBe('READY');
-  });
-
-  it('a confirmation of the table’s codes does not carry over to it', () => {
-    const { mxik, packageCode } = OIL_TYPE_FISCAL[OilType.SYNTHETIC];
-    expect(
-      resolveFiscalClassification({
-        ...listing(ProductKind.MOTOR_OIL, OilType.SYNTHETIC),
-        category: {
-          ...withOwnCode,
-          fiscalConfirmedCodes: `${mxik}:${packageCode}:`,
-        },
-      }),
-    ).toEqual({ ok: false, gaps: [FISCAL_CODES_UNCONFIRMED] });
   });
 
   it('a motor oil stating no type takes the type from the category', () => {
@@ -737,7 +687,7 @@ describe('a composition category with a code of its own', () => {
 
   it('a position an import left as a spare part is not blocked by that', () => {
     // What a 1C position is until someone types it. Filed here by hand, it takes the
-    // code the operator confirmed for everything on this node.
+    // code the operator entered for everything on this node.
     expect(
       resolveFiscalClassification(listing(ProductKind.SPARE_PART, null)),
     ).toEqual(OWN_CODES);
@@ -817,20 +767,18 @@ describe('the four nodes seeded with a code for one product of many', () => {
       category: category as never,
     });
 
-    it('holding it, with no children: not sellable, and nothing to confirm', () => {
+    it('holding it, with no children: not sellable', () => {
       expect(categoryFiscalReadiness(seeded).status).toBe('NOT_SELLABLE');
-      expect(confirmableFiscalCodes(seeded)).toBeNull();
+      expect(hasUsableFiscalCodes(seeded)).toBe(false);
     });
 
-    it('a listing on it is refused, even against a stored confirmation', () => {
-      const result = resolveFiscalClassification(
-        onIt({ ...seeded, fiscalConfirmedCodes: `${mxik}:1350563:` }),
-      );
+    it('a listing on it is refused', () => {
+      const result = resolveFiscalClassification(onIt(seeded));
       expect(result.ok).toBe(false);
     });
 
     it('with active children it is a parent, whatever code it holds', () => {
-      const parent = confirmedCategory({
+      const parent = configuredCategory({
         id,
         parentId: 'a-root',
         mxik: '09999999999999902',
@@ -846,25 +794,16 @@ describe('the four nodes seeded with a code for one product of many', () => {
         ...seeded,
         mxik: '09999999999999902',
       };
-      expect(categoryFiscalReadiness(different).status).toBe(
-        'NEEDS_CONFIRMATION',
-      );
-      expect(
-        resolveFiscalClassification(
-          onIt({
-            ...different,
-            fiscalConfirmedCodes: '09999999999999902:1350563:',
-          }),
-        ),
-      ).toEqual({
+      expect(categoryFiscalReadiness(different).status).toBe('READY');
+      expect(resolveFiscalClassification(onIt(different))).toEqual({
         ok: true,
         mxik: '09999999999999902',
         packageCode: '1350563',
       });
     });
 
-    it('a confirmed subcategory under it carries its own MXIK and becomes READY', () => {
-      const sub = confirmedCategory({
+    it('a subcategory under it carries its own MXIK and becomes READY', () => {
+      const sub = configuredCategory({
         id: `${id}-sub`,
         parentId: id,
         mxik: '09999999999999903',
@@ -916,22 +855,12 @@ describe('the one place a receipt’s MXIK comes from', () => {
 
 describe('categoryFiscalReadiness — what an operator still has to do', () => {
   it.each([
-    ['codes confirmed', confirmedCategory(), 'READY'],
-    ['composition confirmed', composition(SYNTHETIC_CATEGORY), 'READY'],
-    [
-      'codes nobody confirmed',
-      { ...confirmedCategory(), fiscalConfirmedCodes: null },
-      'NEEDS_CONFIRMATION',
-    ],
-    [
-      'composition nobody confirmed',
-      bareCategory(SYNTHETIC_CATEGORY, 'motor-oil'),
-      'NEEDS_CONFIRMATION',
-    ],
+    ['codes entered', configuredCategory(), 'READY'],
+    ['composition on the oil table', composition(SYNTHETIC_CATEGORY), 'READY'],
     ['no codes', bareCategory('front-brake-pads'), 'NEEDS_CODES'],
     [
       'a parent',
-      confirmedCategory({ id: 'transmission', _count: { children: 5 } }),
+      configuredCategory({ id: 'transmission', _count: { children: 5 } }),
       'NOT_SELLABLE',
     ],
     ['the fallback bucket', bareCategory('cat_uncategorized'), 'NOT_SELLABLE'],
@@ -940,27 +869,20 @@ describe('categoryFiscalReadiness — what an operator still has to do', () => {
   });
 });
 
-describe('confirmableFiscalCodes', () => {
-  it('states all the codes, so editing any one voids a confirmation', () => {
-    expect(confirmableFiscalCodes({ id: 'brakes', ...BOTH })).toBe(
-      '08708005011000000:1417722:1417723',
-    );
-    expect(confirmableFiscalCodes({ id: 'filters', ...SINGLE_ONLY })).toBe(
-      '08421002001000000:1499205:',
-    );
+describe('hasUsableFiscalCodes', () => {
+  it('holds for a category with its codes', () => {
+    expect(hasUsableFiscalCodes({ id: 'brakes', ...BOTH })).toBe(true);
+    expect(hasUsableFiscalCodes({ id: 'filters', ...SINGLE_ONLY })).toBe(true);
   });
 
-  it('reads a composition’s codes from the oil table, not its empty columns', () => {
-    const { mxik, packageCode } = OIL_TYPE_FISCAL[OilType.SYNTHETIC];
+  it('holds for a composition with empty columns: the oil table has its codes', () => {
     expect(
-      confirmableFiscalCodes({ id: SYNTHETIC_CATEGORY, ...UNCONFIGURED }),
-    ).toBe(`${mxik}:${packageCode}:`);
+      hasUsableFiscalCodes({ id: SYNTHETIC_CATEGORY, ...UNCONFIGURED }),
+    ).toBe(true);
   });
 
-  it('is null when there is nothing to confirm', () => {
-    expect(
-      confirmableFiscalCodes({ id: 'brakes', ...UNCONFIGURED }),
-    ).toBeNull();
+  it('does not hold with no codes', () => {
+    expect(hasUsableFiscalCodes({ id: 'brakes', ...UNCONFIGURED })).toBe(false);
   });
 });
 

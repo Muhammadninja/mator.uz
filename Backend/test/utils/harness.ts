@@ -10,7 +10,6 @@
  */
 
 import { Global, Module } from '@nestjs/common';
-import { confirmableFiscalCodes } from '../../src/common/fiscal.util';
 import { DiscountService } from '../../src/sales/discount.service';
 import { PaymeFiscalService } from '../../src/orders/webhooks/payme-fiscal.service';
 import { QueueService } from '../../src/queue/queue.service';
@@ -310,12 +309,11 @@ export const FISCAL_TEST_ENV = {
 };
 
 /**
- * A category row an operator has confirmed: by default the brake leaf with both
- * package codes. The confirmation is computed from the row, so overriding a code in
- * `over` yields a category confirmed for THOSE codes.
+ * A category row with its codes entered: by default the brake leaf with both
+ * package codes.
  */
-export function confirmedCategory(over: Partial<any> = {}): any {
-  const row = {
+export function configuredCategory(over: Partial<any> = {}): any {
+  return {
     id: 'brakes',
     parentId: 'brake-system',
     mxik: '08708005011000000',
@@ -325,7 +323,6 @@ export function confirmedCategory(over: Partial<any> = {}): any {
     _count: { children: 0 },
     ...over,
   };
-  return { ...row, fiscalConfirmedCodes: confirmableFiscalCodes(row) };
 }
 
 /**
@@ -354,7 +351,7 @@ export function stubFiscalizableOrderLines(prisma: PrismaMock): void {
       kind: 'SPARE_PART',
       oilType: null,
       inStock: true,
-      category: confirmedCategory(),
+      category: configuredCategory(),
       seller: { status: 'ACTIVE', tin: '301234567', vatPercent: 0 },
     },
   ]);

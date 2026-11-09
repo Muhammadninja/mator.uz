@@ -24,8 +24,8 @@ import {
 import { PartCategoryService } from '../../catalog/categories/part-category.service';
 import {
   categoryFiscalReadiness,
-  confirmableFiscalCodes,
   FISCAL_CATEGORY_SELECT,
+  hasUsableFiscalCodes,
   packageFormGap,
 } from '../../common/fiscal.util';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -385,10 +385,9 @@ export class AdminCategoryTransferService {
     }
 
     // ── fiscal codes come from the category, so moving changes which apply ──
-    const hasCodes = (c: CategoryRow) => confirmableFiscalCodes(c) !== null;
     const isReady = (c: CategoryRow) =>
       categoryFiscalReadiness(c).status === 'READY';
-    if (hasCodes(source) && !hasCodes(target)) {
+    if (hasUsableFiscalCodes(source) && !hasUsableFiscalCodes(target)) {
       blockers.push({
         code: 'TARGET_NOT_FISCALIZED',
         message:
@@ -408,7 +407,7 @@ export class AdminCategoryTransferService {
       warnings.push({
         code: 'TARGET_NOT_READY',
         message:
-          'Products here can be paid for online today and could not be after the move: the target is not confirmed against Tasnif yet.',
+          'Products here can be paid for online today and could not be after the move: the target is not ready for Payme.',
       });
     }
     // Nothing stands in for a missing code, so such a listing is refused at payment.

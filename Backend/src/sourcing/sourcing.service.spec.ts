@@ -11,10 +11,9 @@ import {
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import {
-  FISCAL_CODES_UNCONFIRMED,
   PACKAGE_FORM_NOT_STATED,
 } from '../common/fiscal.util';
-import { confirmedCategory } from '../../test/utils/harness';
+import { configuredCategory } from '../../test/utils/harness';
 import { ClassifySourcingOfferDto } from './dto/classify-sourcing-offer.dto';
 import { SourcingService } from './sourcing.service';
 
@@ -60,7 +59,7 @@ describe('SourcingService.classifyOffer', () => {
   const ctx = { actor: { id: 'adm_1', email: 'a@b.c', name: 'A' } };
 
   it('writes the classification and audits who decided what', async () => {
-    const { service, prisma, audit } = classifying(confirmedCategory());
+    const { service, prisma, audit } = classifying(configuredCategory());
 
     const res = await service.classifyOffer(
       'soff_1',
@@ -77,30 +76,18 @@ describe('SourcingService.classifyOffer', () => {
       target: { entity: AdminAuditEntity.SOURCING_OFFER, id: 'soff_1' },
       newValues: { categoryId: 'brakes', packageForm: PackageForm.SET },
     });
-    // A confirmed category: nothing stands between this offer and a receipt.
+    // A category with its codes: nothing stands between this offer and a receipt.
     expect(res.data.fiscalGaps).toEqual([]);
   });
 
-  it('reports what the receipt would still lack: a category nobody confirmed', async () => {
-    const { service } = classifying({
-      ...confirmedCategory(),
-      fiscalConfirmedCodes: null,
-    });
-    const res = await service.classifyOffer('soff_1', {
-      categoryId: 'brakes',
-      packageForm: PackageForm.SINGLE,
-    });
-    expect(res.data.fiscalGaps).toEqual([FISCAL_CODES_UNCONFIRMED]);
-  });
-
   it('says so at once when an offer states no form where the category holds several', async () => {
-    const { service } = classifying(confirmedCategory());
+    const { service } = classifying(configuredCategory());
     const res = await service.classifyOffer('soff_1', { categoryId: 'brakes' });
     expect(res.data.fiscalGaps).toEqual([PACKAGE_FORM_NOT_STATED]);
   });
 
   it('says so at once when the category has no code for the form stated', async () => {
-    const { service } = classifying(confirmedCategory());
+    const { service } = classifying(configuredCategory());
     const res = await service.classifyOffer('soff_1', {
       categoryId: 'brakes',
       packageForm: PackageForm.BOX,

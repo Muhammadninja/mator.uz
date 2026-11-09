@@ -7,7 +7,7 @@ import { ConflictException } from '@nestjs/common';
 import { OilType, PackageForm, ProductKind } from '@prisma/client';
 import { AdminCategoryTransferService } from './admin-category-transfer.service';
 import {
-  confirmedCategory,
+  configuredCategory,
   createPrismaMock,
   fakeAudit,
   PrismaMock,
@@ -26,7 +26,6 @@ const node = (id: string, parentId: string | null, over = {}) => ({
   packageCodeSingle: null,
   packageCodeSet: null,
   packageCodeBox: null,
-  fiscalConfirmedCodes: null,
   _count: { children: 0 },
   ...over,
 });
@@ -214,16 +213,7 @@ describe('AdminCategoryTransferService — oils', () => {
 describe('AdminCategoryTransferService — fiscal readiness', () => {
   it('warns when products payable today could not be paid for after the move', async () => {
     const tree = TREE.map((n) =>
-      n.id === 'brakes'
-        ? {
-            ...n,
-            ...confirmedCategory({
-              id: 'brakes',
-              parentId: 'brake-system',
-              packageCodeSet: null,
-            }),
-          }
-        : n,
+      n.id === 'brake-discs' ? { ...n, _count: { children: 2 } } : n,
     );
     const { service } = world([SPARE], tree);
 
@@ -234,7 +224,12 @@ describe('AdminCategoryTransferService — fiscal readiness', () => {
   });
 
   it('says nothing about readiness when the source could not be paid for either', async () => {
-    const { service } = world([SPARE]);
+    const tree = TREE.map((n) =>
+      n.id === 'brakes' || n.id === 'brake-discs'
+        ? { ...n, _count: { children: 2 } }
+        : n,
+    );
+    const { service } = world([SPARE], tree);
     const { data } = await service.preview('brakes', 'brake-discs');
     expect(codesOf(data.warnings)).not.toContain('TARGET_NOT_READY');
   });

@@ -196,8 +196,7 @@ async function seedCategories() {
         sortOrder: c.sortOrder,
         level: 0,
         isActive: true,
-        // Candidate codes on a fresh database, unconfirmed until an operator
-        // confirms them (see CATEGORY_FISCAL_DATA).
+        // Codes for a fresh database (see CATEGORY_FISCAL_DATA).
         ...fiscalDataFor(c.id),
       },
     });
