@@ -1344,16 +1344,6 @@ model PartCategory {
   packageCodeSingle String?           @map("package_code_single") @db.VarChar(20)
   packageCodeSet    String?           @map("package_code_set") @db.VarChar(20)
   packageCodeBox    String?           @map("package_code_box") @db.VarChar(20)
-  // The codes an operator CONFIRMED against Tasnif as true of EVERY listing filed
-  // on this node, stored as the exact "mxik:single:set[:box]" that was confirmed
-  // rather than as a flag. On a node holding one code, that is also the statement
-  // that everything filed there is sold in that form. Having a code and having a confirmed one are different facts:
-  // seeded codes were supplied per representative product (a starter's code on all
-  // electrical parts), so a non-empty `mxik` proves nothing about a given listing.
-  // Null, or any value that no longer equals the current codes, means unconfirmed,
-  // and Payme checkout refuses the listing. Written only by the admin confirmation
-  // endpoint; see resolveFiscalClassification() in common/fiscal.util.ts.
-  fiscalConfirmedCodes String?        @map("fiscal_confirmed_codes") @db.VarChar(80)
   createdAt         DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt         DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
   parent            PartCategory?     @relation("PartCategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
@@ -2278,9 +2268,10 @@ enum AdminAuditAction {
   ADMIN_PROFILE_UPDATED
   REFUND_RECORDED
   REFUND_VOIDED
-  // What reaches a tax receipt: an operator confirming (or withdrawing) a category's
-  // fiscal codes against Tasnif, and classifying a sourcing offer so it can be
-  // fiscalized. newValues carries the exact codes or category.
+  // What reaches a tax receipt. The two CATEGORY_FISCAL_* values are no longer written
+  // (category codes need no confirmation since 2026-11-09); they stay for the audit rows
+  // already recorded. SOURCING_OFFER_CLASSIFIED: classifying a sourcing offer so it can
+  // be fiscalized. newValues carries the exact codes or category.
   CATEGORY_FISCAL_CONFIRMED
   CATEGORY_FISCAL_UNCONFIRMED
   SOURCING_OFFER_CLASSIFIED

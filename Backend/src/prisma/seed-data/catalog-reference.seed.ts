@@ -170,8 +170,7 @@ export const SEED_OTHER_CATEGORIES: SeedOtherCategory[] = [
 
 // ── Category fiscal data (MXIK / ИКПУ + Tasnif package codes) ────────────────
 /**
- * CANDIDATE fiscal codes, keyed by stable category id: what the supplied list
- * said, NOT a confirmed classification. Mirrors the UPDATE block in
+ * Fiscal codes, keyed by stable category id: what the supplied list said. Mirrors the UPDATE block in
  * migrations/20260811000000_add_fiscal_data exactly, so a freshly seeded database
  * and a migrated one converge — the same contract the category tree itself already
  * follows.
@@ -179,11 +178,9 @@ export const SEED_OTHER_CATEGORIES: SeedOtherCategory[] = [
  * Every entry needs checking against Tasnif. The list names representative products,
  * so several entries describe ONE product of a broad category: a starter on
  * `electrical-parts`, a headlight on `lighting`, a spark plug on `ignition`, rubber
- * hoses on `belts-and-hoses`. Those four can never reach a receipt, and cannot be
- * confirmed, for as long as a node holds them (REPRESENTATIVE_ONLY_MXIK). Nothing else
- * here reaches a receipt until an operator confirms that the code is true of everything
- * filed on the node (PATCH /v1/admin/categories/:id/fiscal-confirmation), and the
- * comments below are not that confirmation.
+ * hoses on `belts-and-hoses`. Those four can never reach a receipt for as long as a
+ * node holds them (REPRESENTATIVE_ONLY_MXIK). Every other entry on a leaf node is what
+ * a receipt carries, for as long as an admin leaves it there.
  *
  * Two rules governed every entry, and nothing else:
  *

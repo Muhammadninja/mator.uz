@@ -4,7 +4,7 @@ import { PaymeFiscalReceiptService } from '../../src/orders/webhooks/payme-fisca
 import { PaymeService } from '../../src/orders/webhooks/payme.service';
 import { ClickService } from '../../src/orders/webhooks/click.service';
 import {
-  confirmedCategory,
+  configuredCategory,
   createPrismaMock,
   fakeConfig,
   fakeFiscal,
@@ -85,7 +85,7 @@ describe('Payments + webhooks smoke', () => {
           packageForm: null,
           kind: 'SPARE_PART',
           oilType: null,
-          category: confirmedCategory({ packageCodeSet: null }),
+          category: configuredCategory({ packageCodeSet: null }),
           // The operator has not entered this dealer's ИНН / ставка НДС yet.
           inStock: true,
           seller: { status: 'ACTIVE', tin: null, vatPercent: null },
@@ -127,7 +127,7 @@ describe('Payments + webhooks smoke', () => {
           packageForm: null,
           kind: 'SPARE_PART',
           oilType: null,
-          category: confirmedCategory({ packageCodeSet: null }),
+          category: configuredCategory({ packageCodeSet: null }),
           inStock: true,
           seller: { status: 'ACTIVE', tin: '301234567', vatPercent: 0 },
         },

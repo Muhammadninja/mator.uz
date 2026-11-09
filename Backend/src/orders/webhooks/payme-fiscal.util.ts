@@ -150,7 +150,7 @@ export type FiscalLineResult =
 /**
  * Map one order line to its fiscal item, or report exactly what is missing.
  *
- * A line is only fiscalizable when the classification resolves (a confirmed MXIK and
+ * A line is only fiscalizable when the classification resolves (an MXIK and
  * package code of its own) and the dealer's TIN and VAT rate are present. Missing
  * data is reported — never substituted — because every plausible default here is a
  * lie to the tax authority: an absent VAT rate is not 0%, and an absent MXIK has no

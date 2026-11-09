@@ -71,13 +71,9 @@ describe('the seed and what an operator has configured', () => {
       expect(update).toBeGreaterThan(-1);
       expect(create).toBeGreaterThan(update);
       expect(call.slice(update, create)).not.toMatch(
-        /fiscalDataFor|mxik|packageCode|fiscalConfirmedCodes/,
+        /fiscalDataFor|mxik|packageCode/,
       );
     }
-  });
-
-  it('never writes a confirmation: only an operator can say a code was checked', () => {
-    expect(seedSource).not.toContain('fiscalConfirmedCodes');
   });
 
   it('on a live database it leaves the category tree alone unless told otherwise', () => {
@@ -91,7 +87,7 @@ describe('the seed and what an operator has configured', () => {
       join(__dirname, '..', '..', '..', 'prisma', 'seed-categories.ts'),
       'utf8',
     );
-    expect(seeder).not.toMatch(/mxik|packageCode|fiscalConfirmedCodes/);
+    expect(seeder).not.toMatch(/mxik|packageCode/);
   });
 
   it('the one-product codes it writes on a new database are the ones the rule stops', () => {
@@ -185,10 +181,7 @@ describe('CATEGORY_FISCAL_DATA', () => {
     }
   });
 
-  it('confirms nothing: on a new database no seeded code reaches a receipt', () => {
-    // A comment naming the product a code was supplied for is no confirmation. A fresh
-    // database must not be able to reach a receipt until an operator has looked, and
-    // the four that describe one product of a broad category cannot be confirmed.
+  it('every seeded code is usable, except the four that describe one product of many', () => {
     for (const [id, fiscal] of entries) {
       const { status } = categoryFiscalReadiness({
         id,
@@ -197,14 +190,13 @@ describe('CATEGORY_FISCAL_DATA', () => {
         packageCodeSingle: fiscal.packageCodeSingle,
         packageCodeSet: fiscal.packageCodeSet ?? null,
         packageCodeBox: null,
-        fiscalConfirmedCodes: null,
         _count: { children: 0 },
       });
       expect({ id, status }).toEqual({
         id,
         status: Object.keys(REPRESENTATIVE_ONLY_MXIK).includes(id)
           ? 'NOT_SELLABLE'
-          : 'NEEDS_CONFIRMATION',
+          : 'READY',
       });
     }
   });

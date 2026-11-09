@@ -25,7 +25,6 @@ import {
   receiptTotalTiyin,
 } from './payme-fiscal.util';
 import {
-  FISCAL_CODES_UNCONFIRMED,
   OIL_TYPE_FISCAL,
   OIL_TYPE_REQUIRED,
   REPRESENTATIVE_ONLY_MXIK,
@@ -33,17 +32,17 @@ import {
 } from '../../common/fiscal.util';
 import { CATEGORY_FISCAL_DATA } from '../../prisma/seed-data/catalog-reference.seed';
 import {
-  confirmedCategory,
+  configuredCategory,
   createPrismaMock,
   fakeConfig,
   FISCAL_TEST_ENV,
   PrismaMock,
 } from '../../../test/utils/harness';
 
-/** Brakes: MXIK plus both package codes (Штука / Комплект), confirmed. */
-const BRAKES = confirmedCategory();
+/** Brakes: MXIK plus both package codes (Штука / Комплект). */
+const BRAKES = configuredCategory();
 /** Filters: one package code, so its sellers are never asked the question. */
-const FILTERS = confirmedCategory({
+const FILTERS = configuredCategory({
   id: 'filters',
   parentId: 'maintenance-and-fluids',
   mxik: '08421002001000000',
@@ -57,7 +56,6 @@ const bareCategory = (id = 'brake-discs') => ({
   mxik: null,
   packageCodeSingle: null,
   packageCodeSet: null,
-  fiscalConfirmedCodes: null,
   _count: { children: 0 },
 });
 
@@ -155,15 +153,15 @@ describe('PaymeFiscalService.buildOrderDetail', () => {
   });
 
   it('uses the single package code when the category holds no other', async () => {
-    // No sale form was ever asked for (packageForm null). The operator who confirmed
-    // this one code said it is true of everything filed here.
+    // No sale form was ever asked for (packageForm null). One code on a category says
+    // it is true of everything filed here.
     stub([orderItem()], [catalogPart({ category: FILTERS, packageForm: null })]);
     const detail = await svc.buildOrderDetail('ord_1');
     expect(detail?.items[0].package_code).toBe('1499205');
   });
 
   describe('never declares a piece for something else', () => {
-    const STEERING = confirmedCategory({
+    const STEERING = configuredCategory({
       id: 'steering',
       mxik: '08708001133000000',
       packageCodeSingle: '1417728',
@@ -344,16 +342,6 @@ describe('PaymeFiscalService.buildOrderDetail', () => {
     await expect(svc.buildOrderDetail('ord_1')).rejects.toBeInstanceOf(
       FiscalDataIncompleteException,
     );
-  });
-
-  it('refuses a category whose code nobody has confirmed against Tasnif', async () => {
-    stub(
-      [orderItem()],
-      [catalogPart({ category: { ...BRAKES, fiscalConfirmedCodes: null } })],
-    );
-    await expect(svc.buildOrderDetail('ord_1')).rejects.toMatchObject({
-      gaps: [expect.stringContaining(FISCAL_CODES_UNCONFIRMED)],
-    });
   });
 
   it('refuses an unclassified part: the bucket every new import position starts in', async () => {
@@ -546,16 +534,6 @@ describe('order lines that are no catalog part', () => {
     });
   });
 
-  it('an offer whose category is not confirmed is refused', async () => {
-    stubOrder(150000);
-    prisma.orderItem.findMany.mockResolvedValue([offerLine()]);
-    stubOffer({ category: { ...BRAKES, fiscalConfirmedCodes: null } });
-
-    await expect(fiscal().buildOrderDetail('ord_1')).rejects.toMatchObject({
-      gaps: [expect.stringContaining(FISCAL_CODES_UNCONFIRMED)],
-    });
-  });
-
   it.each([
     ['the seller has no storefront yet', {}],
     ['the seller id is not a Telegram id', { offerSellerTgId: 'abc' }],
@@ -620,7 +598,7 @@ describe('order lines that are no catalog part', () => {
   });
 
   /** A service an operator has classified, and its provider's tax data. */
-  const SERVICE_CATEGORY = confirmedCategory({
+  const SERVICE_CATEGORY = configuredCategory({
     id: 'oil-change-service',
     parentId: 'services',
     mxik: '10101010101010101',
@@ -679,26 +657,15 @@ describe('order lines that are no catalog part', () => {
     it.each<[string, Record<string, unknown>, string]>([
       ['no category', { category: null }, 'category fiscal data is unavailable'],
       [
-        'a category nobody confirmed',
-        { category: { ...SERVICE_CATEGORY, fiscalConfirmedCodes: null } },
-        FISCAL_CODES_UNCONFIRMED,
-      ],
-      [
         'a category with no MXIK',
         {
           category: {
             ...SERVICE_CATEGORY,
             mxik: null,
             packageCodeSingle: null,
-            fiscalConfirmedCodes: null,
           },
         },
         'category has no MXIK',
-      ],
-      [
-        'a category whose package code was changed',
-        { category: { ...SERVICE_CATEGORY, packageCodeSingle: '1000003' } },
-        FISCAL_CODES_UNCONFIRMED,
       ],
       [
         'a parent category',
@@ -852,7 +819,7 @@ describe('a product and the category above it', () => {
   it('the query reads the category itself: a parent is never even fetched', async () => {
     prisma.catalogPart.findMany.mockResolvedValue([
       catalogPart({
-        category: confirmedCategory({
+        category: configuredCategory({
           id: 'sub',
           parentId: 'lighting',
           mxik: SUB_MXIK,
@@ -871,7 +838,7 @@ describe('a product and the category above it', () => {
       it('a product on a subcategory carries the subcategory’s MXIK', async () => {
         prisma.catalogPart.findMany.mockResolvedValue([
           catalogPart({
-            category: confirmedCategory({
+            category: configuredCategory({
               id: `${parentId}-sub`,
               parentId,
               mxik: SUB_MXIK,
@@ -906,8 +873,6 @@ describe('a product and the category above it', () => {
               ...bareCategory(parentId),
               mxik: parentMxik,
               packageCodeSingle: '1350563',
-              // Even a confirmation already stored against it does not count.
-              fiscalConfirmedCodes: `${parentMxik}:1350563:`,
             },
           }),
         ]);
@@ -936,9 +901,9 @@ describe('motor-oil fiscal resolution', () => {
     [OilType.MINERAL]: 'mineral-motor-oil',
   };
 
-  /** A composition category: confirmed, and carrying NO codes of its own. */
+  /** A composition category carrying NO codes of its own. */
   const composition = (type: OilType, over: Record<string, unknown> = {}) =>
-    confirmedCategory({
+    configuredCategory({
       id: COMPOSITION_OF[type],
       parentId: 'motor-oil',
       mxik: null,
@@ -1205,14 +1170,14 @@ describe('platform charge lines', () => {
     });
   });
 
-  it('delivery’s code asks for no category and no confirmation', async () => {
+  it('delivery’s code asks for no category', async () => {
     stubOrder({ deliveryUzs: 25000, serviceFeeUzs: 0 });
     await withCodes().buildOrderDetail('ord_1');
     expect(prisma.partCategory.findUnique).not.toHaveBeenCalled();
     expect(prisma.partCategory.findMany).not.toHaveBeenCalled();
   });
 
-  it('the goods keep their own MXIK and their own confirmation', async () => {
+  it('the goods keep their own MXIK', async () => {
     stubOrder({ deliveryUzs: 25000, serviceFeeUzs: 0 });
     prisma.catalogPart.findMany.mockResolvedValue([
       {
@@ -1220,17 +1185,19 @@ describe('platform charge lines', () => {
         packageForm: PackageForm.SINGLE,
         kind: ProductKind.SPARE_PART,
         oilType: null,
-        category: { ...BRAKES, fiscalConfirmedCodes: null },
+        category: { ...BRAKES, mxik: null, packageCodeSingle: null },
         seller: DEALER_A,
       },
     ]);
     await expect(withCodes().buildOrderDetail('ord_1')).rejects.toMatchObject({
-      gaps: [expect.stringContaining(FISCAL_CODES_UNCONFIRMED)],
+      gaps: expect.arrayContaining([
+        expect.stringContaining('category has no MXIK'),
+      ]),
     });
   });
 
   describe('a line already coded as delivery', () => {
-    const DELIVERY_SERVICE = confirmedCategory({
+    const DELIVERY_SERVICE = configuredCategory({
       id: 'courier-service',
       parentId: 'services',
       mxik: '10112006002000000',
@@ -1951,7 +1918,7 @@ describe('buildFiscalItem (pure mapping)', () => {
   describe("ANTIFREEZE keeps its own category's IKPU", () => {
     // The REAL operator-supplied codes of the `antifreeze` category, taken from
     // the seed's own table so this test and the configuration cannot drift.
-    const ANTIFREEZE_CATEGORY = confirmedCategory({
+    const ANTIFREEZE_CATEGORY = configuredCategory({
       id: 'antifreeze',
       parentId: 'maintenance-and-fluids',
       mxik: CATEGORY_FISCAL_DATA.antifreeze.mxik,

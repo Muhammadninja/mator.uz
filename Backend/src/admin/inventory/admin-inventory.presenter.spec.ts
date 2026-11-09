@@ -12,10 +12,9 @@ import {
   presentInventoryRow,
 } from './admin-inventory.presenter';
 import {
-  FISCAL_CODES_UNCONFIRMED,
   PACKAGE_FORM_NOT_STATED,
 } from '../../common/fiscal.util';
-import { confirmedCategory } from '../../../test/utils/harness';
+import { configuredCategory } from '../../../test/utils/harness';
 
 function row(over: Record<string, unknown> = {}) {
   return {
@@ -33,7 +32,7 @@ function row(over: Record<string, unknown> = {}) {
     packageForm: PackageForm.SINGLE as PackageForm | null,
     brand: { id: 'brand_1', name: 'Bosch' },
     category: {
-      ...confirmedCategory({ id: 'brake-pads' }),
+      ...configuredCategory({ id: 'brake-pads' }),
       name: 'Brake Pads',
       nameRu: 'Тормозные колодки',
       nameUz: 'Tormoz kolodkalari',
@@ -47,7 +46,7 @@ function row(over: Record<string, unknown> = {}) {
 // The row's verdict comes from the same rule Payme checkout runs, so the console can
 // never call a part ready that checkout would refuse.
 describe('presentInventoryRow — fiscal readiness', () => {
-  it('is ready when the category is confirmed and the dealer has its tax data', () => {
+  it('is ready when the category has its codes and the dealer has its tax data', () => {
     expect(presentInventoryRow(row()).fiscal).toEqual({
       ready: true,
       gaps: [],
@@ -60,18 +59,14 @@ describe('presentInventoryRow — fiscal readiness', () => {
     expect(fiscal.gaps).toEqual([PACKAGE_FORM_NOT_STATED]);
   });
 
-  it('names what stops a part: an unconfirmed category and a dealer with no TIN', () => {
+  it('names what stops a part: a dealer with no TIN', () => {
     const { fiscal } = presentInventoryRow(
       row({
-        category: {
-          ...row().category,
-          fiscalConfirmedCodes: null,
-        },
         seller: { tin: null, vatPercent: new Prisma.Decimal(0) },
       }),
     );
     expect(fiscal.ready).toBe(false);
-    expect(fiscal.gaps).toEqual([FISCAL_CODES_UNCONFIRMED, 'dealer has no TIN']);
+    expect(fiscal.gaps).toEqual(['dealer has no TIN']);
   });
 
   it('a spare part filed on a composition is refused, whatever its category says', () => {
@@ -79,7 +74,7 @@ describe('presentInventoryRow — fiscal readiness', () => {
       row({
         category: {
           ...row().category,
-          ...confirmedCategory({
+          ...configuredCategory({
             id: 'synthetic-motor-oil',
             parentId: 'motor-oil',
             mxik: null,
@@ -99,7 +94,7 @@ describe('presentInventoryRow — fiscal readiness', () => {
         oilType: OilType.SYNTHETIC,
         category: {
           ...row().category,
-          ...confirmedCategory({
+          ...configuredCategory({
             id: 'synthetic-motor-oil',
             parentId: 'motor-oil',
             mxik: null,

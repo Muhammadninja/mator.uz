@@ -26,8 +26,6 @@ import {
 import { PartCategoryService } from '../../catalog/categories/part-category.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import {
-  categoryFiscalReadiness,
-  confirmableFiscalCodes,
   isCategoryFiscallyConfigured,
   packageFormGap,
 } from '../../common/fiscal.util';
@@ -45,7 +43,6 @@ import {
   writeCategoryTree,
 } from './category-tree-lock';
 import { BulkMoveProductsDto } from './dto/bulk-move-products.dto';
-import { ConfirmCategoryFiscalDto } from './dto/confirm-category-fiscal.dto';
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { ListCategoriesQueryDto } from './dto/list-categories.query.dto';
 import { MoveCategoryDto } from './dto/move-category.dto';
@@ -311,14 +308,6 @@ export class AdminCategoriesService {
 
       const fiscal = this.resolveFiscal(category, dto);
       const data: Prisma.PartCategoryUpdateInput = { ...fiscal };
-      // A confirmation is of the codes as they were: changing them ends it for good,
-      // so changing them back needs someone to look again.
-      if (
-        confirmableFiscalCodes({ ...category, ...fiscal }) !==
-        confirmableFiscalCodes(category)
-      ) {
-        data.fiscalConfirmedCodes = null;
-      }
 
       if (dto.name !== undefined) data.name = dto.name;
       if (dto.nameRu !== undefined) data.nameRu = dto.nameRu;
@@ -391,74 +380,6 @@ export class AdminCategoriesService {
     // standing ON this node should see next.
     await this.categories.invalidate(previousParentId, dto.parentId, id);
 
-    return { success: true, data: presentAdminCategoryNode(updated) };
-  }
-
-  /**
-   * Record, or withdraw, an operator's confirmation that this category's codes were
-   * checked against Tasnif and are true of everything filed on it. Stored as the
-   * exact codes, which the receipt compares against, so a row changed by any route
-   * stops being confirmed; `update` also clears it, so an edit back does not restore
-   * it. This method never changes a code.
-   */
-  async setFiscalConfirmation(
-    id: string,
-    dto: ConfirmCategoryFiscalDto,
-    ctx: AdminAuditContext = {},
-  ) {
-    const updated = await this.writeTree(async (tx) => {
-      const row = await tx.partCategory.findUnique({
-        where: { id },
-        select: ADMIN_CATEGORY_NODE_SELECT,
-      });
-      if (!row) throw new NotFoundException('Category not found');
-
-      const codes = confirmableFiscalCodes(row);
-      if (dto.confirmed) {
-        const readiness = categoryFiscalReadiness(row);
-        if (readiness.status === 'NOT_SELLABLE') {
-          throw new ConflictException({
-            code: 'CATEGORY_NOT_SELLABLE',
-            message: `Nothing should be sold from this category, so it cannot be confirmed: ${readiness.gaps.join('; ')}.`,
-          });
-        }
-        if (!codes) {
-          throw new ConflictException({
-            code: 'FISCAL_CODES_MISSING',
-            message: 'This category has no fiscal codes to confirm.',
-          });
-        }
-        if (dto.codes !== codes) {
-          throw new ConflictException({
-            code: 'FISCAL_CODES_CHANGED',
-            message: `The codes are now ${codes}. Check them and confirm again.`,
-          });
-        }
-      }
-
-      const next = dto.confirmed ? codes : null;
-      const saved = await tx.partCategory.update({
-        where: { id },
-        data: { fiscalConfirmedCodes: next },
-        select: ADMIN_CATEGORY_NODE_SELECT,
-      });
-      await this.audit.record(
-        {
-          action: dto.confirmed
-            ? AdminAuditAction.CATEGORY_FISCAL_CONFIRMED
-            : AdminAuditAction.CATEGORY_FISCAL_UNCONFIRMED,
-          actor: ctx.actor,
-          actorLabel: ctx.actorLabel,
-          target: { entity: AdminAuditEntity.CATEGORY, id, name: row.name },
-          previousValues: { fiscalConfirmedCodes: row.fiscalConfirmedCodes },
-          newValues: { fiscalConfirmedCodes: next },
-          ip: ctx.ip,
-          userAgent: ctx.userAgent,
-        },
-        tx,
-      );
-      return saved;
-    });
     return { success: true, data: presentAdminCategoryNode(updated) };
   }
 

@@ -89,11 +89,10 @@ does not need to send it.
 | `packageCodeSingle` | `string \| null` | Tasnif package code for "Штука" (a single item). |
 | `packageCodeSet` | `string \| null` | Tasnif package code for "Комплект / набор" (a set). Optional even on a configured category — see [1.7](#17-the-fiscal-fields). |
 | `packageCodeBox` | `string \| null` | Tasnif package code for "Потребительская коробка" (a consumer box). Optional even on a configured category — see [1.7](#17-the-fiscal-fields). |
-| `fiscalConfigured` | `boolean` | **Derived.** Whether products in this category can reach a receipt (and therefore be sold through Payme). `false` until the codes are confirmed — see [1.7](#17-the-fiscal-fields). |
+| `fiscalConfigured` | `boolean` | **Derived.** Whether products in this category can reach a receipt (and therefore be sold through Payme). `false` until the codes are entered — see [1.7](#17-the-fiscal-fields). |
 | `fiscalByOilType` | `boolean` | **Derived.** `true` on a motor-oil composition category with no MXIK of its own, whose codes come from a table rather than from the columns above — see [1.7](#17-the-fiscal-fields). |
-| `fiscalStatus` | `string` | **Derived.** `READY`, `NEEDS_CONFIRMATION`, `NEEDS_CODES` or `NOT_SELLABLE` (a parent, the fallback bucket, or a node still holding a code for one product of many). |
+| `fiscalStatus` | `string` | **Derived.** `READY`, `NEEDS_CODES` or `NOT_SELLABLE` (a parent, the fallback bucket, or a node still holding a code for one product of many). |
 | `fiscalGaps` | `string[]` | **Derived.** Every reason checkout refuses this category; empty when ready. For operators, not customers. |
-| `fiscalCodesToConfirm` | `string \| null` | **Derived.** The codes a listing here would carry, as `mxik:single:set`, with `:box` added when the category has a box code. What to check in Tasnif, and what to send back to confirm them. `null` when there is nothing to confirm, or when `fiscalStatus` is `NOT_SELLABLE`. |
 
 ### 1.3 The three localized names
 
@@ -182,7 +181,6 @@ All under `@Controller('v1/admin/categories')` unless noted.
 | 8 | `PATCH` | `/v1/admin/categories/:id/move` | Re-parent + reorder |
 | 9 | `DELETE` | `/v1/admin/categories/:id` | Hard delete (guarded) |
 | 10 | `PATCH` | `/v1/admin/products/bulk-move` | Reassign many buyer parts to one category |
-| 11 | `PATCH` | `/v1/admin/categories/:id/fiscal-confirmation` | Confirm the fiscal codes against Tasnif, or withdraw that (manager or super admin) |
 
 **#10 lives on a different controller** (`/v1/admin/products`, not
 `/v1/admin/categories`) — Nest allows exactly one controller per base path,
@@ -357,22 +355,6 @@ transmission oil loses it, so its fiscal codes follow the category.
 Use this for a "move N selected products to category X" bulk action in the
 product list — it is **not** for reorganizing the category tree itself.
 
-#### 11 — `PATCH /v1/admin/categories/:id/fiscal-confirmation`
-
-Body (`ConfirmCategoryFiscalDto`):
-
-| Field | Required | Notes |
-|---|---|---|
-| `confirmed` | ✅ | `true` to confirm, `false` to withdraw. |
-| `codes` | when confirming | The `fiscalCodesToConfirm` value the operator checked. |
-
-**Response** — `200 { success: true, data: <category node> }`.
-
-**Errors:** `400` invalid body · `403` an operator role · `404` no such category ·
-`409` with `code`: `FISCAL_CODES_CHANGED` (they changed since they were checked: show
-the new ones), `FISCAL_CODES_MISSING`, or `CATEGORY_NOT_SELLABLE` (a parent, or the
-fallback bucket).
-
 ### 1.5 Reordering
 
 There is still **no dedicated reorder endpoint and no bulk-reorder**. Set
@@ -396,12 +378,7 @@ code. A category that has neither cannot have its products sold through
 Payme at all — checkout is refused for them, not silently allowed with a
 missing code.
 
-**Having a code is not enough.** A code entered for one product says nothing about
-everything else filed on the same category, so checkout also requires an operator
-to have confirmed the codes against Tasnif as true of **every** listing on that
-node (endpoint #11). Until then a configured category reads
-`fiscalStatus: NEEDS_CONFIRMATION` and `fiscalConfigured: false`. Editing a code
-ends the confirmation, and changing it back needs a new one. Codes are never
+Codes are never
 inherited: a subcategory with none is refused whatever its parent has, and a node
 with active children is refused as too broad (`NOT_SELLABLE`). So is a node still
 holding a code supplied for one product of many (`electrical-parts`, `lighting`,
@@ -449,8 +426,7 @@ parts.
 categories (synthetic / semi-synthetic / mineral) take their codes from a table
 for as long as they have no MXIK of their own. A category where
 `fiscalByOilType: true` will show `mxik`/`packageCodeSingle`/`packageCodeSet` all
-`null` **without that being a gap**: its `fiscalCodesToConfirm` shows the table's
-codes, and it still needs confirming like any other. A code an operator enters
+`null` **without that being a gap**. A code an operator enters
 there replaces the table's, and `fiscalByOilType` turns `false`. Detect this case
 from `fiscalByOilType`, not by category name or id. Nothing else qualifies: the
 `motor-oil` parent names no composition, and transmission oil and the "Другое"
@@ -462,8 +438,7 @@ children need codes of their own.
 |---|---|
 | Rename | Display name changes everywhere. **Safe** — nothing keys on names. |
 | Change slug | Changes `slug`, **not** the `id` of an existing row. Existing listings keep pointing at the same `id`. |
-| Edit fiscal fields | Ends any confirmation, so every existing product in the category becomes unpayable at once until the new codes are confirmed, even if they are later changed back. No product row is touched. |
-| Confirm fiscal codes | Every existing product in the category that has nothing else missing becomes payable at once. |
+| Edit fiscal fields | Applies at once to every existing product in the category. No product row is touched. |
 | Move to another parent | Re-parents, re-derives `level` for the node and its whole subtree. Cycle-guarded. |
 | Reorder | `sortOrder` changes button/grid order. |
 | Deactivate | Disappears from bot and buyer immediately on next read. Existing listings keep their `categoryId`. |

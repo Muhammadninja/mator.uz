@@ -2,7 +2,6 @@ import { DraftStatus, Prisma, PartMainCategory } from '@prisma/client';
 import {
   categoryFiscalReadiness,
   CategoryFiscalStatus,
-  confirmableFiscalCodes,
   offersPackageChoice,
 } from '../../common/fiscal.util';
 import {
@@ -49,7 +48,6 @@ export const ADMIN_CATEGORY_NODE_SELECT = {
   packageCodeSingle: true,
   packageCodeSet: true,
   packageCodeBox: true,
-  fiscalConfirmedCodes: true,
   // Parts (buyer catalog) plus the supply-side listings and live drafts that
   // point here, through either column. The same set the delete guard checks, so
   // what the console reports up front is what the server will answer. `children`
@@ -101,8 +99,7 @@ export interface AdminCategoryTreeNode {
    *  way. With one code in all, the seller is never asked how an item is sold. */
   packageCodeBox: string | null;
   /** Derived: whether products of this category can reach a receipt, by the same
-   *  resolver Payme checkout runs. False until an operator has confirmed the codes.
-   *  The console renders the warning off this rather than re-deriving the rule. */
+   *  resolver Payme checkout runs. The console renders the warning off this rather than re-deriving the rule. */
   fiscalConfigured: boolean;
   /** Derived: this category's products are fiscalized from the oil table, so the
    *  code fields above are legitimately empty. True only on a composition category
@@ -112,11 +109,6 @@ export interface AdminCategoryTreeNode {
   fiscalStatus: CategoryFiscalStatus;
   /** Derived: every reason the resolver refuses this category; empty when ready. */
   fiscalGaps: string[];
-  /** Derived: the codes a listing here would carry (from the oil table on a
-   *  composition category). What to check in Tasnif, and what to send back to
-   *  confirm them; null when there is nothing to confirm, or on a node that cannot
-   *  be confirmed because nothing should be sold from it. */
-  fiscalCodesToConfirm: string | null;
   /** Derived: whether the seller bot asks how an item is sold here, which also means a
    *  listing that states no form cannot be paid for online. */
   offersPackageChoice: boolean;
@@ -158,8 +150,6 @@ export function presentAdminCategoryNode(
     fiscalByOilType: isFiscalizedByOilType(row),
     fiscalStatus: readiness.status,
     fiscalGaps: readiness.gaps,
-    fiscalCodesToConfirm:
-      readiness.status === 'NOT_SELLABLE' ? null : confirmableFiscalCodes(row),
     offersPackageChoice: offersPackageChoice(row),
     productsCount: row._count.parts,
     // The larger of the two columns, not their sum: a listing filed on a childless

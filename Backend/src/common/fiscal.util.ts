@@ -20,7 +20,7 @@ import {
  * rules in PartCategoryService and the kind capabilities in product-kind.ts.
  *
  * Ownership, which nothing here may blur:
- *   Category → mxik + a package code per sale form + what was confirmed
+ *   Category → mxik + a package code per sale form
  *   Dealer   → tin + vatPercent
  *   Product  → the sale FORM only (which code, never the code itself)
  *
@@ -111,10 +111,6 @@ export interface FiscalCodes {
  * oil type on anything else, such as an industrial oil under "Другое", does not make
  * it motor oil. Nothing is stored per product and this table is shared by every
  * consumer.
- *
- * Holding them here is not a confirmation either: they were supplied like the seeded
- * category codes, and an operator confirms each against Tasnif on its composition
- * category before it can reach a receipt.
  */
 export const OIL_TYPE_FISCAL: Readonly<Record<OilType, FiscalCodes>> = {
   [OilType.SYNTHETIC]: {
@@ -186,9 +182,8 @@ export function offersPackageChoice(
  *
  *   • A stated form gets the code of that form, and only that.
  *   • A listing that states nothing gets the single code only where the category holds
- *     nothing else. That is no assumption: an operator confirms codes as true of every
- *     listing on the node, so confirming one code says everything there is sold that
- *     way. With more than one code, someone has to say which applies.
+ *     nothing else: a category with one code says everything there is sold that way.
+ *     With more than one code, someone has to say which applies.
  */
 export function resolvePackageCode(
   category: CategoryPackageCodeColumns,
@@ -237,14 +232,12 @@ export const FISCAL_CATEGORY_SELECT = {
   packageCodeSingle: true,
   packageCodeSet: true,
   packageCodeBox: true,
-  fiscalConfirmedCodes: true,
   _count: { select: { children: { where: { isActive: true } } } },
 } satisfies Prisma.PartCategorySelect;
 
 export interface FiscalCategorySource extends CategoryFiscalData {
   id: string;
   parentId: string | null;
-  fiscalConfirmedCodes: string | null;
   _count: { children: number };
 }
 
@@ -260,10 +253,6 @@ export type FiscalClassification =
   | { ok: true; mxik: string; packageCode: string }
   | { ok: false; gaps: string[] };
 
-/** The reason a code that is present still cannot reach a receipt. */
-export const FISCAL_CODES_UNCONFIRMED =
-  'category fiscal codes are not confirmed against Tasnif';
-
 /**
  * Codes supplied for ONE product of a node that holds many kinds of goods: a starter
  * on `electrical-parts`, a headlight on `lighting`, a spark plug on `ignition`, rubber
@@ -271,9 +260,8 @@ export const FISCAL_CODES_UNCONFIRMED =
  * there. None of the four has children in the seeded tree, because the subcategories
  * for those goods are its SIBLINGS, so the rule about parents would not catch them,
  * and new listings can land on them by themselves (see classificationOf). A node
- * still holding its code is therefore treated like a parent: nothing is sold from it
- * and it cannot be confirmed. A different code entered by an operator is a decision
- * this table says nothing about.
+ * still holding its code is therefore treated like a parent: nothing is sold from it.
+ * A different code entered by an operator is a decision this table says nothing about.
  */
 export const REPRESENTATIVE_ONLY_MXIK: Readonly<Record<string, string>> = {
   'electrical-parts': '08511001001000000',
@@ -290,29 +278,16 @@ function holdsRepresentativeCode(category: {
 }
 
 /**
- * The codes a listing on this category would carry, as the one comparable string an
- * operator confirms, or null when there is nothing they may confirm. A composition
- * category with no code of its own takes them from OIL_TYPE_FISCAL. A box code adds a
- * part of its own, so a category without one keeps the string it was confirmed under.
+ * Whether a listing on this category would have codes to carry: its own, or on a
+ * composition category with none of its own, those of OIL_TYPE_FISCAL.
  */
-export function confirmableFiscalCodes(
+export function hasUsableFiscalCodes(
   category: Pick<FiscalCategorySource, 'id' | keyof CategoryFiscalData>,
-): string | null {
-  const composition = oilTypeForCategory(category.id);
-  if (composition && isFiscalizedByOilType(category)) {
-    const codes = OIL_TYPE_FISCAL[composition];
-    return `${codes.mxik}:${codes.packageCode}:`;
-  }
-  if (
-    !isCategoryFiscallyConfigured(category) ||
-    holdsRepresentativeCode(category)
-  ) {
-    return null;
-  }
-  const codes = `${category.mxik}:${category.packageCodeSingle}:${category.packageCodeSet ?? ''}`;
-  return category.packageCodeBox
-    ? `${codes}:${category.packageCodeBox}`
-    : codes;
+): boolean {
+  if (isFiscalizedByOilType(category)) return true;
+  return (
+    isCategoryFiscallyConfigured(category) && !holdsRepresentativeCode(category)
+  );
 }
 
 /**
@@ -324,9 +299,7 @@ export function confirmableFiscalCodes(
  * the right one:
  *   • the code must be the category's OWN. A parent's code is never inherited, and a
  *     node with children is too broad to classify what sits on it;
- *   • the kind must belong on the category (see kindFitsCategory);
- *   • an operator must have confirmed exactly these codes against Tasnif. Seeded codes
- *     were supplied per representative product, so they do not count until then.
+ *   • the kind must belong on the category (see kindFitsCategory).
  *
  * An oil type alone never supplies a code: the oil table needs a MOTOR_OIL listing on
  * the composition category stating that same type, with no code of its own. Every
@@ -345,7 +318,7 @@ export function resolveFiscalClassification(
   const composition = oilTypeForCategory(category.id);
   const byOilTable = isFiscalizedByOilType(category);
   // The oil table describes motor oil and nothing else, but a code an operator entered
-  // on a composition is confirmed for everything filed there. That includes a position
+  // on a composition applies to everything filed there. That includes a position
   // filed by hand that an import left as SPARE_PART, because 1C does not state a kind.
   const untypedOnOwnCodes =
     composition !== null && !byOilTable && kind === ProductKind.SPARE_PART;
@@ -404,11 +377,6 @@ export function resolveFiscalClassification(
   }
 
   if (gaps.length > 0 || !codes) return { ok: false, gaps };
-  // An absent confirmation never counts, even against nothing to confirm.
-  const confirmed = category.fiscalConfirmedCodes;
-  if (!confirmed || confirmed !== confirmableFiscalCodes(category)) {
-    return { ok: false, gaps: [FISCAL_CODES_UNCONFIRMED] };
-  }
   return { ok: true, mxik: codes.mxik, packageCode: codes.packageCode };
 }
 
@@ -452,8 +420,6 @@ export function listingFiscalGaps(
 export type CategoryFiscalStatus =
   /** Listings of the kind it holds can reach a receipt. */
   | 'READY'
-  /** It has codes, but nobody has confirmed them against Tasnif. */
-  | 'NEEDS_CONFIRMATION'
   /** It needs an MXIK and package code entered. */
   | 'NEEDS_CODES'
   /**
@@ -484,8 +450,6 @@ export function categoryFiscalReadiness(category: FiscalCategorySource): {
     category._count.children > 0 ||
     holdsRepresentativeCode(category)
       ? 'NOT_SELLABLE'
-      : result.gaps.includes(FISCAL_CODES_UNCONFIRMED)
-        ? 'NEEDS_CONFIRMATION'
-        : 'NEEDS_CODES';
+      : 'NEEDS_CODES';
   return { status, gaps: result.gaps };
 }

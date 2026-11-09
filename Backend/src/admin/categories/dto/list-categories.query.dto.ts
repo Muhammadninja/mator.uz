@@ -13,7 +13,6 @@ import type { CategoryFiscalStatus } from '../../../common/fiscal.util';
 
 const CATEGORY_FISCAL_STATUSES: CategoryFiscalStatus[] = [
   'READY',
-  'NEEDS_CONFIRMATION',
   'NEEDS_CODES',
   'NOT_SELLABLE',
 ];
@@ -69,7 +68,7 @@ export class ListCategoriesQueryDto {
   @ApiPropertyOptional({
     description:
       'Filter by fiscal readiness: which categories still need codes entered ' +
-      '(NEEDS_CODES) or confirmed against Tasnif (NEEDS_CONFIRMATION).',
+      '(NEEDS_CODES).',
     enum: CATEGORY_FISCAL_STATUSES,
   })
   @IsOptional()
