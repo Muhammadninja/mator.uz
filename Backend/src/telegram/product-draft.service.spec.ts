@@ -423,15 +423,13 @@ describe('ProductDraftService', () => {
       });
     });
 
-    it('findExpired sweeps CREATING, READY_FOR_PREVIEW, COMMITTING and CANCELLED past TTL — never PUBLISHED', async () => {
+    it('findExpiredActive sweeps CREATING, READY_FOR_PREVIEW and COMMITTING past TTL — never PUBLISHED', async () => {
       prisma.productDraft.findMany.mockResolvedValue([]);
       const now = new Date('2026-07-25T12:00:00Z');
 
-      await service.findExpired(now);
+      await service.findExpiredActive(now);
 
       const arg = prisma.productDraft.findMany.mock.calls[0][0];
-      // CANCELLED is included as the backstop for a cancel path that died between
-      // its transition and its asset deletion (re-deleting gone assets is a no-op).
       // COMMITTING is included so a commit that died before the product write has
       // its assets reclaimed — the whole reason the claim is COMMITTING and not
       // PUBLISHED, which the sweep must never touch.
@@ -440,7 +438,6 @@ describe('ProductDraftService', () => {
           DraftStatus.CREATING,
           DraftStatus.READY_FOR_PREVIEW,
           DraftStatus.COMMITTING,
-          DraftStatus.CANCELLED,
         ],
       });
       // A published draft's processed assets belong to a live product — never swept.
@@ -654,6 +651,63 @@ describe('ProductDraftService — preview-edit primitives', () => {
           formStep: 'PHOTOS_FIRST',
         }),
       ).resolves.toBeNull();
+    });
+  });
+
+  describe('cleanup of closed drafts (ING-002, LOW-ING-008)', () => {
+    it('finds closed drafts only while they still reference an asset', async () => {
+      prisma.productDraft.findMany.mockResolvedValue([]);
+      const now = new Date('2026-07-25T12:00:00Z');
+      await service.findClosedWithAssets(now, null);
+      const { where, orderBy } = prisma.productDraft.findMany.mock.calls[0][0];
+      expect(where.status).toEqual({
+        in: [DraftStatus.CANCELLED, DraftStatus.EXPIRED],
+      });
+      expect(where.images.some.OR).toHaveLength(2);
+      expect(orderBy).toEqual([{ expiresAt: 'asc' }, { id: 'asc' }]);
+    });
+
+    it('continues past a cursor', async () => {
+      prisma.productDraft.findMany.mockResolvedValue([]);
+      const at = new Date(5);
+      await service.findClosedWithAssets(new Date(), { expiresAt: at, id: 'x' });
+      expect(prisma.productDraft.findMany.mock.calls[0][0].where.OR).toEqual([
+        { expiresAt: { gt: at } },
+        { expiresAt: at, id: { gt: 'x' } },
+      ]);
+    });
+
+    it('clears only what was confirmed deleted', async () => {
+      prisma.productDraftImage.updateMany.mockResolvedValue({ count: 1 });
+      await service.clearAssetReferences('d1', ['bad']);
+      const calls = prisma.productDraftImage.updateMany.mock.calls.map((c: any[]) => c[0]);
+      expect(calls[0]).toEqual({
+        where: { draftId: 'd1', originalPublicId: { notIn: ['bad'] } },
+        data: { originalPublicId: null },
+      });
+      expect(calls[1].where.processedPublicId).toEqual({ notIn: ['bad'] });
+    });
+
+    it('a commit claim cannot succeed past the TTL', async () => {
+      prisma.productDraft.updateMany.mockResolvedValue({ count: 0 });
+      const now = new Date('2026-07-25T12:00:00Z');
+      await expect(
+        service.tryTransition('d1', DraftStatus.READY_FOR_PREVIEW, DraftStatus.COMMITTING, 3, {
+          notExpiredAt: now,
+        }),
+      ).resolves.toBe(false);
+      expect(prisma.productDraft.updateMany.mock.calls[0][0].where).toEqual({
+        id: 'd1',
+        status: DraftStatus.READY_FOR_PREVIEW,
+        version: 3,
+        expiresAt: { gt: now },
+      });
+    });
+
+    it('an ordinary transition has no TTL condition', async () => {
+      prisma.productDraft.updateMany.mockResolvedValue({ count: 1 });
+      await service.tryTransition('d1', DraftStatus.CREATING, DraftStatus.EXPIRED, 1);
+      expect(prisma.productDraft.updateMany.mock.calls[0][0].where).not.toHaveProperty('expiresAt');
     });
   });
 });

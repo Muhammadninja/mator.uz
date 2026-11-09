@@ -40,6 +40,30 @@ export class CloudinaryService implements OnModuleInit {
    * asset is logged and does not throw, so callers (e.g. cancelling a pending
    * product) never fail because cleanup couldn't reach Cloudinary.
    */
+  /**
+   * Delete assets and report the ones that could not be, for a caller that retries.
+   * An id Cloudinary no longer has counts as deleted, so repeating this is harmless.
+   */
+  async destroyAssets(publicIds: string[]): Promise<string[]> {
+    const failed: string[] = [];
+    await Promise.all(
+      publicIds.map(async (publicId) => {
+        try {
+          const { result } = (await cloudinary.uploader.destroy(publicId, {
+            resource_type: 'image',
+          })) as { result?: string };
+          if (result !== 'ok' && result !== 'not found') failed.push(publicId);
+        } catch (err) {
+          failed.push(publicId);
+          this.logger.warn(
+            `Failed to delete Cloudinary asset "${publicId}": ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }),
+    );
+    return failed;
+  }
+
   async deleteAssets(publicIds: string[]): Promise<void> {
     await Promise.all(
       publicIds.map(async (publicId) => {

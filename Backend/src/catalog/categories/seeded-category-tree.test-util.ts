@@ -78,7 +78,9 @@ export function isTreeEdgeRead(args: unknown): boolean {
     ?.select;
   return (
     !!select &&
-    Object.keys(select).sort().join(',') === 'id,parentId' &&
+    ['id,parentId', 'id,isActive,parentId'].includes(
+      Object.keys(select).sort().join(','),
+    ) &&
     !(args as { where?: unknown }).where
   );
 }

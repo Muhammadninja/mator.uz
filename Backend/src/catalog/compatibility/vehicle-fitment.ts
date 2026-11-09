@@ -123,3 +123,70 @@ export function vehicleFitWhere(
 
   return { OR: or };
 }
+
+/**
+ * The compatibility facet as two counts' worth of `where`, so the database does the
+ * counting: the same decision computeCompatibility makes for one part, in its order.
+ *   1. a trim row for this trim and year decides, with its own status;
+ *   2. else a curated binding to this model is a fit;
+ *   3. else an engine row decides, FITS read down to maybe;
+ *   4. else any other fitment data at all means it does not fit;
+ *   5. else it is a maybe, which is whatever the other two leave.
+ */
+export function compatibilityFacetWhere(v: VehicleFitContext): {
+  fits: Prisma.CatalogPartWhereInput;
+  doesNotFit: Prisma.CatalogPartWhereInput;
+} {
+  const trimRow: Prisma.PartCompatibilityWhereInput | null = v.trimId
+    ? {
+        trimId: v.trimId,
+        OR: [{ years: { isEmpty: true } }, { years: { has: v.year } }],
+      }
+    : null;
+  const engineRow: Prisma.PartCompatibilityWhereInput | null = v.engineId
+    ? { engineId: v.engineId }
+    : null;
+  const curated: Prisma.CatalogPartWhereInput | null = v.modelId
+    ? { fitmentBindings: { some: { vehicleModelId: v.modelId } } }
+    : null;
+  const notTrim: Prisma.CatalogPartWhereInput[] = trimRow
+    ? [{ compatibilities: { none: trimRow } }]
+    : [];
+  const notCurated: Prisma.CatalogPartWhereInput[] = v.modelId
+    ? [{ fitmentBindings: { none: { vehicleModelId: v.modelId } } }]
+    : [];
+  const notEngine: Prisma.CatalogPartWhereInput[] = engineRow
+    ? [{ compatibilities: { none: engineRow } }]
+    : [];
+
+  const fits: Prisma.CatalogPartWhereInput[] = [];
+  const doesNotFit: Prisma.CatalogPartWhereInput[] = [];
+  if (trimRow) {
+    fits.push({ compatibilities: { some: { AND: [trimRow, { status: 'FITS' }] } } });
+    doesNotFit.push({
+      compatibilities: { some: { AND: [trimRow, { status: 'DOES_NOT_FIT' }] } },
+    });
+  }
+  if (curated) fits.push({ AND: [...notTrim, curated] });
+  if (engineRow) {
+    doesNotFit.push({
+      AND: [
+        ...notTrim,
+        ...notCurated,
+        { compatibilities: { some: { AND: [engineRow, { status: 'DOES_NOT_FIT' }] } } },
+      ],
+    });
+  }
+  doesNotFit.push({
+    AND: [
+      ...notTrim,
+      ...notCurated,
+      ...notEngine,
+      { OR: [{ compatibilities: { some: {} } }, { fitmentBindings: { some: {} } }] },
+    ],
+  });
+  return {
+    fits: fits.length > 0 ? { OR: fits } : { id: { in: [] } },
+    doesNotFit: { OR: doesNotFit },
+  };
+}

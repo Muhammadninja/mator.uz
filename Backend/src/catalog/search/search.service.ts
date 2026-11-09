@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { clampLimit } from '../../common/pagination.util';
@@ -10,14 +10,49 @@ import {
 import { formatUzs } from '../parts/part.presenter';
 import { SearchDto } from './dto/search.dto';
 import { BUYER_LISTED_PART } from '../buyer-visibility';
+import {
+  loadCategoryTreeScope,
+  visibleCategoryWhere,
+} from '../categories/category-tree-scope';
+import {
+  categorySubtreeWhere,
+  partOrderBy,
+  partTextWhere,
+} from '../parts/parts.service';
+import { DiscountService } from '../../sales/discount.service';
 
 const MAX_SEARCH_LIMIT = 50;
 const MAX_TYPEAHEAD_LIMIT = 20;
 const MAX_QUICK_FILTERS = 20;
+const MAX_CATEGORY_FILTERS = 20;
+
+/** A position in the result order. Opaque to clients, like the listing's own paging. */
+function encodePageToken(offset: number): string {
+  return Buffer.from(JSON.stringify([offset])).toString('base64url');
+}
+
+function decodePageToken(token: string): number {
+  try {
+    const [offset] = JSON.parse(Buffer.from(token, 'base64url').toString()) as unknown[];
+    if (Number.isSafeInteger(offset) && (offset as number) >= 0) return offset as number;
+  } catch {
+    // Falls through to the refusal below.
+  }
+  throw new BadRequestException('Invalid pageToken');
+}
 
 @Injectable()
 export class SearchService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly discounts: DiscountService,
+  ) {}
+
+  /** What every buyer-facing search read starts from. */
+  private async listedParts(): Promise<Prisma.CatalogPartWhereInput[]> {
+    const visible = visibleCategoryWhere(await loadCategoryTreeScope(this.prisma));
+    return visible ? [BUYER_LISTED_PART, visible] : [BUYER_LISTED_PART];
+  }
 
   /**
    * Universal parts search with facet counts (POST /v1/search).
@@ -30,23 +65,31 @@ export class SearchService {
     const startedAt = Date.now();
     const q = dto.query?.trim() ?? '';
     const limit = clampLimit(dto.limit, 20, MAX_SEARCH_LIMIT);
-    const categories = (dto.filters?.categories as string[] | undefined) ?? [];
+    const requested = dto.filters?.categories;
+    const categories = (Array.isArray(requested) ? requested : [])
+      .filter((c): c is string => typeof c === 'string' && c.length > 0)
+      .slice(0, MAX_CATEGORY_FILTERS);
+    const offset = dto.pageToken ? decodePageToken(dto.pageToken) : 0;
 
-    // Only buyer-listed parts: no suspended dealer, a ready photo
-    // (buyer-visibility.ts). Kept under AND so the `seller` rating filter below
-    // can still be spread in beside it.
-    const where: Prisma.CatalogPartWhereInput = { AND: [BUYER_LISTED_PART] };
-    if (q) where.title = { contains: q, mode: 'insensitive' };
-    if (categories.length) where.categoryId = { in: categories };
-
-    const [total, items, catGroup, under200k, between, highRated] =
+    // The listing's own definitions: only buyer-listed parts in visible categories,
+    // title or article number, a category with everything beneath it. Kept under AND
+    // so the `seller` rating filter below can still be spread in beside it.
+    const conditions = await this.listedParts();
+    if (q) conditions.push(partTextWhere(q));
+    if (categories.length) {
+      conditions.push({ OR: categories.map(categorySubtreeWhere) });
+    }
+    const where: Prisma.CatalogPartWhereInput = { AND: conditions };
+    const [total, fetched, catGroup, under200k, between, highRated, sales] =
       await Promise.all([
         this.prisma.catalogPart.count({ where }),
         this.prisma.catalogPart.findMany({
           where,
           include: { category: true },
-          orderBy: { createdAt: 'desc' },
-          take: limit,
+          orderBy: partOrderBy(dto.sortBy),
+          skip: offset,
+          // One past the page says whether another page exists.
+          take: limit + 1,
         }),
         this.prisma.catalogPart.groupBy({
           by: ['categoryId'],
@@ -62,7 +105,11 @@ export class SearchService {
         this.prisma.catalogPart.count({
           where: { ...where, seller: { ratingAvg: { gte: 4 } } },
         }),
+        this.discounts.loadActiveSales(),
       ]);
+    const items = fetched.slice(0, limit);
+    const nextPageToken =
+      fetched.length > limit ? encodePageToken(offset + limit) : null;
 
     const catIds = catGroup.map((g) => g.categoryId);
     // All three names in the SAME query the facet already made — the label is
@@ -112,7 +159,14 @@ export class SearchService {
       results: items.map((p) => ({
         id: p.id,
         title: p.title,
-        price: formatUzs(p.priceUzs),
+        // What the buyer pays, the same figure as the listing and the detail.
+        price: formatUzs(
+          this.discounts.calculateDiscount(
+            Number(p.priceUzs),
+            { id: p.id, categoryId: p.categoryId, sellerId: p.sellerId },
+            sales,
+          ).finalPrice,
+        ),
         // Localized display label (was the internal `category.name`, which is
         // English for every seeded bucket and rendered as-is by the app).
         category: localizedCategoryName(p.category, lang),
@@ -122,7 +176,7 @@ export class SearchService {
       })),
       total,
       durationMs: Date.now() - startedAt,
-      nextPageToken: null,
+      nextPageToken,
       facetCounts: {
         categories: categoriesFacet,
         price: { under_200k: under200k, '200k_to_500k': between },
@@ -154,10 +208,7 @@ export class SearchService {
 
     if (term) {
       const products = await this.prisma.catalogPart.findMany({
-        where: {
-          title: { contains: term, mode: 'insensitive' },
-          ...BUYER_LISTED_PART,
-        },
+        where: { AND: [...(await this.listedParts()), partTextWhere(term)] },
         select: { id: true, title: true },
         take: Math.max(0, safeLimit - 1),
       });
@@ -177,7 +228,11 @@ export class SearchService {
     const safeLimit = clampLimit(limit, 8, MAX_QUICK_FILTERS);
     const grouped = await this.prisma.catalogPart.groupBy({
       by: ['brandId'],
-      where: { inStock: true, brandId: { not: null }, ...BUYER_LISTED_PART },
+      where: {
+        AND: await this.listedParts(),
+        inStock: true,
+        brandId: { not: null },
+      },
       _count: { _all: true },
       orderBy: { _count: { brandId: 'desc' } },
       take: safeLimit,

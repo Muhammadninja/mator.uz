@@ -69,6 +69,14 @@ export class OrdersController {
   // the caller carries an admin token (HS256), never a mobile app-user one; this
   // route therefore carries no JwtAuthGuard at all (see the class-level note).
   // Every admin role is an operator here; AdminRoleGuard 403s anything else.
+  /** The buyer's own cash or terminal order, while no money has been collected. */
+  @Post(':id/cancel')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  cancel(@Request() req: { user: { id: string } }, @Param('id') id: string) {
+    return this.orders.cancelOwnOfflineOrder(req.user.id, id);
+  }
+
   @Patch(':id/status')
   @UseGuards(AdminJwtGuard, AdminRoleGuard)
   @Roles(AdminRole.SUPER_ADMIN, AdminRole.MANAGER, AdminRole.OPERATOR)

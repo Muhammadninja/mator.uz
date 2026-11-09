@@ -10,6 +10,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { NotificationsService } from '../../notifications/notifications.service';
 import { RealtimeGateway } from '../../realtime/realtime.gateway';
 import { recordProviderRefund } from '../financial-refund.ledger';
+import { OFFLINE_PAYMENT_TYPES } from '../offline-order.policy';
 import { OrderStatusService } from '../order-status.service';
 import {
   PAYABLE_ORDER_STATUSES,
@@ -116,6 +117,17 @@ export class SettlementService {
     if (payment.status === PaymentStatus.PAID) return 'already_paid';
     if (!SETTLEABLE_PAYMENT_STATUSES.includes(payment.status)) {
       return 'not_settleable';
+    }
+    // The last gate for every provider, however a transaction came to exist: a cash
+    // or terminal order's money is recorded by an operator and never settled here.
+    if (
+      payment.order.paymentType &&
+      OFFLINE_PAYMENT_TYPES.includes(payment.order.paymentType)
+    ) {
+      this.logger.warn(
+        `Payment ${paymentId} NOT settled: order ${payment.orderId} is paid in person`,
+      );
+      return 'order_not_payable';
     }
 
     let claimed: boolean;
@@ -247,6 +259,11 @@ export class SettlementService {
     let claimed: boolean;
     try {
       claimed = await this.prisma.$transaction(async (tx) => {
+        // The ledger requires this lock, and it comes first, in the order the manual
+        // refund path takes it, so the two serialise instead of deadlocking.
+        if (performedBefore) {
+          await tx.$queryRaw`SELECT id FROM orders WHERE id = ${payment.orderId} FOR UPDATE`;
+        }
         const claim = await tx.payment.updateMany({
           where: {
             id: paymentId,

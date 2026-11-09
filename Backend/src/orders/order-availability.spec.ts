@@ -58,7 +58,7 @@ describe('findUnavailableParts', () => {
       { partId: null, title: 'Sourced offer' },
     ]);
     expect(res).toEqual([
-      { partId: 'out', title: 'B', reason: 'out_of_stock' },
+      { partId: 'out', title: 'B', reason: 'out_of_stock', availableQuantity: 0, requestedQuantity: 0 },
       { partId: 'suspended', title: 'C', reason: 'dealer_suspended' },
       { partId: 'gone', title: 'D', reason: 'missing' },
     ]);

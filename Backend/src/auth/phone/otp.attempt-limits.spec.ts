@@ -2,7 +2,7 @@
 // real FixedWindowRateLimiter runs over an in-memory Redis whose every command
 // yields to the event loop, so concurrent verifications really do interleave.
 import { HttpException } from '@nestjs/common';
-import { OtpService, OtpPurpose } from './otp.service';
+import { OtpService, OtpPurpose, otpCooldownPhone } from './otp.service';
 import { FixedWindowRateLimiter } from '../../redis/rate-limiter.service';
 import { RedisKeys } from '../../redis/redis.keys';
 
@@ -20,6 +20,15 @@ function makeRedis() {
       await tick();
       return store.has(key) ? store.get(key) : null;
     }),
+    setNxEx: jest.fn(async (key: string, ttl: number, claim: string) => {
+      if (store.has(key)) return false;
+      store.set(key, claim);
+      ttls.set(key, ttl);
+      return true;
+    }),
+    evalScript: jest.fn(async (_s: string, keys: string[], args: string[]) =>
+      store.get(keys[0]) === args[0] ? (store.delete(keys[0]), 1) : 0,
+    ),
     setEx: jest.fn(async (key: string, ttl: number, value: unknown) => {
       await tick();
       store.set(key, JSON.parse(JSON.stringify(value)));
@@ -75,11 +84,7 @@ const statusOf = (result: PromiseSettledResult<void>): number | 'ok' => {
 
 /** A phone's next request after the resend cooldown has passed. */
 function allowResend(redis: ReturnType<typeof makeRedis>) {
-  const record = redis.store.get(RedisKeys.otp(PHONE)) as Record<
-    string,
-    unknown
-  >;
-  record.lastSentAt = Date.now() - 120_000;
+  redis.store.delete(RedisKeys.otpSendCooldown(otpCooldownPhone(PHONE)));
 }
 
 describe('OTP attempt limits (SEC-001)', () => {
@@ -152,10 +157,11 @@ describe('OTP attempt limits (SEC-001)', () => {
   });
 
   it('shares the per-phone limit across request ids', async () => {
-    const { service } = build();
+    const { service, redis } = build();
     const comparisons = countComparisons(service);
     // Three requests x up to five attempts: only ten comparisons are allowed.
     for (let round = 0; round < 3; round++) {
+      allowResend(redis);
       const issued = await service.request(PHONE);
       comparisons.mockClear();
       await Promise.allSettled(

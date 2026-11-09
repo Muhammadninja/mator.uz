@@ -1,7 +1,11 @@
 import { Logger, Provider } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Redis, { RedisOptions } from 'ioredis';
-import { REDIS_CLIENT } from './redis.constants';
+import {
+  REDIS_CLIENT,
+  REDIS_COMMAND_TIMEOUT_MS,
+  REDIS_CONNECT_TIMEOUT_MS,
+} from './redis.constants';
 
 export const redisProvider: Provider = {
   provide: REDIS_CLIENT,
@@ -16,7 +20,14 @@ export const redisProvider: Provider = {
       password: password && password.length > 0 ? password : undefined,
       lazyConnect: true,
       enableReadyCheck: true,
-      maxRetriesPerRequest: null,
+      // This client serves HTTP requests and short service commands; BullMQ builds
+      // its own connections (queue.config.ts) and keeps the unlimited retries its
+      // blocking commands need. A failed reconnect rejects what is queued instead
+      // of holding it for the whole outage, which is what bounds the offline queue,
+      // and a command that gets no reply is rejected after the timeout.
+      maxRetriesPerRequest: 1,
+      commandTimeout: REDIS_COMMAND_TIMEOUT_MS,
+      connectTimeout: REDIS_CONNECT_TIMEOUT_MS,
       retryStrategy: (times: number): number => Math.min(times * 200, 5_000),
     };
 

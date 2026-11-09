@@ -9,13 +9,14 @@ import { AvatarService } from './avatar.service';
 import { PhoneChangeService } from './phone-change.service';
 import { AccountDeletionService } from './account-deletion.service';
 import { UserController } from './user.controller';
+import { OrdersModule } from '../orders/orders.module';
 
 @Module({
   // CloudinaryModule is @Global (available app-wide), but it is imported here
   // explicitly so the module is self-contained: AvatarService's dependency on
   // CloudinaryService is declared where it is used and resolves even in an
   // isolated UserModule test harness.
-  imports: [PrismaModule, AuthModule, NotificationsModule, AddressesModule, CloudinaryModule],
+  imports: [PrismaModule, AuthModule, NotificationsModule, AddressesModule, CloudinaryModule, OrdersModule],
   // AccountDeletionService takes TokenService (from AuthModule) so deletion goes
   // through the SINGLE existing revocation entry point, and CloudinaryService to
   // clean up the avatar asset.

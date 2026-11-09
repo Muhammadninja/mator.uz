@@ -10,7 +10,7 @@
  */
 
 import { SearchService } from './search.service';
-import { createPrismaMock, PrismaMock } from '../../../test/utils/harness';
+import { createPrismaMock, fakeDiscounts, PrismaMock } from '../../../test/utils/harness';
 
 const CATEGORY = {
   id: 'brake-pads',
@@ -41,7 +41,7 @@ describe('SearchService — category localization', () => {
 
   beforeEach(() => {
     prisma = createPrismaMock();
-    svc = new SearchService(prisma);
+    svc = new SearchService(prisma, fakeDiscounts());
 
     prisma.catalogPart.count
       .mockResolvedValueOnce(3) // total
@@ -102,7 +102,7 @@ describe('SearchService — category localization', () => {
     it('reports the same COUNTS in every language', async () => {
       const counts = await Promise.all(
         (['ru', 'uz', 'en'] as const).map(async (lang) => {
-          const fresh = new SearchService(prisma);
+          const fresh = new SearchService(prisma, fakeDiscounts());
           prisma.catalogPart.count.mockResolvedValue(3);
           const res = await fresh.search({ query: 'brake' } as never, lang);
           return Object.values(res.facetCounts.categories).sort();
@@ -167,14 +167,14 @@ describe('SearchService — category localization', () => {
         ]);
         prisma.partCategory.findMany.mockResolvedValue([CATEGORY]);
 
-        await new SearchService(prisma).search(
+        await new SearchService(prisma, fakeDiscounts()).search(
           { query: 'brake', filters: { categories: [CATEGORY.id] } } as never,
           lang,
         );
         argsPerLang.push([
           prisma.catalogPart.findMany.mock.calls[0][0],
           prisma.catalogPart.groupBy.mock.calls[0][0],
-          prisma.partCategory.findMany.mock.calls[0][0],
+          prisma.partCategory.findMany.mock.calls.at(-1)[0],
         ]);
       }
       expect(argsPerLang[0]).toEqual(argsPerLang[1]);
@@ -187,7 +187,7 @@ describe('SearchService — category localization', () => {
         'uz',
       );
       const where = prisma.catalogPart.findMany.mock.calls[0][0].where;
-      expect(where.categoryId).toEqual({ in: [CATEGORY.id] });
+      expect(JSON.stringify(where)).toContain(`"categoryId":"${CATEGORY.id}"`);
       expect(JSON.stringify(where)).not.toContain('Tormoz kolodkalari');
     });
 
@@ -196,9 +196,10 @@ describe('SearchService — category localization', () => {
     it('loads all three names in a single category query', async () => {
       await svc.search({ query: 'brake' } as never, 'uz');
 
-      expect(prisma.partCategory.findMany).toHaveBeenCalledTimes(1);
+      // The other read is the tree, for what is visible; it names no labels.
+      expect(prisma.partCategory.findMany).toHaveBeenCalledTimes(2);
       expect(
-        prisma.partCategory.findMany.mock.calls[0][0].select,
+        prisma.partCategory.findMany.mock.calls.at(-1)[0].select,
       ).toMatchObject({ nameRu: true, nameUz: true, nameEn: true });
     });
   });

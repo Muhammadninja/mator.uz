@@ -1,5 +1,7 @@
 import {
   BadRequestException,
+  HttpException,
+  HttpStatus,
   Inject,
   Injectable,
   Logger,
@@ -12,6 +14,7 @@ import { createHash } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { CacheService } from '../redis/cache.service';
 import { RedisKeys } from '../redis/redis.keys';
+import { AtomicBudget } from '../redis/atomic-budget.service';
 import { readDeliveryCoverage, readDeliveryRates } from './delivery.config';
 import {
   COURIER_DELIVERY_UNAVAILABLE,
@@ -37,6 +40,23 @@ export const DELIVERY_ADDRESS_COORDINATES_MISSING =
 export const PICKUP_LOCATION_MISSING = 'PICKUP_LOCATION_MISSING';
 export const DELIVERY_ROUTE_NOT_FOUND = 'DELIVERY_ROUTE_NOT_FOUND';
 export const DELIVERY_ROUTING_UNAVAILABLE = 'DELIVERY_ROUTING_UNAVAILABLE';
+export const DELIVERY_TOO_MANY_SELLERS = 'DELIVERY_TOO_MANY_SELLERS';
+export const DELIVERY_QUOTE_LIMITED = 'DELIVERY_QUOTE_LIMITED';
+
+/**
+ * Sellers one quote may route to, and paid routing calls one buyer may cause per day.
+ * Each seller in a cart is one route, so a real order needs a few. The daily figure
+ * counts only uncached calls, and a buyer re-checking a cart reuses the cache.
+ * Override with DELIVERY_MAX_SELLERS_PER_QUOTE and DELIVERY_ROUTING_DAILY_PER_USER.
+ */
+const DEFAULT_MAX_SELLERS_PER_QUOTE = 8;
+const DEFAULT_ROUTING_DAILY_PER_USER = 100;
+const DAY_S = 24 * 60 * 60;
+
+/** Four decimals is about 10 m here: closer points are one route to the same price. */
+function roundForRouteKey(coordinate: number): string {
+  return coordinate.toFixed(4);
+}
 
 /**
  * Roads between two fixed points rarely change, and within this window a quote and the
@@ -162,13 +182,28 @@ export class DeliveryQuoteService {
   private readonly tariffVersion: string;
   /** Null when no delivery area is configured, which keeps couriers off. */
   readonly coverage: DeliveryCoverage | null;
+  private readonly maxSellersPerQuote: number;
+  private readonly routingDailyPerUser: number;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly cache: CacheService,
     @Inject(ROUTING_PROVIDER) private readonly routing: RoutingProvider,
     config: ConfigService,
+    private readonly budget: AtomicBudget,
   ) {
+    const positive = (name: string, fallback: number): number => {
+      const value = Number(config.get<string>(name));
+      return Number.isInteger(value) && value > 0 ? value : fallback;
+    };
+    this.maxSellersPerQuote = positive(
+      'DELIVERY_MAX_SELLERS_PER_QUOTE',
+      DEFAULT_MAX_SELLERS_PER_QUOTE,
+    );
+    this.routingDailyPerUser = positive(
+      'DELIVERY_ROUTING_DAILY_PER_USER',
+      DEFAULT_ROUTING_DAILY_PER_USER,
+    );
     this.rates = readDeliveryRates((key) => config.get<string>(key));
     this.tariffVersion = tariffVersionOf(this.rates);
     this.coverage = readDeliveryCoverage((key) => config.get<string>(key));
@@ -272,9 +307,15 @@ export class DeliveryQuoteService {
     }
 
     const pickups = await this.pickupsOf(goods);
+    if (pickups.length > this.maxSellersPerQuote) {
+      throw new UnprocessableEntityException({
+        code: DELIVERY_TOO_MANY_SELLERS,
+        message: 'This cart has goods from too many sellers for one courier delivery.',
+      });
+    }
     const shipments = await Promise.all(
       pickups.map(async ({ sellerId, origin }) => {
-        const distanceMeters = await this.routeDistance(origin, point);
+        const distanceMeters = await this.routeDistance(origin, point, userId);
         return {
           sellerId,
           pickup: origin,
@@ -403,15 +444,16 @@ export class DeliveryQuoteService {
   private async routeDistance(
     origin: GeoPoint,
     destination: GeoPoint,
+    userId: string,
   ): Promise<number> {
     const id = createHash('sha256')
       .update(
         [
           this.routing.name,
-          origin.lat,
-          origin.lng,
-          destination.lat,
-          destination.lng,
+          roundForRouteKey(origin.lat),
+          roundForRouteKey(origin.lng),
+          roundForRouteKey(destination.lat),
+          roundForRouteKey(destination.lng),
         ].join('|'),
       )
       .digest('hex');
@@ -420,6 +462,10 @@ export class DeliveryQuoteService {
         RedisKeys.cacheDeliveryRoute(id),
         ROUTE_CACHE_TTL_SECONDS,
         async () => {
+          // Only a miss reaches here, so only paid calls are counted. A Redis
+          // failure propagates: the cache may carry on without Redis, a paid call
+          // may not.
+          await this.reserveRoutingCall(userId);
           const distanceMeters = await this.routing.routeDistanceMeters(
             origin,
             destination,
@@ -452,5 +498,24 @@ export class DeliveryQuoteService {
       }
       throw err;
     }
+  }
+
+  private async reserveRoutingCall(userId: string): Promise<void> {
+    const decision = await this.budget.reserve([
+      {
+        key: RedisKeys.budgetRoutingDay(userId),
+        limit: this.routingDailyPerUser,
+        windowSeconds: DAY_S,
+      },
+    ]);
+    if (decision.allowed) return;
+    throw new HttpException(
+      {
+        code: DELIVERY_QUOTE_LIMITED,
+        message: 'Too many delivery price requests today. Please try again later.',
+        details: { retry_after_seconds: decision.retryAfter },
+      },
+      HttpStatus.TOO_MANY_REQUESTS,
+    );
   }
 }

@@ -1094,6 +1094,7 @@ describe('TelegramService — draft flow (photos-first)', () => {
         'READY_FOR_PREVIEW',
         'COMMITTING',
         3,
+        { notExpiredAt: expect.any(Date) },
       );
       // The claim strictly precedes the write — that ordering IS the guard.
       expect(order).toEqual(['claim:COMMITTING', 'product.upsert']);
@@ -1135,6 +1136,7 @@ describe('TelegramService — draft flow (photos-first)', () => {
         'READY_FOR_PREVIEW',
         'COMMITTING',
         3,
+        { notExpiredAt: expect.any(Date) },
       );
       expect(drafts.publishDraft).not.toHaveBeenCalled();
       const said = ctx.reply.mock.calls.map(([t]: [string]) => t).join(' ');

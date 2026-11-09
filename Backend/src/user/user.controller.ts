@@ -207,7 +207,6 @@ export class UserController {
   // ── Phone change ────────────────────────────────────────────────────────────
   @Post('phone/request')
   @HttpCode(HttpStatus.OK)
-  @Throttle({ default: { limit: 5, ttl: 60 * 1000 } })
   @ApiOperation({
     summary: 'Request an OTP to change the account phone number.',
   })

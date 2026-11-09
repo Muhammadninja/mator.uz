@@ -26,6 +26,7 @@ import { Throttle } from '@nestjs/throttler';
 import { AdminRole } from '@prisma/client';
 import type { Request } from 'express';
 import { AdminAuthService } from './admin-auth.service';
+import { AdminLoginProtection } from './admin-login-protection.service';
 import { AdminLoginDto } from './dto/admin-login.dto';
 import { AdminRefreshDto } from './dto/admin-refresh.dto';
 import {
@@ -54,7 +55,10 @@ type AuthenticatedAdminRequest = Request & { user: AuthenticatedAdmin };
 @ApiTags('Admin Auth')
 @Controller('v1/auth/admin')
 export class AdminAuthController {
-  constructor(private readonly adminAuth: AdminAuthService) {}
+  constructor(
+    private readonly adminAuth: AdminAuthService,
+    private readonly loginProtection: AdminLoginProtection,
+  ) {}
 
   @Post('login')
   // Tighter than the global baseline: this is the one endpoint where an
@@ -72,15 +76,20 @@ export class AdminAuthController {
   @ApiUnauthorizedResponse({
     description: 'Invalid email or password, or account deactivated.',
   })
-  login(@Body() dto: AdminLoginDto, @Req() req: Request) {
-    // Session provenance for the "active sessions" list. `req.ip` is the real
-    // client address because main.ts sets `trust proxy` for the Nginx hop. All
-    // three values are untrusted and display-only.
-    return this.adminAuth.login(dto, {
+  async login(@Body() dto: AdminLoginDto, @Req() req: Request) {
+    const client = await this.loginProtection.resolveClient(req);
+    // Counted before the password is checked, so a burst of parallel guesses
+    // cannot all get through ahead of the first recorded failure.
+    await this.loginProtection.beginAttempt(dto.email, client);
+    // Session provenance for the "active sessions" list. Device name and user
+    // agent are untrusted and display-only.
+    const session = await this.adminAuth.login(dto, {
       deviceName: dto.deviceName,
-      ip: req.ip,
+      ip: client.ip,
       userAgent: req.get('user-agent'),
     });
+    await this.loginProtection.recordSuccess(dto.email, client);
+    return session;
   }
 
   @Post('refresh')

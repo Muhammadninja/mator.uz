@@ -472,9 +472,18 @@ export class ProductDraftService {
     from: DraftStatus,
     to: DraftStatus,
     expectedVersion: number,
+    options: { notExpiredAt?: Date } = {},
   ): Promise<boolean> {
+    // With `notExpiredAt` (a commit's claim), a draft past its TTL is the sweep's. It
+    // is one statement with the version check, so a commit and a sweep at the boundary
+    // have exactly one winner, and a loser's assets are never published.
     const { count } = await this.prisma.productDraft.updateMany({
-      where: { id: draftId, status: from, version: expectedVersion },
+      where: {
+        id: draftId,
+        status: from,
+        version: expectedVersion,
+        ...(options.notExpiredAt ? { expiresAt: { gt: options.notExpiredAt } } : {}),
+      },
       data: { status: to, version: { increment: 1 } },
     });
     return count === 1;
@@ -833,7 +842,7 @@ export class ProductDraftService {
    * PUBLISHED is deliberately excluded — its processed assets belong to a live
    * product and must never be touched.
    */
-  findExpired(now: Date = new Date(), take = 100): Promise<DraftWithImages[]> {
+  findExpiredActive(now: Date = new Date(), take = 100): Promise<DraftWithImages[]> {
     return this.prisma.productDraft.findMany({
       where: {
         status: {
@@ -841,7 +850,6 @@ export class ProductDraftService {
             DraftStatus.CREATING,
             DraftStatus.READY_FOR_PREVIEW,
             DraftStatus.COMMITTING,
-            DraftStatus.CANCELLED,
           ],
         },
         expiresAt: { lte: now },
@@ -849,6 +857,85 @@ export class ProductDraftService {
       orderBy: { expiresAt: 'asc' },
       take,
       include: { images: { orderBy: { sortOrder: 'asc' } } },
+    });
+  }
+
+  /**
+   * Closed drafts that still reference assets: a cancel path that died before its
+   * deletion, or a sweep that could not finish one. A draft leaves this set once its
+   * references are cleared, so those that are done never come back to fill the batch.
+   * Walks (expiresAt, id) from `after`, so assets Cloudinary keeps refusing cannot hold
+   * the head of the queue either.
+   */
+  findClosedWithAssets(
+    now: Date,
+    after: { expiresAt: Date; id: string } | null,
+    take = 100,
+  ): Promise<DraftWithImages[]> {
+    return this.prisma.productDraft.findMany({
+      where: {
+        status: { in: [DraftStatus.CANCELLED, DraftStatus.EXPIRED] },
+        expiresAt: { lte: now },
+        images: {
+          some: {
+            OR: [
+              { originalPublicId: { not: null } },
+              { processedPublicId: { not: null } },
+            ],
+          },
+        },
+        ...(after
+          ? {
+              OR: [
+                { expiresAt: { gt: after.expiresAt } },
+                { expiresAt: after.expiresAt, id: { gt: after.id } },
+              ],
+            }
+          : {}),
+      },
+      orderBy: [{ expiresAt: 'asc' }, { id: 'asc' }],
+      take,
+      include: { images: { orderBy: { sortOrder: 'asc' } } },
+    });
+  }
+
+  /**
+   * Forget this draft's assets, except those deletion failed for. Includes processed
+   * assets a live product claimed: they are the product's now, not the draft's.
+   */
+  async clearAssetReferences(draftId: string, failed: string[]): Promise<void> {
+    await this.prisma.productDraftImage.updateMany({
+      where: { draftId, originalPublicId: { notIn: failed } },
+      data: { originalPublicId: null },
+    });
+    await this.prisma.productDraftImage.updateMany({
+      where: { draftId, processedPublicId: { notIn: failed } },
+      data: { processedPublicId: null },
+    });
+  }
+
+  /**
+   * Images still PROCESSING on a live draft older than `createdBefore`, for the sweep
+   * to compare against the queue. A row carries no timestamp of its own, so the draft's
+   * age keeps a job that is only just being enqueued out of this.
+   */
+  findStuckImages(
+    createdBefore: Date,
+    take = 100,
+  ): Promise<
+    Pick<ProductDraftImage, 'id' | 'draftId' | 'jobId' | 'attempts'>[]
+  > {
+    return this.prisma.productDraftImage.findMany({
+      where: {
+        status: DraftImageStatus.PROCESSING,
+        draft: {
+          status: DraftStatus.CREATING,
+          createdAt: { lt: createdBefore },
+        },
+      },
+      select: { id: true, draftId: true, jobId: true, attempts: true },
+      orderBy: { id: 'asc' },
+      take,
     });
   }
 }

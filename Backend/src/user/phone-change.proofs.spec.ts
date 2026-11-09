@@ -70,6 +70,13 @@ const pair = (res: Record<string, any>) => ({
   current: res.dev_current_phone_otp_code as string,
 });
 
+/** What Redis does by itself after 60 seconds. */
+function elapseCooldowns(redis: { store: Map<string, unknown> }) {
+  for (const key of [...redis.store.keys()]) {
+    if (key.startsWith('otp:cooldown:')) redis.store.delete(key);
+  }
+}
+
 describe('Phone change needs both numbers (SEC-008)', () => {
   it('sends a code to the number on the account, not one the client names', async () => {
     const { service, redis } = world();
@@ -160,8 +167,9 @@ describe('Phone change needs both numbers (SEC-008)', () => {
   });
 
   it('a later request replaces the pending codes', async () => {
-    const { service } = world();
+    const { service, redis } = world();
     const first = pair(await service.request('u1', NEW));
+    elapseCooldowns(redis);
     await service.request('u1', OTHER);
     await expect(
       service.confirm('u1', NEW, first.fresh, first.current),
@@ -192,11 +200,18 @@ describe('Phone change needs both numbers (SEC-008)', () => {
   it('leaves a login code on the same number intact', async () => {
     const { service, otp, redis } = world();
     const login = await otp.request(OLD);
+    elapseCooldowns(redis);
     await service.request('u1', NEW);
     expect(redis.store.has(RedisKeys.otp(OLD))).toBe(true);
     await expect(
       otp.verify(login.requestId, OLD, login.devOtpCode!, OtpPurpose.LOGIN),
     ).resolves.toBeUndefined();
+  });
+
+  it('waits out the same minute as a login code to that number', async () => {
+    const { service, otp } = world();
+    await otp.request(OLD);
+    await expect(service.request('u1', NEW)).rejects.toMatchObject({ status: 429 });
   });
 
   it('a phone-change code cannot sign in', async () => {

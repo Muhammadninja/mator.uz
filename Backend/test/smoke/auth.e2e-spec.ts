@@ -40,9 +40,9 @@ describe('Auth smoke', () => {
   describe('Phone OTP', () => {
     it('issues, then verifies the exact code that was sent', async () => {
       // No AUTH_DEV_MODE → production path: the code goes out for real delivery
-      // and no dev code is returned. Delivery is ENQUEUED (queue.enqueueSms),
+      // and no dev code is returned. Delivery is ENQUEUED (queue.enqueueOtpSms),
       // not sent inline: OtpService takes the QUEUE, and SmsProcessor is what
-      // talks to a provider. OTP state lives in Redis; the hourly ceiling runs
+      // talks to a provider. OTP state lives in Redis; verification attempts run
       // through FixedWindowRateLimiter.
       const queue = fakeQueue();
       const redis = fakeRedis();
@@ -56,14 +56,14 @@ describe('Auth smoke', () => {
 
       const issued = await otp.request(phone);
       expect(issued.otpLength).toBe(6);
-      expect(queue.enqueueSms).toHaveBeenCalledTimes(1);
+      expect(queue.enqueueOtpSms).toHaveBeenCalledTimes(1);
       // Deterministic jobId keyed on (requestId, sendCount=0 for the initial
       // issue) — what makes a duplicated enqueue collapse to one delivery.
-      expect(queue.enqueueSms.mock.calls[0][1]).toEqual({
+      expect(queue.enqueueOtpSms.mock.calls[0][1]).toEqual({
         jobId: `sms_otp_${issued.requestId}_0`,
       });
 
-      const code = /(\d{6})/.exec(queue.enqueueSms.mock.calls[0][0].message)![1];
+      const code = queue.enqueueOtpSms.mock.calls[0][0].otp.code;
       // The exact code verifies and consumes the record (key removed from Redis).
       await expect(otp.verify(issued.requestId, phone, code)).resolves.toBeUndefined();
       expect(redis.store.has(RedisKeys.otp(phone))).toBe(false);

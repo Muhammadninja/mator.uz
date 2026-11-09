@@ -1,5 +1,11 @@
 import { Injectable } from '@nestjs/common';
-import { AdminRole, OrderActorType, OrderStatus, Prisma } from '@prisma/client';
+import {
+  AdminRole,
+  OrderActorType,
+  OrderStatus,
+  PaymentStatus,
+  Prisma,
+} from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { prefixedId, IdPrefix } from '../common/ulid.util';
 import {
@@ -188,6 +194,49 @@ export class OrderStatusService {
       });
     }
     return expired;
+  }
+
+  /**
+   * Cancel a cash or terminal order on which no money has moved, under the row lock
+   * OfflineCollectionService takes, so it cannot pass a collection being recorded.
+   * Only PENDING_PAYMENT: from PROCESSING on, an operator has taken the order and the
+   * usual return and cancellation rules apply. Writes one history row when it flips.
+   *
+   * @returns whether this call cancelled the order.
+   */
+  async cancelUncollectedOffline(
+    tx: Prisma.TransactionClient,
+    orderId: string,
+    by: { customerId?: string; note: string },
+  ): Promise<boolean> {
+    await tx.$queryRaw`SELECT id FROM orders WHERE id = ${orderId} FOR UPDATE`;
+    const res = await tx.order.updateMany({
+      where: {
+        id: orderId,
+        status: OrderStatus.PENDING_PAYMENT,
+        paymentType: { in: OFFLINE_PAYMENT_TYPES },
+        offlineCollection: { is: null },
+        payments: {
+          none: {
+            OR: [
+              { status: { in: [PaymentStatus.PAID, PaymentStatus.REFUNDED] } },
+              { providerState: ACTIVE_PROVIDER_STATE },
+            ],
+          },
+        },
+      },
+      data: { status: OrderStatus.CANCELLED },
+    });
+    if (res.count !== 1) return false;
+    await tx.orderStatusHistory.create({
+      data: {
+        ...this.historyData(orderId, OrderStatus.CANCELLED, undefined, by.note),
+        ...(by.customerId
+          ? { actorType: OrderActorType.CUSTOMER, actorId: by.customerId }
+          : {}),
+      },
+    });
+    return true;
   }
 
   /**

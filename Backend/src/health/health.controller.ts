@@ -11,10 +11,13 @@ import { ApiTags } from '@nestjs/swagger';
 import { SkipThrottle } from '@nestjs/throttler';
 import type { Response } from 'express';
 import { PrismaService } from '../prisma/prisma.service';
+import { RedisService, withRedisTimeout } from '../redis/redis.service';
 import {
   TelegramPollingStatus,
   pollingHealthView,
 } from '../telegram/polling-status';
+
+const HEALTH_REDIS_TIMEOUT_MS = 1_000;
 
 /**
  * Liveness/readiness probe for load balancers and orchestrators. `/health`
@@ -33,6 +36,7 @@ export class HealthController {
   constructor(
     private readonly prisma: PrismaService,
     @Optional() private readonly polling?: TelegramPollingStatus,
+    @Optional() private readonly redis?: RedisService,
   ) {}
 
   @Get('live')
@@ -49,13 +53,31 @@ export class HealthController {
     } catch {
       throw new ServiceUnavailableException({ status: 'error', database: 'down' });
     }
-    if (!this.polling) return { status: 'ok', database: 'up' };
-    const { status, reason } = this.polling.current();
-    return {
-      status: 'ok',
+    // Reported, not gating: without Redis the catalogue still reads, while sign-in,
+    // OTP and everything else needing it answers 503 until Redis is back.
+    const redis = await this.redisStatus();
+    const base = {
+      status: redis === 'down' ? 'degraded' : 'ok',
       database: 'up',
-      telegram: { polling: status, reason },
+      ...(redis ? { redis } : {}),
     };
+    if (!this.polling) return base;
+    const { status, reason } = this.polling.current();
+    return { ...base, telegram: { polling: status, reason } };
+  }
+
+  private async redisStatus(): Promise<'up' | 'down' | undefined> {
+    if (!this.redis) return undefined;
+    try {
+      await withRedisTimeout(
+        this.redis.getClient().ping(),
+        HEALTH_REDIS_TIMEOUT_MS,
+        'health PING',
+      );
+      return 'up';
+    } catch {
+      return 'down';
+    }
   }
 
   /**

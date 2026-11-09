@@ -340,6 +340,7 @@ describe('buyer catalog — only parts with a ready photo are listed', () => {
         photographed('mid_ok', { priceUzs: 300_000 }),
         withoutPhoto('mid_bare', { priceUzs: 300_000 }),
       ]) as never,
+      fakeDiscounts() as never,
     );
     const res = await svc.search({ query: 'колодки' });
 
@@ -355,6 +356,7 @@ describe('buyer catalog — only parts with a ready photo are listed', () => {
   it('GET /v1/typeahead suggests only photographed parts', async () => {
     const svc = new SearchService(
       catalogStore([photographed('ok'), withoutPhoto('bare')]) as never,
+      fakeDiscounts() as never,
     );
     const { suggestions } = await svc.typeahead('колодки');
     expect(suggestions.filter((s) => s.type === 'product')).toEqual([
@@ -379,6 +381,7 @@ describe('buyer catalog — only parts with a ready photo are listed', () => {
         withoutPhoto('bare_gates_1', other),
         withoutPhoto('bare_gates_2', other),
       ]) as never,
+      fakeDiscounts() as never,
     );
     const { items } = await svc.quickFilters();
     expect(items.map((i) => [i.label, i.count])).toEqual([['brand_bosch', 2]]);

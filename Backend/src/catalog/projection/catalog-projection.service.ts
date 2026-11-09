@@ -1,3 +1,4 @@
+import { withSearchForms } from '../../common/normalize-oem.util';
 import { Injectable, Logger } from '@nestjs/common';
 import {
   Prisma,
@@ -628,12 +629,12 @@ export class CatalogProjectionService {
     // is never copied into the OEM array or vice versa — and duplicates are
     // collapsed so a number is listed once.
     const gmNumbers = uniqueStrings([
-      ...legacyNumbers.gmNumbers,
-      ...(product.gmNumbers ?? []),
+      ...withSearchForms(legacyNumbers.gmNumbers),
+      ...withSearchForms(product.gmNumbers ?? []),
     ]);
     const oemNumbers = uniqueStrings([
-      ...legacyNumbers.oemNumbers,
-      ...(product.oemNumbers ?? []),
+      ...withSearchForms(legacyNumbers.oemNumbers),
+      ...withSearchForms(product.oemNumbers ?? []),
     ]);
 
     // The part's classification (see classificationOf), kept apart from

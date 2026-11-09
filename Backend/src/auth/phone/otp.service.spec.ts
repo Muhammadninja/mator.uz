@@ -7,7 +7,7 @@
 // isolation and the phone-keyed lookups — all identical to the previous DB path.
 
 import { OtpChannel } from '@prisma/client';
-import { OtpService, OtpPurpose } from './otp.service';
+import { OtpService, OtpPurpose, otpCooldownPhone } from './otp.service';
 import { FixedWindowRateLimiter } from '../../redis/rate-limiter.service';
 import { RedisKeys } from '../../redis/redis.keys';
 import type { OtpSmsRequest } from '../../queue/queue.service';
@@ -25,6 +25,15 @@ function makeRedisMock() {
     ttls,
     get: jest.fn(async (key: string) =>
       store.has(key) ? store.get(key) : null,
+    ),
+    setNxEx: jest.fn(async (key: string, ttl: number, claim: string) => {
+      if (store.has(key)) return false;
+      store.set(key, claim);
+      ttls.set(key, ttl);
+      return true;
+    }),
+    evalScript: jest.fn(async (_s: string, keys: string[], args: string[]) =>
+      store.get(keys[0]) === args[0] ? (store.delete(keys[0]), 1) : 0,
     ),
     setEx: jest.fn(async (key: string, ttl: number, value: unknown) => {
       // Emulate the real service: JSON round-trip so callers get a plain object.
@@ -93,6 +102,11 @@ function build(devMode: boolean) {
   return { service, redis, queue, config, rateLimiter };
 }
 
+/** What Redis does by itself once the 60 seconds are up. */
+function elapseCooldown(redis: ReturnType<typeof makeRedisMock>, phone: string) {
+  redis.store.delete(RedisKeys.otpSendCooldown(otpCooldownPhone(phone)));
+}
+
 /** The record stored under RedisKeys.otp(phone) after an issue. */
 function storedRecord(redis: ReturnType<typeof makeRedisMock>, phone: string) {
   return redis.store.get(RedisKeys.otp(phone)) as {
@@ -143,31 +157,14 @@ describe('OtpService — AUTH_DEV_MODE', () => {
       expect(opts.jobId).toBe(`sms_otp_${issued.requestId}_0`);
     });
 
-    it('issues a usable OTP even when the enqueue fails (code stays valid)', async () => {
-      const { service, redis, queue } = build(false);
-      queue.enqueueOtpSms.mockRejectedValueOnce(new Error('redis down'));
-
-      // The request must still succeed: the code is already persisted and
-      // redeemable, and the user can resend. A queue hiccup is not a 500.
-      const issued = await service.request('+998901234567');
-
-      expect(issued.requestId).toEqual(expect.any(String));
-      expect(storedRecord(redis, '+998901234567').codeHash).toEqual(
-        expect.any(String),
-      );
-    });
-
-    it('enforces the per-hour ceiling (6th request in the window is rejected)', async () => {
-      const { service } = build(false);
-      for (let i = 0; i < 5; i++) {
-        await service.request(`+99890000000${i}`.slice(0, 13));
-      }
-      // Same MSISDN, 6 issues -> the 6th trips MAX_PER_HOUR.
+    it('has no per-hour ceiling on sending', async () => {
+      const { service, redis } = build(false);
       const phone = '+998905555555';
-      for (let i = 0; i < 5; i++) await service.request(phone);
-      await expect(service.request(phone)).rejects.toThrow(
-        'Too many OTP requests. Please try again later.',
-      );
+      for (let i = 0; i < 8; i++) {
+        await service.request(phone);
+        elapseCooldown(redis, phone);
+      }
+      expect(redis.incr).not.toHaveBeenCalled();
     });
   });
 
@@ -178,10 +175,7 @@ describe('OtpService — AUTH_DEV_MODE', () => {
       const beforeHash = storedRecord(redis, '+998901234567').codeHash;
       queue.enqueueOtpSms.mockClear();
 
-      // Elapse the cooldown by rewriting lastSentAt into the past.
-      const rec = storedRecord(redis, '+998901234567') as Record<string, unknown>;
-      rec.lastSentAt = Date.now() - 10 * 60 * 1000;
-      redis.store.set(RedisKeys.otp('+998901234567'), rec);
+      elapseCooldown(redis, '+998901234567');
 
       const issued = await service.resend(first.requestId);
 
@@ -216,9 +210,7 @@ describe('OtpService — AUTH_DEV_MODE', () => {
       const { service, redis, queue } = build(false);
       const first = await service.request('+998901234567');
       queue.enqueueOtpSms.mockClear();
-      const rec = storedRecord(redis, '+998901234567') as Record<string, unknown>;
-      rec.lastSentAt = Date.now() - 10 * 60 * 1000;
-      redis.store.set(RedisKeys.otp('+998901234567'), rec);
+      elapseCooldown(redis, '+998901234567');
 
       const issued = await service.resend(first.requestId);
 
@@ -238,9 +230,7 @@ describe('OtpService — AUTH_DEV_MODE', () => {
       );
       expect(queue.enqueueOtpSms.mock.calls[0][0].otp.lang).toBe('ru');
 
-      const rec = storedRecord(redis, '+998901234567') as Record<string, unknown>;
-      rec.lastSentAt = Date.now() - 10 * 60 * 1000;
-      redis.store.set(RedisKeys.otp('+998901234567'), rec);
+      elapseCooldown(redis, '+998901234567');
       await service.resend(first.requestId);
 
       expect(queue.enqueueOtpSms.mock.calls[1][0].otp.lang).toBe('ru');
@@ -250,9 +240,9 @@ describe('OtpService — AUTH_DEV_MODE', () => {
       const { service, redis, queue } = build(false);
       const first = await service.request('+998901234567');
       const rec = storedRecord(redis, '+998901234567') as Record<string, unknown>;
-      rec.lastSentAt = Date.now() - 10 * 60 * 1000;
       delete rec.lang; // record written by the previous release
       redis.store.set(RedisKeys.otp('+998901234567'), rec);
+      elapseCooldown(redis, '+998901234567');
 
       await service.resend(first.requestId);
 
@@ -266,9 +256,7 @@ describe('OtpService — AUTH_DEV_MODE', () => {
       const first = await service.request('+998901234567');
       const firstJobId = queue.enqueueOtpSms.mock.calls[0][1].jobId;
 
-      const rec = storedRecord(redis, '+998901234567') as Record<string, unknown>;
-      rec.lastSentAt = Date.now() - 10 * 60 * 1000;
-      redis.store.set(RedisKeys.otp('+998901234567'), rec);
+      elapseCooldown(redis, '+998901234567');
       await service.resend(first.requestId);
 
       const resendJobId = queue.enqueueOtpSms.mock.calls[1][1].jobId;

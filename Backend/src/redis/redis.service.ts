@@ -6,9 +6,16 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import Redis from 'ioredis';
-import { REDIS_CLIENT, REDIS_STARTUP_TIMEOUT_MS } from './redis.constants';
+import {
+  REDIS_CLIENT,
+  REDIS_COMMAND_TIMEOUT_MS,
+  REDIS_QUIT_TIMEOUT_MS,
+  REDIS_STARTUP_TIMEOUT_MS,
+} from './redis.constants';
 import {
   RedisTimeoutError,
+  RedisUnavailableError,
+  assertRedisBacklogRoom,
   trackUnansweredRedisCommand,
 } from './redis-backlog';
 
@@ -23,17 +30,13 @@ export {
 /**
  * Bound ONE Redis command for a caller that must not wait out an outage.
  *
- * The shared client deliberately waits through a disconnect
- * (`maxRetriesPerRequest: null` plus the offline queue, see redis.provider.ts):
- * a command issued while Redis is down settles only once Redis is back. That is
- * right for callers whose command must land, and wrong for the fail-open helpers
- * (DraftLock, CacheService), whose contract is that an unavailable Redis behaves
- * like a miss — and whose callers include bot handlers that block every seller's
- * updates while they wait. This turns "no reply within `ms`" into an ordinary
- * rejection those helpers already treat as Redis being unavailable.
+ * The shared client rejects a command only after its own command timeout or a
+ * failed reconnect, and BullMQ's connections wait out an outage entirely. Callers
+ * that must not wait that long use this: it turns "no reply within `ms`" into an
+ * ordinary rejection they already treat as Redis being unavailable.
  *
- * It does NOT cancel the command: ioredis keeps it queued and runs it once the
- * connection returns (exactly as its own `commandTimeout` would). Bound only
+ * It does NOT cancel the command: ioredis may still run it once the connection
+ * returns (exactly as its own `commandTimeout` would). Bound only
  * commands that are safe to complete late. A command given up on is counted
  * against the process-wide cap in redis-backlog.ts until it settles; callers
  * check that cap (assertRedisBacklogRoom) before issuing. Rejects with
@@ -53,6 +56,17 @@ export function withRedisTimeout<T>(
     }, ms);
   });
   return Promise.race([command, timeout]).finally(() => clearTimeout(timer));
+}
+
+/** ioredis's own ways of saying the server cannot be reached. */
+function isConnectivityFailure(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  return (
+    err.name === 'MaxRetriesPerRequestError' ||
+    /Command timed out|Connection is closed|Stream isn't writeable|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EPIPE/.test(
+      err.message,
+    )
+  );
 }
 
 @Injectable()
@@ -75,7 +89,12 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleDestroy(): Promise<void> {
-    await this.client.quit();
+    // A QUIT during an outage has nobody to answer it; shutdown must still finish.
+    try {
+      await withRedisTimeout(this.client.quit(), REDIS_QUIT_TIMEOUT_MS, 'QUIT');
+    } catch {
+      this.client.disconnect(false);
+    }
   }
 
   getClient(): Redis {
@@ -83,7 +102,7 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   }
 
   async get<T = string>(key: string): Promise<T | null> {
-    const raw = await this.client.get(key);
+    const raw = await this.bounded('GET', () => this.client.get(key));
     if (raw === null) return null;
     try {
       return JSON.parse(raw) as T;
@@ -94,52 +113,73 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   }
 
   async set<T>(key: string, value: T): Promise<'OK'> {
-    return this.client.set(key, JSON.stringify(value));
+    return this.bounded('SET', () => this.client.set(key, JSON.stringify(value)));
   }
 
   async setEx<T>(key: string, ttl: number, value: T): Promise<'OK'> {
-    return this.client.setex(key, ttl, JSON.stringify(value));
+    return this.bounded('SETEX', () =>
+      this.client.setex(key, ttl, JSON.stringify(value)),
+    );
+  }
+
+  /** SET key claim NX EX ttl. True only for the caller that created the key. */
+  async setNxEx(key: string, ttl: number, claim: string): Promise<boolean> {
+    return (
+      (await this.bounded('SET NX', () =>
+        this.client.set(key, claim, 'EX', ttl, 'NX'),
+      )) === 'OK'
+    );
   }
 
   async del(key: string): Promise<number> {
-    return this.client.del(key);
+    return this.bounded('DEL', () => this.client.del(key));
   }
 
   async exists(key: string): Promise<boolean> {
-    return (await this.client.exists(key)) > 0;
+    return (await this.bounded('EXISTS', () => this.client.exists(key))) > 0;
   }
 
   async expire(key: string, ttl: number): Promise<boolean> {
-    return (await this.client.expire(key, ttl)) === 1;
+    return (
+      (await this.bounded('EXPIRE', () => this.client.expire(key, ttl))) === 1
+    );
   }
 
   async ttl(key: string): Promise<number> {
-    return this.client.ttl(key);
+    return this.bounded('TTL', () => this.client.ttl(key));
   }
 
   async incr(key: string): Promise<number> {
-    return this.client.incr(key);
+    return this.bounded('INCR', () => this.client.incr(key));
   }
 
   async decr(key: string): Promise<number> {
-    return this.client.decr(key);
+    return this.bounded('DECR', () => this.client.decr(key));
   }
 
   async scan(pattern: string, count = 100): Promise<string[]> {
     const found: string[] = [];
     let cursor = '0';
     do {
-      const [next, batch] = await this.client.scan(
-        cursor,
-        'MATCH',
-        pattern,
-        'COUNT',
-        count,
+      const [next, batch] = await this.bounded('SCAN', () =>
+        this.client.scan(cursor, 'MATCH', pattern, 'COUNT', count),
       );
       cursor = next;
       found.push(...batch);
     } while (cursor !== '0');
     return found;
+  }
+
+  /** Run a Lua script atomically. */
+  async evalScript<T>(
+    script: string,
+    keys: readonly string[],
+    args: readonly (string | number)[],
+  ): Promise<T> {
+    return this.bounded(
+      'EVAL',
+      () => this.client.eval(script, keys.length, ...keys, ...args) as Promise<T>,
+    );
   }
 
   async flushDb(): Promise<'OK'> {
@@ -149,6 +189,28 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
       );
     }
     return this.client.flushdb();
+  }
+
+  /**
+   * Every command here answers within the bound or rejects with
+   * RedisUnavailableError, which the HTTP layer turns into a 503. A caller whose
+   * contract is to carry on without Redis (CacheService) catches it; everything
+   * guarding security or spending lets it through, so an outage refuses rather
+   * than waives the check.
+   */
+  private async bounded<T>(what: string, run: () => Promise<T>): Promise<T> {
+    assertRedisBacklogRoom(what);
+    try {
+      return await withRedisTimeout(run(), REDIS_COMMAND_TIMEOUT_MS, what);
+    } catch (err) {
+      if (err instanceof RedisUnavailableError) throw err;
+      if (isConnectivityFailure(err)) {
+        throw new RedisUnavailableError(
+          `Redis ${what} failed: ${(err as Error).message}`,
+        );
+      }
+      throw err;
+    }
   }
 
   private async verifyConnection(): Promise<void> {

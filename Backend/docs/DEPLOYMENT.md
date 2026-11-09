@@ -269,6 +269,143 @@ exactly as the dry run prints it: `--allow-database=<host/db>`. The code covers 
 script, the database and the plan, so a plan that changed needs a new dry run.
 `admin:create` bootstrapping therefore takes two runs.
 
+## Reverse proxy, client addresses and admin sign-in
+
+Nginx must run on the same machine as the app. `trust proxy` is `loopback`, so only a
+loopback peer may state a client address in `X-Forwarded-For`, and Nginx's own entry is
+the one believed. Set `TRUST_PROXY` to a comma-separated list of addresses or CIDR
+ranges if the proxy moves elsewhere; `true` and hop counts are refused at startup.
+
+Manual steps, none of them in this repository:
+
+1. Keep port 3000 off the network. Set `BIND_HOST=127.0.0.1` and restart, or close the
+   port in the firewall. Without this a direct caller cannot spoof an address, but it
+   does bypass Nginx and its limits.
+2. Set the same `ADMIN_PROXY_SECRET` (32 or more random characters) on the API and on
+   the admin panel's server. Generate one with `openssl rand -hex 32`. It is what lets
+   the panel, which calls the API from one address for every operator, report each
+   operator's real address. Never give it a `NEXT_PUBLIC_` name.
+
+Until the secret is set on both sides, the account lockout still works, but the
+per-address limits are off and operators share one throttle bucket.
+
+Admin sign-in failures are counted in Redis. After 5 failures an account, or an account
+from one address, is locked for 30 seconds, doubling with each further failure up to 15
+minutes; 20 failures from one address lock that address. A refused attempt counts nothing
+and cannot extend a lock, and every lock lapses by itself within 15 minutes.
+
+So that a guessing attack cannot shut an operator out, the account lock does not apply to
+an address that has signed in to that account in the last 30 days, and any other address
+that has not failed there gets two tries, which covers a new device. A correct sign-in
+clears the account's and that address's failures and gives back its own count on the
+per-address counter. If Redis is down, sign-in answers 503.
+
+The panel signs each login and refresh with `ADMIN_PROXY_SECRET`, binding the address, the
+time, the method and the path. An unsigned, altered or stale signature is ignored, and
+one seen before is treated as unsigned, so the request counts against its real sender.
+The panel takes the address from `X-Real-IP`, which its Nginx block must set from
+`$remote_addr` (see the panel's DEPLOY-ADMIN.md). If the secret is missing or shorter
+than 32 characters, the API ignores the headers and falls back to the account lock alone.
+
+## OTP sending and verification
+
+These are two separate things.
+
+**Sending.** The only limit is one SMS per phone number per 60 seconds, for first requests
+and resends alike, shared by every OTP flow on that number. It is one atomic Redis
+`SET NX EX 60` on `otp:cooldown:<digits>`, so it holds across instances. While it runs the
+API answers 429 with `Retry-After` and `details.retry_after_seconds`, and no code is
+created or replaced. If the SMS cannot be queued the API answers 503, the previous code
+stays valid and the phone can retry at once; a queue that only timed out keeps the
+cooldown, since the job may still be delivered. With Redis down, requests get a 503.
+
+There is no hourly, daily, global or per-network limit on SMS, and no CAPTCHA. The
+endpoints sit under the platform-wide 100 requests per minute per client only.
+
+**Verification.** Five attempts per request and ten per phone per hour, counted
+atomically before the code is compared. With Redis down, verification answers 503.
+
+## SMS provider
+
+`SMS_PROVIDER` chooses the provider, with its own credentials as listed in
+`.env.example`. Delivery runs on the `sms` queue: three attempts with exponential backoff,
+and duplicates of one send collapse on the job id `sms_otp_<requestId>_<sendCount>`. A
+retry sends the same code, never a new one.
+
+## Delivery limits
+
+All are environment variables read at startup; restart after a change. Anything missing
+or not a positive whole number falls back to the default. If Redis is down the routing
+budget refuses with 503 rather than allowing a paid call.
+
+| Variable | Default | Limits |
+|---|---|---|
+| `DELIVERY_QUOTE_PER_MINUTE` | 20 | Courier quotes per buyer per minute |
+| `DELIVERY_MAX_SELLERS_PER_QUOTE` | 8 | Distinct sellers one courier quote may route to |
+| `DELIVERY_ROUTING_DAILY_PER_USER` | 100 | Uncached routing calls per buyer per day |
+
+## AI chat
+
+There are no usage, token or per-user limits on the chat. Requests are validated (message
+up to 2,000 characters, history up to 10 turns of 2,000 each, 20,000 in all) and sit under
+the route's pre-existing 15 requests per minute per client.
+
+## Part-number lookup forms (one-time, after the backend)
+
+Rows written before this version need their canonical form added. Originals stay first
+and unchanged, and no products are merged.
+
+    npm run backfill:part-number-search-forms                                  # dry run
+    npm run backfill:part-number-search-forms -- --apply --confirm=<digest>    # digest from the dry run
+
+If the data changes between the two runs the digest will not match: dry-run again.
+
+## Read-only checks before deploying
+
+Run these yourself, against production, with a read-only connection. They change nothing.
+
+Parts that inactive categories would hide. Expected: no rows.
+
+```sql
+WITH RECURSIVE hidden AS (
+  SELECT id FROM part_categories WHERE is_active = false
+  UNION
+  SELECT c.id FROM part_categories c JOIN hidden h ON c.parent_id = h.id
+)
+SELECT p.category_id, count(*) AS parts
+FROM catalog_parts p JOIN hidden h ON h.id = p.category_id
+GROUP BY p.category_id ORDER BY parts DESC;
+```
+
+Imported positions claiming stock with a zero count. Expected: zero.
+
+```sql
+SELECT count(*) FROM catalog_parts p
+JOIN stocks s ON p.id = 'part_stock_' || s.id::text
+WHERE s.source_system IS NOT NULL AND p.stock_qty = 0 AND p.in_stock = true;
+```
+
+## Known limit: the last unit
+
+There is no stock reservation. Each buyer is checked against the current count, so two
+buyers checking out at the same moment can both be accepted for the last unit.
+
+## Connection pooling
+
+The retention job takes `pg_try_advisory_xact_lock` and does its deletes in the same
+transaction, so it needs one connection and is compatible with PgBouncer transaction
+pooling by design. This has been reviewed in code, not run against a real PgBouncer.
+
+## Image jobs and shutdown
+
+The repository's `kill_timeout` is 5 seconds, while a FLUX poll can run for 240. A
+restart therefore interrupts running image jobs. BullMQ re-delivers them, and the hourly
+draft sweep fails any image whose job is gone, so a seller is never left waiting.
+
+Recommended production value: `kill_timeout: 30000`. It lets SMS jobs and short image jobs
+finish, and stays short enough for a quick restart; longer FLUX polls are recovered as
+above. It has not been changed here.
+
 ## Dealer inventory sync
 
 `POST /v1/integrations/dealers/sync-inventory` accepts up to 12,501,024 bytes (about
@@ -306,3 +443,15 @@ physical receipt, an operator records the money with the "Деньги полу�
 (`POST /v1/orders/:id/offline-collection`). Until then it counts as received nowhere and
 cannot be refunded. Orders already placed keep their old reading. The receipt is issued
 outside Mator: its number can be entered, and nothing waits for it.
+
+## Deployment dependencies
+
+- Three migrations are pending from earlier releases:
+  `20261108000000_offline_collections`, `20261108000100_stock_projection_pending` and
+  `20261109000000_drop_category_fiscal_confirmation`. The new code needs the first two,
+  and the old code must not run after the third, so stop the API, run
+  `npx prisma migrate deploy`, then start the new build.
+- API: `ADMIN_PROXY_SECRET`, `BIND_HOST=127.0.0.1` or a firewall on port 3000, and
+  `OTP_JOB_ENCRYPTION_KEY`. Admin server: the same `ADMIN_PROXY_SECRET`.
+- The app's order cancel button needs this backend's `POST /v1/orders/:id/cancel`, so the
+  backend goes first. Installed apps keep working without the update.

@@ -15,6 +15,7 @@ import { PaymentsService } from './payments.service';
 import { PaymentsController } from './payments.controller';
 import { SettlementService } from './webhooks/settlement.service';
 import { PaymeService } from './webhooks/payme.service';
+import { PaymeTransactionSweeper } from './webhooks/payme-transaction.sweeper';
 import { PaymeFiscalService } from './webhooks/payme-fiscal.service';
 import { PaymeFiscalReceiptService } from './webhooks/payme-fiscal-receipt.service';
 import { ClickService } from './webhooks/click.service';
@@ -44,6 +45,7 @@ import { FinanceAlerts } from './finance-alerts';
     PaymentsService,
     SettlementService,
     PaymeService,
+    PaymeTransactionSweeper,
     // The fiscal-receipt builder: the checkout gate, and the receipt each invoice
     // freezes for the webhook's CheckPerformTransaction reply (PaymentsService).
     PaymeFiscalService,

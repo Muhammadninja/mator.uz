@@ -77,7 +77,7 @@ export class FixedWindowRateLimiter implements RateLimiter {
 
   /**
    * Count one hit against `key` and report whether it is allowed. Callers build
-   * the key from {@link RedisKeys} (e.g. `RedisKeys.rateOtpRequest(phone)`), so
+   * the key from {@link RedisKeys} (e.g. `RedisKeys.rateOtpVerify(phone)`), so
    * key formatting never leaks into call sites.
    *
    * @param key           fully-qualified Redis key (from RedisKeys)

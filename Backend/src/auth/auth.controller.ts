@@ -58,7 +58,6 @@ export class AuthController {
 
   // ── Phone OTP (primary flow) ──────────────────────────────────────────────────
   @Post('phone/request-otp')
-  @Throttle({ default: { limit: 5, ttl: 60 * 1000 } })
   @HttpCode(HttpStatus.OK)
   requestOtp(@Body() dto: RequestOtpDto) {
     return this.phoneAuth.requestOtp(dto);
@@ -103,7 +102,6 @@ export class AuthController {
   }
 
   @Post('phone/resend-otp')
-  @Throttle({ default: { limit: 5, ttl: 60 * 1000 } })
   @HttpCode(HttpStatus.OK)
   resendOtp(@Body() dto: ResendOtpDto) {
     return this.phoneAuth.resendOtp(dto.request_id);
