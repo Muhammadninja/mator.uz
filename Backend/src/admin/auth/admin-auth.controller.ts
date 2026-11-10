@@ -38,7 +38,10 @@ import { ListAdminAuditQueryDto } from './dto/list-admin-audit.query.dto';
 import { Roles } from './decorators/roles.decorator';
 import { AdminJwtGuard } from './guards/admin-jwt.guard';
 import { AdminRoleGuard } from './guards/admin-role.guard';
-import { AuthenticatedAdmin } from './strategies/admin-jwt.strategy';
+import type {
+  AdminRequest,
+  AuthenticatedAdmin,
+} from './strategies/admin-jwt.strategy';
 
 /** A request that has passed AdminJwtGuard, so `user` is always present. */
 type AuthenticatedAdminRequest = Request & { user: AuthenticatedAdmin };
@@ -117,14 +120,18 @@ export class AdminAuthController {
   @ApiOperation({
     summary: 'Admin logout',
     description:
-      'Invalidates the supplied refresh token, so it can no longer be rotated. Other ' +
-      'sessions belonging to this administrator are unaffected.',
+      'Invalidates the supplied refresh token, so it can no longer be rotated, and the ' +
+      'access token that made the call, which is rejected from the next request on. ' +
+      'Other sessions belonging to this administrator are unaffected.',
   })
   @ApiUnauthorizedResponse({
     description: 'Missing or invalid admin access token.',
   })
-  async logout(@Body() dto: AdminRefreshDto): Promise<void> {
-    await this.adminAuth.logout(dto.refreshToken);
+  async logout(
+    @Req() req: AdminRequest,
+    @Body() dto: AdminRefreshDto,
+  ): Promise<void> {
+    await this.adminAuth.logout(dto.refreshToken, req.adminTokenMeta);
   }
 
   @Get('me')

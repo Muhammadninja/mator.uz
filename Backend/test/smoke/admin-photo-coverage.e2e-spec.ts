@@ -10,6 +10,7 @@ import { createHmac } from 'crypto';
 import request from 'supertest';
 import { AdminAuthConfig } from '../../src/admin/auth/admin-auth.config';
 import { AdminJwtStrategy } from '../../src/admin/auth/strategies/admin-jwt.strategy';
+import { AdminTokenService } from '../../src/admin/auth/admin-token.service';
 import { AdminPhotoCoverageController } from '../../src/admin/photo-coverage/admin-photo-coverage.controller';
 import { AdminPhotoCoverageService } from '../../src/admin/photo-coverage/admin-photo-coverage.service';
 import { PrismaService } from '../../src/prisma/prisma.service';
@@ -67,6 +68,11 @@ describe('GET /v1/admin/photo-coverage/*', () => {
       providers: [
         AdminJwtStrategy,
         { provide: AdminAuthConfig, useValue: { secret: SECRET } },
+        // Logout / device revocation markers (LOW-ADM-008): none here.
+        {
+          provide: AdminTokenService,
+          useValue: { isAccessTokenRevoked: async () => false },
+        },
         { provide: PrismaService, useValue: prisma },
         { provide: AdminPhotoCoverageService, useValue: coverage },
       ],

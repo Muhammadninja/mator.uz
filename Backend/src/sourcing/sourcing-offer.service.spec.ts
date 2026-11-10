@@ -53,7 +53,10 @@ function offerStore(overrides: Record<string, any>) {
 }
 
 function makePrisma(overrides: Record<string, unknown> = {}) {
-  return {
+  const prisma: Record<string, any> = {
+    // The ticket row lock taken by acceptOffer; its status decides.
+    $queryRaw: jest.fn(async () => [{ status: 'OFFERED' }]),
+    $transaction: jest.fn((run: (tx: unknown) => unknown) => run(prisma)),
     sourcingTicket: {
       findUnique: jest.fn(async () => TICKET),
       updateMany: jest.fn(async () => ({ count: 1 })),
@@ -65,11 +68,16 @@ function makePrisma(overrides: Record<string, unknown> = {}) {
     },
     ...overrides,
   };
+  return prisma as any;
 }
 
 function build(prisma = makePrisma()) {
   const notifications = { emit: jest.fn(async () => ({ id: 'ntf_1' })) };
-  const cart = { addSourcedOffer: jest.fn(async () => ({ items: [], subtotalUzs: 250000 })) };
+  const cart = {
+    addSourcedOffer: jest.fn(async () => ({ items: [], subtotalUzs: 250000 })),
+    addSourcedOfferLine: jest.fn(async () => undefined),
+    snapshot: jest.fn(async () => ({ items: [], subtotalUzs: 250000 })),
+  };
   const telegram = {
     notifyDealerOfferAccepted: jest.fn(async () => undefined),
     notifyDealerOfferDeclined: jest.fn(async () => undefined),
@@ -213,7 +221,9 @@ describe('SourcingOfferService.acceptOffer', () => {
         data: { status: 'ACCEPTED', customerNotifyPending: false },
       }),
     );
-    expect(cart.addSourcedOffer).toHaveBeenCalledWith(
+    // Written on the acceptance's own transaction.
+    expect(cart.addSourcedOfferLine).toHaveBeenCalledWith(
+      prisma,
       'usr_1',
       expect.objectContaining({ offerId: 'soff_1', priceUzs: 250000, title: 'Тормозные колодки' }),
     );
@@ -243,7 +253,7 @@ describe('SourcingOfferService.acceptOffer', () => {
     const { service, cart } = build(prisma);
 
     await expect(service.acceptOffer('soff_1', 'usr_1')).rejects.toBeInstanceOf(ConflictException);
-    expect(cart.addSourcedOffer).not.toHaveBeenCalled();
+    expect(cart.addSourcedOfferLine).not.toHaveBeenCalled();
   });
 
   it('rejects an offer the caller does not own', async () => {
@@ -256,6 +266,74 @@ describe('SourcingOfferService.acceptOffer', () => {
     const { service } = build(prisma);
 
     await expect(service.acceptOffer('soff_1', 'usr_1')).rejects.toBeInstanceOf(NotFoundException);
+  });
+});
+
+describe('SourcingOfferService.acceptOffer — ticket state and races (LOW-ORD-011)', () => {
+  it.each(['CLOSED', 'CANCELLED', 'ACCEPTED'])(
+    'a %s ticket accepts no offer and is not reopened',
+    async (status) => {
+      const { service, prisma, cart, telegram } = build();
+      prisma.$queryRaw.mockResolvedValue([{ status }]);
+
+      await expect(service.acceptOffer('soff_1', 'usr_1')).rejects.toBeInstanceOf(
+        ConflictException,
+      );
+      expect(prisma.sourcingOffer.updateMany).not.toHaveBeenCalled();
+      expect(prisma.sourcingTicket.update).not.toHaveBeenCalled();
+      expect(cart.addSourcedOfferLine).not.toHaveBeenCalled();
+      expect(telegram.notifyDealerOfferAccepted).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['PENDING', 'IN_PROGRESS', 'OFFERED', 'NO_OFFER'])(
+    'a %s ticket can still accept an offer',
+    async (status) => {
+      const { service, prisma } = build();
+      prisma.$queryRaw.mockResolvedValue([{ status }]);
+      await expect(service.acceptOffer('soff_1', 'usr_1')).resolves.toBeDefined();
+    },
+  );
+
+  it('locks the ticket row before deciding', async () => {
+    const { service, prisma } = build();
+    await service.acceptOffer('soff_1', 'usr_1');
+    const sql = (prisma.$queryRaw.mock.calls[0] as [TemplateStringsArray])[0].join('?');
+    expect(sql).toMatch(/FROM sourcing_tickets\s+WHERE id = \?::uuid FOR UPDATE/);
+  });
+
+  it('two dealers\' offers on one ticket accepted at once: one wins, the other is refused', async () => {
+    const { service, prisma, cart, telegram } = build();
+    // Stand-in for the row lock: one transaction at a time, each reading what
+    // the previous one committed.
+    let ticketStatus = 'OFFERED';
+    let queue: Promise<unknown> = Promise.resolve();
+    prisma.$transaction.mockImplementation((run: (tx: unknown) => Promise<unknown>) => {
+      const next = queue.then(() => run(prisma));
+      queue = next.catch(() => undefined);
+      return next;
+    });
+    prisma.$queryRaw.mockImplementation(async () => [{ status: ticketStatus }]);
+    prisma.sourcingTicket.update.mockImplementation(async (a: any) => {
+      ticketStatus = a.data.status;
+      return {};
+    });
+
+    const results = await Promise.allSettled([
+      service.acceptOffer('soff_1', 'usr_1'),
+      service.acceptOffer('soff_2', 'usr_1'),
+    ]);
+
+    expect(results.map((r) => r.status)).toEqual(['fulfilled', 'rejected']);
+    expect(cart.addSourcedOfferLine).toHaveBeenCalledTimes(1);
+    expect(telegram.notifyDealerOfferAccepted).toHaveBeenCalledTimes(1);
+  });
+
+  it('a failed cart write rolls the acceptance back and tells no dealer', async () => {
+    const { service, cart, telegram } = build();
+    cart.addSourcedOfferLine.mockRejectedValue(new Error('db blip'));
+    await expect(service.acceptOffer('soff_1', 'usr_1')).rejects.toThrow('db blip');
+    expect(telegram.notifyDealerOfferAccepted).not.toHaveBeenCalled();
   });
 });
 
@@ -309,6 +387,6 @@ describe('SourcingOfferService — expiry', () => {
       { expiresAt: null },
       { expiresAt: { gt: expect.any(Date) } },
     ]);
-    expect(cart.addSourcedOffer).not.toHaveBeenCalled();
+    expect(cart.addSourcedOfferLine).not.toHaveBeenCalled();
   });
 });

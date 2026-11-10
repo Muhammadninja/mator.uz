@@ -11,6 +11,7 @@
 import express from 'express';
 import request from 'supertest';
 import {
+  PAYME_MAX_BODY_BYTES,
   PAYME_WEBHOOK_PATH,
   paymeRawBodyMiddleware,
 } from '../../src/orders/webhooks/payme-raw-body.middleware';
@@ -86,4 +87,39 @@ describe('Payme webhook transport', () => {
     // Parsed object, not raw text — the middleware is scoped to Payme only.
     expect(seen[0]).toEqual({ hello: 'world' });
   });
+
+  // LOW-PAY-007: an oversized body is refused before it is buffered or handled.
+  it('answers 413 for a body over 64 KB and never calls the handler', async () => {
+    const res = await request(app)
+      .post(PAYME_WEBHOOK_PATH)
+      .set('Authorization', AUTH)
+      .set('Content-Type', 'application/json')
+      .send(JSON.stringify({ id: 1, method: 'x', pad: 'a'.repeat(PAYME_MAX_BODY_BYTES) }));
+
+    expect(res.status).toBe(413);
+    expect(handleRaw).not.toHaveBeenCalled();
+  });
+
+  it('still accepts a body just under the limit', async () => {
+    const res = await request(app)
+      .post(PAYME_WEBHOOK_PATH)
+      .set('Authorization', AUTH)
+      .set('Content-Type', 'application/json')
+      .send(JSON.stringify({ id: 1, pad: 'a'.repeat(PAYME_MAX_BODY_BYTES - 200) }));
+
+    expect(res.status).toBe(200);
+    expect(handleRaw).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['null', '[]', '[1,2]', '42', '"text"', 'true'])(
+    'passes the JSON value %s through as text for the service to refuse',
+    async (payload) => {
+      await request(app)
+        .post(PAYME_WEBHOOK_PATH)
+        .set('Authorization', AUTH)
+        .set('Content-Type', 'application/json')
+        .send(payload);
+      expect(handleRaw).toHaveBeenCalledWith(AUTH, payload);
+    },
+  );
 });

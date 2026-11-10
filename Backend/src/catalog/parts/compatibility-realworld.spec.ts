@@ -77,7 +77,7 @@ function makeService(opts: {
   const prisma = {
     partCategory: { findMany: jest.fn().mockResolvedValue([]) },
     catalogPart: {
-      findUnique: jest.fn().mockResolvedValue({
+      findFirst: jest.fn().mockResolvedValue({
         id: opts.part.id ?? 'part_1',
         categoryId: 'cat',
         isUniversal: opts.part.isUniversal,

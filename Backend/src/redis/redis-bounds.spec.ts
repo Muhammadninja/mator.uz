@@ -139,6 +139,24 @@ describe('health', () => {
     });
   });
 
+  it('a burst of probes costs one database query and one Redis ping (LOW-PLT-015)', async () => {
+    const db = { $queryRaw: jest.fn().mockResolvedValue([{}]) };
+    const ping = jest.fn().mockResolvedValue('PONG');
+    const health = new HealthController(db as never, undefined, {
+      getClient: () => ({ ping }),
+    } as never);
+
+    const answers = await Promise.all(
+      Array.from({ length: 20 }, () => health.ready()),
+    );
+
+    expect(db.$queryRaw).toHaveBeenCalledTimes(1);
+    expect(ping).toHaveBeenCalledTimes(1);
+    expect(answers[19]).toEqual({ status: 'ok', database: 'up', redis: 'up' });
+    // The body carries a status for each dependency and nothing else.
+    expect(Object.keys(answers[0]).sort()).toEqual(['database', 'redis', 'status']);
+  });
+
   it('reports a working Redis', async () => {
     const redis = { getClient: () => ({ ping: jest.fn().mockResolvedValue('PONG') }) };
     const health = new HealthController(prisma as never, undefined, redis as never);

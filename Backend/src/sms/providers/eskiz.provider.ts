@@ -1,6 +1,7 @@
 import { Logger } from '@nestjs/common';
 import axios from 'axios';
 import { SmsProvider, SmsSendResult } from '../sms-provider.interface';
+import { maskPhone } from '../../common/pii.util';
 
 interface EskizConfig {
   baseUrl: string; // https://notify.eskiz.uz/api
@@ -154,7 +155,7 @@ export class EskizSmsProvider implements SmsProvider {
     const mobilePhone = toE164.replace(/\D/g, ''); // Eskiz expects digits only
     if (!/^998\d{9}$/.test(mobilePhone)) {
       throw new Error(
-        `Eskiz: unsupported phone format "${toE164}" (expected 998XXXXXXXXX)`,
+        `Eskiz: unsupported phone format "${maskPhone(toE164)}" (expected 998XXXXXXXXX)`,
       );
     }
     if (!text) {

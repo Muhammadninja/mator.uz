@@ -11,6 +11,7 @@ import { AdminAuditService } from '../auth/admin-audit.service';
 import {
   AdminAuditContext,
   AdminAuthService,
+  lastSuperAdminMessage,
 } from '../auth/admin-auth.service';
 import { AdminTokenService } from '../auth/admin-token.service';
 import {
@@ -276,6 +277,10 @@ export class AdminManagementService {
     id: string,
     action: string,
   ): Promise<void> {
+    // An early, friendly refusal only. The decision that counts is taken again
+    // inside the writing transaction, under a lock on the active SUPER_ADMIN
+    // rows (AdminAuthService.guardLastSuperAdmin), where a concurrent demotion
+    // cannot slip past it.
     const remaining = await this.prisma.appAdmin.count({
       where: {
         role: AdminRole.SUPER_ADMIN,
@@ -284,10 +289,7 @@ export class AdminManagementService {
       },
     });
     if (remaining === 0) {
-      throw new BadRequestException(
-        `Cannot ${action} the last active SUPER_ADMIN — the console would become unmanageable. ` +
-          'Promote another administrator first.',
-      );
+      throw new BadRequestException(lastSuperAdminMessage(action));
     }
   }
 }

@@ -49,7 +49,21 @@ export function priceSourcesFollowCart(prisma: PrismaMock): void {
       const cart = await prisma.cart.findUnique();
       return where.id.in.flatMap((id) => {
         const line = cart?.items?.find((i: any) => i[field] === id);
-        return line ? [{ id, [column]: Number(line.priceUzsSnapshot) }] : [];
+        // A row that can still be sold (LOW-ORD-007): an ACCEPTED offer on a
+        // live ticket, a service of an active provider.
+        return line
+          ? [
+              {
+                id,
+                [column]: Number(line.priceUzsSnapshot),
+                status: 'ACCEPTED',
+                sellerTgId: '1',
+                ticket: { status: 'ACCEPTED' },
+                providerId: line.providerId ?? 'prov_1',
+                provider: { isActive: true },
+              },
+            ]
+          : [];
       });
     };
   prisma.providerServiceOffering.findMany.mockImplementation(
@@ -182,6 +196,8 @@ export function fakeRedis(): any {
       return existed;
     }),
     exists: jest.fn(async (key: string) => store.has(key)),
+    existsAny: jest.fn(async (keys: string[]) => keys.some((k) => store.has(k))),
+    existsEach: jest.fn(async (keys: string[]) => keys.map((k) => store.has(k))),
     expire: jest.fn(async (key: string, ttl: number) => {
       if (!store.has(key)) return false;
       ttls.set(key, ttl);

@@ -185,7 +185,7 @@ describe('SmsService provider selection (Eskiz fail-fast)', () => {
   it('throws in production when SMS_PROVIDER=eskiz and credentials are missing', () => {
     expect(() =>
       build({ NODE_ENV: 'production', SMS_PROVIDER: 'eskiz' }),
-    ).toThrow(/requires ESKIZ_EMAIL and ESKIZ_PASSWORD in production/);
+    ).toThrow(/SMS_PROVIDER=eskiz is missing its credentials in production \(ESKIZ_EMAIL, ESKIZ_PASSWORD\)/);
   });
 
   it('throws in production when only ESKIZ_PASSWORD is missing', () => {
@@ -195,7 +195,7 @@ describe('SmsService provider selection (Eskiz fail-fast)', () => {
         SMS_PROVIDER: 'eskiz',
         ESKIZ_EMAIL: 'bot@mator.uz',
       }),
-    ).toThrow(/requires ESKIZ_EMAIL and ESKIZ_PASSWORD/);
+    ).toThrow(/missing its credentials in production \(ESKIZ_EMAIL, ESKIZ_PASSWORD\)/);
   });
 
   it('throws in production when only ESKIZ_EMAIL is missing', () => {
@@ -205,7 +205,7 @@ describe('SmsService provider selection (Eskiz fail-fast)', () => {
         SMS_PROVIDER: 'eskiz',
         ESKIZ_PASSWORD: 'secret',
       }),
-    ).toThrow(/requires ESKIZ_EMAIL and ESKIZ_PASSWORD/);
+    ).toThrow(/missing its credentials in production \(ESKIZ_EMAIL, ESKIZ_PASSWORD\)/);
   });
 
   it('boots the eskiz provider in production when both credentials are present', () => {
@@ -226,16 +226,49 @@ describe('SmsService provider selection (Eskiz fail-fast)', () => {
     expect(providerName(build({ SMS_PROVIDER: 'eskiz' }))).toBe('log');
   });
 
-  it('does not fail-fast for other providers, even in production', () => {
+  // LOW-PLT-013: production never runs on the log provider, however it got there.
+  it.each([
+    ['unset', {}],
+    ['log', { SMS_PROVIDER: 'log' }],
+    ['LOG with stray whitespace', { SMS_PROVIDER: ' LOG ' }],
+    ['an unknown name', { SMS_PROVIDER: 'twilio' }],
+  ])('refuses to boot in production when SMS_PROVIDER is %s', (_label, env) => {
+    expect(() => build({ NODE_ENV: 'production', ...env })).toThrow(
+      /is not allowed in production\. Set it to a real provider \(eskiz, playmobile, sayqal\)/,
+    );
+  });
+
+  it.each([
+    ['playmobile', /PLAYMOBILE_LOGIN, PLAYMOBILE_PASSWORD/],
+    ['sayqal', /SAYQAL_USERNAME, SAYQAL_SECRET_KEY, SAYQAL_SERVICE_ID/],
+  ])(
+    'refuses to boot in production when %s lacks its credentials',
+    (provider, missing) => {
+      expect(() =>
+        build({ NODE_ENV: 'production', SMS_PROVIDER: provider }),
+      ).toThrow(missing);
+    },
+  );
+
+  it('boots a fully configured real provider in production', () => {
     expect(
       providerName(
-        build({ NODE_ENV: 'production', SMS_PROVIDER: 'playmobile' }),
+        build({
+          NODE_ENV: 'production',
+          SMS_PROVIDER: 'sayqal',
+          SAYQAL_USERNAME: 'u',
+          SAYQAL_SECRET_KEY: 'k',
+          SAYQAL_SERVICE_ID: '7',
+        }),
       ),
-    ).toBe('log');
-    expect(
-      providerName(build({ NODE_ENV: 'production', SMS_PROVIDER: 'sayqal' })),
-    ).toBe('log');
-    expect(providerName(build({ NODE_ENV: 'production' }))).toBe('log');
+    ).toBe('sayqal');
+  });
+
+  it('keeps the log provider for local development and tests', () => {
+    expect(providerName(build({ NODE_ENV: 'development' }))).toBe('log');
+    expect(providerName(build({ NODE_ENV: 'test', SMS_PROVIDER: 'log' }))).toBe(
+      'log',
+    );
   });
 });
 
@@ -251,6 +284,38 @@ describe('SmsService.applyEskizCallback', () => {
     const prisma = { smsMessage: { updateMany } } as unknown as PrismaService;
     const resolver = { resolve: jest.fn() } as unknown as SmsOperatorResolver;
     service = new SmsService(makeConfig(), prisma, resolver);
+  });
+
+  // INFO-3: an unauthenticated report can touch delivery telemetry only.
+  it('a report writes only the delivery columns of one pending eskiz row', async () => {
+    await service.applyEskizCallback({ messageId: 'msg-1', status: 'failed', error: 'x' });
+    expect(lastWhere()).toEqual({
+      provider: 'eskiz',
+      providerSmsId: 'msg-1',
+      status: 'pending',
+    });
+    expect(Object.keys(lastData()).sort()).toEqual([
+      'deliveredAt',
+      'errorMessage',
+      'status',
+    ]);
+  });
+
+  it('bounds the stored error text', async () => {
+    await service.applyEskizCallback({
+      messageId: 'msg-1',
+      status: 'failed',
+      error: 'e'.repeat(10_000),
+    });
+    expect((lastData().errorMessage as string).length).toBe(500);
+  });
+
+  it('a repeated report is idempotent: it matches no pending row the second time', async () => {
+    updateMany.mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 0 });
+    await service.applyEskizCallback({ messageId: 'msg-1', status: 'delivered' });
+    await expect(
+      service.applyEskizCallback({ messageId: 'msg-1', status: 'delivered' }),
+    ).resolves.toMatchObject({ outcome: 'no_match' });
   });
 
   it('closes the pending row as delivered and stamps deliveredAt', async () => {
@@ -404,5 +469,31 @@ describe('SmsService.sendOtp — language selection', () => {
     const row = create.mock.calls[0][0].data;
     expect(row.template).toBe('otp');
     expect(JSON.stringify(row)).not.toContain('333444');
+  });
+});
+
+// LOW-PLT-012 / LOW-PLT-013: the log provider records that a message was not
+// sent, and nothing that was in it.
+describe('LogSmsProvider', () => {
+  it('never writes the message text or the full phone number to the log', async () => {
+    const { Logger } = jest.requireActual<typeof import('@nestjs/common')>(
+      '@nestjs/common',
+    );
+    const { LogSmsProvider } = jest.requireActual<
+      typeof import('./providers/log.provider')
+    >('./providers/log.provider');
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+    try {
+      await new LogSmsProvider().send(
+        '+998901234567',
+        'Mator: tasdiqlash kodi 482913',
+      );
+      const logged = warn.mock.calls.flat().join(' ');
+      expect(logged).not.toContain('482913');
+      expect(logged).not.toContain('901234567');
+      expect(logged).toContain('+998*******67');
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

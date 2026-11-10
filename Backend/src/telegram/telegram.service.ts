@@ -5,6 +5,7 @@ import {
   Logger,
   Optional,
 } from '@nestjs/common';
+import { TelegramStateJanitor } from './telegram-state-janitor';
 import { ConfigService } from '@nestjs/config';
 import { OnEvent } from '@nestjs/event-emitter';
 import {
@@ -209,6 +210,13 @@ export function resolveDraftTtlMs(
 // popup (answerCbQuery) still fires every time — Telegram shows it in place and
 // it does not accumulate; only the chat message is deduplicated.
 const STALE_NOTICE_DEDUP_MS = 5000;
+
+// Idle dialogue state (LOW-ING-012): a user silent for longer than the draft
+// TTL (and at least a day) plus an hour of grace is forgotten, checked every
+// ten minutes. See telegram-state-janitor.ts.
+const DIALOGUE_STATE_MIN_IDLE_MS = 24 * 60 * 60 * 1000;
+const DIALOGUE_STATE_GRACE_MS = 60 * 60 * 1000;
+const DIALOGUE_STATE_SWEEP_MS = 10 * 60 * 1000;
 
 // Inline-button callback payloads for the confirmation step.
 const CONFIRM_ADD = 'product:add';
@@ -557,6 +565,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   // language on another device would be stuck with the default until restart.
   private readonly langCache = new Map<number, AppLang>();
 
+  // Forgets the maps above for users who went quiet (LOW-ING-012); see
+  // telegram-state-janitor.ts. Built in onModuleInit, once the draft TTL is known.
+  private janitor?: TelegramStateJanitor;
+
   constructor(
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
@@ -598,6 +610,19 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     );
 
     this.bot = new Telegraf(token);
+
+    // First middleware: every update counts as activity, so the janitor never
+    // forgets a user who is still talking to the bot.
+    this.janitor = new TelegramStateJanitor(
+      Math.max(this.draftTtlMs, DIALOGUE_STATE_MIN_IDLE_MS) + DIALOGUE_STATE_GRACE_MS,
+      [this.wizard, this.livePrompt, this.liveNotice, this.langCache],
+      [{ map: this.staleNoticeSentAt, ttlMs: STALE_NOTICE_DEDUP_MS }],
+    );
+    this.janitor.start(DIALOGUE_STATE_SWEEP_MS);
+    this.bot.use((ctx, next) => {
+      if (ctx.from) this.janitor?.touch(ctx.from.id);
+      return next();
+    });
     // Registered before any handler can run. Telegraf's DEFAULT error handler
     // rethrows, and a rethrow ends the polling loop — for every seller, until
     // the process restarts: one expired callback, DB blip or Telegram refusal
@@ -637,6 +662,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   }
 
   onModuleDestroy() {
+    this.janitor?.stop();
     this.mediaBuffer?.clear();
     this.offerFlow.clear();
     this.wizard.clear();
@@ -3662,6 +3688,44 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Replace a product's gallery with `urls`, in order, the first one primary
+   * (LOW-ING-015).
+   *
+   * One transaction, opened by a lock on the product's row. Two listings
+   * committing onto one shared product (the same GM number from two sellers,
+   * which remains allowed: SEC-003 stays rolled back) used to interleave their
+   * delete and insert and could leave both galleries merged with two primary
+   * images. Under the lock the second commit waits and then replaces the
+   * first's gallery whole: always exactly one ordered set with one primary
+   * image, and the product's `imageUrl` names that same image.
+   *
+   * Nothing is deleted from Cloudinary, before or after: the commit never
+   * deleted a replaced gallery's assets and this does not start to. A failure
+   * rolls back to the previous gallery. No ownership check is added.
+   */
+  private async replaceProductGallery(
+    productId: number,
+    urls: readonly string[],
+  ): Promise<void> {
+    await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM products WHERE id = ${productId} FOR UPDATE`;
+      await tx.productImage.deleteMany({ where: { productId } });
+      await tx.productImage.createMany({
+        data: urls.map((url, i) => ({
+          productId,
+          url,
+          sortOrder: i,
+          isPrimary: i === 0,
+        })),
+      });
+      await tx.product.update({
+        where: { id: productId },
+        data: { imageUrl: urls[0] ?? null },
+      });
+    });
+  }
+
+  /**
    * Remove a pending session WITHOUT deleting its Cloudinary assets. Used by a
    * successful commit, where the assets are kept for the saved product.
    */
@@ -4148,17 +4212,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       await persistVehicleLinks(this.prisma, product.id, metadata);
 
       // Replace the product gallery with the new ordered set (first = primary).
-      await this.prisma.productImage.deleteMany({
-        where: { productId: product.id },
-      });
-      await this.prisma.productImage.createMany({
-        data: processedUrls.map((url, i) => ({
-          productId: product.id,
-          url,
-          sortOrder: i,
-          isPrimary: i === 0,
-        })),
-      });
+      await this.replaceProductGallery(product.id, processedUrls);
 
       const stock = await this.prisma.stock.upsert({
         where: { sellerId_productId: { sellerId, productId: product.id } },

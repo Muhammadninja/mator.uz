@@ -332,7 +332,74 @@ describe('OtpService — AUTH_DEV_MODE', () => {
     it('request() persists the given purpose', async () => {
       const { service, redis } = build(false);
       await service.request('+998901234567', OtpChannel.SMS, OtpPurpose.PHONE_CHANGE);
-      expect(storedRecord(redis, '+998901234567').purpose).toBe('phone_change');
+      // In its own place, away from the login code of the same number.
+      expect(
+        storedRecord(redis, 'phone_change:+998901234567').purpose,
+      ).toBe('phone_change');
+      expect(redis.store.has(RedisKeys.otp('+998901234567'))).toBe(false);
+    });
+
+    // INFO-14: a login code and a phone-change code for one number are separate
+    // records, so neither request can replace or satisfy the other.
+    describe('a login request cannot interfere with a pending phone change', () => {
+      const PHONE = '+998901234567';
+
+      it('requesting a login code leaves the phone-change code redeemable', async () => {
+        const { service, redis } = build(true);
+        const change = await service.request(PHONE, OtpChannel.SMS, OtpPurpose.PHONE_CHANGE);
+        elapseCooldown(redis, PHONE);
+        // Anyone can ask for a login code for any number.
+        const login = await service.request(PHONE, OtpChannel.SMS, OtpPurpose.LOGIN);
+
+        await expect(
+          service.verify(change.requestId, PHONE, change.devOtpCode!, OtpPurpose.PHONE_CHANGE),
+        ).resolves.toBeUndefined();
+        // And the login code is untouched by the phone change being consumed.
+        await expect(
+          service.verify(login.requestId, PHONE, login.devOtpCode!, OtpPurpose.LOGIN),
+        ).resolves.toBeUndefined();
+      });
+
+      it('a login code cannot confirm a phone change, even with the right digits', async () => {
+        const { service, redis } = build(true);
+        const change = await service.request(PHONE, OtpChannel.SMS, OtpPurpose.PHONE_CHANGE);
+        elapseCooldown(redis, PHONE);
+        const login = await service.request(PHONE, OtpChannel.SMS, OtpPurpose.LOGIN);
+
+        await expect(
+          service.verify(login.requestId, PHONE, login.devOtpCode!, OtpPurpose.PHONE_CHANGE),
+        ).rejects.toThrow('Invalid or already-used verification request');
+        // The login code presented against the phone-change request id fails as
+        // a wrong code (unless the two happen to be equal digits).
+        if (login.devOtpCode !== change.devOtpCode) {
+          await expect(
+            service.verify(change.requestId, PHONE, login.devOtpCode!, OtpPurpose.PHONE_CHANGE),
+          ).rejects.toThrow('Incorrect verification code');
+        }
+      });
+
+      it('a proof of the current number cannot stand in for the new number, or the reverse', async () => {
+        const { service, redis } = build(true);
+        const current = await service.request(PHONE, OtpChannel.SMS, OtpPurpose.PHONE_CHANGE_CURRENT);
+        elapseCooldown(redis, PHONE);
+        const fresh = await service.request(PHONE, OtpChannel.SMS, OtpPurpose.PHONE_CHANGE);
+
+        await expect(
+          service.verify(current.requestId, PHONE, current.devOtpCode!, OtpPurpose.PHONE_CHANGE),
+        ).rejects.toThrow('Invalid or already-used verification request');
+        await expect(
+          service.verify(fresh.requestId, PHONE, fresh.devOtpCode!, OtpPurpose.PHONE_CHANGE_CURRENT),
+        ).rejects.toThrow('Invalid or already-used verification request');
+      });
+
+      it('login and phone-change guesses for one number share the hourly allowance of ten', async () => {
+        const { service, redis } = build(true);
+        const change = await service.request(PHONE, OtpChannel.SMS, OtpPurpose.PHONE_CHANGE);
+        await expect(
+          service.verify(change.requestId, PHONE, '000000x', OtpPurpose.PHONE_CHANGE),
+        ).rejects.toThrow();
+        expect(redis.store.get(RedisKeys.rateOtpVerify(PHONE))).toBe(1);
+      });
     });
 
     it('verify() rejects a code whose stored purpose does not match', async () => {
@@ -352,7 +419,9 @@ describe('OtpService — AUTH_DEV_MODE', () => {
         service.verifyLatestForPhone('+998901234567', issued.devOtpCode!, OtpPurpose.PHONE_CHANGE),
       ).resolves.toBeUndefined();
 
-      expect(redis.store.has(RedisKeys.otp('+998901234567'))).toBe(false);
+      expect(
+        redis.store.has(RedisKeys.otp('phone_change:+998901234567')),
+      ).toBe(false);
     });
 
     it('verifyLatestForPhone() throws when no active request exists', async () => {

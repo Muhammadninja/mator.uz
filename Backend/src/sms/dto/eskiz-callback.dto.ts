@@ -57,5 +57,6 @@ export class EskizCallbackDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(500)
   error?: string;
 }

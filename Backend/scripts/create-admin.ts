@@ -1,8 +1,9 @@
 /**
  * CLI bootstrap for admin-panel accounts (table: app_admins).
  *
- *   npm run admin:create -- --email=admin@example.com --name="Jane Doe" --password='…'
+ *   npm run admin:create -- --email=admin@example.com --name="Jane Doe"
  *   npm run admin:create -- --email=ops@example.com --name="Ops" --role=OPERATOR
+ *   printf '%s' "$PW" | npm run admin:create -- --email=… --name=… --password-stdin
  *
  * Each of those is a dry run and writes nothing. Repeat it with `--apply
  * --confirm=<code>` to do it, and `--allow-database=<host/db>` for any non-local
@@ -14,11 +15,13 @@
  * first SUPER_ADMIN comes into existence; afterwards a SUPER_ADMIN creates the
  * rest. Defaults to SUPER_ADMIN precisely because bootstrapping is its main job.
  *
- * Credentials may also come from the environment (ADMIN_EMAIL / ADMIN_PASSWORD /
- * ADMIN_NAME / ADMIN_ROLE), which is preferable in CI and deploy pipelines: a
- * password passed as a flag lands in the shell history and the process list.
- * When neither a flag nor an env var supplies the password, one is generated and
- * printed once.
+ * The password is never taken from the command line (INFO-11): an argument is
+ * visible to every user in the process list and stays in the shell history.
+ * `--password=…` is refused. It comes, in order of preference, from:
+ *   • nowhere: one is generated and printed once (recommended);
+ *   • standard input with `--password-stdin`, e.g. piped from a secret store;
+ *   • the ADMIN_PASSWORD environment variable, for CI and deploy pipelines.
+ * Email, name and role may also come from ADMIN_EMAIL / ADMIN_NAME / ADMIN_ROLE.
  *
  * NOTE: distinct from the SEED_ADMIN_* block in src/prisma/seed.ts, which
  * bootstraps a mobile-side app_users ADMIN. Different table, different login
@@ -100,7 +103,10 @@ async function applyAdmin(
 
   // Generate when unsupplied, so the operator is never nudged into inventing a
   // weak bootstrap password.
-  const supplied = args.password ?? env.ADMIN_PASSWORD;
+  const supplied =
+    args['password-stdin'] === 'true'
+      ? await readPasswordFromStdin()
+      : env.ADMIN_PASSWORD;
   const generated = !supplied;
   const password = supplied ?? randomBytes(18).toString('base64url');
 
@@ -190,11 +196,36 @@ async function applyAdmin(
   }
 }
 
+/** One line from standard input, without its line ending. Never echoed or logged. */
+async function readPasswordFromStdin(
+  stdin: NodeJS.ReadableStream = process.stdin,
+): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of stdin) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+  }
+  const password = Buffer.concat(chunks).toString('utf8').replace(/\r?\n$/, '');
+  if (!password) throw new Error('--password-stdin was given but nothing was read.');
+  return password;
+}
+
+/** A password on argv is in the process list and the shell history: refuse it. */
+export function assertNoPasswordArgument(argv: readonly string[]): void {
+  if (argv.some((a) => a === '--password' || a.startsWith('--password='))) {
+    throw new Error(
+      '--password is not accepted: command-line arguments are visible in the process ' +
+        'list and shell history. Omit it to generate one, or use --password-stdin or ' +
+        'ADMIN_PASSWORD.',
+    );
+  }
+}
+
 export function runCreateAdmin(
   prisma: PrismaClient,
   argv: readonly string[],
   env: NodeJS.ProcessEnv,
 ) {
+  assertNoPasswordArgument(argv);
   const args = parseArgs([...argv]);
   return runMaintenance({
     script: 'admin:create',

@@ -8,6 +8,7 @@ import {
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
+import { ScalarQueryPipe } from '../../common/query-param.pipes';
 import { ApiHeader, ApiTags } from '@nestjs/swagger';
 import { resolveRequestLang } from '../../common/app-lang.util';
 import { SearchService } from './search.service';
@@ -41,13 +42,17 @@ export class SearchController {
 
   @Get('typeahead')
   @HttpCode(HttpStatus.OK)
-  typeahead(@Query('q') q: string, @Query('limit') limit?: string) {
+  typeahead(
+    @Query('q', new ScalarQueryPipe('q', 100)) q?: string,
+    @Query('limit', new ScalarQueryPipe('limit', 4)) limit?: string,
+  ) {
+    // An out-of-range limit is still clamped by the service, as before.
     return this.search.typeahead(q ?? '', limit ? parseInt(limit, 10) : 6);
   }
 
   @Get('search/quick-filters')
   @HttpCode(HttpStatus.OK)
-  quickFilters(@Query('limit') limit?: string) {
+  quickFilters(@Query('limit', new ScalarQueryPipe('limit', 4)) limit?: string) {
     return this.search.quickFilters(limit ? parseInt(limit, 10) : 8);
   }
 }

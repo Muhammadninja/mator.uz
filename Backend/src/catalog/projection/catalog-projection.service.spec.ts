@@ -6,6 +6,7 @@
 // DB-independent: we drive the shared Prisma mock and inspect the upsert args
 // the service builds.
 
+import { hasDisplayablePhoto } from '../../admin/photo-coverage/photo-coverage.rules';
 import { PartCondition } from '@prisma/client';
 import { CatalogProjectionService } from './catalog-projection.service';
 import { createPrismaMock, PrismaMock } from '../../../test/utils/harness';
@@ -108,6 +109,56 @@ describe('CatalogProjectionService — mapping', () => {
       });
       // update carries the same data (idempotent upsert).
       expect(part.update).toMatchObject({ priceUzs: 185000, inStock: true });
+    });
+
+    // LOW-CAT-013: one photo rule for buyer listing and admin coverage.
+    describe('photo validity', () => {
+      const withImages = (urls: string[]) => {
+        const base = buildStock() as any;
+        return {
+          ...base,
+          product: {
+            ...base.product,
+            images: urls.map((url, sortOrder) => ({ url, sortOrder })),
+          },
+        };
+      };
+      const projected = () => upsertArg(prisma, 'catalogPart').create.images;
+
+      it('keeps a valid Cloudinary gallery whole, in order', () => {
+        const urls = [
+          'https://res.cloudinary.com/mator/image/upload/v1/a.png',
+          'https://res.cloudinary.com/mator/image/upload/v1/b.png',
+        ];
+        svc.buildProjectionOps(withImages(urls));
+        expect(projected()).toEqual(urls);
+      });
+
+      it('a broken first photo is dropped, so the next good one is primary', () => {
+        svc.buildProjectionOps(
+          withImages(['http://insecure/a.png', 'https://cdn/b.png']),
+        );
+        expect(projected()).toEqual(['https://cdn/b.png']);
+        expect(hasDisplayablePhoto(projected())).toBe(true);
+      });
+
+      it('a gallery with no usable photo projects as empty, so it is not listed', () => {
+        svc.buildProjectionOps(withImages(['', 'relative/path.png', 'ftp://x/y']));
+        expect(projected()).toEqual([]);
+      });
+
+      it('after projection, buyer "non-empty" and admin "first is displayable" agree', () => {
+        for (const urls of [
+          ['https://cdn/a.png'],
+          ['', 'https://cdn/b.png'],
+          ['javascript:alert(1)'],
+          [],
+        ]) {
+          svc.buildProjectionOps(withImages(urls));
+          const images = projected();
+          expect(images.length > 0).toBe(hasDisplayablePhoto(images));
+        }
+      });
     });
 
     it('projects the SELLER-CHOSEN categoryId in preference to the enum', () => {

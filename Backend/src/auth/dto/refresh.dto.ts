@@ -1,4 +1,4 @@
-import { IsString, IsOptional } from 'class-validator';
+import { IsString, IsOptional, MaxLength } from 'class-validator';
 
 /**
  * Refresh-token body accepting BOTH key styles so the consolidated
@@ -14,4 +14,14 @@ export class RefreshDto {
   @IsOptional()
   @IsString()
   refresh_token?: string;
+
+  /**
+   * Logout only: the install being signed out, so its push tokens are released
+   * even when the session was not bound to a device at sign-in. Ignored by the
+   * refresh endpoints.
+   */
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  install_id?: string;
 }

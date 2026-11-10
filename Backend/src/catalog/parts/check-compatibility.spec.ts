@@ -33,7 +33,7 @@ function makeService(opts: {
   const prisma = {
     partCategory: { findMany: jest.fn().mockResolvedValue([]) },
     catalogPart: {
-      findUnique: jest.fn().mockResolvedValue(
+      findFirst: jest.fn().mockResolvedValue(
         opts.part
           ? {
               id: opts.part.id ?? 'part_1',
@@ -315,7 +315,7 @@ describe('PartsService.checkCompatibility — curated Fitment Studio bindings', 
     // Even were the legacy rows returned, they are not evidence this check
     // reads: they are seller-entered names, so at most the listing shows the
     // part — the verdict stays UNCERTAIN.
-    prisma.catalogPart.findUnique.mockResolvedValue({
+    prisma.catalogPart.findFirst.mockResolvedValue({
       id: 'part_1',
       isUniversal: false,
       oemNumbers: [],
@@ -330,7 +330,7 @@ describe('PartsService.checkCompatibility — curated Fitment Studio bindings', 
       USER,
     );
     expect(res.status).toBe('UNCERTAIN');
-    const [{ select }] = prisma.catalogPart.findUnique.mock.calls[0] as [
+    const [{ select }] = prisma.catalogPart.findFirst.mock.calls[0] as [
       { select: Record<string, unknown> },
     ];
     expect(select).not.toHaveProperty('fits');
@@ -349,7 +349,7 @@ describe('PartsService.checkCompatibility — curated Fitment Studio bindings', 
       part: { isUniversal: false, compatibilities: [] },
       vehicleById: spark,
     });
-    prisma.catalogPart.findUnique.mockResolvedValue({
+    prisma.catalogPart.findFirst.mockResolvedValue({
       id: 'part_1',
       isUniversal: false,
       oemNumbers: [],
@@ -436,5 +436,38 @@ describe('PartsService.checkCompatibility — curated Fitment Studio bindings', 
       USER,
     );
     expect(res.status).toBe('UNIVERSAL');
+  });
+});
+
+// LOW-CAT-010: compatibility lookups use the buyer listing's visibility.
+describe('compatibility endpoints honour buyer visibility', () => {
+  it('both lookups filter by the buyer-listed predicate, so a hidden id is a 404', async () => {
+    const { BUYER_LISTED_PART } = jest.requireActual<
+      typeof import('../buyer-visibility')
+    >('../buyer-visibility');
+    const findFirst = jest.fn().mockResolvedValue(null);
+    const prisma: any = {
+      catalogPart: { findFirst },
+      partCategory: { findMany: jest.fn().mockResolvedValue([]) },
+      vehicle: { findFirst: jest.fn().mockResolvedValue(null) },
+    };
+    const { PartsService } = jest.requireActual<typeof import('./parts.service')>(
+      './parts.service',
+    );
+    const service = new PartsService(prisma, {} as never);
+
+    await expect(service.compatibility('part_stock_41', 'veh_1')).rejects.toThrow(
+      'Part not found',
+    );
+    await expect(
+      service.checkCompatibility('part_stock_42', { vehicleId: 'veh_1' }),
+    ).rejects.toThrow('Part not found');
+
+    for (const [args] of findFirst.mock.calls as any[]) {
+      // Suspended dealer, no photo and no price are all part of this predicate.
+      expect(args.where).toMatchObject({ ...BUYER_LISTED_PART });
+      expect(args.where.seller).toEqual({ status: { not: 'SUSPENDED' } });
+      expect(args.where.images).toEqual({ isEmpty: false });
+    }
   });
 });

@@ -1,3 +1,5 @@
+import { ValidationPipe } from '@nestjs/common';
+import { CreateBookingDto } from '../../src/providers/dto/create-booking.dto';
 import { BadRequestException } from '@nestjs/common';
 import { ProvidersService } from '../../src/providers/providers.service';
 import { BookingsService } from '../../src/providers/bookings.service';
@@ -66,7 +68,7 @@ describe('Masters/Bookings smoke', () => {
 
   it('creates a 5-minute HOLD booking with the summed price', async () => {
     const { svc } = newBookings(prisma);
-    prisma.serviceProvider.findUnique.mockResolvedValue({ id: 'master_1' });
+    prisma.serviceProvider.findUnique.mockResolvedValue({ id: 'master_1', isActive: true });
     // The referenced vehicle must belong to the caller (ownership check).
     prisma.vehicle.findUnique.mockResolvedValue({ id: 'veh_1', userId: 'usr_1', deletedAt: null });
     prisma.providerServiceOffering.findMany.mockResolvedValue([
@@ -90,7 +92,7 @@ describe('Masters/Bookings smoke', () => {
 
   it("rejects a booking referencing another user's vehicle (ownership)", async () => {
     const { svc } = newBookings(prisma);
-    prisma.serviceProvider.findUnique.mockResolvedValue({ id: 'master_1' });
+    prisma.serviceProvider.findUnique.mockResolvedValue({ id: 'master_1', isActive: true });
     // Vehicle exists but belongs to a different user.
     prisma.vehicle.findUnique.mockResolvedValue({ id: 'veh_other', userId: 'usr_2', deletedAt: null });
     await expect(
@@ -104,7 +106,7 @@ describe('Masters/Bookings smoke', () => {
 
   it('rejects a booking whose service_ids do not belong to the provider', async () => {
     const { svc } = newBookings(prisma);
-    prisma.serviceProvider.findUnique.mockResolvedValue({ id: 'master_1' });
+    prisma.serviceProvider.findUnique.mockResolvedValue({ id: 'master_1', isActive: true });
     prisma.providerServiceOffering.findMany.mockResolvedValue([]); // none matched
     await expect(
       svc.create('usr_1', 'master_1', { service_ids: ['svc_x'], scheduled_at: '2026-07-01T10:00:00Z' } as any),
@@ -114,20 +116,27 @@ describe('Masters/Bookings smoke', () => {
   it('confirm transitions HOLD → CONFIRMED and notifies (booking_confirmed)', async () => {
     const { svc, notifications } = newBookings(prisma);
     prisma.booking.findUnique.mockResolvedValue({ id: 'bk_1', userId: 'usr_1', status: 'HOLD' });
-    prisma.booking.update.mockResolvedValue({});
+    prisma.booking.updateMany.mockResolvedValue({ count: 1 });
 
     const res = await svc.confirm('usr_1', 'bk_1');
     expect(res).toEqual({ booking_id: 'bk_1', status: 'confirmed' });
-    expect(prisma.booking.update).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ status: 'CONFIRMED' }) }),
-    );
+    // Conditional on a still-live hold (LOW-ORD-008).
+    expect(prisma.booking.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: 'bk_1',
+        userId: 'usr_1',
+        status: 'HOLD',
+        OR: [{ holdExpiresAt: null }, { holdExpiresAt: { gt: expect.any(Date) } }],
+      },
+      data: { status: 'CONFIRMED', holdExpiresAt: null },
+    });
     expect(notifications.emit).toHaveBeenCalledWith('usr_1', expect.objectContaining({ type: 'BOOKING_CONFIRMED' }));
   });
 
   it('cancel transitions to CANCELLED and notifies (booking_cancelled)', async () => {
     const { svc, notifications } = newBookings(prisma);
     prisma.booking.findUnique.mockResolvedValue({ id: 'bk_1', userId: 'usr_1', status: 'CONFIRMED' });
-    prisma.booking.update.mockResolvedValue({});
+    prisma.booking.updateMany.mockResolvedValue({ count: 1 });
 
     const res = await svc.cancel('usr_1', 'bk_1');
     expect(res).toEqual({ booking_id: 'bk_1', status: 'cancelled' });
@@ -139,4 +148,66 @@ describe('Masters/Bookings smoke', () => {
     prisma.booking.findUnique.mockResolvedValue({ id: 'bk_1', userId: 'usr_1', status: 'COMPLETED' });
     await expect(svc.confirm('usr_1', 'bk_1')).rejects.toBeInstanceOf(BadRequestException);
   });
+
+  // ── LOW-ORD-008 ──────────────────────────────────────────────────────────
+  it('an expired hold cannot be confirmed, even before the sweeper has run', async () => {
+    const { svc, notifications } = newBookings(prisma);
+    prisma.booking.findUnique.mockResolvedValue({
+      id: 'bk_1',
+      userId: 'usr_1',
+      status: 'HOLD',
+      holdExpiresAt: new Date(Date.now() - 1000),
+    });
+    // The conditional write finds no live hold.
+    prisma.booking.updateMany.mockResolvedValue({ count: 0 });
+    await expect(svc.confirm('usr_1', 'bk_1')).rejects.toBeInstanceOf(BadRequestException);
+    expect(notifications.emit).not.toHaveBeenCalled();
+  });
+
+  it('sweeper and confirm racing: whichever the database lets update the row wins, once', async () => {
+    const { svc, notifications } = newBookings(prisma);
+    // Confirm read HOLD, then the sweeper expired it before the write.
+    prisma.booking.findUnique
+      .mockResolvedValueOnce({ id: 'bk_1', userId: 'usr_1', status: 'HOLD' })
+      .mockResolvedValueOnce({ status: 'EXPIRED' });
+    prisma.booking.updateMany.mockResolvedValue({ count: 0 });
+    await expect(svc.confirm('usr_1', 'bk_1')).rejects.toBeInstanceOf(BadRequestException);
+    expect(notifications.emit).not.toHaveBeenCalled();
+  });
+
+  it('a duplicate confirm of a booking already confirmed stays a success', async () => {
+    const { svc } = newBookings(prisma);
+    prisma.booking.findUnique
+      .mockResolvedValueOnce({ id: 'bk_1', userId: 'usr_1', status: 'HOLD' })
+      .mockResolvedValueOnce({ status: 'CONFIRMED' });
+    prisma.booking.updateMany.mockResolvedValue({ count: 0 });
+    await expect(svc.confirm('usr_1', 'bk_1')).resolves.toEqual({
+      booking_id: 'bk_1',
+      status: 'confirmed',
+    });
+  });
+
+  it('an inactive provider takes no booking', async () => {
+    const { svc } = newBookings(prisma);
+    prisma.serviceProvider.findUnique.mockResolvedValue({ id: 'master_1', isActive: false });
+    await expect(
+      svc.create('usr_1', 'master_1', {
+        service_ids: ['svc_oil'],
+        scheduled_at: '2026-07-01T10:00:00Z',
+      } as any),
+    ).rejects.toThrow(/Provider not found/);
+  });
+
+  it.each(['soon', '2026-02-30T10:00:00Z', '2026-07-01', '20260701T100000Z'])(
+    'scheduled_at %j is a 400, not a database 500',
+    async (scheduled_at) => {
+      const pipe = new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true });
+      await expect(
+        pipe.transform(
+          { service_ids: ['svc_oil'], scheduled_at, contact_phone_e164: '+998901234567' },
+          { type: 'body', metatype: CreateBookingDto },
+        ),
+      ).rejects.toMatchObject({ status: 400 });
+    },
+  );
 });

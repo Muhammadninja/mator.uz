@@ -36,6 +36,20 @@ export function buildPaymeCheckoutUrl(params: PaymeCheckoutParams): string {
     returnUrl,
   } = params;
 
+  // The payload is a `;`-separated list, so no value may contain the separator
+  // or a line break. `returnUrl` is validated upstream (payment-return-url.ts);
+  // this is the last line of defence for every field, whoever the caller is.
+  for (const [name, value] of Object.entries({
+    merchantId,
+    accountField,
+    orderId,
+    returnUrl: returnUrl ?? '',
+  })) {
+    if (/[;\r\n]/.test(value)) {
+      throw new Error(`Payme checkout parameter ${name} contains a separator`);
+    }
+  }
+
   const parts = [
     `m=${merchantId}`,
     `ac.${accountField}=${orderId}`,

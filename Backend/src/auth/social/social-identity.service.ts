@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { ConflictException, Injectable, Logger } from '@nestjs/common';
 import { Prisma, Role, type AppUser } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { SocialProfile } from './social-profile.interface';
@@ -60,18 +60,25 @@ export class SocialIdentityService {
         const user = await tx.appUser.findUnique({ where: { email } });
 
         if (user) {
+          // INFO-1: link only onto an account whose OWN email was proven. An
+          // account registered with someone else's address and never verified
+          // is exactly what a pre-account hijack plants: linking the real
+          // owner's Google/Apple sign-in to it would hand the planter a live
+          // account. Such an account must verify its email first; nothing is
+          // linked and nothing is marked verified here.
+          if (!user.emailVerified) {
+            this.logger.warn(
+              `Refused to link ${profile.provider} to user ${user.id}: the account's email is unverified`,
+            );
+            throw new ConflictException({
+              code: 'EMAIL_ACCOUNT_UNVERIFIED',
+              message:
+                'An account with this email exists but its email is not verified. Verify it before linking a sign-in provider.',
+            });
+          }
           await tx.authIdentity.create({
             data: { ...this.identityData(profile), userId: user.id },
           });
-          // The provider asserted a verified email matching this account, so
-          // the user demonstrably controls the inbox — mark it verified.
-          if (!user.emailVerified) {
-            await tx.appUser.update({
-              where: { id: user.id },
-              data: { emailVerified: true },
-            });
-            user.emailVerified = true;
-          }
           this.logger.log(
             `Linked ${profile.provider} to existing user ${user.id} via verified email`,
           );
@@ -109,9 +116,10 @@ export class SocialIdentityService {
           // Synthesize a unique placeholder when no email is supplied.
           email: profile.email ?? this.placeholderEmail(profile),
           passwordHash: null,
-          // Social accounts never go through the email/password login path,
-          // so they are considered verified by their provider.
-          emailVerified: true,
+          // INFO-1: verified only when the provider said so. This path is
+          // reached for an unverified or absent provider email, so it is false
+          // here; a placeholder address is never a verified one.
+          emailVerified: Boolean(profile.email && profile.emailVerified),
           firstName: profile.firstName,
           lastName: profile.lastName,
           role: Role.USER,

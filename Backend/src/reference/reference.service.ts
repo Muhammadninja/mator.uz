@@ -4,6 +4,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { loadCategoryTreeScope } from '../catalog/categories/category-tree-scope';
 import { PartCategoryService } from '../catalog/categories/part-category.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { CacheService } from '../redis/cache.service';
@@ -209,6 +210,13 @@ export class ReferenceService {
       if (!parentId.trim())
         throw new BadRequestException('parentId is required');
       await this.categories.getOrFail(parentId);
+      // LOW-CAT-011: a deactivated node, or one under a deactivated ancestor,
+      // is hidden from buyers with its whole subtree. Its children would
+      // otherwise still be offered here, one level at a time, so it answers as
+      // an unknown category does.
+      if ((await loadCategoryTreeScope(this.prisma)).isHidden(parentId)) {
+        throw new NotFoundException('Category not found');
+      }
       const items = await this.categories.findChildren(parentId);
       return { items, total: items.length };
     }

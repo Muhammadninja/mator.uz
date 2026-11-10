@@ -16,6 +16,8 @@ function makePrismaMock() {
     vehicleModelRef: { findMany: jest.fn(), findUnique: jest.fn() },
     vehicleTrim: { findMany: jest.fn(), findUnique: jest.fn() },
     vehicleEngine: { findMany: jest.fn() },
+    // The category tree the hidden-subtree check reads; nothing hidden by default.
+    partCategory: { findMany: jest.fn().mockResolvedValue([]) },
   };
 }
 
@@ -343,6 +345,37 @@ describe('ReferenceService', () => {
       categories.findCatalogRootCategories.mockResolvedValue([brakes]);
       const res = await service.listCategories();
       expect(res.items.every((i) => !('isActive' in i))).toBe(true);
+    });
+  });
+
+  // LOW-CAT-011: a hidden subtree is not browsable one level at a time.
+  describe('listCategories under a deactivated category', () => {
+    const edges = [
+      { id: 'engine', parentId: null, isActive: false },
+      { id: 'engine-filters', parentId: 'engine', isActive: true },
+      { id: 'brakes', parentId: null, isActive: true },
+    ];
+
+    it.each(['engine', 'engine-filters'])(
+      'answers 404 for %s, the inactive node or a node beneath it',
+      async (parentId) => {
+        prisma.partCategory.findMany.mockResolvedValue(edges);
+        categories.getOrFail.mockResolvedValue({ id: parentId });
+        await expect(service.listCategories(parentId)).rejects.toThrow(
+          'Category not found',
+        );
+        expect(categories.findChildren).not.toHaveBeenCalled();
+      },
+    );
+
+    it('still lists the children of an active category', async () => {
+      prisma.partCategory.findMany.mockResolvedValue(edges);
+      categories.getOrFail.mockResolvedValue({ id: 'brakes' });
+      categories.findChildren.mockResolvedValue([{ id: 'brake-pads' }]);
+      await expect(service.listCategories('brakes')).resolves.toEqual({
+        items: [{ id: 'brake-pads' }],
+        total: 1,
+      });
     });
   });
 });

@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { escapeLike } from '../common/like-escape.util';
 import { sellableWhere } from '../orders/inventory/inventory-availability';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
@@ -110,8 +111,8 @@ export class RagSearchService {
 
     // In-stock parts matching ANY search form in the title or the brand name.
     const or: Prisma.CatalogPartWhereInput[] = allForms.flatMap((f) => [
-      { title: { contains: f, mode: 'insensitive' } },
-      { brand: { is: { name: { contains: f, mode: 'insensitive' } } } },
+      { title: { contains: escapeLike(f), mode: 'insensitive' } },
+      { brand: { is: { name: { contains: escapeLike(f), mode: 'insensitive' } } } },
     ]);
 
     const visible = visibleCategoryWhere(await loadCategoryTreeScope(this.prisma));

@@ -132,4 +132,25 @@ describe('AdminAuthConfig', () => {
       },
     );
   });
+
+  describe('access TTL ceiling (LOW-ADM-008)', () => {
+    const secret = randomBytes(48).toString('base64');
+
+    it('clamps ADMIN_JWT_ACCESS_TTL_SECONDS to one hour', () => {
+      expect(
+        build({
+          ADMIN_JWT_SECRET: secret,
+          ADMIN_JWT_ACCESS_TTL_SECONDS: '86400',
+        }).accessTtlSeconds,
+      ).toBe(3600);
+    });
+
+    it('leaves a shorter configured TTL and the 15-minute default alone', () => {
+      expect(
+        build({ ADMIN_JWT_SECRET: secret, ADMIN_JWT_ACCESS_TTL_SECONDS: '600' })
+          .accessTtlSeconds,
+      ).toBe(600);
+      expect(build({ ADMIN_JWT_SECRET: secret }).accessTtlSeconds).toBe(900);
+    });
+  });
 });

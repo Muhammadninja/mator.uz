@@ -1,7 +1,8 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
+import { Type, Transform } from 'class-transformer';
 import {
   IsBoolean,
+  IsEmail,
   IsIn,
   IsInt,
   IsNumber,
@@ -13,6 +14,13 @@ import {
   Min,
   ValidateIf,
 } from 'class-validator';
+import { IsAllowedAssetUrl } from '../../../common/is-allowed-asset-url.validator';
+import { E164_REGEX } from '../../../auth/phone/dto/request-otp.dto';
+import {
+  isProvided,
+  normalizePhone,
+  trimString,
+} from './dealer-contact.validation';
 import {
   MAX_VAT_PERCENT,
   MIN_VAT_PERCENT,
@@ -56,15 +64,16 @@ export class UpdateAdminDealerDto {
   city?: string;
 
   @ApiPropertyOptional({ description: 'Public contact email.' })
-  @IsOptional()
-  @IsString()
+  @ValidateIf(isProvided)
+  @Transform(trimString)
+  @IsEmail({}, { message: 'email must be a valid email address' })
   @MaxLength(255)
   email?: string;
 
   @ApiPropertyOptional({ description: 'Public contact phone (E.164).' })
-  @IsOptional()
-  @IsString()
-  @MaxLength(20)
+  @ValidateIf(isProvided)
+  @Transform(normalizePhone)
+  @Matches(E164_REGEX, { message: 'phone must be a valid E.164 number' })
   phone?: string;
 
   @ApiPropertyOptional({ description: 'Brand accent hex (#RRGGBB[AA]).' })
@@ -80,9 +89,16 @@ export class UpdateAdminDealerDto {
   initial?: string;
 
   @ApiPropertyOptional({ description: 'Brand logo image URL (from POST /v1/admin/dealers/logo).' })
-  @IsOptional()
+  @ValidateIf(isProvided)
+  @Transform(trimString)
   @IsString()
   @MaxLength(512)
+  // The buyer's app loads this URL, so it is held to the asset policy avatars
+  // use: HTTPS on a configured asset host (ASSET_URL_ALLOWED_HOSTS). The logo
+  // upload endpoint returns such a URL; an arbitrary or plain-http one is refused.
+  @IsAllowedAssetUrl({
+    message: 'logoUrl must be an HTTPS URL on an allowed asset host',
+  })
   logoUrl?: string;
 
   @ApiPropertyOptional({ description: 'Pre-formatted lifetime order count, e.g. "18k+".' })

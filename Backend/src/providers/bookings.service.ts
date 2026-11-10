@@ -19,7 +19,7 @@ export class BookingsService {
     await this.assertOwnedVehicle(userId, dto.vehicle_id);
 
     const provider = await this.prisma.serviceProvider.findUnique({ where: { id: providerId } });
-    if (!provider) throw new NotFoundException('Provider not found');
+    if (!provider || !provider.isActive) throw new NotFoundException('Provider not found');
 
     const services = await this.prisma.providerServiceOffering.findMany({
       where: { id: { in: dto.service_ids }, providerId },
@@ -63,17 +63,48 @@ export class BookingsService {
     };
   }
 
-  /** Confirm a held booking (e.g. after checkout) → notifies the user. */
+  /**
+   * Confirm a held booking (e.g. after checkout) → notifies the user.
+   *
+   * LOW-ORD-008: one conditional write decides it. The booking moves to
+   * CONFIRMED only if it is still HOLD and its hold has not run out at this
+   * moment, so neither a late confirm nor one racing the sweeper can revive an
+   * expired hold: of the sweeper's HOLD → EXPIRED and this HOLD → CONFIRMED,
+   * the database lets exactly one update the row. Re-confirming a booking that
+   * is already CONFIRMED stays an idempotent success, as before.
+   *
+   * No payment is required here: the existing booking flow takes none, and
+   * this change does not invent one.
+   */
   async confirm(userId: string, bookingId: string) {
     const booking = await this.assertOwned(userId, bookingId);
-    if (booking.status !== BookingStatus.HOLD && booking.status !== BookingStatus.CONFIRMED) {
+    if (
+      booking.status !== BookingStatus.HOLD &&
+      booking.status !== BookingStatus.CONFIRMED
+    ) {
       throw new BadRequestException('Booking can no longer be confirmed');
     }
     if (booking.status === BookingStatus.HOLD) {
-      await this.prisma.booking.update({
-        where: { id: bookingId },
+      const now = new Date();
+      const moved = await this.prisma.booking.updateMany({
+        where: {
+          id: bookingId,
+          userId,
+          status: BookingStatus.HOLD,
+          OR: [{ holdExpiresAt: null }, { holdExpiresAt: { gt: now } }],
+        },
         data: { status: BookingStatus.CONFIRMED, holdExpiresAt: null },
       });
+      if (moved.count === 0) {
+        const current = await this.prisma.booking.findUnique({
+          where: { id: bookingId },
+          select: { status: true },
+        });
+        // A concurrent confirm of the same booking that got there first.
+        if (current?.status !== BookingStatus.CONFIRMED) {
+          throw new BadRequestException('Booking can no longer be confirmed');
+        }
+      }
     }
 
     await this.notifications.emit(userId, {
@@ -92,10 +123,19 @@ export class BookingsService {
     if (booking.status === BookingStatus.COMPLETED || booking.status === BookingStatus.CANCELLED) {
       throw new BadRequestException('Booking can no longer be cancelled');
     }
-    await this.prisma.booking.update({
-      where: { id: bookingId },
+    // Conditional, like confirm: a booking that completed or was cancelled in
+    // the meantime is not overwritten.
+    const moved = await this.prisma.booking.updateMany({
+      where: {
+        id: bookingId,
+        userId,
+        status: { notIn: [BookingStatus.COMPLETED, BookingStatus.CANCELLED] },
+      },
       data: { status: BookingStatus.CANCELLED, holdExpiresAt: null },
     });
+    if (moved.count === 0) {
+      throw new BadRequestException('Booking can no longer be cancelled');
+    }
 
     await this.notifications.emit(userId, {
       type: NotificationType.BOOKING_CANCELLED,

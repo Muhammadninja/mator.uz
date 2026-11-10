@@ -24,7 +24,15 @@ function makePrismaMock() {
     create: jest.fn(),
     delete: jest.fn().mockResolvedValue({}),
   };
-  const prisma = { appAdmin } as Record<string, unknown>;
+  const adminInvite = { deleteMany: jest.fn().mockResolvedValue({ count: 0 }) };
+  // The `SELECT … FOR UPDATE` over the active SUPER_ADMIN rows.
+  const $queryRaw = jest
+    .fn()
+    .mockResolvedValue([{ id: 'adm_super_a' }, { id: 'adm_super_b' }]);
+  const prisma = { appAdmin, adminInvite, $queryRaw } as Record<
+    string,
+    unknown
+  >;
   // Callback form: hand the same mock back as the transaction client, so the
   // assertions can inspect writes made inside a $transaction.
   prisma.$transaction = (arg: unknown) =>
@@ -33,6 +41,8 @@ function makePrismaMock() {
       : (arg as (tx: unknown) => unknown)(prisma);
   return prisma as unknown as {
     appAdmin: typeof appAdmin;
+    adminInvite: typeof adminInvite;
+    $queryRaw: typeof $queryRaw;
     $transaction: (arg: unknown) => unknown;
   };
 }
@@ -53,9 +63,11 @@ function makeTokensMock() {
     }),
     rotate: jest.fn(),
     revoke: jest.fn().mockResolvedValue(undefined),
+    blacklistAccessToken: jest.fn().mockResolvedValue(undefined),
     revokeAllSessions: jest.fn().mockResolvedValue(1),
     listSessions: jest.fn().mockResolvedValue([]),
     revokeSession: jest.fn().mockResolvedValue(true),
+    notifyAdminRemoved: jest.fn(),
   };
 }
 
@@ -326,6 +338,22 @@ describe('AdminAuthService', () => {
       // Not a theft signal — other sessions must survive a deliberate logout.
       expect(tokens.revokeAllSessions).not.toHaveBeenCalled();
     });
+
+    it('blacklists the access token that made the call (LOW-ADM-008)', async () => {
+      await service.logout('art_raw', { jti: 'jti-1', exp: 1893456000 });
+      expect(tokens.blacklistAccessToken).toHaveBeenCalledWith(
+        'jti-1',
+        1893456000,
+      );
+    });
+
+    it('revokes nothing when the blacklist cannot be written, so logout can be retried', async () => {
+      tokens.blacklistAccessToken.mockRejectedValue(new Error('Redis down'));
+      await expect(
+        service.logout('art_raw', { jti: 'jti-1', exp: 1893456000 }),
+      ).rejects.toThrow('Redis down');
+      expect(tokens.revoke).not.toHaveBeenCalled();
+    });
   });
 
   describe('sessions (multi-device)', () => {
@@ -593,6 +621,117 @@ describe('AdminAuthService', () => {
       // re-reads it), but the refresh rows must go too, or they would linger
       // until expiry.
       expect(tokens.revokeAllSessions).toHaveBeenCalledWith('adm_1');
+    });
+  });
+
+  describe('last SUPER_ADMIN (LOW-ADM-007)', () => {
+    const superAdmin = {
+      id: 'adm_super_a',
+      email: 'a@example.com',
+      name: 'A',
+      role: AdminRole.SUPER_ADMIN,
+    };
+    beforeEach(() => prisma.appAdmin.findUnique.mockResolvedValue(superAdmin));
+
+    it.each([
+      ['demote', () => service.changeRole('adm_super_a', AdminRole.MANAGER)],
+      ['deactivate', () => service.deactivate('adm_super_a')],
+      ['delete', () => service.deleteAdmin('adm_super_a')],
+    ])(
+      'refuses to %s the only active SUPER_ADMIN, inside the writing transaction',
+      async (_action, run) => {
+        prisma.$queryRaw.mockResolvedValue([{ id: 'adm_super_a' }]);
+
+        await expect(run()).rejects.toThrow(/last active SUPER_ADMIN/);
+
+        expect(prisma.appAdmin.update).not.toHaveBeenCalled();
+        expect(prisma.appAdmin.delete).not.toHaveBeenCalled();
+        expect(audit.record).not.toHaveBeenCalled();
+        expect(tokens.revokeAllSessions).not.toHaveBeenCalled();
+      },
+    );
+
+    it('locks the active SUPER_ADMIN rows in a fixed order before deciding', async () => {
+      await service.changeRole('adm_super_a', AdminRole.MANAGER);
+
+      const sql = (
+        prisma.$queryRaw.mock.calls[0] as unknown as [TemplateStringsArray]
+      )[0].join('');
+      expect(sql).toMatch(/role = 'SUPER_ADMIN' AND is_active = true/);
+      expect(sql).toMatch(/ORDER BY id\s+FOR UPDATE/);
+      // The lock is taken before the write it protects.
+      expect(prisma.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+        prisma.appAdmin.update.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('two SUPER_ADMINs demoting each other: the second sees the first gone and is refused', async () => {
+      // What the row lock produces: the loser's SELECT returns after the
+      // winner commits and no longer contains the demoted administrator.
+      prisma.$queryRaw
+        .mockResolvedValueOnce([{ id: 'adm_super_a' }, { id: 'adm_super_b' }])
+        .mockResolvedValueOnce([{ id: 'adm_super_b' }]);
+      prisma.appAdmin.findUnique.mockImplementation(
+        ({ where }: { where: { id: string } }) =>
+          Promise.resolve({ ...superAdmin, id: where.id }),
+      );
+
+      const results = await Promise.allSettled([
+        service.changeRole('adm_super_a', AdminRole.MANAGER),
+        service.changeRole('adm_super_b', AdminRole.MANAGER),
+      ]);
+
+      expect(results.map((r) => r.status).sort()).toEqual([
+        'fulfilled',
+        'rejected',
+      ]);
+      expect(prisma.appAdmin.update).toHaveBeenCalledTimes(1);
+    });
+
+    it('promoting, or changing an administrator who is not a SUPER_ADMIN, is not blocked', async () => {
+      prisma.$queryRaw.mockResolvedValue([{ id: 'adm_super_a' }]);
+      prisma.appAdmin.findUnique.mockResolvedValue({
+        ...superAdmin,
+        id: 'adm_1',
+        role: AdminRole.MANAGER,
+      });
+      await expect(
+        service.changeRole('adm_1', AdminRole.OPERATOR),
+      ).resolves.toBeUndefined();
+      await expect(service.deactivate('adm_1')).resolves.toBeUndefined();
+    });
+  });
+
+  describe('pending invites follow their issuer (LOW-ADM-006)', () => {
+    beforeEach(() =>
+      prisma.appAdmin.findUnique.mockResolvedValue({
+        id: 'adm_super_a',
+        email: 'a@example.com',
+        name: 'A',
+        role: AdminRole.SUPER_ADMIN,
+      }),
+    );
+
+    it.each([
+      ['deactivated', () => service.deactivate('adm_super_a')],
+      ['demoted', () => service.changeRole('adm_super_a', AdminRole.MANAGER)],
+      ['deleted', () => service.deleteAdmin('adm_super_a')],
+    ])('drops them when the issuer is %s', async (_what, run) => {
+      await run();
+      expect(prisma.adminInvite.deleteMany).toHaveBeenCalledWith({
+        where: { invitedById: 'adm_super_a', acceptedAt: null },
+      });
+    });
+
+    it('keeps them when the issuer stays a SUPER_ADMIN', async () => {
+      prisma.appAdmin.findUnique.mockResolvedValue({
+        id: 'adm_1',
+        email: 'm@example.com',
+        name: 'M',
+        role: AdminRole.MANAGER,
+      });
+      await service.changeRole('adm_1', AdminRole.SUPER_ADMIN);
+      expect(prisma.adminInvite.deleteMany).not.toHaveBeenCalled();
     });
   });
 

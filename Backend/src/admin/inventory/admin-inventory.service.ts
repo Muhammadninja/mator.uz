@@ -78,6 +78,35 @@ function describeChange(
   };
 }
 
+/** The part as it stands after an edit, for describing the next edit of it. */
+function applyEdit<
+  T extends {
+    purchasePriceUzs: Prisma.Decimal | null;
+    priceUzs: Prisma.Decimal;
+    cashbackPct: Prisma.Decimal;
+    stockQty: number;
+  },
+>(part: T, item: BatchUpdateInventoryItemDto): T {
+  return {
+    ...part,
+    ...(item.purchasePrice !== undefined
+      ? {
+          purchasePriceUzs:
+            item.purchasePrice === null
+              ? null
+              : new Prisma.Decimal(item.purchasePrice),
+        }
+      : {}),
+    ...(item.retailPrice !== undefined
+      ? { priceUzs: new Prisma.Decimal(item.retailPrice) }
+      : {}),
+    ...(item.cashbackPct !== undefined
+      ? { cashbackPct: new Prisma.Decimal(item.cashbackPct) }
+      : {}),
+    ...(item.stock !== undefined ? { stockQty: item.stock } : {}),
+  };
+}
+
 /**
  * Admin/operator Smart-Inventory console. Backs /v1/admin/inventory over the
  * EXISTING buyer catalog part (CatalogPart): the on-hand quantity, purchase and
@@ -150,12 +179,26 @@ export class AdminInventoryService {
    * applies or none does. Only the fields present on an item are written, and each
    * part that really changed leaves an audit entry with its old and new values.
    * Returns the number of rows updated.
+   *
+   * The rows are locked first, in id order, so the "previous" values in the audit
+   * are the ones this edit really replaced, and so another stock writer (a dealer
+   * sync, the Driver's Village projection, a reservation) cannot interleave with
+   * it: each waits for the other and then works on committed data. Only the
+   * columns an item names are written; `reserved_qty` is never touched here.
+   *
+   * A batch may name one part more than once. Each edit is then described
+   * against what the previous edit of that part left, not against the value the
+   * batch started from.
    */
   async batchUpdate(dto: BatchUpdateInventoryDto, ctx: AdminAuditContext = {}) {
     const updated = await this.prisma.$transaction(
       async (tx) => {
+        const ids = [...new Set(dto.items.map((item) => item.id))].sort();
+        await tx.$queryRaw`
+          SELECT id FROM catalog_parts
+          WHERE id = ANY(${ids}::text[]) ORDER BY id FOR UPDATE`;
         const before = await tx.catalogPart.findMany({
-          where: { id: { in: dto.items.map((item) => item.id) } },
+          where: { id: { in: ids } },
           select: {
             id: true,
             title: true,
@@ -195,6 +238,7 @@ export class AdminInventoryService {
               userAgent: ctx.userAgent,
             });
           }
+          if (part) byId.set(item.id, applyEdit(part, item));
         }
         await this.audit.recordMany(entries, tx);
         return count;

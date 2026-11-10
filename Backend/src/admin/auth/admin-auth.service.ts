@@ -1,10 +1,11 @@
 import {
+  BadRequestException,
   Injectable,
   Logger,
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { AdminAuditAction, AdminRole } from '@prisma/client';
+import { AdminAuditAction, AdminRole, Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import {
   hashPassword,
@@ -31,6 +32,14 @@ import { AuthenticatedAdmin } from './strategies/admin-jwt.strategy';
  */
 const DUMMY_HASH =
   '$argon2id$v=19$m=65536,t=3,p=4$gc69rDtsyU1zsc6ub4dgZA$4iGl2DEjIBLla6mfuDgPJbJYc/zPGJB2etJ3VOETWvk';
+
+/** The refusal for an action that would leave no active SUPER_ADMIN. */
+export function lastSuperAdminMessage(action: string): string {
+  return (
+    `Cannot ${action} the last active SUPER_ADMIN — the console would become unmanageable. ` +
+    'Promote another administrator first.'
+  );
+}
 
 /**
  * Who performed an administrator-mutating action, and from where — attached to
@@ -165,7 +174,13 @@ export class AdminAuthService {
    * Log out: invalidate the presented refresh token so it can no longer be
    * rotated. Other sessions this admin has open elsewhere are left alone.
    */
-  async logout(refreshToken: string): Promise<void> {
+  async logout(
+    refreshToken: string,
+    accessToken: { jti?: string; exp?: number } = {},
+  ): Promise<void> {
+    // The access token that made the call dies first: if Redis cannot record
+    // it, nothing is revoked and the client retries.
+    await this.tokens.blacklistAccessToken(accessToken.jti, accessToken.exp);
     await this.tokens.revoke(refreshToken);
   }
 
@@ -207,12 +222,15 @@ export class AdminAuthService {
       role?: AdminRole;
     },
     audit: AdminAuditContext = {},
+    outerTx?: Prisma.TransactionClient,
   ): Promise<{ id: string; email: string; name: string; role: AdminRole }> {
     const passwordHash = await AdminAuthService.hashPassword(params.password);
 
     // The account row and its audit entry commit together: an admin can never
-    // come into existence without a record of who created it.
-    return this.prisma.$transaction(async (tx) => {
+    // come into existence without a record of who created it. A caller that
+    // owns a transaction (invite acceptance) passes it, so the account commits
+    // or rolls back with the caller's own writes.
+    const run = async (tx: Prisma.TransactionClient) => {
       const admin = await tx.appAdmin.create({
         data: {
           email: params.email.trim().toLowerCase(),
@@ -235,7 +253,8 @@ export class AdminAuthService {
 
       this.logger.log(`Admin account created: ${admin.id} (${admin.role})`);
       return admin;
-    });
+    };
+    return outerTx ? run(outerTx) : this.prisma.$transaction(run);
   }
 
   /**
@@ -295,6 +314,12 @@ export class AdminAuthService {
     if (target.role === newRole) return; // no-op: nothing to audit.
 
     await this.prisma.$transaction(async (tx) => {
+      if (newRole !== AdminRole.SUPER_ADMIN) {
+        await this.guardLastSuperAdmin(tx, adminId, 'demote');
+        // Only a SUPER_ADMIN may invite; an invite outlives neither that role
+        // nor the account (see AdminInviteService.accept, which re-checks).
+        await this.dropPendingInvites(tx, adminId);
+      }
       await tx.appAdmin.update({
         where: { id: adminId },
         data: { role: newRole },
@@ -334,6 +359,8 @@ export class AdminAuthService {
     const target = await this.requireAdmin(adminId);
 
     await this.prisma.$transaction(async (tx) => {
+      await this.guardLastSuperAdmin(tx, adminId, 'deactivate');
+      await this.dropPendingInvites(tx, adminId);
       await tx.appAdmin.update({
         where: { id: adminId },
         data: { isActive: false },
@@ -383,18 +410,64 @@ export class AdminAuthService {
     const target = await this.requireAdmin(adminId);
 
     await this.prisma.$transaction(async (tx) => {
+      await this.guardLastSuperAdmin(tx, adminId, 'delete');
+      await this.dropPendingInvites(tx, adminId);
       await this.audit.record(
         { action: AdminAuditAction.DELETE_ADMIN, ...audit, target },
         tx,
       );
       await tx.appAdmin.delete({ where: { id: adminId } });
     });
+    // Nothing is left to bump a session version on; tell open transports
+    // (the admin realtime channel) directly.
+    this.tokens.notifyAdminRemoved(adminId);
     this.logger.log(`Admin ${adminId} deleted`);
   }
 
   /** The audit trail, newest first. */
   listAudit(params: Parameters<AdminAuditService['list']>[0]) {
     return this.audit.list(params);
+  }
+
+  /**
+   * Refuse, inside the caller's transaction, a change that would leave no
+   * active SUPER_ADMIN.
+   *
+   * The active SUPER_ADMIN rows are locked first, always in id order. Two
+   * administrators demoting each other therefore queue on the same rows: the
+   * second waits for the first to commit, PostgreSQL then re-evaluates the
+   * locked row set against the committed data, and the second sees one fewer
+   * active SUPER_ADMIN and is refused. Exactly one of them can win, and a count
+   * taken outside the writing transaction can no longer go stale.
+   */
+  private async guardLastSuperAdmin(
+    tx: Prisma.TransactionClient,
+    adminId: string,
+    action: 'demote' | 'deactivate' | 'delete',
+  ): Promise<void> {
+    const active = await tx.$queryRaw<{ id: string }[]>`
+      SELECT id FROM app_admins
+      WHERE role = 'SUPER_ADMIN' AND is_active = true
+      ORDER BY id
+      FOR UPDATE`;
+    if (active.some((row) => row.id === adminId) && active.length === 1) {
+      throw new BadRequestException(lastSuperAdminMessage(action));
+    }
+  }
+
+  /** Burn the unaccepted invites an administrator issued. */
+  private async dropPendingInvites(
+    tx: Prisma.TransactionClient,
+    adminId: string,
+  ): Promise<void> {
+    const dropped = await tx.adminInvite.deleteMany({
+      where: { invitedById: adminId, acceptedAt: null },
+    });
+    if (dropped.count > 0) {
+      this.logger.log(
+        `Dropped ${dropped.count} pending invite(s) issued by admin ${adminId}`,
+      );
+    }
   }
 
   /**

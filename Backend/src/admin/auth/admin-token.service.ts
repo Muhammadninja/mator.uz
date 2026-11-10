@@ -3,6 +3,8 @@ import { JwtService } from '@nestjs/jwt';
 import { AdminRole } from '@prisma/client';
 import { createHash, randomBytes, randomUUID } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
+import { RedisService } from '../../redis/redis.service';
+import { RedisKeys } from '../../redis/redis.keys';
 import {
   AdminAuthConfig,
   ADMIN_JWT_AUDIENCE,
@@ -30,6 +32,14 @@ export interface AdminSessionContext {
   ip?: string | null;
   userAgent?: string | null;
 }
+
+/** What was revoked, for transports holding a connection open (WebSockets). */
+export type AdminRevocation =
+  | { adminId: string }
+  | { jti: string }
+  | { sid: string };
+
+export type AdminRevocationListener = (revoked: AdminRevocation) => void;
 
 export interface IssuedAdminSession {
   accessToken: string;
@@ -69,24 +79,30 @@ function truncate(
 @Injectable()
 export class AdminTokenService {
   private readonly logger = new Logger(AdminTokenService.name);
+  private readonly revocationListeners: AdminRevocationListener[] = [];
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
     private readonly config: AdminAuthConfig,
+    private readonly redis: RedisService,
   ) {}
 
   private hash(token: string): string {
     return createHash('sha256').update(token).digest('hex');
   }
 
-  private async signAccessToken(admin: AdminSessionSubject): Promise<string> {
+  private async signAccessToken(
+    admin: AdminSessionSubject,
+    sid: string,
+  ): Promise<string> {
     const payload: AdminJwtPayload = {
       sub: admin.id,
       role: admin.role,
       type: 'admin',
       tokenVersion: admin.tokenVersion,
       jti: randomUUID(),
+      sid,
     };
     return this.jwt.signAsync(payload, {
       algorithm: 'HS256',
@@ -106,11 +122,16 @@ export class AdminTokenService {
   async issueSession(
     admin: AdminSessionSubject,
     context: AdminSessionContext = {},
+    sessionId?: string,
   ): Promise<IssuedAdminSession> {
-    const accessToken = await this.signAccessToken(admin);
+    // The device session this pair belongs to. A login opens a new one; a
+    // rotation carries its predecessor's, so "sign out this device" reaches the
+    // access tokens minted before and after a refresh alike.
+    const sid = sessionId ?? randomUUID();
+    const accessToken = await this.signAccessToken(admin, sid);
     const rawRefresh = `art_${randomBytes(32).toString('base64url')}`;
 
-    await this.prisma.adminRefreshToken.create({
+    const row = await this.prisma.adminRefreshToken.create({
       data: {
         tokenHash: this.hash(rawRefresh),
         adminId: admin.id,
@@ -126,7 +147,13 @@ export class AdminTokenService {
         userAgent: truncate(context.userAgent, 400),
         lastUsedAt: new Date(),
       },
+      select: { id: true },
     });
+    await this.redis.setEx(
+      RedisKeys.adminSessionOfRow(row.id),
+      this.config.refreshTtlSeconds,
+      sid,
+    );
 
     return {
       accessToken,
@@ -220,7 +247,81 @@ export class AdminTokenService {
         ip: stored.ip,
         userAgent: stored.userAgent,
       },
+      (await this.sessionOfRow(stored.id)) ?? undefined,
     );
+  }
+
+  private sessionOfRow(rowId: number): Promise<string | null> {
+    return this.redis.get<string>(RedisKeys.adminSessionOfRow(rowId));
+  }
+
+  /**
+   * Stop the access tokens of the device session a refresh row belongs to. The
+   * marker lives as long as the longest access token could, then expires by
+   * itself. Throws when Redis cannot be reached, so the caller's revocation
+   * fails loudly instead of leaving a live access token behind unnoticed.
+   */
+  private async revokeSessionAccess(rowId: number): Promise<void> {
+    const sid = await this.sessionOfRow(rowId);
+    // A row from before session ids existed: its access token carries none and
+    // expires within one access TTL of that deploy.
+    if (!sid) return;
+    await this.redis.setEx(
+      RedisKeys.adminSessionRevoked(sid),
+      this.config.accessTtlSeconds,
+      true,
+    );
+    this.notify({ sid });
+  }
+
+  /**
+   * Blacklist one access token (logout). The TTL is the token's own remaining
+   * life from its signed `exp`, never longer than an access token can live.
+   */
+  async blacklistAccessToken(
+    jti: string | undefined,
+    exp: number | undefined,
+  ): Promise<void> {
+    if (!jti || !exp) return;
+    const remaining = Math.min(
+      exp - Math.floor(Date.now() / 1000),
+      this.config.accessTtlSeconds,
+    );
+    if (remaining <= 0) return;
+    await this.redis.setEx(RedisKeys.adminJwtBlacklist(jti), remaining, true);
+    this.notify({ jti });
+  }
+
+  /**
+   * True when this access token was logged out or its device session was signed
+   * out. One Redis round trip. Rejects when Redis cannot answer: a revoked token
+   * is never accepted because the check could not be made.
+   */
+  isAccessTokenRevoked(token: { jti?: string; sid?: string }): Promise<boolean> {
+    const keys: string[] = [];
+    if (token.jti) keys.push(RedisKeys.adminJwtBlacklist(token.jti));
+    if (token.sid) keys.push(RedisKeys.adminSessionRevoked(token.sid));
+    return this.redis.existsAny(keys);
+  }
+
+  /** Register a transport to be told when admin credentials are revoked. */
+  onRevoked(listener: AdminRevocationListener): void {
+    this.revocationListeners.push(listener);
+  }
+
+  /** A deleted account has no session version left to bump: tell transports. */
+  notifyAdminRemoved(adminId: string): void {
+    this.notify({ adminId });
+  }
+
+  private notify(revoked: AdminRevocation): void {
+    for (const listener of this.revocationListeners) {
+      try {
+        listener(revoked);
+      } catch (err) {
+        this.logger.warn(`Admin revocation listener failed: ${String(err)}`);
+      }
+    }
   }
 
   /**
@@ -230,8 +331,17 @@ export class AdminTokenService {
    * session dies — the admin's other devices stay signed in.
    */
   async revoke(rawRefresh: string): Promise<void> {
+    const tokenHash = this.hash(rawRefresh);
+    const row = await this.prisma.adminRefreshToken.findUnique({
+      where: { tokenHash },
+      select: { id: true },
+    });
+    // Before the row is marked: were Redis down, the logout fails and can be
+    // retried, instead of ending with the refresh token dead and the access
+    // token quietly alive.
+    if (row) await this.revokeSessionAccess(row.id);
     await this.prisma.adminRefreshToken.updateMany({
-      where: { tokenHash: this.hash(rawRefresh), revokedAt: null },
+      where: { tokenHash, revokedAt: null },
       data: { revokedAt: new Date() },
     });
   }
@@ -280,6 +390,12 @@ export class AdminTokenService {
    * @returns true if a live session was revoked.
    */
   async revokeSession(adminId: string, sessionId: number): Promise<boolean> {
+    const live = await this.prisma.adminRefreshToken.findFirst({
+      where: { id: sessionId, adminId, revokedAt: null },
+      select: { id: true },
+    });
+    if (!live) return false;
+    await this.revokeSessionAccess(live.id);
     const result = await this.prisma.adminRefreshToken.updateMany({
       where: { id: sessionId, adminId, revokedAt: null },
       data: { revokedAt: new Date() },
@@ -304,6 +420,7 @@ export class AdminTokenService {
     this.logger.log(
       `Admin token version bumped for ${adminId} -> ${admin.tokenVersion}`,
     );
+    this.notify({ adminId });
     return admin.tokenVersion;
   }
 }

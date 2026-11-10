@@ -67,6 +67,21 @@ export function toVehicleFitContext(v: VehicleFitRow): VehicleFitContext {
   };
 }
 
+/**
+ * A trim compatibility row that applies to this model year: its `years` list
+ * is empty (every year) or names the year. The single translation of the
+ * card's `c.years.length === 0 || c.years.includes(year)`.
+ */
+export function trimRowForYear(
+  trimId: string,
+  year: number,
+): Prisma.PartCompatibilityWhereInput {
+  return {
+    trimId,
+    OR: [{ years: { isEmpty: true } }, { years: { has: year } }],
+  };
+}
+
 /** Matches parts that carry NO curated binding (so legacy rows still decide). */
 export const HAS_NO_CURATED_FITMENT = {
   fitmentBindings: { none: {} },
@@ -112,7 +127,11 @@ export function vehicleFitWhere(
 
   if (v.trimId || v.engineId) {
     const compatOr: Prisma.PartCompatibilityWhereInput[] = [];
-    if (v.trimId) compatOr.push({ trimId: v.trimId });
+    // LOW-CAT-008: a trim row matches only within its model years, the rule
+    // computeCompatibility (the card) and the compatibility facet already
+    // apply: no years means every year. Engine rows carry no year rule in the
+    // card, so none is added here either.
+    if (v.trimId) compatOr.push(trimRowForYear(v.trimId, v.year));
     if (v.engineId) compatOr.push({ engineId: v.engineId });
     or.push({
       compatibilities: {
@@ -138,10 +157,7 @@ export function compatibilityFacetWhere(v: VehicleFitContext): {
   doesNotFit: Prisma.CatalogPartWhereInput;
 } {
   const trimRow: Prisma.PartCompatibilityWhereInput | null = v.trimId
-    ? {
-        trimId: v.trimId,
-        OR: [{ years: { isEmpty: true } }, { years: { has: v.year } }],
-      }
+    ? trimRowForYear(v.trimId, v.year)
     : null;
   const engineRow: Prisma.PartCompatibilityWhereInput | null = v.engineId
     ? { engineId: v.engineId }

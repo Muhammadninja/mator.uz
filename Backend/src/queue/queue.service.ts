@@ -3,6 +3,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue, type Job, type JobsOptions } from 'bullmq';
 import { QUEUE_NAMES } from './queue.constants';
+import { maskPhone } from '../common/pii.util';
 import type { SmsLang } from '../sms/otp-message.i18n';
 import { OtpJobSecretStore } from './otp-job-secret.store';
 
@@ -207,7 +208,7 @@ export class QueueService {
     data: SmsJobData,
     opts?: JobsOptions,
   ): Promise<Job<SmsQueuePayload>> {
-    this.logger.debug(`Enqueue sms job for ${data.phone}`);
+    this.logger.debug(`Enqueue sms job for ${maskPhone(data.phone)}`);
     return this.smsQueue.add('send', data, opts);
   }
 

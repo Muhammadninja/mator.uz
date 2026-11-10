@@ -607,3 +607,32 @@ export function vehicleCategoryForCategory(
   }
   return null;
 }
+
+/**
+ * The home-grid bucket a category QUERY VALUE names, or null (LOW-CAT-006).
+ *
+ * THE one mapping from what the grid sends (a tile's id: the bucket's slug,
+ * e.g. 'belts-and-hoses') or a legacy enum value ('BELTS_AND_HOSES') to the
+ * bucket whose whole subtree is listed. The tile count and the listing it
+ * opens both resolve through here, so they name the same set of parts. It is
+ * keyed on the id, as the tree itself is (mainCategoryForCategory), never on a
+ * row's editable `mainCategory` column: editing that column cannot make a tile
+ * count one bucket and open another.
+ */
+export function bucketForCategoryParam(
+  raw: string | null | undefined,
+): PartMainCategory | null {
+  if (!raw) return null;
+  const up = raw.toUpperCase();
+  if ((Object.values(PartMainCategory) as string[]).includes(up)) {
+    return up as PartMainCategory;
+  }
+  const lower = raw.toLowerCase();
+  for (const [main, slug] of Object.entries(MAIN_CATEGORY_TO_SLUG) as [
+    PartMainCategory,
+    string,
+  ][]) {
+    if (slug === lower) return main;
+  }
+  return null;
+}

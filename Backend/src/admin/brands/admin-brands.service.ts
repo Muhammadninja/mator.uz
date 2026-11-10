@@ -150,8 +150,11 @@ export class AdminBrandsService {
       }),
     );
 
-    // Name/active/logo all feed the app's makes list, so bust it.
+    // Name/active/logo all feed the app's makes list, so bust it. `isActive`
+    // also gates every model of the brand (listModels hides an inactive make's
+    // models), so its models list goes too (LOW-CAT-012).
     await this.bustMakes();
+    if (dto.isActive !== undefined) await this.bustModels(id);
     return { success: true, data: presentAdminBrandRow(brand) };
   }
 
@@ -201,6 +204,13 @@ export class AdminBrandsService {
       select: { id: true, name: true },
     });
     if (!brand) throw new NotFoundException('Brand not found');
+    // The models the delete cascades away, whose trim lists are cached by model.
+    const modelIds = (
+      await this.prisma.vehicleModelRef.findMany({
+        where: { makeId: id },
+        select: { id: true },
+      })
+    ).map((m) => m.id);
     try {
       // Models cascade via the existing FK; a garage Vehicle referencing the
       // make blocks the delete with P2003.
@@ -237,9 +247,12 @@ export class AdminBrandsService {
       throw err;
     }
 
-    // Deleting the make removes it AND its models from the app catalog.
+    // Deleting the make removes it AND its models (and their trims) from the
+    // app catalog. Only after the delete committed: a refused delete (409)
+    // leaves every cache as it was.
     await this.bustMakes();
     await this.bustModels(id);
+    await this.bustTrims(modelIds);
     return { success: true, data: { id } };
   }
 
@@ -346,6 +359,8 @@ export class AdminBrandsService {
 
     await this.bustMakes();
     await this.bustModels(existing.makeId);
+    // The model's trims went with it (LOW-CAT-012).
+    await this.bustTrims([id]);
     return { success: true, data: { id } };
   }
 
@@ -443,6 +458,13 @@ export class AdminBrandsService {
   /** Bust a make's models list cache (models are cached per makeId). */
   private async bustModels(makeId: string): Promise<void> {
     await this.cache.delete(RedisKeys.cacheReferenceModels(makeId));
+  }
+
+  /** Bust the trims lists of these models (trims are cached per modelId). */
+  private async bustTrims(modelIds: readonly string[]): Promise<void> {
+    await Promise.all(
+      modelIds.map((id) => this.cache.delete(RedisKeys.cacheReferenceTrims(id))),
+    );
   }
 }
 

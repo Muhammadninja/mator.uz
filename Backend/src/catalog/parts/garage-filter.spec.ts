@@ -32,7 +32,7 @@ function makePrisma(garage: fx.VehicleKey = 'cobalt') {
       }),
       groupBy: jest.fn().mockResolvedValue([]),
       aggregate: jest.fn().mockResolvedValue({ _min: {}, _max: {} }),
-      findUnique: jest.fn(),
+      findFirst: jest.fn(),
     },
     partBrand: { findMany: jest.fn().mockResolvedValue([]) },
     // Like the database: the garage row comes back only for a lookup scoped
@@ -189,7 +189,7 @@ describe('vehicle_id path: resolved only in the caller garage', () => {
 
   it('legacy GET :id/compatibility answers for the owner only', async () => {
     const prisma = makePrisma('cobalt');
-    prisma.catalogPart.findUnique.mockResolvedValue({
+    prisma.catalogPart.findFirst.mockResolvedValue({
       id: 'p1',
       isUniversal: false,
       compatibilities: [],

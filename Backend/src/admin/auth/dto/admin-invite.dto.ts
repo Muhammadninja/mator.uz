@@ -72,3 +72,23 @@ export class AdminInvitePreviewDto {
   @ApiProperty({ enum: AdminRole, example: AdminRole.OPERATOR })
   role: AdminRole;
 }
+
+class InviteIssuerDto {
+  @ApiProperty() id: string;
+  @ApiProperty() email: string;
+  @ApiProperty() name: string;
+}
+
+/**
+ * A pending invite in GET /v1/auth/admin/invites. `id` identifies the invite for
+ * revocation; the token and its hash are never part of any response.
+ */
+export class PendingAdminInviteDto {
+  @ApiProperty() id: string;
+  @ApiProperty({ example: 'ops@example.com' }) email: string;
+  @ApiProperty({ enum: AdminRole }) role: AdminRole;
+  @ApiProperty() expiresAt: Date;
+  @ApiProperty() createdAt: Date;
+  @ApiProperty({ type: InviteIssuerDto, nullable: true })
+  invitedBy: InviteIssuerDto | null;
+}

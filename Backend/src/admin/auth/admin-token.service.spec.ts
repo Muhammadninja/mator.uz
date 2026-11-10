@@ -24,8 +24,9 @@ const SECRET = 'test-admin-secret-at-least-32-characters-long';
 
 function makePrismaMock() {
   const adminRefreshToken = {
-    create: jest.fn().mockResolvedValue({}),
+    create: jest.fn().mockResolvedValue({ id: 10 }),
     findUnique: jest.fn(),
+    findFirst: jest.fn(),
     // listSessions reads through findMany; declared here so the delegate's shape
     // covers every method the service calls rather than being patched onto the
     // object mid-test (which the type then rejects).
@@ -55,14 +56,38 @@ function firstCallArg<T>(fn: jest.Mock): T {
   return (fn.mock.calls as unknown as T[][])[0][0];
 }
 
+/** Just the Redis surface the service uses, backed by a Map. */
+function makeRedisMock() {
+  const store = new Map<string, unknown>();
+  const ttls = new Map<string, number>();
+  return {
+    store,
+    ttls,
+    get: jest.fn(async (key: string) => store.get(key) ?? null),
+    setEx: jest.fn(async (key: string, ttl: number, value: unknown) => {
+      store.set(key, value);
+      ttls.set(key, ttl);
+      return 'OK';
+    }),
+    existsAny: jest.fn(async (keys: string[]) => keys.some((k) => store.has(k))),
+  };
+}
+
 describe('AdminTokenService', () => {
   let prisma: ReturnType<typeof makePrismaMock>;
+  let redis: ReturnType<typeof makeRedisMock>;
   let service: AdminTokenService;
   const jwt = new JwtService({});
 
   beforeEach(() => {
     prisma = makePrismaMock();
-    service = new AdminTokenService(prisma as never, jwt, configMock as never);
+    redis = makeRedisMock();
+    service = new AdminTokenService(
+      prisma as never,
+      jwt,
+      configMock as never,
+      redis as never,
+    );
   });
 
   const subject = { id: 'adm_1', role: AdminRole.SUPER_ADMIN, tokenVersion: 3 };
@@ -374,6 +399,7 @@ describe('AdminTokenService', () => {
     });
 
     it('revokes one session by id, scoped to its owner', async () => {
+      prisma.adminRefreshToken.findFirst.mockResolvedValue({ id: 42 });
       prisma.adminRefreshToken.updateMany.mockResolvedValue({ count: 1 });
       await expect(service.revokeSession('adm_1', 42)).resolves.toBe(true);
 
@@ -386,8 +412,14 @@ describe('AdminTokenService', () => {
     });
 
     it("reports false when the session is not the caller's", async () => {
-      prisma.adminRefreshToken.updateMany.mockResolvedValue({ count: 0 });
+      prisma.adminRefreshToken.findFirst.mockResolvedValue(null);
       await expect(service.revokeSession('adm_1', 999)).resolves.toBe(false);
+      expect(prisma.adminRefreshToken.findFirst).toHaveBeenCalledWith({
+        where: { id: 999, adminId: 'adm_1', revokedAt: null },
+        select: { id: true },
+      });
+      expect(prisma.adminRefreshToken.updateMany).not.toHaveBeenCalled();
+      expect(redis.setEx).not.toHaveBeenCalled();
     });
 
     it('lists only live sessions on the current token version', async () => {
@@ -425,6 +457,109 @@ describe('AdminTokenService', () => {
       // admin's other devices keep working.
       expect(prisma.appAdmin.update).not.toHaveBeenCalled();
       expect(prisma.adminRefreshToken.deleteMany).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('access-token revocation (LOW-ADM-008)', () => {
+    const claims = (token: string) => jwt.decode<AdminJwtPayload>(token);
+
+    it('logout blacklists the access token for exactly its remaining life', async () => {
+      const exp = Math.floor(Date.now() / 1000) + 300;
+      await service.blacklistAccessToken('jti-1', exp);
+
+      await expect(service.isAccessTokenRevoked({ jti: 'jti-1' })).resolves.toBe(
+        true,
+      );
+      const ttl = redis.ttls.get('admin:jwt:blacklist:jti-1')!;
+      expect(ttl).toBeGreaterThan(295);
+      expect(ttl).toBeLessThanOrEqual(300);
+    });
+
+    it('never keeps a blacklist entry longer than an access token can live', async () => {
+      // A forged-looking far-future exp cannot pin a key in Redis.
+      await service.blacklistAccessToken(
+        'jti-1',
+        Math.floor(Date.now() / 1000) + 10 * 24 * 3600,
+      );
+      expect(redis.ttls.get('admin:jwt:blacklist:jti-1')).toBe(900);
+    });
+
+    it('stores nothing for a token that has already expired', async () => {
+      await service.blacklistAccessToken(
+        'jti-1',
+        Math.floor(Date.now() / 1000) - 1,
+      );
+      expect(redis.setEx).not.toHaveBeenCalled();
+    });
+
+    it('"sign out this device" revokes that device\'s access token and no other', async () => {
+      prisma.adminRefreshToken.create
+        .mockResolvedValueOnce({ id: 1 })
+        .mockResolvedValueOnce({ id: 2 });
+      const laptop = claims((await service.issueSession(subject)).accessToken);
+      const phone = claims((await service.issueSession(subject)).accessToken);
+      expect(laptop.sid).not.toBe(phone.sid);
+
+      prisma.adminRefreshToken.findFirst.mockResolvedValue({ id: 1 });
+      await service.revokeSession('adm_1', 1);
+
+      await expect(service.isAccessTokenRevoked(laptop)).resolves.toBe(true);
+      // An independent session stays valid unless it is revoked itself.
+      await expect(service.isAccessTokenRevoked(phone)).resolves.toBe(false);
+    });
+
+    it('a refresh keeps the device session, so revoking it reaches tokens minted before and after', async () => {
+      prisma.adminRefreshToken.create.mockResolvedValueOnce({ id: 10 });
+      const before = claims((await service.issueSession(subject)).accessToken);
+
+      prisma.adminRefreshToken.findUnique.mockResolvedValue(storedRow({ id: 10 }));
+      prisma.adminRefreshToken.create.mockResolvedValueOnce({ id: 11 });
+      const after = claims((await service.rotate('art_old')).accessToken);
+      expect(after.sid).toBe(before.sid);
+
+      prisma.adminRefreshToken.findFirst.mockResolvedValue({ id: 11 });
+      await service.revokeSession('adm_1', 11);
+
+      await expect(service.isAccessTokenRevoked(before)).resolves.toBe(true);
+      await expect(service.isAccessTokenRevoked(after)).resolves.toBe(true);
+    });
+
+    it('logout by refresh token revokes the device session before marking the row', async () => {
+      prisma.adminRefreshToken.create.mockResolvedValueOnce({ id: 7 });
+      const token = claims((await service.issueSession(subject)).accessToken);
+      prisma.adminRefreshToken.findUnique.mockResolvedValue({ id: 7 });
+
+      await service.revoke('art_one');
+
+      await expect(service.isAccessTokenRevoked(token)).resolves.toBe(true);
+    });
+
+    it('leaves the refresh row untouched when Redis cannot record the revocation', async () => {
+      prisma.adminRefreshToken.create.mockResolvedValueOnce({ id: 7 });
+      await service.issueSession(subject);
+      prisma.adminRefreshToken.findUnique.mockResolvedValue({ id: 7 });
+      redis.setEx.mockRejectedValueOnce(new Error('Redis down'));
+
+      await expect(service.revoke('art_one')).rejects.toThrow('Redis down');
+      expect(prisma.adminRefreshToken.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('a Redis outage is an error, never "not revoked"', async () => {
+      redis.existsAny.mockRejectedValue(new Error('Redis down'));
+      await expect(
+        service.isAccessTokenRevoked({ jti: 'jti-1', sid: 'sid-1' }),
+      ).rejects.toThrow('Redis down');
+    });
+
+    it('tells open transports what was revoked', async () => {
+      const seen: unknown[] = [];
+      service.onRevoked((r) => seen.push(r));
+      await service.blacklistAccessToken(
+        'jti-1',
+        Math.floor(Date.now() / 1000) + 60,
+      );
+      await service.revokeAllSessions('adm_1');
+      expect(seen).toEqual([{ jti: 'jti-1' }, { adminId: 'adm_1' }]);
     });
   });
 

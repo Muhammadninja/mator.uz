@@ -1,4 +1,5 @@
 import { withSearchForms } from '../../common/normalize-oem.util';
+import { displayablePhotos } from '../../admin/photo-coverage/photo-coverage.rules';
 import { Injectable, Logger } from '@nestjs/common';
 import {
   Prisma,
@@ -675,7 +676,14 @@ export class CatalogProjectionService {
     const brandId = CatalogProjectionService.singleBrandId(brandsForProduct);
 
     const partId = CatalogProjectionService.catalogPartId(stock.id);
-    const images = product.images.map((img) => img.url);
+    // LOW-CAT-013: only photos the buyer's card can load are projected, so the
+    // stored array's first entry is always a displayable photo whenever the
+    // array is non-empty. That makes the buyer catalog's rule (a non-empty
+    // `images`) and the admin coverage rule (`images[0]` is displayable) one
+    // and the same for every row written from here. A gallery whose first photo
+    // was broken lists its next good one first; one with no good photo projects
+    // as empty and is not listed. Nothing is deleted from product_images.
+    const images = displayablePhotos(product.images.map((img) => img.url));
 
     // Project the part number into the GM/OEM search arrays by its LABELED type,
     // without cross-copying. A GM-labeled number is searchable only as GM, an

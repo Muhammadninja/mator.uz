@@ -176,6 +176,9 @@ export class OrdersService {
         partId: i.partId,
         title: i.title,
         quantity: i.quantity,
+        offerId: i.offerId,
+        serviceId: i.serviceId,
+        providerId: i.providerId,
       })),
     );
     if (refusedForQuantityAlone(unavailable)) {
@@ -200,7 +203,10 @@ export class OrdersService {
     // an order. Without these checks the ids are persisted verbatim, letting a
     // user reference another user's vehicle or address (cross-tenant reference).
     await this.assertOwnedVehicle(userId, dto.vehicle_id);
-    await this.assertOwnedAddress(userId, dto.cart_snapshot?.delivery_address_id);
+    await this.assertOwnedAddress(
+      userId,
+      dto.cart_snapshot?.delivery_address_id ?? undefined,
+    );
 
     // Apply active sales per line, so the order is charged the SAME discounted
     // price the buyer saw in the catalog and cart. A line's charged unit price is
@@ -366,7 +372,14 @@ export class OrdersService {
       // After the check above, whose lock holds these parts until commit.
       const stillUnavailable = await findUnavailableParts(
         tx,
-        lines.map((i) => ({ partId: i.partId, title: i.title, quantity: i.quantity })),
+        lines.map((i) => ({
+          partId: i.partId,
+          title: i.title,
+          quantity: i.quantity,
+          offerId: i.offerId,
+          serviceId: i.serviceId,
+          providerId: i.providerId,
+        })),
       );
       if (refusedForQuantityAlone(stillUnavailable)) {
         throw new StockConflictError(stillUnavailable);
@@ -639,7 +652,9 @@ export class OrdersService {
         message: 'Cancelling an order needs a reason.',
       });
     }
-    const paymentsOnFile =
+    // An early, friendly refusal. The decision is made again under the order's
+    // row lock below (INFO-6).
+    let paymentsOnFile =
       to === OrderStatus.PAID
         ? await this.assertCanMarkPaid(order, note, actor)
         : null;
@@ -655,6 +670,19 @@ export class OrdersService {
     // same transaction: the history records the lifecycle, the audit entry what
     // an operator is accountable for about the money.
     const moved = await this.prisma.$transaction(async (tx) => {
+      if (to === OrderStatus.PAID) {
+        // INFO-6: Payme's CreateTransaction takes this same lock before it
+        // looks for an active transaction and inserts one. Taking it here and
+        // reading the payments again under it means a manual confirmation and
+        // a new Payme transaction are decided one after the other: either the
+        // transaction exists first and this is refused (PAYMENT_IN_PROGRESS),
+        // or the order is PAID first and Payme's re-check refuses to bind a
+        // transaction to it. A PerformTransaction racing this cannot both
+        // capture money and lose: its own move to PAID is conditional on the
+        // status, in the same transaction as its claim.
+        await tx.$queryRaw`SELECT id FROM orders WHERE id = ${orderId} FOR UPDATE`;
+        paymentsOnFile = await this.assertCanMarkPaid(order, note, actor, tx);
+      }
       const changed = await this.orderStatus.transitionIf(orderId, [from], to, {
         tx,
         actor,
@@ -793,8 +821,9 @@ export class OrdersService {
     order: { id: string; paymentType: PaymentType | null },
     note: string | null,
     actor?: StatusActor,
+    db: Prisma.TransactionClient = this.prisma,
   ) {
-    const payments = await this.prisma.payment.findMany({
+    const payments = await db.payment.findMany({
       where: { orderId: order.id },
       select: {
         id: true,

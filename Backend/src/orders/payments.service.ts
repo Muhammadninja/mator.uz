@@ -19,7 +19,8 @@ import { buildPaymeCheckoutUrl } from './webhooks/payme-checkout.util';
 import { PaymeFiscalService } from './webhooks/payme-fiscal.service';
 import { findOpenPaymeInvoice } from './webhooks/payme-invoice.util';
 import { isPayableOrderStatus } from './order-transitions';
-import { isClickEnabled } from './webhooks/click.config';
+import { clickMerchantIds, isClickEnabled } from './webhooks/click.config';
+import { assertReturnUrl, readReturnUrlPolicy } from './payment-return-url';
 import { assertAllAvailable } from './order-availability';
 import { findUnavailableForPayment } from './inventory/payment-availability';
 import { OFFLINE_PAYMENT_TYPES } from './offline-order.policy';
@@ -32,7 +33,16 @@ export class PaymentsService {
     private readonly fiscal: PaymeFiscalService,
   ) {}
 
+  private returnUrl(dto: CreateInvoiceDto): string | undefined {
+    return assertReturnUrl(
+      dto.return_url,
+      readReturnUrlPolicy((key) => this.config.get<string>(key)),
+    );
+  }
+
   async createPaymeInvoice(userId: string, dto: CreateInvoiceDto) {
+    // Refused before anything is read or written for the order.
+    const returnUrl = this.returnUrl(dto);
     const order = await this.loadPayableOrder(userId, dto.order_id);
     // Stock can change between placing the order and paying it: refuse a
     // checkout link for an order whose parts can no longer be sold.
@@ -54,7 +64,7 @@ export class PaymentsService {
       orderId: order.id,
       amountTiyin: tiyin,
       checkoutBaseUrl: payme.checkoutUrl,
-      returnUrl: dto.return_url,
+      returnUrl,
     });
     // Both fields carry the same official checkout link. The app opens it
     // directly; Payme's own page hands off to the installed Payme app.
@@ -113,11 +123,17 @@ export class PaymentsService {
     if (!isClickEnabled((k) => this.config.get<string>(k))) {
       throw new BadRequestException('Click payments are not enabled');
     }
+    // No placeholder ids: without the real ones a link would point at another
+    // merchant's service. Boot validation refuses this state; this is the guard
+    // for a process assembled without it.
+    const ids = clickMerchantIds((k) => this.config.get<string>(k));
+    if (!ids) {
+      throw new BadRequestException('Click payments are not enabled');
+    }
+    const { serviceId, merchantId } = ids;
+    const returnUrl = this.returnUrl(dto) ?? '';
     const order = await this.loadPayableOrder(userId, dto.order_id);
     const amountUzs = Number(order.totalUzs);
-    const serviceId = this.config.get<string>('CLICK_SERVICE_ID') ?? '12345';
-    const merchantId = this.config.get<string>('CLICK_MERCHANT_ID') ?? '67890';
-    const returnUrl = dto.return_url ?? '';
     const base = `service_id=${serviceId}&merchant_id=${merchantId}&amount=${amountUzs}&transaction_param=${order.id}`;
     const deepLink = `click://services/pay?${base}&return_url=${encodeURIComponent(returnUrl)}`;
     const httpsFallback = `https://my.click.uz/services/pay?${base}`;

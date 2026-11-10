@@ -64,11 +64,17 @@ function payload(over: Partial<AdminJwtPayload> = {}): AdminJwtPayload {
 describe('AdminJwtStrategy.validate', () => {
   let prisma: ReturnType<typeof makePrismaMock>;
   let strategy: AdminJwtStrategy;
+  let tokens: { isAccessTokenRevoked: jest.Mock };
   let req: Request;
 
   beforeEach(() => {
     prisma = makePrismaMock();
-    strategy = new AdminJwtStrategy(prisma as never, configMock as never);
+    tokens = { isAccessTokenRevoked: jest.fn().mockResolvedValue(false) };
+    strategy = new AdminJwtStrategy(
+      prisma as never,
+      configMock as never,
+      tokens as never,
+    );
     req = {} as Request;
   });
 
@@ -215,6 +221,30 @@ describe('AdminJwtStrategy.validate', () => {
         strategy.validate(req, payload({ type: 'user' as 'admin' })),
       ).rejects.toThrow('Not an admin token');
       // Rejected before any DB work.
+      expect(prisma.appAdmin.findUnique).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('access-token revocation (LOW-ADM-008)', () => {
+    it('rejects a logged-out or device-revoked token before any database read', async () => {
+      tokens.isAccessTokenRevoked.mockResolvedValue(true);
+      await expect(
+        strategy.validate(req, payload({ jti: 'jti-1', sid: 'sid-1' })),
+      ).rejects.toThrow('Token revoked');
+      expect(tokens.isAccessTokenRevoked).toHaveBeenCalledWith(
+        expect.objectContaining({ jti: 'jti-1', sid: 'sid-1' }),
+      );
+      expect(prisma.appAdmin.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('does not accept a token when the revocation check cannot be made', async () => {
+      // Redis down: the error surfaces (503), it is never read as "not revoked".
+      tokens.isAccessTokenRevoked.mockRejectedValue(
+        new Error('Redis EXISTS failed'),
+      );
+      await expect(strategy.validate(req, payload())).rejects.toThrow(
+        'Redis EXISTS failed',
+      );
       expect(prisma.appAdmin.findUnique).not.toHaveBeenCalled();
     });
   });

@@ -8,11 +8,19 @@
 
 import { NotFoundException } from '@nestjs/common';
 import { SellerStatus } from '@prisma/client';
-import { SellersService } from './sellers.service';
+import { Reflector } from '@nestjs/core';
+import { SELLER_STATUS_TRANSITIONS, SellersService } from './sellers.service';
+import { AdminController } from '../admin/admin.controller';
+import { QueueHealthController } from '../ops/queue-health.controller';
+import { RolesGuard } from '../auth/guards/roles.guard';
+import { ROLES_KEY } from '../auth/decorators/roles.decorator';
 import { SellerEvent } from './seller-events';
 
 function makePrisma(seller: Record<string, unknown> | null) {
-  return {
+  const prisma = {
+    // The row lock taken before the status is read.
+    $queryRaw: jest.fn().mockResolvedValue([]),
+    $transaction: (run: (tx: unknown) => unknown) => run(prisma),
     seller: {
       findUnique: jest.fn().mockResolvedValue(seller),
       update: jest
@@ -30,6 +38,7 @@ function makePrisma(seller: Record<string, unknown> | null) {
       upsert: jest.fn(),
     },
   };
+  return prisma;
 }
 
 function makeEvents() {
@@ -100,18 +109,20 @@ describe('SellersService.updateStatus — approval event', () => {
     expect(events.emit).not.toHaveBeenCalled();
   });
 
-  it('emits when a REJECTED seller is later approved (a real transition)', async () => {
-    const { svc, events } = makeService({
+  it('does not approve a REJECTED seller in one call, and messages nobody', async () => {
+    const { svc, prisma, events } = makeService({
       ...pendingSeller,
       status: SellerStatus.REJECTED,
     });
 
-    await svc.updateStatus(7, SellerStatus.ACTIVE);
-
-    expect(events.emit).toHaveBeenCalledWith(SellerEvent.APPROVED, {
-      sellerId: 7,
-      tgId: BigInt(123456),
-    });
+    await expect(svc.updateStatus(7, SellerStatus.ACTIVE)).rejects.toMatchObject(
+      {
+        status: 409,
+        response: { code: 'SELLER_STATUS_TRANSITION_NOT_ALLOWED' },
+      },
+    );
+    expect(prisma.seller.update).not.toHaveBeenCalled();
+    expect(events.emit).not.toHaveBeenCalled();
   });
 
   it('throws for an unknown seller and emits nothing', async () => {
@@ -161,5 +172,155 @@ describe('SellersService — TELEGRAM vs BUSINESS sellers', () => {
     expect(prisma.seller.update).toHaveBeenCalledWith({ where: { id: 9 }, data: { status: SellerStatus.ACTIVE } });
     expect(result).toMatchObject({ id: 9, status: SellerStatus.ACTIVE });
     expect(events.emit).not.toHaveBeenCalled();
+  });
+});
+
+// LOW-ADM-010: the explicit transition table, decided under a row lock.
+describe('SellersService.updateStatus — transitions', () => {
+  const { PENDING, ACTIVE, REJECTED } = SellerStatus;
+  const withStatus = (status: SellerStatus) => ({ ...pendingSeller, status });
+
+  it.each([
+    [PENDING, ACTIVE],
+    [PENDING, REJECTED],
+    [ACTIVE, REJECTED],
+  ])('%s -> %s is allowed and written', async (from, to) => {
+    const { svc, prisma } = makeService(withStatus(from));
+    await expect(svc.updateStatus(7, to)).resolves.toMatchObject({ status: to });
+    expect(prisma.seller.update).toHaveBeenCalledWith({
+      where: { id: 7 },
+      data: { status: to },
+    });
+  });
+
+  it.each([
+    [REJECTED, ACTIVE],
+    [REJECTED, PENDING],
+    [ACTIVE, PENDING],
+  ])('%s -> %s is refused with 409 and nothing is written', async (from, to) => {
+    const { svc, prisma } = makeService(withStatus(from));
+    await expect(svc.updateStatus(7, to)).rejects.toMatchObject({ status: 409 });
+    expect(prisma.seller.update).not.toHaveBeenCalled();
+  });
+
+  it.each([PENDING, ACTIVE, REJECTED])(
+    'asking for the current status (%s) is an idempotent no-op',
+    async (status) => {
+      const { svc, prisma, events } = makeService(withStatus(status));
+      await expect(svc.updateStatus(7, status)).resolves.toMatchObject({
+        status,
+      });
+      expect(prisma.seller.update).not.toHaveBeenCalled();
+      expect(events.emit).not.toHaveBeenCalled();
+    },
+  );
+
+  it('the table covers every status, so a new one cannot be forgotten', () => {
+    expect(Object.keys(SELLER_STATUS_TRANSITIONS).sort()).toEqual(
+      Object.values(SellerStatus).sort(),
+    );
+  });
+
+  it('locks the row before reading the status it decides on', async () => {
+    const { svc, prisma } = makeService(pendingSeller);
+    await svc.updateStatus(7, ACTIVE);
+    const sql = (
+      prisma.$queryRaw.mock.calls[0] as unknown as [TemplateStringsArray]
+    )[0].join('?');
+    expect(sql).toMatch(/FROM sellers WHERE id = \? FOR UPDATE/);
+    expect(prisma.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      prisma.seller.findUnique.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('a concurrent approve and reject cannot both apply to the PENDING row', async () => {
+    // What the row lock produces: the second caller reads what the first wrote.
+    const { svc, prisma, events } = makeService(pendingSeller);
+    // Stand-in for `SELECT … FOR UPDATE`: one transaction at a time.
+    let queue: Promise<unknown> = Promise.resolve();
+    (prisma as { $transaction: unknown }).$transaction = (
+      run: (tx: unknown) => Promise<unknown>,
+    ) => {
+      const next = queue.then(() => run(prisma));
+      queue = next.catch(() => undefined);
+      return next;
+    };
+    let current: SellerStatus = PENDING;
+    prisma.seller.findUnique.mockImplementation(async () => ({
+      ...pendingSeller,
+      status: current,
+    }));
+    prisma.seller.update.mockImplementation(
+      async (args: { data: { status: SellerStatus } }) => {
+        current = args.data.status;
+        return { ...pendingSeller, status: current };
+      },
+    );
+
+    const results = await Promise.allSettled([
+      svc.updateStatus(7, REJECTED),
+      svc.updateStatus(7, ACTIVE),
+    ]);
+
+    // Rejection won; the approval was judged against REJECTED and refused.
+    expect(results.map((r) => r.status)).toEqual(['fulfilled', 'rejected']);
+    expect(current).toBe(REJECTED);
+    expect(events.emit).not.toHaveBeenCalled();
+  });
+});
+
+// The legacy plane keeps its access rule exactly: buyer-JWT Role.ADMIN only.
+describe('legacy api/admin plane access (unchanged)', () => {
+  const rolesOf = (target: object) =>
+    Reflect.getMetadata(ROLES_KEY, target) as string[];
+
+  it('seller approval and the queue-health route still require Role.ADMIN', () => {
+    expect(rolesOf(AdminController)).toEqual(['ADMIN']);
+    expect(rolesOf(QueueHealthController)).toEqual(['ADMIN']);
+  });
+
+  it('a buyer USER is refused by the guard, an ADMIN is let through', () => {
+    const guard = new RolesGuard(new Reflector());
+    const ctx = (role: string) =>
+      ({
+        getHandler: () => AdminController.prototype.approveSeller,
+        getClass: () => AdminController,
+        switchToHttp: () => ({ getRequest: () => ({ user: { role } }) }),
+      }) as never;
+    expect(guard.canActivate(ctx('USER'))).toBe(false);
+    expect(guard.canActivate(ctx('ADMIN'))).toBe(true);
+  });
+});
+
+// LOW-ING-012: repeated /start never makes a second seller.
+describe('SellersService.upsertFromBot', () => {
+  it('is keyed on the unique tg_id, so repeated /start finds the same row', async () => {
+    const { svc, prisma } = makeService(pendingSeller);
+    prisma.seller.upsert.mockResolvedValue(pendingSeller);
+    await svc.upsertFromBot(123456n, 'Avtomir');
+    await svc.upsertFromBot(123456n, 'Avtomir');
+    for (const [args] of prisma.seller.upsert.mock.calls as any[]) {
+      expect(args.where).toEqual({ tgId: 123456n });
+      expect(args.update).toEqual({});
+    }
+  });
+
+  it('a concurrent duplicate that loses the insert gets the winner\'s row, not an error', async () => {
+    const { svc, prisma } = makeService(pendingSeller);
+    const { Prisma } = jest.requireActual<typeof import('@prisma/client')>('@prisma/client');
+    prisma.seller.upsert.mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+        code: 'P2002',
+        clientVersion: 'x',
+      }),
+    );
+    await expect(svc.upsertFromBot(123456n, 'Avtomir')).resolves.toBe(pendingSeller);
+    expect(prisma.seller.findUnique).toHaveBeenCalledWith({ where: { tgId: 123456n } });
+  });
+
+  it('other database errors still surface', async () => {
+    const { svc, prisma } = makeService(pendingSeller);
+    prisma.seller.upsert.mockRejectedValue(new Error('db down'));
+    await expect(svc.upsertFromBot(123456n, 'Avtomir')).rejects.toThrow('db down');
   });
 });

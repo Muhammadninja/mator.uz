@@ -1,6 +1,6 @@
 import { PrismaService } from '../prisma/prisma.service';
 import { SyncMode } from './dto/sync-inventory.dto';
-import { IntegrationsService } from './integrations.service';
+import { MAX_STOCK_QTY, IntegrationsService } from './integrations.service';
 import type { IntegrationDealer } from './interfaces/integration-dealer.interface';
 
 const dealer: IntegrationDealer = {
@@ -157,6 +157,48 @@ describe('IntegrationsService.syncInventory', () => {
     const { data } = updateMany.mock.calls[0][0];
     expect(data).not.toHaveProperty('priceUzs');
     expect(data.purchasePriceUzs.toString()).toBe('5000');
+  });
+
+  it('PARTIAL: an overflowing total is refused before the first chunk commits (LOW-ING-011)', async () => {
+    findMany.mockResolvedValue([
+      { id: 'part_1', oemNumbers: ['A1'], gmNumbers: [] },
+      { id: 'part_2', oemNumbers: ['B2'], gmNumbers: [] },
+    ]);
+    const rows = [
+      // A valid position that a chunked write would have committed first.
+      { article: 'B2', title: 'Y', quantity: 5, price: 1000 },
+      ...Array.from({ length: 2_148 }, () => ({
+        article: 'A1',
+        title: 'X',
+        quantity: 1_000_000,
+        price: 1000,
+      })),
+    ];
+    await expect(service.syncInventory(dealer, { items: rows })).rejects.toMatchObject({
+      response: { code: 'SYNC_QUANTITY_OUT_OF_RANGE' },
+    });
+    expect(updateMany).not.toHaveBeenCalled();
+    expect(findMany).not.toHaveBeenCalled();
+  });
+
+  it('PARTIAL: two articles naming one part cannot sum past the column either', async () => {
+    findMany.mockResolvedValue([
+      {
+        id: 'part_1',
+        oemNumbers: Array.from({ length: 3000 }, (_, i) => `X${i}`),
+        gmNumbers: [],
+      },
+    ]);
+    const rows = Array.from({ length: 3000 }, (_, i) => ({
+      article: `X${i}`,
+      title: 'X',
+      quantity: 1_000_000,
+      price: 1000,
+    }));
+    await expect(service.syncInventory(dealer, { items: rows })).rejects.toMatchObject({
+      response: { code: 'SYNC_QUANTITY_OUT_OF_RANGE' },
+    });
+    expect(updateMany).not.toHaveBeenCalled();
   });
 
   it('reports an unknown article as skipped instead of creating a part', async () => {
@@ -526,6 +568,38 @@ describe('FULL sync is one complete, atomic upload (ING-003)', () => {
       stock: () => stock,
     };
   }
+
+  // LOW-ING-011: a sum that does not fit the column is refused before any write.
+  describe('quantity overflow', () => {
+    const MAX_ROW = 1_000_000;
+    const repeats = (article: string, n: number) =>
+      Array.from({ length: n }, () => item(article, MAX_ROW));
+
+    it('FULL: 2,148 rows of one article at the per-row maximum change nothing and zero nothing', async () => {
+      const { service, stock, prisma } = world();
+      await expect(
+        service.syncInventory(dealer, {
+          mode: SyncMode.FULL,
+          items: repeats('AAA111', 2_148),
+        }),
+      ).rejects.toMatchObject({
+        status: 400,
+        response: { code: 'SYNC_QUANTITY_OUT_OF_RANGE' },
+      });
+      expect(stock()).toEqual({ a: 1, b: 2, c: 3 });
+      // Refused before a transaction was even opened.
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('the largest total that fits still applies', async () => {
+      const { service, stock } = world();
+      await service.syncInventory(dealer, {
+        mode: SyncMode.FULL,
+        items: [...repeats('AAA111', 2_147), item('AAA111', 483_647)],
+      });
+      expect(stock().a).toBe(MAX_STOCK_QTY);
+    });
+  });
 
   it('keeps accepting a FULL upload that does not state its size', async () => {
     const { service, stock } = world();

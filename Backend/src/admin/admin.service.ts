@@ -14,11 +14,11 @@ export class AdminService {
     return this.sellers.findPending();
   }
 
-  approveSeller(id: number) {
-    return this.sellers.updateStatus(id, SellerStatus.ACTIVE);
+  approveSeller(id: number, actorId?: string) {
+    return this.sellers.updateStatus(id, SellerStatus.ACTIVE, actorId);
   }
 
-  rejectSeller(id: number) {
-    return this.sellers.updateStatus(id, SellerStatus.REJECTED);
+  rejectSeller(id: number, actorId?: string) {
+    return this.sellers.updateStatus(id, SellerStatus.REJECTED, actorId);
   }
 }

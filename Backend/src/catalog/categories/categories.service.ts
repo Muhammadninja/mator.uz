@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { bucketForCategoryParam } from './category-map';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import {
@@ -134,7 +135,14 @@ export class CategoriesService {
         name_uz: c.nameUz,
         name_en: c.nameEn,
         slug: c.slug ?? c.id,
-        count: c.mainCategory ? (counts.get(c.mainCategory) ?? 0) : 0,
+        // The bucket this tile OPENS (its id, resolved exactly as the listing
+        // resolves ?category=<id>), not the row's editable column; see
+        // bucketForCategoryParam. A tile no bucket answers to counts the tree's
+        // own classification of its id.
+        count: (() => {
+          const bucket = bucketForCategoryParam(c.id) ?? tree.mainCategoryOf(c.id);
+          return bucket ? (counts.get(bucket) ?? 0) : 0;
+        })(),
         iconKey: c.iconKey,
         color: c.color,
       })),

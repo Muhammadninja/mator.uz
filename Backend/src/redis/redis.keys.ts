@@ -12,6 +12,13 @@ export const RedisKeys = {
   // An OTP waiting for its SMS worker, encrypted; see OtpJobSecretStore.
   otpSmsSecret: (ref: string): string => `otp:sms:${ref}`,
   jwtBlacklist: (jti: string): string => `jwt:blacklist:${jti}`,
+  // Admin access-token revocation; see AdminTokenService. Separate from the buyer
+  // blacklist so neither identity space can revoke the other's tokens.
+  adminJwtBlacklist: (jti: string): string => `admin:jwt:blacklist:${jti}`,
+  // The stable id of the device session a refresh row belongs to.
+  adminSessionOfRow: (rowId: number): string => `admin:session:row:${rowId}`,
+  // A device session that was signed out; kills its access tokens.
+  adminSessionRevoked: (sid: string): string => `admin:session:revoked:${sid}`,
 
   // ── Cache (read-through, TTL-only invalidation) ───────────────────────────
   // Reference catalog lists cached via CacheService. Keyed by the parameter the

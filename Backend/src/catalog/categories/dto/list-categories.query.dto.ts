@@ -1,4 +1,4 @@
-import { IsIn, IsOptional, IsString } from 'class-validator';
+import { IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 
 export const CATEGORY_SCOPES = ['main', 'vehicle'] as const;
@@ -16,5 +16,6 @@ export class ListCategoriesQueryDto {
   @ApiPropertyOptional({ description: 'Scope per-category counts to parts that fit this garage vehicle.' })
   @IsOptional()
   @IsString()
+  @MaxLength(64)
   vehicle_id?: string;
 }

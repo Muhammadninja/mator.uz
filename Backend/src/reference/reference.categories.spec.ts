@@ -167,8 +167,10 @@ function makeApi() {
     ),
     delete: jest.fn(),
   };
-  const tree = new PartCategoryService(categoryDb() as never, cache as never);
-  const reference = new ReferenceService({} as never, cache as never, tree);
+  const db = categoryDb();
+  const tree = new PartCategoryService(db as never, cache as never);
+  // The same tree is what decides whether a parent is hidden.
+  const reference = new ReferenceService(db as never, cache as never, tree);
   return { api: new ReferenceController(reference), tree, cache };
 }
 

@@ -139,6 +139,31 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     return (await this.bounded('EXISTS', () => this.client.exists(key))) > 0;
   }
 
+  /** EXISTS over several keys in one round trip: true when any of them is set. */
+  async existsAny(keys: string[]): Promise<boolean> {
+    if (keys.length === 0) return false;
+    return (
+      (await this.bounded('EXISTS', () => this.client.exists(...keys))) > 0
+    );
+  }
+
+  /** One EXISTS per key, pipelined into a single round trip, in input order. */
+  async existsEach(keys: string[]): Promise<boolean[]> {
+    if (keys.length === 0) return [];
+    const replies = await this.bounded('EXISTS', async () => {
+      const pipeline = this.client.pipeline();
+      for (const key of keys) pipeline.exists(key);
+      return pipeline.exec();
+    });
+    if (!replies || replies.length !== keys.length) {
+      throw new RedisUnavailableError('Redis EXISTS pipeline returned no reply');
+    }
+    return replies.map(([err, count]) => {
+      if (err) throw err;
+      return Number(count) > 0;
+    });
+  }
+
   async expire(key: string, ttl: number): Promise<boolean> {
     return (
       (await this.bounded('EXPIRE', () => this.client.expire(key, ttl))) === 1

@@ -70,6 +70,18 @@ const AVAILABILITY_LABEL: Record<SourcingOfferAvailability, string | null> = {
  * a push hiccup NEVER fails offer creation — the offer is the source of truth
  * and an operator can still reach the customer through the ticket console.
  */
+/**
+ * Ticket states from which a customer may still accept an offer. NO_OFFER is
+ * included: it means every earlier offer lapsed, and a later offer on the same
+ * request is still a valid one to buy.
+ */
+export const ACCEPTABLE_TICKET_STATUSES: readonly SourcingTicketStatus[] = [
+  SourcingTicketStatus.PENDING,
+  SourcingTicketStatus.IN_PROGRESS,
+  SourcingTicketStatus.OFFERED,
+  SourcingTicketStatus.NO_OFFER,
+];
+
 @Injectable()
 export class SourcingOfferService {
   private readonly logger = new Logger(SourcingOfferService.name);
@@ -158,36 +170,50 @@ export class SourcingOfferService {
 
   /**
    * Accept an offer → add it to the customer's cart as a self-contained line and
-   * move the offer + ticket to ACCEPTED. The status flip is an atomic
-   * updateMany guarded on `status = SENT`, so a double-tap / concurrent accept
-   * can't add the line twice. Returns the updated cart snapshot for the app.
+   * move the offer + ticket to ACCEPTED (LOW-ORD-011).
+   *
+   * One transaction decides it, opened by a lock on the ticket's row:
+   *   • the ticket must still be open to offers (ACCEPTABLE_TICKET_STATUSES). A
+   *     CLOSED or CANCELLED ticket is never reopened by an acceptance, and an
+   *     ACCEPTED one already has its winner;
+   *   • the offer must still be SENT and unexpired (a conditional update);
+   *   • the cart line is written in the same transaction.
+   * Two customers' taps, or two dealers' offers on one ticket accepted at once,
+   * queue on the ticket lock: the second sees ACCEPTED and gets a 409. The
+   * dealer is told only after the commit.
    */
   async acceptOffer(offerId: string, userId: string) {
     const offer = await this.loadOwnedOffer(offerId, userId);
 
-    const flip = await this.prisma.sourcingOffer.updateMany({
-      where: {
-        id: offerId,
-        status: 'SENT',
-        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
-      },
-      data: { status: 'ACCEPTED', customerNotifyPending: false },
-    });
-    if (flip.count === 0) {
-      throw new ConflictException('Offer is no longer available');
-    }
-
-    const cart = await this.cart.addSourcedOffer(userId, {
-      offerId,
-      title: this.partName(offer.ticket.extractedData) ?? 'Запчасть',
-      priceUzs: offer.price,
-      imageUrl: offer.images[0] ?? null,
-    });
-
-    // The whole ticket is resolved once the customer buys one offer.
-    await this.prisma.sourcingTicket.update({
-      where: { id: offer.ticketId },
-      data: { status: SourcingTicketStatus.ACCEPTED },
+    await this.prisma.$transaction(async (tx) => {
+      const [ticket] = await tx.$queryRaw<{ status: SourcingTicketStatus }[]>`
+        SELECT status FROM sourcing_tickets
+        WHERE id = ${offer.ticketId}::uuid FOR UPDATE`;
+      if (!ticket || !ACCEPTABLE_TICKET_STATUSES.includes(ticket.status)) {
+        throw new ConflictException('Offer is no longer available');
+      }
+      const flip = await tx.sourcingOffer.updateMany({
+        where: {
+          id: offerId,
+          status: 'SENT',
+          OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+        },
+        data: { status: 'ACCEPTED', customerNotifyPending: false },
+      });
+      if (flip.count === 0) {
+        throw new ConflictException('Offer is no longer available');
+      }
+      await this.cart.addSourcedOfferLine(tx, userId, {
+        offerId,
+        title: this.partName(offer.ticket.extractedData) ?? 'Запчасть',
+        priceUzs: offer.price,
+        imageUrl: offer.images[0] ?? null,
+      });
+      // The whole ticket is resolved once the customer buys one offer.
+      await tx.sourcingTicket.update({
+        where: { id: offer.ticketId },
+        data: { status: SourcingTicketStatus.ACCEPTED },
+      });
     });
 
     // Let the dealer know their offer was bought (fire-and-forget).
@@ -197,7 +223,7 @@ export class SourcingOfferService {
       `${offer.price.toLocaleString('ru-RU')} ${offer.currency}`,
     );
 
-    return cart;
+    return this.cart.snapshot(userId);
   }
 
   /** Decline an offer with a reason. The ticket stays open so other dealers can

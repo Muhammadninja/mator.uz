@@ -1,4 +1,13 @@
-import { IsString, IsOptional, IsInt, Min, Max } from 'class-validator';
+import {
+  IsISO8601,
+  IsInt,
+  IsOptional,
+  IsString,
+  Matches,
+  Max,
+  MaxLength,
+  Min,
+} from 'class-validator';
 import { Type } from 'class-transformer';
 
 // Upper bound on a single cart line's quantity. A realistic retail cart never
@@ -10,26 +19,38 @@ export class AddCartItemDto {
   // Catalog id of the part. The contract sends `id`; `part_id` is also accepted.
   @IsOptional()
   @IsString()
+  @MaxLength(64)
   id?: string;
 
   @IsOptional()
   @IsString()
+  @MaxLength(64)
   part_id?: string;
 
   @IsOptional()
   @IsString()
+  @MaxLength(64)
   service_id?: string;
 
   @IsOptional()
   @IsString()
+  @MaxLength(64)
   provider_id?: string;
 
   @IsOptional()
   @IsString()
+  @MaxLength(64)
   vehicle_id?: string;
 
+  // A real date-time, or 400: `new Date('garbage')` would otherwise reach the
+  // database as Invalid Date and fail as a 500.
+  // The extended form (`YYYY-MM-DDThh:mm…`) is the one `new Date()` parses; the
+  // basic form `20261120` is valid ISO 8601 and would still become Invalid Date.
   @IsOptional()
-  @IsString()
+  @IsISO8601({ strict: true, strictSeparator: true })
+  @Matches(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/, {
+    message: 'scheduled_at must be an ISO 8601 date-time',
+  })
   scheduled_at?: string;
 
   @IsOptional()

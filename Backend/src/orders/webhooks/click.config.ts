@@ -34,3 +34,60 @@ export function isClickEnabled(
     enabledPaymentProviders(get).includes('click') && clickSecret(get) !== ''
   );
 }
+
+/**
+ * Values that are not a merchant's own ids. `12345` and `67890` were the
+ * placeholders this code used to fall back to: a payment link built from them
+ * points at whoever really holds those ids.
+ */
+const CLICK_PLACEHOLDER_IDS = new Set(['12345', '67890', '0', '123456']);
+
+function clickId(raw: string | undefined): string | null {
+  const value = (raw ?? '').trim();
+  return /^\d{1,12}$/.test(value) && !CLICK_PLACEHOLDER_IDS.has(value)
+    ? value
+    : null;
+}
+
+/** Click's service and merchant ids, or null unless BOTH are real. No fallback. */
+export function clickMerchantIds(
+  get: (key: string) => string | undefined,
+): { serviceId: string; merchantId: string } | null {
+  const serviceId = clickId(get('CLICK_SERVICE_ID'));
+  const merchantId = clickId(get('CLICK_MERCHANT_ID'));
+  return serviceId && merchantId ? { serviceId, merchantId } : null;
+}
+
+/**
+ * Boot-time check (LOW-PAY-008). Click stays off unless it is listed in
+ * PAYMENT_PROVIDERS and has a secret; nothing here turns it on. But once it IS
+ * on, it must have its real ids: starting with placeholders would hand buyers
+ * links to another merchant's service.
+ */
+export function collectClickConfigErrors(
+  env: Record<string, unknown>,
+): string[] {
+  const get = (key: string) =>
+    typeof env[key] === 'string' ? env[key] : undefined;
+  if (!isClickEnabled(get)) return [];
+  const errors: string[] = [];
+  for (const key of ['CLICK_SERVICE_ID', 'CLICK_MERCHANT_ID']) {
+    if (!clickId(get(key))) {
+      errors.push(
+        `${key} must be the numeric id Click issued (placeholders such as 12345 / 67890 are refused) when Click is enabled.`,
+      );
+    }
+  }
+  return errors;
+}
+
+/** ConfigModule `validate` step. */
+export function validateClickEnv(
+  env: Record<string, unknown>,
+): Record<string, unknown> {
+  const errors = collectClickConfigErrors(env);
+  if (errors.length > 0) {
+    throw new Error(`Invalid Click configuration:\n  - ${errors.join('\n  - ')}`);
+  }
+  return env;
+}

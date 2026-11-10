@@ -15,6 +15,10 @@ const PROD = {
   PAYME_MERCHANT_KEY: 'merchant-secret',
   UZMAPS_API_KEY: 'uzmaps-key',
   OTP_JOB_ENCRYPTION_KEY: 'a'.repeat(64),
+  // A real SMS provider: production refuses the log provider (LOW-PLT-013).
+  SMS_PROVIDER: 'eskiz',
+  ESKIZ_EMAIL: 'bot@example.com',
+  ESKIZ_PASSWORD: 'eskiz-secret',
 };
 
 const AREA = JSON.stringify({

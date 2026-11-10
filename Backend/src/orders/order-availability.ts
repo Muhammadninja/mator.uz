@@ -1,5 +1,10 @@
 import { ConflictException } from '@nestjs/common';
-import { DealerStatus } from '@prisma/client';
+import {
+  DealerStatus,
+  SellerStatus,
+  SourcingOfferStatus,
+  SourcingTicketStatus,
+} from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { loadCategoryTreeScope } from '../catalog/categories/category-tree-scope';
 import {
@@ -42,7 +47,13 @@ export type UnavailableReason =
   | 'insufficient_stock'
   | 'category_hidden'
   // Paying for an order whose hold ran out: it has no claim on the stock any more.
-  | 'reservation_expired';
+  | 'reservation_expired'
+  // LOW-ORD-007: lines that are not catalog parts.
+  | 'offer_unavailable'
+  | 'seller_ineligible'
+  | 'service_unavailable'
+  | 'provider_mismatch'
+  | 'invalid_quantity';
 
 export interface UnavailableLine {
   partId: string;
@@ -103,9 +114,24 @@ export const CART_CHANGED = 'CART_CHANGED';
 /** The total computed now is not the one the buyer confirmed. */
 export const ORDER_TOTAL_CHANGED = 'ORDER_TOTAL_CHANGED';
 
+/** A cart or order line, as far as availability is concerned. */
+export interface AvailabilityLine {
+  partId: string | null;
+  title: string;
+  quantity?: number;
+  offerId?: string | null;
+  serviceId?: string | null;
+  providerId?: string | null;
+}
+
+type AvailabilityDb = Pick<PrismaService, 'catalogPart' | 'partCategory'> &
+  Partial<
+    Pick<PrismaService, 'sourcingOffer' | 'seller' | 'providerServiceOffering'>
+  >;
+
 export async function findUnavailableParts(
-  prisma: Pick<PrismaService, 'catalogPart' | 'partCategory'>,
-  lines: readonly { partId: string | null; title: string; quantity?: number }[],
+  prisma: AvailabilityDb,
+  lines: readonly AvailabilityLine[],
   options: {
     /**
      * Paying for an existing order (see payment-availability.ts): per part, the units
@@ -117,10 +143,11 @@ export async function findUnavailableParts(
     lapsedParts?: ReadonlySet<string>;
   } = {},
 ): Promise<UnavailableLine[]> {
+  const otherLines = await findUnavailableOtherLines(prisma, lines);
   const partLines = lines.filter(
     (l): l is { partId: string; title: string; quantity?: number } => !!l.partId,
   );
-  if (partLines.length === 0) return [];
+  if (partLines.length === 0) return otherLines;
 
   const parts = await prisma.catalogPart.findMany({
     where: { id: { in: [...new Set(partLines.map((l) => l.partId))] } },
@@ -184,6 +211,123 @@ export async function findUnavailableParts(
       });
     } else if (reason) {
       unavailable.push({ partId: line.partId, title: line.title, reason });
+    }
+  }
+  return [...unavailable, ...otherLines];
+}
+
+/** Ticket states in which a bought offer can no longer be delivered. */
+const DEAD_TICKET_STATUSES: readonly SourcingTicketStatus[] = [
+  SourcingTicketStatus.CANCELLED,
+  SourcingTicketStatus.CLOSED,
+];
+
+/**
+ * Lines that are not catalog parts (LOW-ORD-007): a bought sourcing offer, or a
+ * provider's service. Neither has stock, so no count is checked; what is checked
+ * is that it can still be sold, on the same three gates as parts (cart, order
+ * creation, payment):
+ *
+ *   • an offer is exactly one item, still ACCEPTED (not expired, declined or
+ *     removed), on a ticket nobody cancelled or closed, from a seller who is not
+ *     REJECTED;
+ *   • a service is booked once per line, still offered, by an active provider,
+ *     and the line names the provider that really offers it.
+ *
+ * `partId` on the result carries the offer or service id so the existing 409
+ * shape names the line.
+ */
+async function findUnavailableOtherLines(
+  prisma: AvailabilityDb,
+  lines: readonly AvailabilityLine[],
+): Promise<UnavailableLine[]> {
+  const offerLines = lines.filter((l) => !l.partId && l.offerId);
+  const serviceLines = lines.filter((l) => !l.partId && l.serviceId);
+  if (offerLines.length === 0 && serviceLines.length === 0) return [];
+  const unavailable: UnavailableLine[] = [];
+
+  if (offerLines.length > 0) {
+    if (!prisma.sourcingOffer || !prisma.seller) {
+      throw new Error('Offer lines need the sourcingOffer and seller delegates');
+    }
+    const offers = await prisma.sourcingOffer.findMany({
+      where: { id: { in: offerLines.map((l) => l.offerId!) } },
+      select: {
+        id: true,
+        status: true,
+        sellerTgId: true,
+        ticket: { select: { status: true } },
+      },
+    });
+    const tgIds = [
+      ...new Set(
+        offers
+          .map((o) => o.sellerTgId)
+          .filter((id) => /^\d{1,19}$/.test(id)),
+      ),
+    ].map((id) => BigInt(id));
+    const sellers = tgIds.length
+      ? await prisma.seller.findMany({
+          where: { tgId: { in: tgIds } },
+          select: { tgId: true, status: true },
+        })
+      : [];
+    const rejected = new Set(
+      sellers
+        .filter((s) => s.status === SellerStatus.REJECTED)
+        .map((s) => String(s.tgId)),
+    );
+    const byId = new Map(offers.map((o) => [o.id, o]));
+    for (const line of offerLines) {
+      const offer = byId.get(line.offerId!);
+      const reason: UnavailableReason | null = !offer
+        ? 'offer_unavailable'
+        : (line.quantity ?? 1) !== 1
+          ? 'invalid_quantity'
+          : offer.status !== SourcingOfferStatus.ACCEPTED ||
+              DEAD_TICKET_STATUSES.includes(offer.ticket.status)
+            ? 'offer_unavailable'
+            : rejected.has(offer.sellerTgId)
+              ? 'seller_ineligible'
+              : null;
+      if (reason) {
+        unavailable.push({ partId: line.offerId!, title: line.title, reason });
+      }
+    }
+  }
+
+  if (serviceLines.length > 0) {
+    if (!prisma.providerServiceOffering) {
+      throw new Error('Service lines need the providerServiceOffering delegate');
+    }
+    const services = await prisma.providerServiceOffering.findMany({
+      where: { id: { in: serviceLines.map((l) => l.serviceId!) } },
+      select: {
+        id: true,
+        providerId: true,
+        priceUzs: true,
+        provider: { select: { isActive: true } },
+      },
+    });
+    const byId = new Map(services.map((svc) => [svc.id, svc]));
+    for (const line of serviceLines) {
+      const svc = byId.get(line.serviceId!);
+      const reason: UnavailableReason | null = !svc || !svc.provider.isActive
+        ? 'service_unavailable'
+        : (line.quantity ?? 1) !== 1
+          ? 'invalid_quantity'
+          : line.providerId && line.providerId !== svc.providerId
+            ? 'provider_mismatch'
+            : Number(svc.priceUzs) <= 0
+              ? 'no_price'
+              : null;
+      if (reason) {
+        unavailable.push({
+          partId: line.serviceId!,
+          title: line.title,
+          reason,
+        });
+      }
     }
   }
   return unavailable;

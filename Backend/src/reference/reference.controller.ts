@@ -1,4 +1,5 @@
 import { Controller, Get, Param, Query } from '@nestjs/common';
+import { ScalarQueryPipe } from '../common/query-param.pipes';
 import {
   ApiBadRequestResponse,
   ApiNotFoundResponse,
@@ -55,7 +56,7 @@ export class ReferenceController {
     description: 'makeId is unknown.',
     schema: { example: { code: 'NOT_FOUND', message: 'Unknown make_id' } },
   })
-  models(@Query('makeId') makeId: string) {
+  models(@Query('makeId', new ScalarQueryPipe('makeId', 64)) makeId: string) {
     return this.reference.listModels(makeId);
   }
 
@@ -83,7 +84,7 @@ export class ReferenceController {
     description: 'modelId is unknown.',
     schema: { example: { code: 'NOT_FOUND', message: 'Unknown model_id' } },
   })
-  trims(@Query('modelId') modelId: string) {
+  trims(@Query('modelId', new ScalarQueryPipe('modelId', 64)) modelId: string) {
     return this.reference.listTrims(modelId);
   }
 
@@ -119,7 +120,7 @@ export class ReferenceController {
     description: 'trimId is supplied but unknown (existence validation only).',
     schema: { example: { code: 'NOT_FOUND', message: 'Unknown trim_id' } },
   })
-  engines(@Query('trimId') trimId?: string) {
+  engines(@Query('trimId', new ScalarQueryPipe('trimId', 64)) trimId?: string) {
     return this.reference.listEngines(trimId);
   }
 
@@ -177,7 +178,9 @@ export class ReferenceController {
     description: 'parentId is supplied but unknown.',
     schema: { example: { code: 'NOT_FOUND', message: 'Category not found' } },
   })
-  categories(@Query('parentId') parentId?: string) {
+  categories(
+    @Query('parentId', new ScalarQueryPipe('parentId', 64)) parentId?: string,
+  ) {
     return this.reference.listCategories(parentId);
   }
 

@@ -1,5 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import axios, { type AxiosResponse } from 'axios';
+import {
+  downloadUrlProblem,
+  pollingUrlProblem,
+  providerUrlAgent,
+} from './bfl-url-policy';
 
 // Black Forest Labs FLUX.2 Pro — the production model in the FLUX.2 family.
 // The API is asynchronous: POST the edit request, receive a polling_url, then GET
@@ -224,6 +229,8 @@ export class ImageEnhanceService {
             Accept: 'application/json',
           },
           timeout: SUBMIT_TIMEOUT_MS,
+          // A redirect would carry the x-key header to its target.
+          maxRedirects: 0,
         },
       ),
     );
@@ -233,6 +240,16 @@ export class ImageEnhanceService {
       throw new ImageEnhanceError(
         `no polling_url in submit response: ${bodyText(response.data)}`,
         true,
+      );
+    }
+    // The key goes to this URL next: only BFL's own API may receive it. Not
+    // retryable: the same response would come back with the same URL, and a
+    // job BFL already accepted is not re-submitted for it.
+    const problem = pollingUrlProblem(pollingUrl);
+    if (problem) {
+      throw new ImageEnhanceError(
+        `untrusted polling_url refused (${problem})`,
+        false,
       );
     }
     return pollingUrl;
@@ -297,6 +314,10 @@ export class ImageEnhanceService {
       axios.get<PollResponse>(pollingUrl, {
         headers: { 'x-key': this.apiKey, Accept: 'application/json' },
         timeout: POLL_TIMEOUT_MS,
+        // No redirect may take the key elsewhere, and the host must resolve
+        // to a public address (see bfl-url-policy.ts).
+        maxRedirects: 0,
+        httpsAgent: providerUrlAgent,
         validateStatus: (code) => (code >= 200 && code < 300) || code === 503,
       }),
     );
@@ -314,11 +335,27 @@ export class ImageEnhanceService {
   /** Download the produced PNG from the signed result URL. */
   private async download(imageUrl: string): Promise<Buffer> {
     // A pre-signed delivery URL: deliberately no x-key, which only ever goes
-    // to BFL's API.
+    // to BFL's API. It is still a URL from a response, so it must be https and
+    // public: the image fetched here is published to Cloudinary.
+    const problem = downloadUrlProblem(imageUrl);
+    if (problem) {
+      throw new ImageEnhanceError(
+        `untrusted result URL refused (${problem})`,
+        false,
+      );
+    }
     const response = await httpCall('download', () =>
       axios.get<ArrayBuffer>(imageUrl, {
         responseType: 'arraybuffer',
         timeout: DOWNLOAD_TIMEOUT_MS,
+        maxRedirects: 3,
+        httpsAgent: providerUrlAgent,
+        // Each redirect hop is held to the same rule as the first URL.
+        beforeRedirect: (options: { protocol?: string }) => {
+          if (options.protocol !== 'https:') {
+            throw new ImageEnhanceError('result URL redirected off https', false);
+          }
+        },
       }),
     );
     const image = Buffer.from(response.data);

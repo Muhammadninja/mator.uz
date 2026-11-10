@@ -344,7 +344,7 @@ describe('PartsService — search and sort survive ProductKind', () => {
 describe('PartsService — the compatibility endpoint', () => {
   function makeCompatService(part: Record<string, unknown> | null) {
     const prisma = makePrisma();
-    (prisma.catalogPart as unknown as { findUnique: jest.Mock }).findUnique =
+    (prisma.catalogPart as unknown as { findFirst: jest.Mock }).findFirst =
       jest.fn().mockResolvedValue(part);
     prisma.vehicle.findFirst.mockResolvedValue({
       trimId: 'trim_1',

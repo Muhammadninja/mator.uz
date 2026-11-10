@@ -1,4 +1,9 @@
 import 'reflect-metadata';
+import { COLLECT_TTL_MS } from './metrics.controller';
+import {
+  isMetricsRequestAllowed,
+  resolveMetricsAccess,
+} from './metrics-access.guard';
 import { Controller, Get, INestApplication } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
@@ -235,7 +240,7 @@ describe('/metrics endpoint', () => {
     expect(moduleRef.get(MetricsService)).toBe(moduleRef.get(MetricsService));
   });
 
-  it('refreshes queue gauges on each scrape rather than polling in the background', async () => {
+  it('reads the queues when a scrape arrives, not in the background, and reuses the result for 15 s', async () => {
     let queues: Awaited<ReturnType<typeof buildApp>>['queues'];
     ({ app, queues, restore } = await buildApp({ METRICS_ENABLED: 'true' }));
 
@@ -244,13 +249,113 @@ describe('/metrics endpoint', () => {
 
     await request(app.getHttpServer()).get('/metrics').expect(200);
     const afterOne = smsQueue.getJobCounts.mock.calls.length;
-    await request(app.getHttpServer()).get('/metrics').expect(200);
-    const afterTwo = smsQueue.getJobCounts.mock.calls.length;
+    // A burst of scrapes inside the window costs no further Redis or DB reads.
+    for (let i = 0; i < 5; i++) {
+      await request(app.getHttpServer()).get('/metrics').expect(200);
+    }
+    const afterBurst = smsQueue.getJobCounts.mock.calls.length;
 
-    // Nothing is read until a scrape arrives, then exactly one read per scrape.
     expect(callsAfterInit).toBe(0);
     expect(afterOne).toBe(1);
-    expect(afterTwo).toBe(2);
+    expect(afterBurst).toBe(1);
+
+    // Once the window has passed, the next scrape collects again.
+    const realNow = Date.now;
+    const spy = jest
+      .spyOn(Date, 'now')
+      .mockImplementation(() => realNow() + COLLECT_TTL_MS + 1);
+    try {
+      await request(app.getHttpServer()).get('/metrics').expect(200);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(smsQueue.getJobCounts.mock.calls.length).toBe(2);
+  });
+});
+
+// LOW-PLT-015: who may scrape.
+describe('/metrics access', () => {
+  let app: INestApplication;
+  let restore: () => void;
+  const TOKEN = 'scrape-token-of-sufficient-length-123';
+
+  afterEach(async () => {
+    await app?.close();
+    restore?.();
+  });
+
+  it('serves a scraper on this machine with no configuration', async () => {
+    ({ app, restore } = await buildApp({
+      METRICS_TOKEN: undefined,
+      METRICS_ALLOWED_IPS: undefined,
+    }));
+    await request(app.getHttpServer()).get('/metrics').expect(200);
+  });
+
+  it('refuses a request the local proxy forwarded from an outside address', async () => {
+    ({ app, restore } = await buildApp({
+      METRICS_TOKEN: undefined,
+      METRICS_ALLOWED_IPS: undefined,
+    }));
+    const res = await request(app.getHttpServer())
+      .get('/metrics')
+      .set('X-Forwarded-For', '203.0.113.7')
+      .expect(403);
+    expect(res.text).not.toContain('mator_');
+  });
+
+  it('serves an outside scraper that presents the bearer token, and only the right one', async () => {
+    ({ app, restore } = await buildApp({ METRICS_TOKEN: TOKEN }));
+    const outside = () =>
+      request(app.getHttpServer())
+        .get('/metrics')
+        .set('X-Forwarded-For', '203.0.113.7');
+    await outside().set('Authorization', `Bearer ${TOKEN}`).expect(200);
+    await outside().set('Authorization', `Bearer ${TOKEN}x`).expect(403);
+    await outside().expect(403);
+  });
+
+  it('serves an outside address named in METRICS_ALLOWED_IPS', async () => {
+    ({ app, restore } = await buildApp({
+      METRICS_TOKEN: undefined,
+      METRICS_ALLOWED_IPS: 'loopback, 203.0.113.0/24',
+    }));
+    await request(app.getHttpServer())
+      .get('/metrics')
+      .set('X-Forwarded-For', '203.0.113.7')
+      .expect(200);
+    await request(app.getHttpServer())
+      .get('/metrics')
+      .set('X-Forwarded-For', '198.51.100.1')
+      .expect(403);
+  });
+
+  it('a forged X-Forwarded-For from a direct client does not buy access', () => {
+    const access = resolveMetricsAccess({});
+    const direct = (xff: string) => ({
+      url: '/metrics',
+      headers: { 'x-forwarded-for': xff },
+      socket: { remoteAddress: '203.0.113.7' },
+    });
+    expect(isMetricsRequestAllowed(direct('127.0.0.1') as never, access)).toBe(
+      false,
+    );
+    // Nor does prepending one in front of what the proxy appended.
+    expect(
+      isMetricsRequestAllowed(
+        {
+          url: '/metrics',
+          headers: { 'x-forwarded-for': '127.0.0.1, 203.0.113.7' },
+          socket: { remoteAddress: '127.0.0.1' },
+        } as never,
+        access,
+      ),
+    ).toBe(false);
+  });
+
+  it('treats a short METRICS_TOKEN as not configured rather than as a weak secret', () => {
+    const access = resolveMetricsAccess({ METRICS_TOKEN: 'short' });
+    expect(access.token).toBeNull();
   });
 });
 

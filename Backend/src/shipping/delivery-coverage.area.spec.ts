@@ -60,6 +60,9 @@ describe('the approved delivery area', () => {
           PAYME_MERCHANT_KEY: 'merchant-secret',
           UZMAPS_API_KEY: 'uzmaps-key',
           OTP_JOB_ENCRYPTION_KEY: 'a'.repeat(64),
+          SMS_PROVIDER: 'eskiz',
+          ESKIZ_EMAIL: 'bot@example.com',
+          ESKIZ_PASSWORD: 'eskiz-secret',
           DELIVERY_COVERAGE_POLYGON,
         }),
       ).not.toThrow();

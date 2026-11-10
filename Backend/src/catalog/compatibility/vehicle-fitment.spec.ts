@@ -146,3 +146,55 @@ describe('toVehicleFitContext', () => {
     );
   });
 });
+
+// LOW-CAT-008: model years apply to the vehicle listing as they do on the card.
+describe('vehicleFitWhere — model years on trim rows', () => {
+  const { computeCompatibility } = jest.requireActual<
+    typeof import('../parts/part.presenter')
+  >('../parts/part.presenter');
+
+  const part = (id: string, years: number[], extra: Record<string, unknown> = {}) => ({
+    id,
+    isUniversal: false,
+    fitmentBindings: [],
+    fits: [],
+    makeFits: [],
+    compatibilities: [
+      { trimId: 'cobalt-ltz', engineId: null, years, status: 'FITS', confidence: 1 },
+    ],
+    ...extra,
+  });
+  const vehicle = (year: number) => ({
+    modelId: 'some-other-model',
+    makeName: null,
+    modelName: null,
+    trimId: 'cobalt-ltz',
+    engineId: null,
+    year,
+  });
+  const universal = { ...part('universal', []), isUniversal: true, compatibilities: [] };
+  const rows = [part('y2015_2018', [2015, 2016, 2017, 2018]), part('any_year', []), universal];
+
+  it('a part compatible only with 2015–2018 is not listed for a 2020 car', () => {
+    expect(selectIds(rows, vehicleFitWhere(vehicle(2020)))).not.toContain('y2015_2018');
+  });
+
+  it('it is listed for a model year it covers', () => {
+    expect(selectIds(rows, vehicleFitWhere(vehicle(2017)))).toContain('y2015_2018');
+  });
+
+  it('a row with no years fits every year, and universal parts stay visible', () => {
+    for (const year of [1999, 2017, 2030]) {
+      const seen = selectIds(rows, vehicleFitWhere(vehicle(year)));
+      expect(seen).toEqual(expect.arrayContaining(['any_year', 'universal']));
+    }
+  });
+
+  it('the listing and the card agree for every year', () => {
+    for (const year of [2014, 2015, 2018, 2019, 2020]) {
+      const listed = selectIds(rows, vehicleFitWhere(vehicle(year))).includes('y2015_2018');
+      const card = computeCompatibility(rows[0].compatibilities as never, vehicle(year) as never);
+      expect({ year, listed }).toEqual({ year, listed: card?.status === 'fits' });
+    }
+  });
+});

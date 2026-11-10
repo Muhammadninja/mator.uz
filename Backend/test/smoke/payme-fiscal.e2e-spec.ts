@@ -159,7 +159,9 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
             .filter((id: string) => offerings.has(id))
             .map((id: string) => ({
               id,
-              provider: offerings.get(id).provider,
+              provider: { isActive: true, ...offerings.get(id).provider },
+              providerId: offerings.get(id).providerId ?? 'prov_1',
+              priceUzs: offerings.get(id).priceUzs ?? 1,
               category: categoryRow(offerings.get(id).categoryId),
             })),
         ),
@@ -171,6 +173,10 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
           .map((id: string) => ({
             id,
             packageForm: null,
+            // A bought offer that can still be sold (LOW-ORD-007).
+            status: 'ACCEPTED',
+            sellerTgId: '1',
+            ticket: { status: 'ACCEPTED' },
             category: categoryRow(offers.get(id).categoryId),
           })),
       ),

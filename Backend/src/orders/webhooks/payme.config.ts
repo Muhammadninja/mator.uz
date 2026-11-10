@@ -17,6 +17,60 @@ import { MXIK_PATTERN, PACKAGE_CODE_PATTERN } from '../../common/fiscal.util';
 /** Official Payme checkout host — used when PAYME_CHECKOUT_URL is not set. */
 export const DEFAULT_PAYME_CHECKOUT_URL = 'https://checkout.paycom.uz';
 
+/**
+ * Payme's sandbox hosts: `test.paycom.uz` is the one this project has used for
+ * sandbox runs; `checkout.test.paycom.uz` is the sandbox checkout. Usable
+ * outside production only: a production process pointed at either would send
+ * buyers to a page where no money moves.
+ */
+export const PAYME_SANDBOX_CHECKOUT_HOSTS = [
+  'test.paycom.uz',
+  'checkout.test.paycom.uz',
+];
+const PAYME_PRODUCTION_CHECKOUT_HOST = new URL(DEFAULT_PAYME_CHECKOUT_URL).host;
+
+/**
+ * Which Payme a process talks to, stated rather than inferred from a key.
+ *
+ * A sandbox merchant key and a production one look alike, so nothing can tell
+ * them apart by value. What can be checked is that the declared environment,
+ * the runtime and the checkout host agree:
+ *
+ *   • PAYME_ENV is `production` or `sandbox`. Unset, it follows NODE_ENV.
+ *   • NODE_ENV=production refuses PAYME_ENV=sandbox and the sandbox host.
+ *   • The checkout host is one from an explicit list, never "any https URL":
+ *     the production host, the sandbox host (outside production), and any host
+ *     named in PAYME_CHECKOUT_ALLOWED_HOSTS.
+ *
+ * Keep the sandbox credentials in a non-production env file only; that
+ * separation is operational and cannot be enforced from here.
+ */
+export type PaymeEnvironment = 'production' | 'sandbox';
+
+export function resolvePaymeEnvironment(
+  env: Record<string, unknown>,
+): PaymeEnvironment | null {
+  const declared = asTrimmedString(env.PAYME_ENV).toLowerCase();
+  if (declared === 'production' || declared === 'sandbox') return declared;
+  if (declared) return null;
+  return env.NODE_ENV === 'production' ? 'production' : 'sandbox';
+}
+
+function allowedCheckoutHosts(
+  env: Record<string, unknown>,
+  mode: PaymeEnvironment,
+): string[] {
+  const extra = asTrimmedString(env.PAYME_CHECKOUT_ALLOWED_HOSTS)
+    .split(',')
+    .map((h) => h.trim().toLowerCase())
+    .filter(Boolean);
+  return [
+    PAYME_PRODUCTION_CHECKOUT_HOST,
+    ...(mode === 'sandbox' ? PAYME_SANDBOX_CHECKOUT_HOSTS : []),
+    ...extra,
+  ];
+}
+
 /** Account field Payme sends inside `params.account` (configurable per merchant). */
 export const DEFAULT_PAYME_ACCOUNT_FIELD = 'order_id';
 
@@ -78,12 +132,36 @@ export function collectPaymeConfigErrors(
     errors.push('PAYME_MERCHANT_ID is set but empty.');
   }
 
+  const mode = resolvePaymeEnvironment(env);
+  if (!mode) {
+    errors.push('PAYME_ENV must be "production" or "sandbox".');
+  } else if (required && mode !== 'production') {
+    errors.push(
+      'PAYME_ENV=sandbox is refused when NODE_ENV=production: buyers would be sent to a checkout where no money moves.',
+    );
+  }
+
   const checkoutUrl = asTrimmedString(env.PAYME_CHECKOUT_URL);
   if (checkoutUrl) {
     try {
       const parsed = new URL(checkoutUrl);
       if (parsed.protocol !== 'https:') {
         errors.push('PAYME_CHECKOUT_URL must use https.');
+      } else if (parsed.username || parsed.password) {
+        errors.push('PAYME_CHECKOUT_URL must not carry credentials.');
+      } else if (mode) {
+        const host = parsed.host.toLowerCase();
+        // In production the sandbox host is never acceptable, listed or not.
+        const allowed = allowedCheckoutHosts(
+          env,
+          required ? 'production' : mode,
+        ).filter((h) => !required || !PAYME_SANDBOX_CHECKOUT_HOSTS.includes(h));
+        if (!allowed.includes(host)) {
+          errors.push(
+            `PAYME_CHECKOUT_URL host "${host}" is not an accepted Payme checkout host ` +
+              `(${allowed.join(', ')}). Name another in PAYME_CHECKOUT_ALLOWED_HOSTS only if Payme issued it.`,
+          );
+        }
       }
     } catch {
       errors.push(`PAYME_CHECKOUT_URL is not a valid URL: "${checkoutUrl}".`);
@@ -101,7 +179,10 @@ export function collectPaymeConfigErrors(
 export function validatePaymeEnv(
   env: Record<string, unknown>,
 ): Record<string, unknown> {
-  const errors = collectPaymeConfigErrors(env);
+  const errors = [
+    ...collectPaymeConfigErrors(env),
+    ...collectPaymeFiscalReadinessErrors(env),
+  ];
   if (errors.length > 0) {
     throw new Error(
       `Invalid Payme configuration:\n  - ${errors.join('\n  - ')}`,
@@ -256,4 +337,42 @@ export function readPaymeConfig(
       asTrimmedString(get('PAYME_ACCOUNT_FIELD')) ||
       DEFAULT_PAYME_ACCOUNT_FIELD,
   };
+}
+
+/**
+ * Boot-time fiscal readiness (INFO-15).
+ *
+ * MARKETPLACE_TIN, SERVICE_FEE_MXIK and SERVICE_FEE_PACKAGE_CODE are needed by
+ * any Payme order carrying a delivery cost or a service fee. Without them each
+ * such receipt is refused at payment time (fail closed), and the boot log says
+ * so. That stays the default: an order with neither charge needs none of them,
+ * and refusing to start would take the whole API down for a gap that only
+ * affects those orders.
+ *
+ * With PAYME_FISCAL_REQUIRED=true the process refuses to start instead, naming
+ * what is missing. Set it once the codes are registered. Nothing here supplies
+ * a value: a missing or malformed code is reported, never defaulted.
+ */
+export function collectPaymeFiscalReadinessErrors(
+  env: Record<string, unknown>,
+): string[] {
+  if (asTrimmedString(env.PAYME_FISCAL_REQUIRED).toLowerCase() !== 'true') {
+    return [];
+  }
+  const fiscal = readPaymeFiscalConfig((key) =>
+    typeof env[key] === 'string' ? env[key] : undefined,
+  );
+  const errors: string[] = [];
+  if (fiscal.marketplaceTin === null) {
+    errors.push("MARKETPLACE_TIN must be Mator's 9-digit tax id.");
+  }
+  if (fiscal.serviceFee.mxik === null) {
+    errors.push('SERVICE_FEE_MXIK must be the 17-digit MXIK registered for the service fee.');
+  }
+  if (fiscal.serviceFee.packageCode === null) {
+    errors.push('SERVICE_FEE_PACKAGE_CODE must be the package code registered with that MXIK.');
+  }
+  return errors.map(
+    (e) => `${e} (PAYME_FISCAL_REQUIRED=true refuses to start without it.)`,
+  );
 }
