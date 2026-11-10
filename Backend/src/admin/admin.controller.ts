@@ -6,6 +6,7 @@ import {
   ParseEnumPipe,
   ParseIntPipe,
   Query,
+  Request,
   UseGuards,
   HttpCode,
   HttpStatus,
@@ -42,13 +43,19 @@ export class AdminController {
 
   @Patch('sellers/:id/approve')
   @HttpCode(HttpStatus.OK)
-  approveSeller(@Param('id', ParseIntPipe) id: number) {
-    return this.adminService.approveSeller(id);
+  approveSeller(
+    @Param('id', ParseIntPipe) id: number,
+    @Request() req: { user?: { id?: string } },
+  ) {
+    return this.adminService.approveSeller(id, req.user?.id);
   }
 
   @Patch('sellers/:id/reject')
   @HttpCode(HttpStatus.OK)
-  rejectSeller(@Param('id', ParseIntPipe) id: number) {
-    return this.adminService.rejectSeller(id);
+  rejectSeller(
+    @Param('id', ParseIntPipe) id: number,
+    @Request() req: { user?: { id?: string } },
+  ) {
+    return this.adminService.rejectSeller(id, req.user?.id);
   }
 }

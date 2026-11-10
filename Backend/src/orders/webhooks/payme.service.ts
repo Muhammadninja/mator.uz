@@ -160,6 +160,29 @@ interface JsonRpcBody {
   params?: Record<string, any>;
 }
 
+/** A JSON-RPC request is a JSON object: not null, not an array, not a primitive. */
+function isJsonRpcObject(value: unknown): value is JsonRpcBody {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** The request id to echo, when it is one JSON-RPC allows; otherwise null. */
+function requestId(body: JsonRpcBody | null): number | string | null {
+  const id = body?.id;
+  return typeof id === 'number' || typeof id === 'string' ? id : null;
+}
+
+function errorEnvelope(id: number | string | null, err: PaymeError) {
+  return {
+    jsonrpc: '2.0',
+    id,
+    error: {
+      code: err.code,
+      message: err.plainMessage ? err.message : L(err.message),
+      data: err.data,
+    },
+  };
+}
+
 @Injectable()
 export class PaymeService {
   private readonly logger = new Logger(PaymeService.name);
@@ -179,61 +202,104 @@ export class PaymeService {
   }
 
   /**
-   * Entry point for a raw request body: parse, then hand off to {@link handle}.
+   * Entry point for a raw request body.
    *
    * Payme requires HTTP 200 with a JSON-RPC error for EVERY failure, including
    * an unparseable body (-32700). Nest's default pipeline would answer a syntax
    * error with HTTP 400 and our own `{code, message}` envelope, which Payme
    * reads as -32400, so the raw text is parsed here instead.
+   *
+   * Order of work:
+   *   1. The Basic Auth verdict, before the body is looked at. It is a constant
+   *      -time comparison of one header and touches nothing else.
+   *   2. The body (at most 64 KB, see the raw-body middleware) is parsed. For an
+   *      unauthorized caller this serves one purpose only, echoing the request
+   *      `id` Payme expects in the envelope; nothing in it is acted on.
+   *   3. Only an authorized, well-formed JSON object reaches {@link handle}.
+   *
+   * `null`, an array or a primitive is valid JSON but not a JSON-RPC request,
+   * and is answered -32600 rather than read as an object.
    */
   async handleRaw(authHeader: string | undefined, raw: unknown) {
-    let body: JsonRpcBody;
+    const denied = this.authorizationError(authHeader);
+
+    let parsed: unknown;
+    let unparseable = false;
     try {
-      body = this.parseBody(raw);
+      parsed = this.parseBody(raw);
     } catch {
+      unparseable = true;
+    }
+    const request = isJsonRpcObject(parsed) ? parsed : null;
+    const id = requestId(request);
+
+    if (denied) return errorEnvelope(id, denied);
+    if (unparseable) {
       return {
         jsonrpc: '2.0',
         id: null,
         error: { code: -32700, message: L('Could not parse JSON') },
       };
     }
-    return this.handle(authHeader, body);
+    if (!request) {
+      return {
+        jsonrpc: '2.0',
+        id: null,
+        error: { code: -32600, message: L('Invalid request') },
+      };
+    }
+    return this.dispatchEnvelope(request);
   }
 
-  /** Coerce a raw body (Buffer, string, or already-parsed object) to JSON-RPC. */
-  private parseBody(raw: unknown): JsonRpcBody {
-    if (Buffer.isBuffer(raw))
-      return JSON.parse(raw.toString('utf8')) as JsonRpcBody;
-    if (typeof raw === 'string') return JSON.parse(raw) as JsonRpcBody;
-    if (raw && typeof raw === 'object') return raw as JsonRpcBody;
+  /** Coerce a raw body (Buffer, string, or already-parsed value) to JSON. */
+  private parseBody(raw: unknown): unknown {
+    if (Buffer.isBuffer(raw)) return JSON.parse(raw.toString('utf8'));
+    if (typeof raw === 'string') return JSON.parse(raw);
+    if (raw && typeof raw === 'object') return raw;
     throw new SyntaxError('Unparseable Payme request body');
   }
 
   /** Entry point: authorize, dispatch, and wrap the JSON-RPC envelope. */
   async handle(authHeader: string | undefined, body: JsonRpcBody) {
+    const request = isJsonRpcObject(body) ? body : null;
+    const denied = this.authorizationError(authHeader);
+    if (denied) return errorEnvelope(requestId(request), denied);
+    if (!request) {
+      return {
+        jsonrpc: '2.0',
+        id: null,
+        error: { code: -32600, message: L('Invalid request') },
+      };
+    }
+    return this.dispatchEnvelope(request);
+  }
+
+  /** Run an authorized request and wrap the result. Never throws. */
+  private async dispatchEnvelope(body: JsonRpcBody) {
+    const id = requestId(body);
     try {
-      this.authorize(authHeader);
       const result = await this.dispatch(body.method, body.params ?? {});
-      return { jsonrpc: '2.0', id: body.id ?? null, result };
+      return { jsonrpc: '2.0', id, result };
     } catch (err) {
-      if (err instanceof PaymeError) {
-        return {
-          jsonrpc: '2.0',
-          id: body.id ?? null,
-          error: {
-            code: err.code,
-            message: err.plainMessage ? err.message : L(err.message),
-            data: err.data,
-          },
-        };
-      }
+      if (err instanceof PaymeError) return errorEnvelope(id, err);
       // Never let an internal message reach Payme: log it, answer -32400.
       this.logger.error(`Payme handler error: ${(err as Error).message}`);
       return {
         jsonrpc: '2.0',
-        id: body.id ?? null,
+        id,
         error: { code: -32400, message: L('Internal error') },
       };
+    }
+  }
+
+  /** The refusal for these credentials, or null when they are right. */
+  private authorizationError(authHeader?: string): PaymeError | null {
+    try {
+      this.authorize(authHeader);
+      return null;
+    } catch (err) {
+      if (err instanceof PaymeError) return err;
+      throw err;
     }
   }
 

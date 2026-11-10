@@ -112,7 +112,7 @@ describe('Catalog/Search smoke', () => {
 
   it('compatibility projects a trim+year match as "fits"', async () => {
     const svc = new PartsService(prisma, fakeDiscounts());
-    prisma.catalogPart.findUnique.mockResolvedValue({
+    prisma.catalogPart.findFirst.mockResolvedValue({
       compatibilities: [
         { trimId: 'trim_lt', engineId: null, years: [2022], status: 'FITS', confidence: 1, source: 'oem' },
       ],

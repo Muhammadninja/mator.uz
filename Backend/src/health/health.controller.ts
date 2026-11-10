@@ -18,6 +18,13 @@ import {
 } from '../telegram/polling-status';
 
 const HEALTH_REDIS_TIMEOUT_MS = 1_000;
+/**
+ * How long a readiness answer is reused. The route is public and unthrottled so
+ * a probe is never rate-limited; without this, anyone could turn it into a
+ * stream of database queries and Redis pings. Two seconds is far below any
+ * probe interval and bounds the cost at one check per window.
+ */
+const READY_TTL_MS = 2_000;
 
 /**
  * Liveness/readiness probe for load balancers and orchestrators. `/health`
@@ -45,9 +52,22 @@ export class HealthController {
     return { status: 'ok', uptime_s: Math.round(process.uptime()) };
   }
 
+  private readyAt = 0;
+  private readyCheck: Promise<Record<string, unknown>> | null = null;
+
   @Get()
   @HttpCode(HttpStatus.OK)
-  async ready() {
+  ready() {
+    if (!this.readyCheck || Date.now() - this.readyAt >= READY_TTL_MS) {
+      this.readyAt = Date.now();
+      this.readyCheck = this.checkReady();
+      // A failed check is still an answer for the window, not an unhandled one.
+      this.readyCheck.catch(() => undefined);
+    }
+    return this.readyCheck;
+  }
+
+  private async checkReady(): Promise<Record<string, unknown>> {
     try {
       await this.prisma.$queryRaw`SELECT 1`;
     } catch {

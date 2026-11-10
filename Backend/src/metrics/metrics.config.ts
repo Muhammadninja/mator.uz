@@ -6,14 +6,11 @@ import type { ConfigService } from '@nestjs/config';
  * pattern ops.config.ts uses for the Bull Board / queue-monitor settings.
  *
  * Every value has a safe default: with no new env vars set, metrics are ENABLED
- * at `/metrics`. That is the deliberate choice for an observability endpoint —
- * it exposes no business data (only counters, gauges and histograms), and a
- * metrics endpoint that has to be remembered at deploy time is a metrics
- * endpoint that is missing during the incident you needed it for.
+ * at `/metrics`, a metrics endpoint that has to be remembered at deploy time
+ * being one that is missing during the incident you needed it for.
  *
- * Authentication is intentionally NOT handled here: the endpoint is meant to be
- * scraped by Prometheus on the private network and protected at the edge (Nginx
- * allow/deny or basic auth), exactly like the Phase A brief specifies.
+ * Who may read it is decided by MetricsAccessGuard (METRICS_TOKEN,
+ * METRICS_ALLOWED_IPS): by default only this machine.
  */
 
 /**

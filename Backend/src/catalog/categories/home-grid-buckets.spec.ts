@@ -124,12 +124,12 @@ const NO_DISCOUNTS = {
  * groupings run the real `where` over PARTS. The listing's rows, brand facet
  * and subcategory chips come back empty — only the totals are compared.
  */
-function catalogDb() {
+function catalogDb(rows = GRID_ROWS) {
   const selected = (where: unknown) =>
     PARTS.filter((p) => matchesWhere(p, where));
   return {
     partCategory: {
-      findMany: jest.fn(partCategoryFindMany(LIVE_TREE, () => GRID_ROWS)),
+      findMany: jest.fn(partCategoryFindMany(LIVE_TREE, () => rows)),
     },
     catalogPart: {
       count: jest.fn(({ where }: { where: unknown }) =>
@@ -207,5 +207,25 @@ describe('home grid — tile counts match their listings', () => {
     expect(
       (await parts.list({ category: 'cooling-radiators' }, 'ru', null)).total,
     ).toBe(1);
+  });
+});
+
+// LOW-CAT-006: an operator editing a tile row's `mainCategory` column cannot
+// make the tile count one bucket while it opens another.
+describe('home grid — a tile row whose mainCategory column was edited', () => {
+  it('still counts exactly what tapping it lists', async () => {
+    // The Brakes row now says FILTERS in its column; the tile id is still 'brakes'.
+    const edited = GRID_ROWS.map((r) =>
+      r.id === 'brakes' ? { ...r, mainCategory: B.FILTERS } : r,
+    );
+    const prisma = catalogDb(edited);
+    const tiles = (await new CategoriesService(prisma as never).list({}, 'ru', null))
+      .items;
+    const parts = new PartsService(prisma as never, NO_DISCOUNTS as never);
+
+    const brakes = tiles.find((t) => t.id === 'brakes')!;
+    const listing = await parts.list({ category: 'brakes' }, 'ru', null);
+    expect(brakes.count).toBe(listing.total);
+    expect(brakes.count).toBe(EXPECTED_TILE_COUNTS.brakes);
   });
 });

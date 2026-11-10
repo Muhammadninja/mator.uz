@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import {
   AdminAuditAction,
   AdminAuditEntity,
@@ -278,6 +278,23 @@ export class SourcingService {
       where: { ticketId: id },
       select: { id: true },
     });
+
+    // LOW-ORD-011: an offer that reached an order is part of that order's
+    // history, its receipt and its seller's settlement. Deleting the ticket
+    // would cascade the offer away under them. Such a ticket is closed or
+    // cancelled instead, which keeps every record.
+    if (offers.length > 0) {
+      const ordered = await this.prisma.orderItem.count({
+        where: { offerId: { in: offers.map((o) => o.id) } },
+      });
+      if (ordered > 0) {
+        throw new ConflictException({
+          code: 'SOURCING_TICKET_HAS_ORDERS',
+          message:
+            'This request was ordered and cannot be deleted. Close or cancel it instead.',
+        });
+      }
+    }
 
     try {
       await this.prisma.sourcingTicket.delete({ where: { id } });

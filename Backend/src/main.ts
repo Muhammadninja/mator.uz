@@ -15,6 +15,7 @@ import {
 import { BasicAuthThrottle } from './common/basic-auth-throttle';
 import { RATE_LIMITER, type RateLimiter } from './redis/rate-limiter.service';
 import { resolveTrustProxy } from './common/trust-proxy.util';
+import { resolveLogLevels } from './common/runtime-env';
 import {
   SYNC_INVENTORY_PATH,
   syncInventoryBodyMiddleware,
@@ -78,7 +79,10 @@ async function bootstrap() {
   let app: import('@nestjs/common').INestApplication | undefined;
   installProcessErrorHandlers(() => app);
 
-  app = await NestFactory.create(AppModule);
+  // Production runs without debug/verbose lines unless LOG_LEVEL asks for them.
+  app = await NestFactory.create(AppModule, {
+    logger: resolveLogLevels(process.env),
+  });
 
   // Run OnModuleDestroy/OnApplicationShutdown hooks on SIGTERM/SIGINT (PM2
   // restart/redeploy, systemd stop, ctrl-C) — e.g. TelegramService.onModuleDestroy

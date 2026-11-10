@@ -1,7 +1,15 @@
-import { Controller, Get, Header, Res, type Type } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Header,
+  Res,
+  UseGuards,
+  type Type,
+} from '@nestjs/common';
 import { ApiExcludeController } from '@nestjs/swagger';
 import { SkipThrottle } from '@nestjs/throttler';
 import type { Response } from 'express';
+import { MetricsAccessGuard } from './metrics-access.guard';
 import { MetricsService } from './metrics.service';
 import { QueueMetricsCollector } from './queue-metrics.collector';
 import { SmsCostCollector } from './sms-cost.collector';
@@ -21,19 +29,31 @@ import { TelegramPollingCollector } from './telegram-polling.collector';
  * available. Same reason queue.constants.ts reads process.env for `@Processor`
  * options, but without the one-shot limitation.
  *
- * NOT AUTHENTICATED by design (per the Phase A brief): Prometheus scrapes it
- * over the private network and the edge protects it — see the operational notes
- * for the Nginx snippet. Nothing here exposes business data: only counter,
- * gauge and histogram values.
+ * ACCESS: served only to a caller presenting METRICS_TOKEN or coming from an
+ * allowed address (default: this machine); see MetricsAccessGuard. The registry
+ * holds business counters (SMS spend, routing quota), so it is not public, and
+ * Nginx should not proxy the path at all; see docs/P3_HARDENING.md.
  *
  * `@SkipThrottle()` because a 15s scrape must never be rate-limited into a gap
  * in the graphs (the global baseline is 100 req/min — see AppModule), and
  * `@ApiExcludeController()` keeps an operational endpoint out of the public
  * API docs.
  */
+/**
+ * How long one run of the pull collectors is reused. Prometheus scrapes every
+ * 15 to 30 seconds; within this window a second scraper, a retry or anyone
+ * hammering the route gets the gauges already in the registry, and neither
+ * Redis nor the SMS accounting table is read again.
+ */
+export const COLLECT_TTL_MS = 15_000;
+
 @ApiExcludeController()
 @SkipThrottle()
+@UseGuards(MetricsAccessGuard)
 export class MetricsController {
+  private collectedAt = 0;
+  private collecting: Promise<void> | null = null;
+
   constructor(
     private readonly metrics: MetricsService,
     private readonly queues: QueueMetricsCollector,
@@ -58,12 +78,32 @@ export class MetricsController {
   @Get()
   @Header('Cache-Control', 'no-store')
   async scrape(@Res() res: Response): Promise<void> {
-    await Promise.all([this.queues.collect(), this.smsCost.collect()]);
+    await this.collectOnce();
     // In-memory, synchronous, never throws (MetricsService.safe).
     this.telegramPolling.collect();
     const body = await this.metrics.scrape();
     res.setHeader('Content-Type', this.metrics.contentType);
     res.send(body);
+  }
+
+  /**
+   * Run the collectors that touch Redis and PostgreSQL at most once per
+   * {@link COLLECT_TTL_MS}. Concurrent scrapes share the run in flight.
+   */
+  private collectOnce(now = Date.now()): Promise<void> {
+    if (this.collecting) return this.collecting;
+    if (now - this.collectedAt < COLLECT_TTL_MS) return Promise.resolve();
+    this.collecting = Promise.all([
+      this.queues.collect(),
+      this.smsCost.collect(),
+    ])
+      .then(() => {
+        this.collectedAt = Date.now();
+      })
+      .finally(() => {
+        this.collecting = null;
+      });
+    return this.collecting;
   }
 }
 

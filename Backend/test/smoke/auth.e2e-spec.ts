@@ -684,11 +684,11 @@ describe('Auth smoke', () => {
     });
 
     it('POST /v1/auth/logout-all revokes every session for the caller', async () => {
-      const tokens = { revokeAllSessions: jest.fn().mockResolvedValue(2) };
+      const tokens = { logoutAllDevices: jest.fn().mockResolvedValue(2) };
       const controller = new AuthController({} as any, {} as any, tokens as any);
 
       const res = await controller.logoutAll({ user: { id: 'usr_v' } });
-      expect(tokens.revokeAllSessions).toHaveBeenCalledWith('usr_v');
+      expect(tokens.logoutAllDevices).toHaveBeenCalledWith('usr_v');
       expect(res).toEqual({ message: 'All sessions revoked', token_version: 2 });
     });
   });

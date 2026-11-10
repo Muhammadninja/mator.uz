@@ -61,6 +61,31 @@ const dealerSyncLockKey = (dealerId: string) => `dealer_sync:${dealerId}`;
  * classification and images that a stock export does not carry, and inventing
  * one would put an unclassified product in front of buyers.
  */
+/** `catalog_parts.stock_qty` is a PostgreSQL `integer`. */
+export const MAX_STOCK_QTY = 2_147_483_647;
+
+/**
+ * Refuse an upload whose summed quantity for any position would not fit the
+ * stock column (LOW-ING-011). One row is bounded by the DTO; 5,000 repeats of an
+ * article, or several articles naming one part, are not, and their sum used to
+ * overflow `int4` after earlier chunks had committed. JavaScript sums these
+ * exactly (the largest possible total, 5,000 × 1,000,000, is far inside
+ * Number.MAX_SAFE_INTEGER), so the check itself cannot overflow.
+ */
+export function assertQuantitiesFit(
+  totals: readonly { label: string; quantity: number }[],
+): void {
+  const over = totals.filter(
+    (t) => !Number.isSafeInteger(t.quantity) || t.quantity < 0 || t.quantity > MAX_STOCK_QTY,
+  );
+  if (over.length === 0) return;
+  throw new BadRequestException({
+    code: 'SYNC_QUANTITY_OUT_OF_RANGE',
+    message: `The summed quantity of ${over.length} position(s) exceeds ${MAX_STOCK_QTY}. Nothing was changed.`,
+    details: { positions: over.slice(0, 20).map((t) => t.label) },
+  });
+}
+
 @Injectable()
 export class IntegrationsService {
   private readonly logger = new Logger(IntegrationsService.name);
@@ -95,6 +120,12 @@ export class IntegrationsService {
     //    so their quantities SUM rather than overwrite each other — taking the
     //    last row would silently hide every other warehouse's stock.
     const { byArticle, unusable } = this.collapseItems(dto.items);
+    // LOW-ING-011: summed repeats are checked against the column before the
+    // database is even read, so neither mode can write part of an upload and
+    // then fail on a total that does not fit.
+    assertQuantitiesFit(
+      [...byArticle.values()].map((i) => ({ label: i.rawArticle, quantity: i.quantity })),
+    );
 
     // 2. Resolve articles to this dealer's catalog rows. Scoped to the dealer:
     //    the where-clause below is what makes it impossible for one dealer's key
@@ -187,6 +218,8 @@ export class IntegrationsService {
       [...byArticle.keys()],
     );
     const { updates, mergedArticles } = this.buildUpdates(byArticle, matches);
+    // Distinct articles that name one part sum too: checked before the first chunk.
+    assertQuantitiesFit(updates.map((u) => ({ label: u.partId, quantity: u.quantity })));
     const processedCount = await this.applyUpdates(dealerId, updates);
     return { matches, updates, mergedArticles, processedCount, zeroedCount: 0 };
   }
@@ -204,6 +237,11 @@ export class IntegrationsService {
         ...byArticle.keys(),
       ]);
       const { updates, mergedArticles } = this.buildUpdates(byArticle, matches);
+      // Before the write and the zeroing: a refusal here rolls back nothing,
+      // because nothing has been written yet.
+      assertQuantitiesFit(
+        updates.map((u) => ({ label: u.partId, quantity: u.quantity })),
+      );
       const processedCount = updates.length
         ? await tx.$executeRaw`
             UPDATE catalog_parts AS p

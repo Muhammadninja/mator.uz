@@ -203,11 +203,8 @@ describe('the destructive scripts write nothing by default', () => {
     isGm: false,
     partModels: [],
   };
-  const adminArgs = [
-    '--email=a@example.com',
-    '--name=A',
-    '--password=abcdefghijkl',
-  ];
+  // No --password: it is refused on the command line (INFO-11).
+  const adminArgs = ['--email=a@example.com', '--name=A'];
 
   it.each([
     [
@@ -268,4 +265,22 @@ describe('the destructive scripts write nothing by default', () => {
     ).rejects.toThrow('--allow-database');
     expect(writes).toEqual([]);
   });
+});
+
+// INFO-11: the admin bootstrap never takes a password on argv.
+describe('admin:create password input', () => {
+  it.each([['--password=abcdefghijkl'], ['--password', 'abcdefghijkl']])(
+    'refuses %j before touching the database',
+    async (...flag) => {
+      const prisma = { appAdmin: { findUnique: jest.fn() } };
+      expect(() =>
+        runCreateAdmin(
+          prisma as never,
+          ['--email=a@example.com', '--name=A', ...flag],
+          LOCAL,
+        ),
+      ).toThrow(/process list and shell history/);
+      expect(prisma.appAdmin.findUnique).not.toHaveBeenCalled();
+    },
+  );
 });

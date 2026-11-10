@@ -1,4 +1,9 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
+import {
+  inIdOrder,
+  isPriceSort,
+  scanByEffectivePrice,
+} from '../parts/effective-price';
 import { sellableWhere } from '../../orders/inventory/inventory-availability';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -108,6 +113,26 @@ export class SearchService {
         }),
         this.discounts.loadActiveSales(),
       ]);
+    // LOW-CAT-007: with sales running, the price sort and the two price
+    // buckets follow the price the buyer sees, as the listing does.
+    const scan = await scanByEffectivePrice(this.prisma, this.discounts, sales, where, {
+      sort: isPriceSort(dto.sortBy) ? dto.sortBy : undefined,
+      skip: offset,
+      take: limit + 1,
+    });
+    if (scan && isPriceSort(dto.sortBy)) {
+      const rows = await this.prisma.catalogPart.findMany({
+        where: { id: { in: scan.pageIds } },
+        include: { category: true },
+      });
+      fetched.splice(0, fetched.length, ...inIdOrder(scan.pageIds, rows));
+    }
+    const priceUnder200k = scan
+      ? scan.prices.filter((p) => p < 200_000).length
+      : under200k;
+    const priceBetween = scan
+      ? scan.prices.filter((p) => p >= 200_000 && p <= 500_000).length
+      : between;
     const items = fetched.slice(0, limit);
     const nextPageToken =
       fetched.length > limit ? encodePageToken(offset + limit) : null;
@@ -180,7 +205,7 @@ export class SearchService {
       nextPageToken,
       facetCounts: {
         categories: categoriesFacet,
-        price: { under_200k: under200k, '200k_to_500k': between },
+        price: { under_200k: priceUnder200k, '200k_to_500k': priceBetween },
         minRating: { '4plus': highRated },
       },
       // The id+label form of the same facet, ordered by count. Additive: it is

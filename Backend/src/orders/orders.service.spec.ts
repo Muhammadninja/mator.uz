@@ -142,6 +142,98 @@ describe('OrdersService.updateStatus (operator write)', () => {
     });
   });
 
+  // INFO-6: the active-transaction check is repeated under the order lock that
+  // Payme's CreateTransaction also takes.
+  describe('manual payment vs a Payme transaction', () => {
+    const manager = {
+      id: 'adm_mg',
+      role: 'ADMIN',
+      adminRole: AdminRole.MANAGER,
+      email: 'mg@m.uz',
+      displayName: 'Mg',
+    };
+    const payme = (providerState: number | null) => ({
+      id: 'pay_1',
+      provider: 'PAYME',
+      status: 'PENDING',
+      providerState,
+      providerTransactionId: 'ptx_1',
+    });
+
+    beforeEach(() => {
+      prisma.order.findUnique.mockResolvedValue(
+        buildOrder({
+          id: 'ord_1',
+          status: OrderStatus.PENDING_PAYMENT,
+          paymentType: PaymentType.PAYME,
+        }),
+      );
+      prisma.order.updateMany.mockResolvedValue({ count: 1 });
+      prisma.order.findUniqueOrThrow.mockResolvedValue(
+        buildOrder({ id: 'ord_1', status: OrderStatus.PAID }),
+      );
+    });
+
+    it('a transaction Payme created after the first check is seen under the lock and wins', async () => {
+      // First read (outside): nothing active. Second read (under the lock): the
+      // CreateTransaction that committed in between.
+      prisma.payment.findMany
+        .mockResolvedValueOnce([payme(null)])
+        .mockResolvedValueOnce([payme(1)]);
+      const { svc, audit } = build(prisma);
+
+      await expect(
+        svc.updateStatus(
+          'ord_1',
+          { status: 'paid', note: 'Bank statement 14:05' },
+          manager,
+        ),
+      ).rejects.toMatchObject({ response: { code: 'PAYMENT_IN_PROGRESS' } });
+      expect(prisma.order.updateMany).not.toHaveBeenCalled();
+      expect(audit.record).not.toHaveBeenCalled();
+    });
+
+    it('locks the order before re-reading payments and moving it', async () => {
+      prisma.payment.findMany.mockResolvedValue([payme(null)]);
+      const { svc } = build(prisma);
+
+      await svc.updateStatus(
+        'ord_1',
+        { status: 'paid', note: 'Bank statement 14:05' },
+        manager,
+      );
+
+      const lockCall = prisma.$queryRaw.mock.calls.findIndex((c: any[]) =>
+        c[0].join('?').includes('FROM orders WHERE id = ? FOR UPDATE'),
+      );
+      expect(lockCall).toBeGreaterThanOrEqual(0);
+      expect(prisma.$queryRaw.mock.invocationCallOrder[lockCall]).toBeLessThan(
+        prisma.payment.findMany.mock.invocationCallOrder[1],
+      );
+      expect(prisma.payment.findMany.mock.invocationCallOrder[1]).toBeLessThan(
+        prisma.order.updateMany.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('when Payme performed first, the manual move finds the order moved and changes nothing', async () => {
+      prisma.payment.findMany.mockResolvedValue([payme(null)]);
+      // PerformTransaction's conditional move already took the order to PAID.
+      prisma.order.updateMany.mockResolvedValue({ count: 0 });
+      const { svc, audit } = build(prisma);
+
+      await expect(
+        svc.updateStatus(
+          'ord_1',
+          { status: 'paid', note: 'Bank statement 14:05' },
+          manager,
+        ),
+      ).rejects.toBeInstanceOf(ConflictException);
+      // No second "paid" history row, no payment-confirmed audit entry.
+      expect(prisma.orderStatusHistory.create).not.toHaveBeenCalled();
+      expect(audit.record).not.toHaveBeenCalled();
+    });
+  });
+
   describe('marking an order paid by hand', () => {
     const operator = {
       id: 'adm_op',

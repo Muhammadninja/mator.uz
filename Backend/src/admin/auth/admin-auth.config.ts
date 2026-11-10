@@ -14,6 +14,12 @@ export const ADMIN_JWT_AUDIENCE = 'mator-admin-panel';
 /** Admin access tokens are short-lived: a back-office session is not a phone. */
 const DEFAULT_ACCESS_TTL_SECONDS = 15 * 60; // 15m
 const DEFAULT_REFRESH_TTL_SECONDS = 7 * 24 * 60 * 60; // 7d
+/**
+ * Ceiling for ADMIN_JWT_ACCESS_TTL_SECONDS. Revocation markers in Redis live for
+ * one access TTL, and a stolen token is useful for as long: neither may be
+ * stretched by configuration.
+ */
+export const MAX_ADMIN_ACCESS_TTL_SECONDS = 60 * 60; // 1h
 
 // Secret strength floors — see AdminAuthConfig.assertStrongSecret. Chosen to
 // pass `openssl rand -base64 48` (~64 chars, ~60 distinct, ~380 bits) with a
@@ -64,10 +70,16 @@ export class AdminAuthConfig {
       this._secret = randomBytes(48).toString('base64');
     }
 
-    this._accessTtlSeconds = this.positiveInt(
+    const accessTtl = this.positiveInt(
       'ADMIN_JWT_ACCESS_TTL_SECONDS',
       DEFAULT_ACCESS_TTL_SECONDS,
     );
+    if (accessTtl > MAX_ADMIN_ACCESS_TTL_SECONDS) {
+      this.logger.warn(
+        `ADMIN_JWT_ACCESS_TTL_SECONDS=${accessTtl} exceeds the ${MAX_ADMIN_ACCESS_TTL_SECONDS}s ceiling — using ${MAX_ADMIN_ACCESS_TTL_SECONDS}s.`,
+      );
+    }
+    this._accessTtlSeconds = Math.min(accessTtl, MAX_ADMIN_ACCESS_TTL_SECONDS);
     this._refreshTtlSeconds = this.positiveInt(
       'ADMIN_JWT_REFRESH_TTL_SECONDS',
       DEFAULT_REFRESH_TTL_SECONDS,

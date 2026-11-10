@@ -795,7 +795,10 @@ function projectedImages(w: FakePrisma, stockId: number): string[] {
 async function catalogLists(w: FakePrisma, stockId: number): Promise<boolean> {
   const prisma = createPrismaMock();
   prisma.catalogPart.aggregate.mockResolvedValue({ _min: {}, _max: {} });
-  await new PartsService(prisma, {} as never).list({});
+  // No sale running: the listing then orders and aggregates in the database.
+  await new PartsService(prisma, {
+    loadActiveSales: async () => [],
+  } as never).list({});
   const { where } = prisma.catalogPart.findMany.mock.calls[0][0];
   const row = {
     images: projectedImages(w, stockId),

@@ -69,13 +69,30 @@ function world(lines: Record<string, unknown>[]) {
     async ({ where }: any) =>
       where.id.in.flatMap((id: string) =>
         state.services.has(id)
-          ? [{ id, priceUzs: state.services.get(id) }]
+          ? [
+              {
+                id,
+                priceUzs: state.services.get(id),
+                providerId: 'prov_1',
+                provider: { isActive: true },
+              },
+            ]
           : [],
       ),
   );
   prisma.sourcingOffer.findMany.mockImplementation(async ({ where }: any) =>
     where.id.in.flatMap((id: string) =>
-      state.offers.has(id) ? [{ id, price: state.offers.get(id) }] : [],
+      state.offers.has(id)
+        ? [
+            {
+              id,
+              price: state.offers.get(id),
+              status: 'ACCEPTED',
+              sellerTgId: '1',
+              ticket: { status: 'ACCEPTED' },
+            },
+          ]
+        : [],
     ),
   );
   prisma.sale.findMany.mockResolvedValue([]);

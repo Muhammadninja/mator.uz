@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsEnum, IsInt, Min } from 'class-validator';
+import { IsEnum, IsInt, Max, Min } from 'class-validator';
 import { LegalDocumentType } from '@prisma/client';
 import { ApiProperty } from '@nestjs/swagger';
 
@@ -22,5 +22,7 @@ export class LegalDocumentVersionParamsDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  // The column is a PostgreSQL integer; a larger number cannot name a version.
+  @Max(2_147_483_647)
   version: number;
 }

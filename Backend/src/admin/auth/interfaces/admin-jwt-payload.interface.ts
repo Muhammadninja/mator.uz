@@ -14,9 +14,11 @@ export interface AdminJwtPayload {
   // AppAdmin.tokenVersion on every authenticated request; a mismatch means the
   // token was revoked (deactivation, password change, refresh reuse).
   tokenVersion: number;
-  // Per-token unique id. Reserved for single-token blacklisting; logout today
-  // invalidates the refresh token and bumps nothing, so this is informational.
+  // Per-token unique id, blacklisted on logout (AdminTokenService).
   jti?: string;
+  // The device session the token belongs to, stable across refresh rotations.
+  // Revoked as a whole by "sign out this device".
+  sid?: string;
   // Standard JWT expiry (seconds since epoch), set by the signer.
   exp?: number;
 }

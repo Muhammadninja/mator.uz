@@ -4,13 +4,34 @@ import {
   OnGatewayInit,
   WebSocketGateway,
 } from '@nestjs/websockets';
-import { Logger } from '@nestjs/common';
+import { Logger, OnModuleInit, UnauthorizedException } from '@nestjs/common';
 import type { IncomingMessage } from 'http';
 import { WebSocket, WebSocketServer, RawData } from 'ws';
 import type { SourcingTicket } from '@prisma/client';
-import { AdminWsAuthService } from './admin-ws-auth.service';
+import {
+  AdminWsAuthService,
+  AuthenticatedAdmin,
+} from './admin-ws-auth.service';
+import {
+  AdminRevocation,
+  AdminTokenService,
+} from '../admin/auth/admin-token.service';
+import {
+  HandshakeLimiter,
+  selectWsProtocol,
+  trustedProxyList,
+  wsClientIp,
+} from '../common/ws-handshake.util';
 
 const HEARTBEAT_MS = 30_000;
+/**
+ * Every second heartbeat (60 s) the open admin sockets are re-checked in one
+ * batch: account still active, session version unchanged, token and device not
+ * revoked. Revocations made by this process close their sockets at once through
+ * the AdminTokenService listener; this pass bounds how long a socket can outlive
+ * one made anywhere else (another instance, a direct database change).
+ */
+const REVALIDATE_EVERY_BEATS = 2;
 const MAX_PAYLOAD_BYTES = 32 * 1024; // 32 KB — our only inbound frame is a tiny ping.
 const HANDSHAKE_LIMIT = 30;
 const HANDSHAKE_WINDOW_MS = 60_000;
@@ -18,6 +39,8 @@ const HANDSHAKE_WINDOW_MS = 60_000;
 // App-defined WS close codes (4000–4999).
 const CLOSE_UNAUTHORIZED = 4401;
 const CLOSE_RATE_LIMITED = 4429;
+/** Standard "try again later": the check could not be made. */
+const CLOSE_TRY_AGAIN = 1013;
 
 /** The realtime frame admins receive when a new sourcing ticket is opened. */
 export const NEW_SOURCING_TICKET = 'NEW_SOURCING_TICKET';
@@ -26,6 +49,7 @@ export const SOURCING_TICKET_ESCALATED = 'SOURCING_TICKET_ESCALATED';
 interface TrackedSocket extends WebSocket {
   adminId?: string;
   isAlive?: boolean;
+  session?: AuthenticatedAdmin;
 }
 
 interface RealtimeEvent {
@@ -35,25 +59,50 @@ interface RealtimeEvent {
 
 /**
  * Native-`ws` admin realtime gateway. mator-admin connects to
- * `wss://…/admin-events?token=<admin_jwt>` (or with an `Authorization: Bearer`
- * header). Unlike the user RealtimeGateway there is no per-user channel — every
+ * `wss://…/admin-events` with an `Authorization: Bearer` header or the
+ * `mator.bearer` subprotocol; a `?token=` query parameter is refused. Unlike the user RealtimeGateway there is no per-user channel — every
  * authenticated admin joins one broadcast pool and receives operational events
  * such as {@link NEW_SOURCING_TICKET}. Heartbeat and handshake rate-limiting
  * mirror the user gateway.
  */
-@WebSocketGateway({ path: '/admin-events', maxPayload: MAX_PAYLOAD_BYTES })
+@WebSocketGateway({
+  path: '/admin-events',
+  maxPayload: MAX_PAYLOAD_BYTES,
+  handleProtocols: selectWsProtocol,
+})
 export class AdminEventsGateway
-  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect
+  implements
+    OnGatewayInit,
+    OnGatewayConnection,
+    OnGatewayDisconnect,
+    OnModuleInit
 {
   private readonly logger = new Logger(AdminEventsGateway.name);
   private readonly admins = new Set<TrackedSocket>();
-  private readonly handshakes = new Map<string, number[]>();
+  private readonly handshakes = new HandshakeLimiter(
+    HANDSHAKE_LIMIT,
+    HANDSHAKE_WINDOW_MS,
+  );
+  private readonly trustedProxies = trustedProxyList(process.env.TRUST_PROXY);
   private heartbeat?: ReturnType<typeof setInterval>;
+  private beats = 0;
 
-  constructor(private readonly adminAuth: AdminWsAuthService) {}
+  constructor(
+    private readonly adminAuth: AdminWsAuthService,
+    private readonly tokens: AdminTokenService,
+  ) {}
+
+  /**
+   * Deactivation, a role or password change and logout-all revoke every session
+   * of an admin; logout and "sign out this device" revoke one. Either way the
+   * sockets opened with those credentials close now, not at the next heartbeat.
+   */
+  onModuleInit(): void {
+    this.tokens.onRevoked((revoked) => this.disconnectRevoked(revoked));
+  }
 
   afterInit(server: WebSocketServer): void {
-    this.heartbeat = setInterval(() => this.sweep(), HEARTBEAT_MS);
+    this.heartbeat = setInterval(() => void this.sweep(), HEARTBEAT_MS);
     server.on('close', () => this.heartbeat && clearInterval(this.heartbeat));
   }
 
@@ -61,18 +110,22 @@ export class AdminEventsGateway
     client: TrackedSocket,
     request: IncomingMessage,
   ): Promise<void> {
-    if (this.isRateLimited(this.clientIp(request))) {
+    if (this.handshakes.hit(wsClientIp(request, this.trustedProxies))) {
       return this.reject(client, CLOSE_RATE_LIMITED, 'rate_limited');
     }
 
-    let adminId: string;
+    let session: AuthenticatedAdmin;
     try {
-      ({ adminId } = await this.adminAuth.authenticate(request));
-    } catch {
-      return this.reject(client, CLOSE_UNAUTHORIZED, 'unauthorized');
+      session = await this.adminAuth.authenticate(request);
+    } catch (err) {
+      return err instanceof UnauthorizedException
+        ? this.reject(client, CLOSE_UNAUTHORIZED, 'unauthorized')
+        : this.reject(client, CLOSE_TRY_AGAIN, 'unavailable');
     }
+    const adminId = session.adminId;
 
     client.adminId = adminId;
+    client.session = session;
     client.isAlive = true;
     client.on('pong', () => (client.isAlive = true));
     client.on('message', (raw) => this.onMessage(client, raw));
@@ -84,6 +137,23 @@ export class AdminEventsGateway
 
   handleDisconnect(client: TrackedSocket): void {
     this.admins.delete(client);
+  }
+
+  /** Close the sockets a revocation covers. Returns how many were closed. */
+  disconnectRevoked(revoked: AdminRevocation): number {
+    let closed = 0;
+    for (const client of [...this.admins]) {
+      const s = client.session;
+      if (!s) continue;
+      const hit =
+        ('adminId' in revoked && s.adminId === revoked.adminId) ||
+        ('jti' in revoked && s.jti === revoked.jti) ||
+        ('sid' in revoked && s.sid === revoked.sid);
+      if (!hit) continue;
+      this.drop(client, CLOSE_UNAUTHORIZED, 'session_revoked');
+      closed++;
+    }
+    return closed;
   }
 
   /**
@@ -134,22 +204,19 @@ export class AdminEventsGateway
     }
   }
 
-  private isRateLimited(ip: string): boolean {
-    const cutoff = Date.now() - HANDSHAKE_WINDOW_MS;
-    const recent = (this.handshakes.get(ip) ?? []).filter((t) => t > cutoff);
-    recent.push(Date.now());
-    this.handshakes.set(ip, recent);
-    return recent.length > HANDSHAKE_LIMIT;
+  private drop(client: TrackedSocket, code: number, reason: string): void {
+    this.reject(client, code, reason);
+    this.admins.delete(client);
   }
 
-  private clientIp(request: IncomingMessage): string {
-    const fwd = request.headers['x-forwarded-for'];
-    const first = Array.isArray(fwd) ? fwd[0] : fwd?.split(',')[0];
-    return first?.trim() || request.socket?.remoteAddress || 'unknown';
-  }
-
-  private sweep(): void {
-    for (const client of this.admins) {
+  private async sweep(): Promise<void> {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    for (const client of [...this.admins]) {
+      // The heartbeat must not carry a socket past its access token's expiry.
+      if (client.session?.exp && client.session.exp <= nowSeconds) {
+        this.drop(client, CLOSE_UNAUTHORIZED, 'token_expired');
+        continue;
+      }
       if (client.isAlive === false) {
         client.terminate();
         continue;
@@ -161,12 +228,29 @@ export class AdminEventsGateway
         client.terminate();
       }
     }
-    const cutoff = Date.now() - HANDSHAKE_WINDOW_MS;
-    for (const [ip, times] of this.handshakes) {
-      const live = times.filter((t) => t > cutoff);
-      if (live.length === 0) this.handshakes.delete(ip);
-      else this.handshakes.set(ip, live);
+    this.handshakes.prune();
+    if (++this.beats % REVALIDATE_EVERY_BEATS === 0) await this.revalidate();
+  }
+
+  /** Batch re-check of every open socket; see {@link REVALIDATE_EVERY_BEATS}. */
+  async revalidate(): Promise<void> {
+    const open = [...this.admins].filter((c) => c.session);
+    if (open.length === 0) return;
+    let verdicts: boolean[];
+    try {
+      verdicts = await this.adminAuth.stillValid(open.map((c) => c.session!));
+    } catch (err) {
+      // Could not check: this channel carries buyer requests, so it closes
+      // rather than stays open on an unverified session.
+      this.logger.warn(
+        `Admin WS revalidation unavailable, closing ${open.length} socket(s): ${String(err)}`,
+      );
+      for (const client of open) this.drop(client, CLOSE_TRY_AGAIN, 'unavailable');
+      return;
     }
+    open.forEach((client, i) => {
+      if (!verdicts[i]) this.drop(client, CLOSE_UNAUTHORIZED, 'session_revoked');
+    });
   }
 
   private sendTo(client: TrackedSocket, event: RealtimeEvent): void {

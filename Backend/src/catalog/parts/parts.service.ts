@@ -1,4 +1,11 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { escapeLike } from '../../common/like-escape.util';
+import {
+  inIdOrder,
+  isPriceSort,
+  scanByEffectivePrice,
+} from './effective-price';
+import { bucketForCategoryParam } from '../categories/category-map';
 import { sellableWhere } from '../../orders/inventory/inventory-availability';
 import {
   Prisma,
@@ -103,7 +110,8 @@ export function categorySubtreeWhere(
 export function partTextWhere(text: string): Prisma.CatalogPartWhereInput {
   const normalized = normalizeOem(text);
   const or: Prisma.CatalogPartWhereInput[] = [
-    { title: { contains: text, mode: 'insensitive' } },
+    // Literal text: a `%` or `_` the buyer typed is not a wildcard (INFO-9).
+    { title: { contains: escapeLike(text), mode: 'insensitive' } },
   ];
   if (normalized.length > 0) {
     or.push({ oemNumbers: { has: normalized } });
@@ -224,29 +232,45 @@ export class PartsService {
       MAX_PAGE_SIZE,
     );
 
-    const [total, items, brandFacet, priceAgg] = await Promise.all([
+    // One active-sales query for the whole request: the page is priced against
+    // it, and with sales running so are the sort and the price range
+    // (LOW-CAT-007, effective-price.ts).
+    const sales = await this.discounts.loadActiveSales();
+    const scan = await scanByEffectivePrice(this.prisma, this.discounts, sales, where, {
+      sort: isPriceSort(effectiveSort) ? effectiveSort : undefined,
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+    });
+    const byVisiblePrice = !!scan && isPriceSort(effectiveSort);
+
+    const [total, fetched, brandFacet, priceAgg] = await Promise.all([
       this.prisma.catalogPart.count({ where }),
-      this.prisma.catalogPart.findMany({
-        where,
-        include: PART_INCLUDE,
-        orderBy: this.buildOrderBy(effectiveSort),
-        skip: (page - 1) * pageSize,
-        take: pageSize,
-      }),
+      byVisiblePrice
+        ? this.prisma.catalogPart.findMany({
+            where: { id: { in: scan.pageIds } },
+            include: PART_INCLUDE,
+          })
+        : this.prisma.catalogPart.findMany({
+            where,
+            include: PART_INCLUDE,
+            orderBy: this.buildOrderBy(effectiveSort),
+            skip: (page - 1) * pageSize,
+            take: pageSize,
+          }),
       this.prisma.catalogPart.groupBy({
         by: ['brandId'],
         where: brandFacetWhere,
         _count: { _all: true },
       }),
-      this.prisma.catalogPart.aggregate({
-        where,
-        _min: { priceUzs: true },
-        _max: { priceUzs: true },
-      }),
+      scan
+        ? Promise.resolve(null)
+        : this.prisma.catalogPart.aggregate({
+            where,
+            _min: { priceUzs: true },
+            _max: { priceUzs: true },
+          }),
     ]);
-
-    // One active-sales query for the whole page; each part is priced against it.
-    const sales = items.length ? await this.discounts.loadActiveSales() : [];
+    const items = byVisiblePrice ? inIdOrder(scan.pageIds, fetched) : fetched;
 
     return {
       items: items.map((p) =>
@@ -259,10 +283,13 @@ export class PartsService {
       ),
       facets: {
         brands: await this.brandFacet(brandFacet),
-        price_range_uzs: {
-          min: Number(priceAgg._min.priceUzs ?? 0),
-          max: Number(priceAgg._max.priceUzs ?? 0),
-        },
+        // The visible prices' range: the sale price where a sale applies.
+        price_range_uzs: scan
+          ? { min: scan.min, max: scan.max }
+          : {
+              min: Number(priceAgg?._min.priceUzs ?? 0),
+              max: Number(priceAgg?._max.priceUzs ?? 0),
+            },
         compatibility: vehicle
           ? await this.compatibilityFacet(where, vehicle, total)
           : null,
@@ -313,8 +340,11 @@ export class PartsService {
     vehicleId: string,
     userId: string | null = null,
   ) {
-    const part = await this.prisma.catalogPart.findUnique({
-      where: { id: partId },
+    // LOW-CAT-010: the same visibility as the detail page, so a hidden part
+    // (suspended dealer, no usable photo, no price, hidden category) answers 404
+    // here too and its numbers and fitment cannot be enumerated by id.
+    const part = await this.prisma.catalogPart.findFirst({
+      where: { id: partId, ...BUYER_LISTED_PART },
       include: { compatibilities: true, fitmentBindings: CURATED_IDS_SELECT },
     });
     if (!part) throw new NotFoundException('Part not found');
@@ -385,8 +415,9 @@ export class PartsService {
     input: { vehicleId?: string; vin?: string },
     userId?: string | null,
   ) {
-    const part = await this.prisma.catalogPart.findUnique({
-      where: { id: partId },
+    // Buyer-listed only, as above (LOW-CAT-010).
+    const part = await this.prisma.catalogPart.findFirst({
+      where: { id: partId, ...BUYER_LISTED_PART },
       select: {
         id: true,
         categoryId: true,
@@ -801,16 +832,11 @@ export class PartsService {
    * PartMainCategory enum. Case-insensitive; an unknown value resolves to null.
    */
   private rollupMainCategory(q: ListPartsQueryDto): PartMainCategory | null {
+    // The same resolver the home grid's tile counts use (LOW-CAT-006): the
+    // enum, or the canonical SLUG the grid ships as the tile id.
     for (const raw of [q.mainCategory, q.category]) {
-      if (!raw) continue;
-      const up = raw.toUpperCase();
-      if (MAIN_CATEGORY_VALUES.has(up as PartMainCategory)) {
-        return up as PartMainCategory;
-      }
-      // Also accept the canonical SLUG form ('belts-and-hoses'), which the home
-      // grid ships as the category id but which doesn't uppercase to the enum.
-      const bySlug = SLUG_TO_MAIN_CATEGORY.get(raw.toLowerCase());
-      if (bySlug) return bySlug;
+      const bucket = bucketForCategoryParam(raw);
+      if (bucket) return bucket;
     }
     return null;
   }

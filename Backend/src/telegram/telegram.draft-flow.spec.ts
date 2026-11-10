@@ -85,10 +85,13 @@ function makeCtx() {
 
 /** The prisma surface `commitPending` touches (incl. persistVehicleLinks). */
 function makePrismaStub() {
-  return {
+  const self: Record<string, any> = {
+    $transaction: jest.fn((run: (tx: unknown) => unknown) => run(self)),
+    $queryRaw: jest.fn().mockResolvedValue([]),
     product: {
       findUnique: jest.fn().mockResolvedValue(null),
       upsert: jest.fn().mockResolvedValue({ id: 10 }),
+      update: jest.fn().mockResolvedValue({ id: 10 }),
     },
     productImage: {
       deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
@@ -104,6 +107,7 @@ function makePrismaStub() {
     // Publish-time storefront check: no CatalogSeller row → not suspended.
     catalogSeller: { findUnique: jest.fn().mockResolvedValue(null) },
   };
+  return self as any;
 }
 
 /**

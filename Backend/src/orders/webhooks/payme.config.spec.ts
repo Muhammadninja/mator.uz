@@ -1,5 +1,6 @@
 import {
   collectPaymeConfigErrors,
+  collectPaymeFiscalReadinessErrors,
   validatePaymeEnv,
   readPaymeConfig,
   readPaymeFiscalConfig,
@@ -311,5 +312,120 @@ describe('delivery’s fiscal codes', () => {
         'src/orders/webhooks/settlement-store.test-util.ts', // a test double's column
       ],
     );
+  });
+
+  // INFO-4: sandbox and production are declared, and the checkout host is pinned.
+  describe('environment and checkout host', () => {
+    const prod = {
+      NODE_ENV: 'production',
+      PAYME_MERCHANT_ID: 'm',
+      PAYME_MERCHANT_KEY: 'k',
+    };
+
+    it('production accepts the production checkout host, set or defaulted', () => {
+      expect(collectPaymeConfigErrors(prod)).toEqual([]);
+      expect(
+        collectPaymeConfigErrors({
+          ...prod,
+          PAYME_ENV: 'production',
+          PAYME_CHECKOUT_URL: 'https://checkout.paycom.uz',
+        }),
+      ).toEqual([]);
+    });
+
+    it('production refuses PAYME_ENV=sandbox', () => {
+      expect(
+        collectPaymeConfigErrors({ ...prod, PAYME_ENV: 'sandbox' }).join(' '),
+      ).toMatch(/PAYME_ENV=sandbox is refused/);
+    });
+
+    it.each(['https://test.paycom.uz', 'https://checkout.test.paycom.uz'])(
+      'production refuses the sandbox checkout host %s, even if someone lists it',
+      (url) => {
+        expect(
+          collectPaymeConfigErrors({
+            ...prod,
+            PAYME_CHECKOUT_URL: url,
+            PAYME_CHECKOUT_ALLOWED_HOSTS: new URL(url).host,
+          }).join(' '),
+        ).toMatch(/not an accepted Payme checkout host/);
+      },
+    );
+
+    it.each([
+      'https://checkout.paycom.uz.evil.example',
+      'https://evil.example/checkout.paycom.uz',
+      'https://user:pass@checkout.paycom.uz',
+      'https://checkout.paycom.uz:8443',
+    ])('refuses %s: https alone is not trust', (url) => {
+      expect(
+        collectPaymeConfigErrors({ ...prod, PAYME_CHECKOUT_URL: url }),
+      ).toHaveLength(1);
+      expect(
+        collectPaymeConfigErrors({
+          NODE_ENV: 'development',
+          PAYME_CHECKOUT_URL: url,
+        }),
+      ).toHaveLength(1);
+    });
+
+    it('accepts another host only when PAYME_CHECKOUT_ALLOWED_HOSTS names it', () => {
+      expect(
+        collectPaymeConfigErrors({
+          ...prod,
+          PAYME_CHECKOUT_URL: 'https://pay.example.uz',
+          PAYME_CHECKOUT_ALLOWED_HOSTS: 'pay.example.uz',
+        }),
+      ).toEqual([]);
+    });
+
+    it('rejects an unknown PAYME_ENV value', () => {
+      expect(
+        collectPaymeConfigErrors({ NODE_ENV: 'development', PAYME_ENV: 'live' }),
+      ).toEqual(['PAYME_ENV must be "production" or "sandbox".']);
+    });
+  });
+
+  // INFO-15: fiscal configuration at boot.
+  describe('fiscal readiness', () => {
+    const base = { NODE_ENV: 'production', PAYME_MERCHANT_ID: 'm', PAYME_MERCHANT_KEY: 'k' };
+
+    it('does not block startup by default, whatever is missing', () => {
+      expect(collectPaymeFiscalReadinessErrors(base)).toEqual([]);
+      expect(() => validatePaymeEnv(base)).not.toThrow();
+    });
+
+    it('with PAYME_FISCAL_REQUIRED=true, refuses to start and names each missing value', () => {
+      const errors = collectPaymeFiscalReadinessErrors({ ...base, PAYME_FISCAL_REQUIRED: 'true' });
+      expect(errors.join(' ')).toMatch(/MARKETPLACE_TIN/);
+      expect(errors.join(' ')).toMatch(/SERVICE_FEE_MXIK/);
+      expect(errors.join(' ')).toMatch(/SERVICE_FEE_PACKAGE_CODE/);
+      expect(() => validatePaymeEnv({ ...base, PAYME_FISCAL_REQUIRED: 'true' })).toThrow(
+        /Invalid Payme configuration/,
+      );
+    });
+
+    it('refuses invented or borrowed codes too, not only absent ones', () => {
+      const errors = collectPaymeFiscalReadinessErrors({
+        ...base,
+        PAYME_FISCAL_REQUIRED: 'true',
+        MARKETPLACE_TIN: '309457999', // YandexGo's, never Mator's
+        SERVICE_FEE_MXIK: '10112006002000000', // delivery's code
+        SERVICE_FEE_PACKAGE_CODE: '1542432', // delivery's code
+      });
+      expect(errors).toHaveLength(3);
+    });
+
+    it('passes when all three are real', () => {
+      expect(
+        collectPaymeFiscalReadinessErrors({
+          ...base,
+          PAYME_FISCAL_REQUIRED: 'true',
+          MARKETPLACE_TIN: '312345678',
+          SERVICE_FEE_MXIK: '10305001001000000',
+          SERVICE_FEE_PACKAGE_CODE: '1501110',
+        }),
+      ).toEqual([]);
+    });
   });
 });

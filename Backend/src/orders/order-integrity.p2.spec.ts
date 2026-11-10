@@ -307,7 +307,7 @@ describe('offline orders and online payment (LOW-ORD-013)', () => {
       prisma.order.findUnique.mockResolvedValue(
         buildOrder({ id: 'o1', userId: 'u1', status: 'PENDING_PAYMENT', paymentType }),
       );
-      const service = new PaymentsService(prisma, fakeConfig({ PAYME_MERCHANT_ID: 'm', PAYMENT_PROVIDERS: 'payme,click', CLICK_SECRET_KEY: 's' }), fakeFiscal(prisma));
+      const service = new PaymentsService(prisma, fakeConfig({ PAYME_MERCHANT_ID: 'm', PAYMENT_PROVIDERS: 'payme,click', CLICK_SECRET_KEY: 's', CLICK_SERVICE_ID: '98321', CLICK_MERCHANT_ID: '44790' }), fakeFiscal(prisma));
       for (const call of [
         () => service.createPaymeInvoice('u1', { order_id: 'o1' } as any),
         () => service.createClickInvoice('u1', { order_id: 'o1' } as any),

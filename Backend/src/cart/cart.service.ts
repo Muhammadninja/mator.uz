@@ -4,6 +4,7 @@ import {
   BadRequestException,
   ConflictException,
 } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { prefixedId, IdPrefix } from '../common/ulid.util';
 import { AddCartItemDto, MAX_CART_ITEM_QUANTITY } from './dto/add-cart-item.dto';
@@ -75,21 +76,32 @@ export class CartService {
     const cart = await this.getOrCreate(userId);
 
     // Ownership: a caller may only attach their OWN vehicle to a cart line.
-    // (provider_id references the public provider directory, not a user-owned
-    // resource, so it is not ownership-scoped.)
     await this.assertOwnedVehicle(userId, dto.vehicle_id);
 
     if (dto.service_id) {
       const svc = await this.prisma.providerServiceOffering.findUnique({
         where: { id: dto.service_id },
+        include: { provider: { select: { isActive: true } } },
       });
-      if (!svc) throw new NotFoundException('Service not found');
+      if (!svc || !svc.provider.isActive) {
+        throw new NotFoundException('Service not found');
+      }
+      // LOW-ORD-009: who provides the service is the service's own record, not
+      // the client's word. It reaches the order line and from there the
+      // provider's settlement, so a client-named provider that differs is
+      // refused rather than stored or silently replaced.
+      if (dto.provider_id && dto.provider_id !== svc.providerId) {
+        throw new BadRequestException({
+          code: 'PROVIDER_MISMATCH',
+          message: 'provider_id does not match the provider of this service',
+        });
+      }
       await this.prisma.cartItem.create({
         data: {
           id: prefixedId(IdPrefix.CART_ITEM),
           cartId: cart.id,
           serviceId: svc.id,
-          providerId: dto.provider_id,
+          providerId: svc.providerId,
           vehicleId: dto.vehicle_id,
           scheduledAt: dto.scheduled_at ? new Date(dto.scheduled_at) : undefined,
           title: svc.name,
@@ -180,10 +192,28 @@ export class CartService {
     userId: string,
     input: { offerId: string; title: string; priceUzs: number | string; imageUrl?: string | null },
   ) {
-    const cart = await this.getOrCreate(userId);
+    await this.addSourcedOfferLine(this.prisma, userId, input);
+    return this.snapshot(userId);
+  }
+
+  /**
+   * The write half of {@link addSourcedOffer}, on the caller's transaction, so
+   * accepting an offer and putting it in the cart commit together (LOW-ORD-011).
+   */
+  async addSourcedOfferLine(
+    db: Prisma.TransactionClient,
+    userId: string,
+    input: { offerId: string; title: string; priceUzs: number | string; imageUrl?: string | null },
+  ): Promise<void> {
+    const cart = await db.cart.upsert({
+      where: { userId },
+      create: { id: prefixedId(IdPrefix.CART), userId },
+      update: {},
+      include: { items: { select: { offerId: true } } },
+    });
     const already = cart.items.find((i) => i.offerId === input.offerId);
     if (!already) {
-      await this.prisma.cartItem.create({
+      await db.cartItem.create({
         data: {
           id: prefixedId(IdPrefix.CART_ITEM),
           cartId: cart.id,
@@ -195,11 +225,18 @@ export class CartService {
         },
       });
     }
-    return this.snapshot(userId);
   }
 
   async updateItem(userId: string, itemId: string, quantity: number) {
     const item = await this.assertItemOwned(userId, itemId);
+    // LOW-ORD-007: a bought offer is one unique item and a service is one
+    // booking; neither can be multiplied by editing the quantity.
+    if (quantity > 1 && !item.partId && (item.offerId || item.serviceId)) {
+      throw new BadRequestException({
+        code: 'QUANTITY_NOT_ADJUSTABLE',
+        message: 'This line is a single item; its quantity cannot be changed.',
+      });
+    }
     if (quantity <= 0) {
       await this.prisma.cartItem.delete({ where: { id: itemId } });
     } else {

@@ -244,15 +244,20 @@ function makePrisma() {
       args[name] = arg;
       return ret;
     };
-  return {
+  const self: Record<string, any> = {
     calls,
     args,
+    // The gallery replacement's transaction and row lock (LOW-ING-015). Neither
+    // is a write of its own, so neither is recorded in `calls`.
+    $transaction: (run: (tx: unknown) => unknown) => run(self),
+    $queryRaw: () => Promise.resolve([]),
     brand: { upsert: upsert('brand', { id: 1 }) },
     carModel: { upsert: upsert('carModel', { id: 2 }) },
     product: {
       // Not recorded in `calls` (it is a read). Null: nothing listed under this number.
       findUnique: (() => Promise.resolve(null)) as (arg: unknown) => Promise<unknown>,
       upsert: upsert('product', { id: 100 }),
+      update: () => Promise.resolve({ id: 100 }),
     },
     productImage: {
       deleteMany: upsert('productImage.deleteMany', { count: 0 }),
@@ -267,6 +272,7 @@ function makePrisma() {
     // row → not suspended. Not recorded in `calls` (it is a read).
     catalogSeller: { findUnique: () => Promise.resolve(null as unknown) },
   };
+  return self as any;
 }
 
 function makeCtx(tgUserId?: number) {

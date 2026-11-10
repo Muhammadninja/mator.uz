@@ -8,6 +8,7 @@ import { randomBytes, createHash } from 'crypto';
 import { type AppUser } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { MailService } from '../../mail/mail.service';
+import { maskEmail } from '../../common/pii.util';
 
 const TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 const RESEND_COOLDOWN_MS = 60 * 1000; // 60s between emails per user
@@ -95,7 +96,7 @@ export class EmailVerificationService {
   async resend(email: string): Promise<void> {
     const user = await this.prisma.appUser.findUnique({ where: { email } });
     if (!user || user.emailVerified) {
-      this.logger.debug(`Resend ignored for ${email} (missing or already verified)`);
+      this.logger.debug(`Resend ignored for ${maskEmail(email)} (missing or already verified)`);
       return;
     }
 

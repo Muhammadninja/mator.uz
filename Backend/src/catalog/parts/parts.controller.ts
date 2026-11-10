@@ -11,6 +11,7 @@ import {
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
+import { ScalarQueryPipe } from '../../common/query-param.pipes';
 import { ApiTags, ApiOperation, ApiHeader } from '@nestjs/swagger';
 import { resolveRequestLang } from '../../common/app-lang.util';
 import {
@@ -72,7 +73,7 @@ export class PartsController {
   detail(
     @Param('id') id: string,
     @Request() req: { user?: { id: string } | null },
-    @Query('vehicle_id') vehicleId?: string,
+    @Query('vehicle_id', new ScalarQueryPipe('vehicle_id', 64)) vehicleId?: string,
     @Headers('accept-language') acceptLanguage?: string,
   ) {
     return this.parts.detail(
@@ -88,7 +89,7 @@ export class PartsController {
   @UseGuards(OptionalJwtForVehicleGuard)
   compatibility(
     @Param('id') id: string,
-    @Query('vehicle_id') vehicleId: string,
+    @Query('vehicle_id', new ScalarQueryPipe('vehicle_id', 64)) vehicleId: string,
     @Request() req: { user?: { id: string } | null },
   ) {
     return this.parts.compatibility(id, vehicleId, req.user?.id ?? null);

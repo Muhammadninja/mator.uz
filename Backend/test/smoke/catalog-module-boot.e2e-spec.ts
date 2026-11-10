@@ -78,7 +78,7 @@ describe('CatalogModule boot + check-compatibility over HTTP (e2e)', () => {
   });
 
   beforeEach(() => {
-    prisma.catalogPart.findUnique.mockResolvedValue({
+    prisma.catalogPart.findFirst.mockResolvedValue({
       id: 'part_1',
       isUniversal: false,
       oemNumbers: ['96985730'],

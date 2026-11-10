@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   HttpStatus,
@@ -14,6 +15,7 @@ import {
   ApiConflictResponse,
   ApiCreatedResponse,
   ApiForbiddenResponse,
+  ApiNoContentResponse,
   ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
@@ -31,6 +33,7 @@ import {
   AcceptAdminInviteDto,
   AdminInvitePreviewDto,
   CreateAdminInviteDto,
+  PendingAdminInviteDto,
 } from './dto/admin-invite.dto';
 import { AdminSessionResponseDto } from './dto/admin-session.response.dto';
 import { AdminJwtGuard } from './guards/admin-jwt.guard';
@@ -43,6 +46,8 @@ type AuthenticatedAdminRequest = Request & { user: AuthenticatedAdmin };
  * Invite-only admin signup, under /v1/auth/admin/invites.
  *
  *   • POST   /invites            SUPER_ADMIN issues an invite (email + role).
+ *   • GET    /invites            SUPER_ADMIN lists the pending invites.
+ *   • DELETE /invites/:id        SUPER_ADMIN revokes a pending invite.
  *   • GET    /invites/:token     PUBLIC preview — the invited email + role.
  *   • POST   /invites/:token/accept  PUBLIC — set a password, get logged in.
  *
@@ -96,6 +101,51 @@ export class AdminInviteController {
       { email: dto.email, role: dto.role, inviter: this.auditContext(req).actor },
       this.auditContext(req),
     );
+  }
+
+  // Declared before `:token` so the bare collection path is never read as a token.
+  @Get()
+  @UseGuards(AdminJwtGuard, AdminRoleGuard)
+  @Roles(AdminRole.SUPER_ADMIN)
+  @ApiBearerAuth('jwt')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'List pending invites (SUPER_ADMIN)',
+    description:
+      'Invites not yet accepted and not expired, newest first, with who issued each. ' +
+      'Never includes the token or its hash. Same access as issuing an invite.',
+  })
+  @ApiOkResponse({ type: [PendingAdminInviteDto] })
+  @ApiUnauthorizedResponse({
+    description: 'Missing or invalid admin access token.',
+  })
+  @ApiForbiddenResponse({ description: 'Caller is not a SUPER_ADMIN.' })
+  list(): Promise<PendingAdminInviteDto[]> {
+    return this.invites.listPending();
+  }
+
+  @Delete(':id')
+  @UseGuards(AdminJwtGuard, AdminRoleGuard)
+  @Roles(AdminRole.SUPER_ADMIN)
+  @ApiBearerAuth('jwt')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({
+    summary: 'Revoke a pending invite (SUPER_ADMIN)',
+    description:
+      'The invite link stops working immediately. `id` is the invite id from the list, ' +
+      'not the token. Same access as issuing an invite.',
+  })
+  @ApiNoContentResponse({ description: 'Invite revoked.' })
+  @ApiNotFoundResponse({ description: 'No such pending invite.' })
+  @ApiUnauthorizedResponse({
+    description: 'Missing or invalid admin access token.',
+  })
+  @ApiForbiddenResponse({ description: 'Caller is not a SUPER_ADMIN.' })
+  async revoke(
+    @Param('id') id: string,
+    @Req() req: AuthenticatedAdminRequest,
+  ): Promise<void> {
+    await this.invites.revoke(id, this.auditContext(req));
   }
 
   @Get(':token')

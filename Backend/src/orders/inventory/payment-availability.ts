@@ -12,7 +12,10 @@ type Db = Pick<
   | 'orderItem'
   | 'inventoryReservation'
   | 'payment'
->;
+> &
+  Partial<
+    Pick<PrismaService, 'sourcingOffer' | 'seller' | 'providerServiceOffering'>
+  >;
 
 type OpenRow = {
   id: string;
@@ -60,7 +63,15 @@ export async function findUnavailableForPayment(
 ): Promise<UnavailableLine[]> {
   const items = await prisma.orderItem.findMany({
     where: { orderId },
-    select: { partId: true, title: true, quantity: true },
+    // Every line type: an offer or a service is re-checked at payment too.
+    select: {
+      partId: true,
+      title: true,
+      quantity: true,
+      offerId: true,
+      serviceId: true,
+      providerId: true,
+    },
   });
   if (!inventoryReservationsEnabled())
     return findUnavailableParts(prisma, items);

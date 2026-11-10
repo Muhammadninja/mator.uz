@@ -1,3 +1,4 @@
+import { claimPushTokens } from '../../notifications/push-token-ownership';
 import { BadRequestException, Inject, Injectable, forwardRef } from '@nestjs/common';
 import {
   AuthProvider,
@@ -33,9 +34,14 @@ export class PhoneAuthService {
     private readonly legal: LegalService,
   ) {}
 
-  async checkAvailability(phoneE164: string) {
-    const existing = await this.prisma.appUser.findUnique({ where: { phoneE164 } });
-    return { phone_e164: phoneE164, is_existing_user: !!existing };
+  /**
+   * Kept for clients that still call it; it no longer says anything about the
+   * number. Whether a phone has an account is not public: the same answer, and
+   * the same work, for every number. Sign-in and registration are one flow
+   * (request a code, verify it), so no client needs to know in advance.
+   */
+  checkAvailability(phoneE164: string) {
+    return { phone_e164: phoneE164 };
   }
 
   async requestOtp(dto: RequestOtpDto) {
@@ -50,8 +56,9 @@ export class PhoneAuthService {
       OtpPurpose.LOGIN,
       dto.lang,
     );
-    const existing = await this.prisma.appUser.findUnique({ where: { phoneE164 } });
-
+    // No account lookup and no `is_existing_user`: the response is identical for
+    // a registered and an unknown number, so it cannot be used to enumerate
+    // accounts. Whether to register is decided after the code is verified.
     return {
       request_id: issued.requestId,
       phone_e164: phoneE164,
@@ -59,7 +66,6 @@ export class PhoneAuthService {
       resend_after_seconds: issued.resendAfterSeconds,
       otp_length: issued.otpLength,
       delivery_channel: issued.channel.toLowerCase(),
-      is_existing_user: !!existing,
       next_screen: 'AuthOtpVerifyScreen',
       // AUTH_DEV_MODE only: present so the frontend can auto-fill the OTP
       // without an SMS provider. Never set in production.
@@ -178,7 +184,8 @@ export class PhoneAuthService {
       return null; // no device payload -> session not bound to a device
     }
     const platform = device.platform.toUpperCase() as 'IOS' | 'ANDROID';
-    return this.prisma.device.upsert({
+    return this.prisma.$transaction(async (tx) => {
+      const row = await tx.device.upsert({
       where: { userId_installId: { userId, installId: device.install_id } },
       create: {
         id: prefixedId(IdPrefix.DEVICE),
@@ -197,6 +204,10 @@ export class PhoneAuthService {
         apnsToken: device.apns_token,
         lastSeenAt: new Date(),
       },
+      });
+      // The install's tokens now belong to this account alone.
+      await claimPushTokens(tx, row.id, row);
+      return row;
     });
   }
 

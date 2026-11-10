@@ -2,6 +2,7 @@ import { Logger } from '@nestjs/common';
 import axios from 'axios';
 import { createHash, randomUUID } from 'crypto';
 import { SmsProvider, SmsSendResult } from '../sms-provider.interface';
+import { maskPhone } from '../../common/pii.util';
 
 export interface SayqalConfig {
   baseUrl: string; // https://routee.sayqal.uz
@@ -101,7 +102,7 @@ export class SayqalSmsProvider implements SmsProvider {
     // API expects 998YYXXXXXXX (12 digits, no '+'). Callers pass E.164 (+998...).
     const phone = toE164.replace(/\D/g, '');
     if (!/^998\d{9}$/.test(phone)) {
-      throw new Error(`Sayqal: unsupported phone format "${toE164}" (expected 998XXXXXXXXX)`);
+      throw new Error(`Sayqal: unsupported phone format "${maskPhone(toE164)}" (expected 998XXXXXXXXX)`);
     }
     if (!text) {
       throw new Error('Sayqal: refusing to send an empty SMS body');

@@ -85,15 +85,27 @@ export interface OtpProof {
 }
 
 /**
- * Where a record and its limits live. The phone number itself, except for a proof of
- * the current number, which is sent to a number that may be signing in at the same
- * moment and has its own place: asking for it must neither replace a live login code
- * nor spend that number's login allowance.
+ * Where the hourly verification allowance of a record lives. The phone number
+ * itself, except for a proof of the current number, which is sent to a number
+ * that may be signing in at the same moment: asking for it must not spend that
+ * number's login allowance.
  */
-function slotOf(phoneE164: string, purpose: string): string {
+function limitSlotOf(phoneE164: string, purpose: string): string {
   return purpose === OtpPurpose.PHONE_CHANGE_CURRENT
     ? `${purpose}:${phoneE164}`
     : phoneE164;
+}
+
+/**
+ * Where a record lives: one place per (purpose, phone). A login code keeps the
+ * bare phone key. Every other purpose has its own, so asking for a login code
+ * for a number can neither replace nor satisfy a phone-change code pending for
+ * that same number, and the other way round. Without this, anyone who knew the
+ * number an account was moving to could void that change by requesting a login
+ * code for it.
+ */
+function slotOf(phoneE164: string, purpose: string): string {
+  return purpose === OtpPurpose.LOGIN ? phoneE164 : `${purpose}:${phoneE164}`;
 }
 
 /** The cooldown's identity for a number: its digits, however they were written. */
@@ -580,7 +592,7 @@ export class OtpService {
       );
     }
     const perPhone = await this.consumeLimit(
-      RedisKeys.rateOtpVerify(slotOf(record.phoneE164, record.purpose)),
+      RedisKeys.rateOtpVerify(limitSlotOf(record.phoneE164, record.purpose)),
       MAX_VERIFY_PER_HOUR,
       HOURLY_WINDOW_S,
     );
@@ -628,7 +640,7 @@ export class OtpService {
    * single-use consume) is applied exactly once.
    */
   async verifyLatestForPhone(phoneE164: string, code: string, purpose: OtpPurpose): Promise<void> {
-    const record = await this.loadByPhone(phoneE164);
+    const record = await this.loadByPhone(slotOf(phoneE164, purpose));
     if (
       !record ||
       record.purpose !== purpose ||

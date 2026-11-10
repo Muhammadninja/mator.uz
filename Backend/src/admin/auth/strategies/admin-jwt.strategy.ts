@@ -10,6 +10,7 @@ import {
   ADMIN_JWT_ISSUER,
 } from '../admin-auth.config';
 import { AdminJwtPayload } from '../interfaces/admin-jwt-payload.interface';
+import { AdminTokenService } from '../admin-token.service';
 
 /** Passport strategy name. Distinct from the mobile app's default `jwt`. */
 export const ADMIN_JWT_STRATEGY = 'admin-jwt';
@@ -53,6 +54,7 @@ export class AdminJwtStrategy extends PassportStrategy(
   constructor(
     private readonly prisma: PrismaService,
     config: AdminAuthConfig,
+    private readonly tokens: AdminTokenService,
   ) {
     super({
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
@@ -76,6 +78,13 @@ export class AdminJwtStrategy extends PassportStrategy(
     // rejected outright rather than trusted by omission.
     if (payload.type !== 'admin') {
       throw new UnauthorizedException('Not an admin token');
+    }
+
+    // Single-token and single-device revocation (logout, "sign out this
+    // device"), checked before the database read. A Redis failure propagates:
+    // the request is refused rather than the check waived.
+    if (await this.tokens.isAccessTokenRevoked(payload)) {
+      throw new UnauthorizedException('Token revoked');
     }
 
     const admin = await this.prisma.appAdmin.findUnique({

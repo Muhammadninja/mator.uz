@@ -7,6 +7,7 @@ import { boolEnv, normalizeMetricsPath } from './metrics.config';
 import { createMetricsController } from './metrics.controller';
 import { HttpMetricsInterceptor } from './http-metrics.interceptor';
 import { metricsProviders } from './metrics.providers';
+import { MetricsAccessGuard } from './metrics-access.guard';
 import { MetricsService } from './metrics.service';
 import { QueueMetricsCollector } from './queue-metrics.collector';
 import { SmsCostCollector } from './sms-cost.collector';
@@ -94,6 +95,7 @@ function buildMetricsModule() {
     providers: [
       ...metricsProviders(),
       MetricsService,
+      MetricsAccessGuard,
       QueueMetricsCollector,
       // Reads the SMS accounting table on scrape. No import is needed for
       // PrismaService: PrismaModule is @Global, exactly like this module.

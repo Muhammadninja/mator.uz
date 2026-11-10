@@ -4,13 +4,27 @@ import {
   OnGatewayInit,
   WebSocketGateway,
 } from '@nestjs/websockets';
-import { Logger, OnModuleInit } from '@nestjs/common';
+import { Logger, OnModuleInit, UnauthorizedException } from '@nestjs/common';
 import type { IncomingMessage } from 'http';
 import { WebSocket, WebSocketServer, RawData } from 'ws';
 import { TokenService } from '../auth/tokens/token.service';
-import { WsAuthService } from './ws-auth.service';
+import { WsAuthService, WsSession } from './ws-auth.service';
+import {
+  HandshakeLimiter,
+  selectWsProtocol,
+  trustedProxyList,
+  wsClientIp,
+} from '../common/ws-handshake.util';
 
 const HEARTBEAT_MS = 30_000;
+/**
+ * Every this many heartbeats (5 minutes) the open sockets are re-checked against
+ * the database and the blacklist in one batch. Logout and logout-all close their
+ * sockets at once through the TokenService listeners; this pass is the backstop
+ * for a revocation this process did not see, at a cost of one query and one
+ * Redis round trip per pass, not per socket.
+ */
+const REVALIDATE_EVERY_BEATS = 10;
 
 // ── Tunable limits (change here) ──────────────────────────────────────────────
 /**
@@ -45,6 +59,7 @@ interface TrackedSocket extends WebSocket {
   userId?: string;
   channel?: string;
   isAlive?: boolean;
+  session?: WsSession;
 }
 
 /** A server→client event frame. */
@@ -60,17 +75,24 @@ const CLOSE_BAD_REQUEST = 4400;
 const CLOSE_TOO_MANY_CONNECTIONS = 4408; // per-user simultaneous cap reached
 const CLOSE_RATE_LIMITED = 4429; // handshake rate limit (mirrors HTTP 429)
 const CLOSE_SESSION_REVOKED = 4401; // sessions revoked while the socket was open
+/** Standard "try again later": the check could not be made, the token may be fine. */
+const CLOSE_TRY_AGAIN = 1013;
 
 /**
  * Native-`ws` realtime gateway. Clients connect to
- * `wss://…/realtime?channel=garage:{user_id}&token=<jwt>`; the channel's user id
- * must match the authenticated token. Heartbeat is protocol-level ping/pong: the
+ * `wss://…/realtime?channel=garage:{user_id}` and present the access token as
+ * the `mator.bearer` subprotocol (or an Authorization header); the channel's user
+ * id must match the authenticated token. Heartbeat is protocol-level ping/pong: the
  * server pings every 30s and terminates sockets that miss a pong. App-level
  * `{"type":"ping"}` messages are also answered with `{"type":"pong"}`.
  */
 // `maxPayload` (and any other option besides `path`/`server`/`namespace`) is
 // forwarded verbatim to the underlying `ws.Server` constructor by `WsAdapter`.
-@WebSocketGateway({ path: '/realtime', maxPayload: MAX_PAYLOAD_BYTES })
+@WebSocketGateway({
+  path: '/realtime',
+  maxPayload: MAX_PAYLOAD_BYTES,
+  handleProtocols: selectWsProtocol,
+})
 export class RealtimeGateway
   implements
     OnGatewayInit,
@@ -81,10 +103,14 @@ export class RealtimeGateway
   private readonly logger = new Logger(RealtimeGateway.name);
   // userId -> live sockets (a user may have several devices/tabs connected).
   private readonly sockets = new Map<string, Set<TrackedSocket>>();
-  // clientIp -> recent handshake timestamps (ms), for sliding-window rate
-  // limiting. Pruned in `sweep()` so it can't grow unbounded.
-  private readonly handshakes = new Map<string, number[]>();
+  // Sliding-window handshake limit per client address, pruned in `sweep()`.
+  private readonly handshakes = new HandshakeLimiter(
+    HANDSHAKE_LIMIT,
+    HANDSHAKE_WINDOW_MS,
+  );
+  private readonly trustedProxies = trustedProxyList(process.env.TRUST_PROXY);
   private heartbeat?: ReturnType<typeof setInterval>;
+  private beats = 0;
 
   constructor(
     private readonly wsAuth: WsAuthService,
@@ -100,10 +126,11 @@ export class RealtimeGateway
    */
   onModuleInit(): void {
     this.tokens.onSessionsRevoked((userId) => this.disconnectUser(userId));
+    this.tokens.onAccessTokenRevoked((jti) => this.disconnectToken(jti));
   }
 
   afterInit(server: WebSocketServer): void {
-    this.heartbeat = setInterval(() => this.sweep(), HEARTBEAT_MS);
+    this.heartbeat = setInterval(() => void this.sweep(), HEARTBEAT_MS);
     // Stop the timer when the server closes so tests/shutdown don't hang.
     server.on('close', () => this.heartbeat && clearInterval(this.heartbeat));
   }
@@ -114,16 +141,21 @@ export class RealtimeGateway
   ): Promise<void> {
     // Rate-limit the handshake *before* authenticating so failed/abusive
     // attempts are throttled too, not just successful ones.
-    if (this.isRateLimited(this.clientIp(request))) {
+    if (this.handshakes.hit(wsClientIp(request, this.trustedProxies))) {
       return this.reject(client, CLOSE_RATE_LIMITED, 'rate_limited');
     }
 
-    let userId: string;
+    let session: WsSession;
     try {
-      userId = await this.wsAuth.authenticate(request);
-    } catch {
-      return this.reject(client, CLOSE_UNAUTHORIZED, 'unauthorized');
+      session = await this.wsAuth.authenticate(request);
+    } catch (err) {
+      // Only a refused token is "unauthorized", which the app treats as final.
+      // Redis or the database being unreachable is not a verdict on the token.
+      return err instanceof UnauthorizedException
+        ? this.reject(client, CLOSE_UNAUTHORIZED, 'unauthorized')
+        : this.reject(client, CLOSE_TRY_AGAIN, 'unavailable');
     }
+    const userId = session.userId;
 
     const channel = new URL(
       request.url ?? '',
@@ -146,6 +178,7 @@ export class RealtimeGateway
     }
 
     client.userId = userId;
+    client.session = session;
     client.channel = channel!;
     client.isAlive = true;
     client.on('pong', () => (client.isAlive = true));
@@ -182,6 +215,17 @@ export class RealtimeGateway
     return set.size;
   }
 
+  /** Close the sockets opened with one access token (single-device logout). */
+  disconnectToken(jti: string): number {
+    let closed = 0;
+    for (const client of this.allSockets()) {
+      if (client.session?.jti !== jti) continue;
+      this.drop(client, CLOSE_SESSION_REVOKED, 'session_revoked');
+      closed++;
+    }
+    return closed;
+  }
+
   /** Push a garage event to every live socket of the given user. */
   emitGarageEvent(userId: string, type: string, data: unknown): void {
     this.emit(userId, { type, data });
@@ -207,55 +251,59 @@ export class RealtimeGateway
     }
   }
 
-  /**
-   * Sliding-window handshake rate limit keyed by client IP. Records this
-   * attempt and returns true if the IP has exceeded {@link HANDSHAKE_LIMIT}
-   * within {@link HANDSHAKE_WINDOW_MS}. Stale timestamps are dropped on every
-   * call so the per-IP array stays bounded; empty IP entries are cleared here
-   * and by the periodic prune in `sweep()`.
-   */
-  private isRateLimited(ip: string): boolean {
-    const now = Date.now();
-    const cutoff = now - HANDSHAKE_WINDOW_MS;
-    const recent = (this.handshakes.get(ip) ?? []).filter((t) => t > cutoff);
-    recent.push(now);
-    this.handshakes.set(ip, recent);
-    return recent.length > HANDSHAKE_LIMIT;
+  private allSockets(): TrackedSocket[] {
+    return [...this.sockets.values()].flatMap((set) => [...set]);
   }
 
-  /**
-   * Best-effort client IP. Behind Nginx (`trust proxy` is set for HTTP) the
-   * real client is the first entry of `X-Forwarded-For`; fall back to the
-   * socket's remote address for direct connections.
-   */
-  private clientIp(request: IncomingMessage): string {
-    const fwd = request.headers['x-forwarded-for'];
-    const first = Array.isArray(fwd) ? fwd[0] : fwd?.split(',')[0];
-    return first?.trim() || request.socket?.remoteAddress || 'unknown';
+  /** Close a tracked socket and forget it without waiting for the close event. */
+  private drop(client: TrackedSocket, code: number, reason: string): void {
+    this.reject(client, code, reason);
+    this.handleDisconnect(client);
   }
 
-  private sweep(): void {
-    for (const set of this.sockets.values()) {
-      for (const client of set) {
-        if (client.isAlive === false) {
-          client.terminate();
-          continue;
-        }
-        client.isAlive = false;
-        try {
-          client.ping();
-        } catch {
-          client.terminate();
-        }
+  private async sweep(): Promise<void> {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    for (const client of this.allSockets()) {
+      // The access token ran out: the socket goes with it. The app reconnects
+      // with the token its refresh produced.
+      if (client.session?.exp && client.session.exp <= nowSeconds) {
+        this.drop(client, CLOSE_UNAUTHORIZED, 'token_expired');
+        continue;
+      }
+      if (client.isAlive === false) {
+        client.terminate();
+        continue;
+      }
+      client.isAlive = false;
+      try {
+        client.ping();
+      } catch {
+        client.terminate();
       }
     }
-    // Prune expired handshake windows so the map can't grow unbounded.
-    const cutoff = Date.now() - HANDSHAKE_WINDOW_MS;
-    for (const [ip, times] of this.handshakes) {
-      const live = times.filter((t) => t > cutoff);
-      if (live.length === 0) this.handshakes.delete(ip);
-      else this.handshakes.set(ip, live);
+    this.handshakes.prune();
+    if (++this.beats % REVALIDATE_EVERY_BEATS === 0) await this.revalidate();
+  }
+
+  /** Batch re-check of every open socket; see {@link REVALIDATE_EVERY_BEATS}. */
+  async revalidate(): Promise<void> {
+    const open = this.allSockets().filter((c) => c.session);
+    if (open.length === 0) return;
+    let verdicts: boolean[];
+    try {
+      verdicts = await this.wsAuth.stillValid(open.map((c) => c.session!));
+    } catch (err) {
+      // Could not check: the sockets are closed as "try again", and the app
+      // reconnects through the handshake, which makes the same checks.
+      this.logger.warn(
+        `WS revalidation unavailable, closing ${open.length} socket(s): ${String(err)}`,
+      );
+      for (const client of open) this.drop(client, CLOSE_TRY_AGAIN, 'unavailable');
+      return;
     }
+    open.forEach((client, i) => {
+      if (!verdicts[i]) this.drop(client, CLOSE_SESSION_REVOKED, 'session_revoked');
+    });
   }
 
   private track(userId: string, client: TrackedSocket): void {

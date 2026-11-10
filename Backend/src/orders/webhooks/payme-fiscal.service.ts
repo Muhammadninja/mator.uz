@@ -168,14 +168,19 @@ export class PaymeFiscalService implements OnModuleInit {
     const { marketplaceTin, serviceFee } = readPaymeFiscalConfig((key) =>
       this.config.get<string>(key),
     );
+    // Loud in production, where it means real orders are being refused.
+    const report = (message: string) =>
+      this.config.get<string>('NODE_ENV') === 'production'
+        ? this.logger.error(message)
+        : this.logger.warn(message);
     if (marketplaceTin === null) {
-      this.logger.warn(
+      report(
         "MARKETPLACE_TIN is unset or cannot be Mator's 9-digit tax id: any order with " +
           'a delivery cost or a service fee will be refused until it is configured.',
       );
     }
     if (serviceFee.mxik === null || serviceFee.packageCode === null) {
-      this.logger.warn(
+      report(
         'SERVICE_FEE_MXIK or SERVICE_FEE_PACKAGE_CODE is unset or invalid: Payme will ' +
           'refuse any order with a service fee until both are configured.',
       );

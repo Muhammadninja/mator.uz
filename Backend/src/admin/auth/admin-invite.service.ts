@@ -19,6 +19,19 @@ import {
 /** Invite lifetime — a taklif link is valid for 48 hours from creation. */
 const INVITE_TTL_MS = 48 * 60 * 60 * 1000;
 
+/** Upper bound on the pending list; invites are issued at most 10 an hour. */
+const MAX_PENDING_LISTED = 200;
+
+/** A pending invite as shown to a SUPER_ADMIN. Carries no token material. */
+export interface PendingAdminInvite {
+  id: string;
+  email: string;
+  role: AdminRole;
+  expiresAt: Date;
+  createdAt: Date;
+  invitedBy: { id: string; email: string; name: string } | null;
+}
+
 /** The invite preview a public caller may see: who it is for, and what role. */
 export interface AdminInvitePreview {
   email: string;
@@ -38,7 +51,12 @@ export interface AdminInvitePreview {
  *   • Single-use: `acceptedAt` is stamped on acceptance and a used invite is
  *     rejected as "not found" thereafter.
  *   • Short-lived: 48h expiry, checked on both preview and accept.
- *   • Missing/expired/accepted all collapse to 404, so a token cannot be probed.
+ *   • Missing/expired/accepted/revoked all collapse to 404, so a token cannot
+ *     be probed.
+ *   • Bound to its issuer: an invite is honoured only while the administrator
+ *     who issued it is active and still a SUPER_ADMIN. Deactivating, demoting
+ *     or deleting them drops their pending invites (AdminAuthService), and
+ *     acceptance re-checks under a row lock.
  *
  * Nothing here re-implements hashing or session issuance: account creation goes
  * through AdminAuthService.createAdmin (Argon2id + CREATE_ADMIN audit in one
@@ -151,67 +169,103 @@ export class AdminInviteService {
     params: { name: string; password: string },
     context: AdminSessionContext = {},
   ): Promise<IssuedAdminSession> {
-    const invite = await this.findLiveInvite(rawToken);
+    // A cheap refusal for a dead link before paying for the password hash. The
+    // decision that counts is taken again below, under row locks.
+    await this.findLiveInvite(rawToken);
+    const tokenHash = this.hashToken(rawToken);
 
-    // Re-check the account does not exist (an admin could have been created for
-    // this email between issuing and accepting the invite).
-    const clash = await this.prisma.appAdmin.findUnique({
-      where: { email: invite.email },
-      select: { id: true },
-    });
-    if (clash) {
-      // Burn the now-meaningless invite so the stale link cannot be retried.
-      await this.prisma.adminInvite.updateMany({
-        where: { id: invite.id, acceptedAt: null },
+    // One transaction decides everything: the invite is still unused, its
+    // issuer is still an active SUPER_ADMIN, and the account does not exist.
+    // The invite row is locked, so a second accept of the same link waits and
+    // then finds it used. The issuer's row is share-locked, so a deactivation or
+    // demotion either commits first (and this accept is refused) or waits until
+    // the account exists (and then finds no pending invite left to drop).
+    const outcome = await this.prisma.$transaction(async (tx) => {
+      const [invite] = await tx.$queryRaw<
+        {
+          id: string;
+          email: string;
+          role: AdminRole;
+          invited_by_id: string | null;
+          expires_at: Date;
+          accepted_at: Date | null;
+        }[]
+      >`
+        SELECT id, email, role, invited_by_id, expires_at, accepted_at
+        FROM admin_invites WHERE token_hash = ${tokenHash}
+        ORDER BY created_at DESC LIMIT 1 FOR UPDATE`;
+      if (!invite || invite.accepted_at || invite.expires_at < new Date()) {
+        throw new NotFoundException('Invite not found');
+      }
+
+      const [inviter] = invite.invited_by_id
+        ? await tx.$queryRaw<
+            {
+              id: string;
+              email: string;
+              name: string;
+              role: AdminRole;
+              is_active: boolean;
+            }[]
+          >`
+            SELECT id, email, name, role, is_active FROM app_admins
+            WHERE id = ${invite.invited_by_id} FOR SHARE`
+        : [];
+      if (
+        !inviter ||
+        !inviter.is_active ||
+        inviter.role !== AdminRole.SUPER_ADMIN
+      ) {
+        // The issuer was deleted, deactivated or demoted since. The invite is
+        // void; removed so the link stays dead even if they are reinstated.
+        await tx.adminInvite.delete({ where: { id: invite.id } });
+        this.logger.warn(
+          `Invite ${invite.id} refused: its issuer no longer holds the authority to invite`,
+        );
+        return { refused: 'not_found' as const };
+      }
+
+      const clash = await tx.appAdmin.findUnique({
+        where: { email: invite.email },
+        select: { id: true },
+      });
+      if (clash) {
+        // Burn the now-meaningless invite so the stale link cannot be retried.
+        await tx.adminInvite.update({
+          where: { id: invite.id },
+          data: { acceptedAt: new Date() },
+        });
+        return { refused: 'conflict' as const };
+      }
+
+      await tx.adminInvite.update({
+        where: { id: invite.id },
         data: { acceptedAt: new Date() },
       });
-      throw new ConflictException(
-        'An administrator with this email already exists',
-      );
-    }
-
-    // Claim the invite first (single-use): only one accept can flip acceptedAt
-    // from null. A concurrent second accept updates 0 rows and is rejected as
-    // "not found", so the same link can never create two accounts.
-    const claimed = await this.prisma.adminInvite.updateMany({
-      where: { id: invite.id, acceptedAt: null },
-      data: { acceptedAt: new Date() },
-    });
-    if (claimed.count === 0) {
-      throw new NotFoundException('Invite not found');
-    }
-
-    // Reuse the SUPER_ADMIN create-admin path: Argon2id hashing + CREATE_ADMIN
-    // audit in one transaction. The inviter is carried as the audit actor so the
-    // creation is attributed to whoever issued the invite.
-    const inviterActor = invite.invitedBy
-      ? {
-          id: invite.invitedBy.id,
-          email: invite.invitedBy.email,
-          name: invite.invitedBy.name,
-        }
-      : null;
-
-    let admin: { id: string; email: string; name: string; role: AdminRole };
-    try {
-      admin = await this.adminAuth.createAdmin(
+      // The SUPER_ADMIN create-admin path: Argon2id hashing + CREATE_ADMIN
+      // audit, attributed to whoever issued the invite. A failure here rolls
+      // the claim back with it, so a transient error never burns the link.
+      const admin = await this.adminAuth.createAdmin(
         {
           email: invite.email,
           password: params.password,
           name: params.name,
           role: invite.role,
         },
-        { actor: inviterActor, actorLabel: inviterActor ? null : 'invite:accept' },
+        { actor: { id: inviter.id, email: inviter.email, name: inviter.name } },
+        tx,
       );
-    } catch (err) {
-      // Roll the invite back to unaccepted so a transient failure (e.g. DB blip)
-      // does not strand a valid invitee with a permanently-burned link.
-      await this.prisma.adminInvite
-        .updateMany({
-          where: { id: invite.id },
-          data: { acceptedAt: null },
-        })
-        .catch(() => undefined);
+      await this.audit.record(
+        {
+          action: AdminAuditAction.ACCEPT_INVITE,
+          actor: { id: admin.id, email: admin.email, name: admin.name },
+          target: admin,
+          newRole: admin.role,
+        },
+        tx,
+      );
+      return { admin };
+    }).catch((err: unknown) => {
       if (
         err instanceof Prisma.PrismaClientKnownRequestError &&
         err.code === 'P2002'
@@ -221,23 +275,18 @@ export class AdminInviteService {
         );
       }
       throw err;
+    });
+
+    // Thrown after the transaction so the cleanup writes above commit.
+    if ('refused' in outcome) {
+      if (outcome.refused === 'conflict') {
+        throw new ConflictException(
+          'An administrator with this email already exists',
+        );
+      }
+      throw new NotFoundException('Invite not found');
     }
-
-    // Record the acceptance against the freshly-created account (separate from
-    // the CREATE_ADMIN entry createAdmin already wrote).
-    await this.audit
-      .record({
-        action: AdminAuditAction.ACCEPT_INVITE,
-        actor: { id: admin.id, email: admin.email, name: admin.name },
-        target: admin,
-        newRole: admin.role,
-      })
-      .catch((err: unknown) =>
-        this.logger.warn(
-          `Could not write ACCEPT_INVITE audit for ${admin.id}: ${String(err)}`,
-        ),
-      );
-
+    const { admin } = outcome;
     this.logger.log(`Admin invite accepted: ${admin.id} (${admin.role})`);
 
     // Log the new admin straight in — the same session issuance login() uses.
@@ -248,18 +297,67 @@ export class AdminInviteService {
   }
 
   /**
+   * Invites still waiting to be accepted, newest first. Never the token or its
+   * hash: the list is for review, and the hash is the invite's only stored form.
+   */
+  async listPending(): Promise<PendingAdminInvite[]> {
+    const rows = await this.prisma.adminInvite.findMany({
+      where: { acceptedAt: null, expiresAt: { gt: new Date() } },
+      select: {
+        id: true,
+        email: true,
+        role: true,
+        expiresAt: true,
+        createdAt: true,
+        invitedBy: { select: { id: true, email: true, name: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: MAX_PENDING_LISTED,
+    });
+    return rows;
+  }
+
+  /**
+   * Revoke a pending invite: its link stops working at once. The row is
+   * deleted, so a revoked invite answers exactly like one that never existed.
+   *
+   * @throws NotFoundException when there is no such pending invite.
+   */
+  async revoke(inviteId: string, audit: AdminAuditContext): Promise<void> {
+    const dropped = await this.prisma.adminInvite.deleteMany({
+      where: { id: inviteId, acceptedAt: null },
+    });
+    if (dropped.count === 0) throw new NotFoundException('Invite not found');
+    // No AdminAudit row: the enum has no value for revoking an invite, and
+    // writing it under another action would falsify the trail.
+    this.logger.log(
+      `Admin invite ${inviteId} revoked by ${audit.actor?.id ?? 'unknown'}`,
+    );
+  }
+
+  /**
    * Look up a live invite by raw token, or throw 404. "Live" = exists, not yet
-   * accepted, not expired. All three failure modes collapse to one 404 so a
-   * token reveals nothing about which state it is in.
+   * accepted, not expired, and issued by someone who may still invite. Every
+   * failure mode collapses to one 404 so a token reveals nothing about which
+   * state it is in.
    */
   private async findLiveInvite(rawToken: string) {
     const invite = await this.prisma.adminInvite.findFirst({
       where: { tokenHash: this.hashToken(rawToken) },
       include: {
-        invitedBy: { select: { id: true, email: true, name: true } },
+        invitedBy: {
+          select: { id: true, email: true, name: true, role: true, isActive: true },
+        },
       },
+      orderBy: { createdAt: 'desc' },
     });
-    if (!invite || invite.acceptedAt || invite.expiresAt < new Date()) {
+    if (
+      !invite ||
+      invite.acceptedAt ||
+      invite.expiresAt < new Date() ||
+      !invite.invitedBy?.isActive ||
+      invite.invitedBy.role !== AdminRole.SUPER_ADMIN
+    ) {
       throw new NotFoundException('Invite not found');
     }
     return invite;

@@ -8,6 +8,10 @@ import { RedisService } from '../../redis/redis.service';
 import { RedisKeys } from '../../redis/redis.keys';
 import { JwtKeyService } from './jwt-key.service';
 import { JwtPayload } from '../interfaces/jwt-payload.interface';
+import {
+  releaseAllPushTokens,
+  releasePushTokens,
+} from '../../notifications/push-token-ownership';
 
 export const ACCESS_TTL_SECONDS = 60 * 60; // 1h (matches the mobile contract)
 const REFRESH_TTL_MS = 90 * 24 * 60 * 60 * 1000; // 90d
@@ -28,6 +32,9 @@ export interface SessionUser {
  * revocation itself.
  */
 export type SessionRevocationListener = (userId: string) => void;
+
+/** Called after one access token is blacklisted (single-device logout). */
+export type AccessTokenRevocationListener = (jti: string) => void;
 
 export interface IssuedSession {
   accessToken: string;
@@ -54,6 +61,8 @@ export interface IssuedSession {
 export class TokenService {
   private readonly logger = new Logger(TokenService.name);
   private readonly revocationListeners: SessionRevocationListener[] = [];
+  private readonly accessRevocationListeners: AccessTokenRevocationListener[] =
+    [];
 
   constructor(
     private readonly prisma: PrismaService,
@@ -222,6 +231,39 @@ export class TokenService {
     await this.prisma.refreshToken.deleteMany({ where: { tokenHash: this.hash(rawRefresh) } });
   }
 
+  /**
+   * Logout of one device: revoke the session and stop pushing to that device.
+   *
+   * Only a refresh token that belongs to `userId` is honoured for the device
+   * lookup, so one account cannot silence another's phone by presenting its
+   * token. `installId` covers sessions that were never bound to a device at
+   * sign-in (the app registers its device separately). Other devices of the
+   * account keep their sessions and their notifications.
+   */
+  async logoutDevice(
+    userId: string,
+    rawRefresh: string,
+    installId?: string | null,
+  ): Promise<void> {
+    const tokenHash = this.hash(rawRefresh);
+    const row = await this.prisma.refreshToken.findUnique({
+      where: { tokenHash },
+      select: { userId: true, deviceId: true },
+    });
+    await this.prisma.refreshToken.deleteMany({ where: { tokenHash } });
+    await releasePushTokens(this.prisma, userId, {
+      deviceId: row?.userId === userId ? row.deviceId : null,
+      installId,
+    });
+  }
+
+  /** Sign out everywhere: revoke every session and stop pushing to every device. */
+  async logoutAllDevices(userId: string): Promise<number> {
+    const tokenVersion = await this.revokeAllSessions(userId);
+    await releaseAllPushTokens(this.prisma, userId);
+    return tokenVersion;
+  }
+
   async revokeAllForUser(
     userId: string,
     tx?: Prisma.TransactionClient,
@@ -260,6 +302,18 @@ export class TokenService {
     const remainingSeconds = exp - Math.floor(Date.now() / 1000);
     if (remainingSeconds <= 0) return; // already expired — never store.
     await this.redis.setEx(RedisKeys.jwtBlacklist(jti), remainingSeconds, true);
+    for (const listener of this.accessRevocationListeners) {
+      try {
+        listener(jti);
+      } catch (err) {
+        this.logger.warn(`Access revocation listener failed: ${String(err)}`);
+      }
+    }
+  }
+
+  /** Register a transport to be told when one access token is blacklisted. */
+  onAccessTokenRevoked(listener: AccessTokenRevocationListener): void {
+    this.accessRevocationListeners.push(listener);
   }
 
   /**

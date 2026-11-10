@@ -137,7 +137,11 @@ export class AuthController {
   @ApiBearerAuth('jwt')
   @HttpCode(HttpStatus.NO_CONTENT)
   async signOut(@Request() req: AuthenticatedRequest, @Body() dto: RefreshDto) {
-    await this.tokens.revoke(this.resolveRefresh(dto));
+    await this.tokens.logoutDevice(
+      req.user.id,
+      this.resolveRefresh(dto),
+      dto.install_id,
+    );
     await this.tokens.blacklistAccessToken(req.tokenMeta?.jti, req.tokenMeta?.exp);
   }
 
@@ -181,7 +185,13 @@ export class AuthController {
   @ApiBearerAuth('jwt')
   @HttpCode(HttpStatus.OK)
   async logout(@Request() req: AuthenticatedRequest, @Body() dto: RefreshDto) {
-    await this.tokens.revoke(this.resolveRefresh(dto));
+    // Ends the session and stops push notifications to this device; the
+    // account's other devices keep both.
+    await this.tokens.logoutDevice(
+      req.user.id,
+      this.resolveRefresh(dto),
+      dto.install_id,
+    );
     // Immediately kill the access token that made this call, so it can't be used
     // again for the remainder of its lifetime (the refresh revoke above only
     // stops minting new sessions). Every other access token is untouched.
@@ -201,7 +211,7 @@ export class AuthController {
     schema: { example: { message: 'All sessions revoked', token_version: 3 } },
   })
   async logoutAll(@Request() req: { user: { id: string } }) {
-    const tokenVersion = await this.tokens.revokeAllSessions(req.user.id);
+    const tokenVersion = await this.tokens.logoutAllDevices(req.user.id);
     return { message: 'All sessions revoked', token_version: tokenVersion };
   }
 

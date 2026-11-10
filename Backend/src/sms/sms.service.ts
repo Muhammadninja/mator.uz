@@ -1,4 +1,5 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
+import { REAL_SMS_PROVIDERS, SMS_PROVIDER_ENV } from './sms-env.config';
 import { ConfigService } from '@nestjs/config';
 import { MetricsService } from '../metrics/metrics.service';
 import { SmsProvider, SmsSendResult } from './sms-provider.interface';
@@ -70,11 +71,50 @@ export class SmsService {
     );
   }
 
+  /**
+   * The configured provider. Outside production an unset, unknown or
+   * half-configured choice falls back to the log provider, so local flows never
+   * block. In production there is no fallback: see {@link refuseLogProvider}.
+   */
   private resolveProvider(): SmsProvider {
-    const choice = (
-      this.config.get<string>('SMS_PROVIDER') ?? 'log'
-    ).toLowerCase();
+    const choice = (this.config.get<string>('SMS_PROVIDER') ?? 'log')
+      .trim()
+      .toLowerCase();
+    const provider = this.configuredProvider(choice);
+    if (provider) return provider;
+    if (this.isProduction()) this.refuseLogProvider(choice);
+    return new LogSmsProvider();
+  }
 
+  /**
+   * In production a fallback to the log provider means no user ever receives a
+   * code while the service reports itself healthy. Refuse to boot instead: a
+   * crash-looping deploy is far cheaper to notice than an auth flow that is
+   * quietly dead.
+   */
+  private refuseLogProvider(choice: string): never {
+    const real = REAL_SMS_PROVIDERS.join(', ');
+    if (!REAL_SMS_PROVIDERS.includes(choice)) {
+      throw new Error(
+        `SMS_PROVIDER="${choice}" is not allowed in production. Set it to a real provider (${real}).`,
+      );
+    }
+    throw new Error(
+      `SMS_PROVIDER=${choice} is missing its credentials in production ` +
+        `(${SMS_PROVIDER_ENV[choice].join(', ')}); refusing to fall back to the log provider.`,
+    );
+  }
+
+  /** Outside production only; production refuses instead (refuseLogProvider). */
+  private warnUnconfigured(choice: string): void {
+    if (this.isProduction()) return;
+    this.logger.warn(
+      `SMS_PROVIDER=${choice} but ${SMS_PROVIDER_ENV[choice].join('/')} missing or invalid — falling back to log`,
+    );
+  }
+
+  /** The provider `choice` names, or null when it is `log`, unknown or unconfigured. */
+  private configuredProvider(choice: string): SmsProvider | null {
     if (choice === 'eskiz') {
       const email = this.config.get<string>('ESKIZ_EMAIL');
       const password = this.config.get<string>('ESKIZ_PASSWORD');
@@ -89,19 +129,7 @@ export class SmsService {
           callbackUrl: this.config.get<string>('ESKIZ_CALLBACK_URL'),
         });
       }
-      // In production a silent fallback means every OTP is written to the log
-      // and no user ever receives one, while the service reports itself healthy.
-      // Refuse to boot instead: a crash-looping deploy is far cheaper to notice
-      // than an auth flow that is quietly dead. Dev/test keep the log fallback.
-      if (this.isProduction()) {
-        throw new Error(
-          'SMS_PROVIDER=eskiz requires ESKIZ_EMAIL and ESKIZ_PASSWORD in production ' +
-            '(refusing to fall back to the log provider and silently drop every OTP)',
-        );
-      }
-      this.logger.warn(
-        'SMS_PROVIDER=eskiz but credentials missing — falling back to log',
-      );
+      this.warnUnconfigured('eskiz');
     }
 
     if (choice === 'playmobile') {
@@ -118,9 +146,7 @@ export class SmsService {
             this.config.get<string>('PLAYMOBILE_ORIGINATOR') ?? '3700',
         });
       }
-      this.logger.warn(
-        'SMS_PROVIDER=playmobile but credentials missing — falling back to log',
-      );
+      this.warnUnconfigured('playmobile');
     }
 
     if (choice === 'sayqal') {
@@ -138,12 +164,10 @@ export class SmsService {
           nickname: this.config.get<string>('SAYQAL_NICKNAME'),
         });
       }
-      this.logger.warn(
-        'SMS_PROVIDER=sayqal but SAYQAL_USERNAME/SAYQAL_SECRET_KEY/SAYQAL_SERVICE_ID missing or invalid — falling back to log',
-      );
+      this.warnUnconfigured('sayqal');
     }
 
-    return new LogSmsProvider();
+    return null;
   }
 
   /**
@@ -333,7 +357,12 @@ export class SmsService {
         data: {
           status: mapped,
           deliveredAt: mapped === 'delivered' ? new Date() : null,
-          errorMessage: mapped === 'delivered' ? null : (payload.error ?? payload.status ?? null),
+          // Bounded: an unauthenticated report must not write an arbitrary
+          // amount of text into the ledger (INFO-3).
+          errorMessage:
+            mapped === 'delivered'
+              ? null
+              : ((payload.error ?? payload.status)?.slice(0, 500) ?? null),
         },
       });
 

@@ -38,6 +38,13 @@ export class PushDispatchService {
       fcm: [],
       apns: [],
     };
+    // One message per token, even if two rows carry the same one.
+    const seen = new Set<string>();
+    const fresh = (token: string | null): token is string => {
+      if (!token || seen.has(token)) return false;
+      seen.add(token);
+      return true;
+    };
     for (const d of devices) {
       const msg = (token: string): PushMessage => ({
         token,
@@ -46,9 +53,13 @@ export class PushDispatchService {
         data: payload.data,
         deeplinkPath: payload.deeplinkPath,
       });
-      if (d.expoPushToken) route.expo.push(msg(d.expoPushToken));
-      else if (d.fcmToken) route.fcm.push(msg(d.fcmToken));
-      else if (d.apnsToken) route.apns.push(msg(d.apnsToken));
+      if (d.expoPushToken) {
+        if (fresh(d.expoPushToken)) route.expo.push(msg(d.expoPushToken));
+      } else if (d.fcmToken) {
+        if (fresh(d.fcmToken)) route.fcm.push(msg(d.fcmToken));
+      } else if (d.apnsToken) {
+        if (fresh(d.apnsToken)) route.apns.push(msg(d.apnsToken));
+      }
     }
 
     const results = (

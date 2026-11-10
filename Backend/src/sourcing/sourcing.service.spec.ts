@@ -28,6 +28,7 @@ function build(overrides: Record<string, unknown> = {}) {
     notification: {
       deleteMany: jest.fn(async () => ({ count: 2 })),
     },
+    orderItem: { count: jest.fn(async () => 0) },
     ...overrides,
   };
   const audit = { record: jest.fn().mockResolvedValue(undefined) };
@@ -127,6 +128,22 @@ describe('SourcingService.classifyOffer', () => {
 });
 
 describe('SourcingService.deleteTicket', () => {
+  it('refuses to delete a ticket whose offer is in an order (LOW-ORD-011)', async () => {
+    const { service, prisma } = build({
+      orderItem: { count: jest.fn(async () => 1) },
+    });
+
+    await expect(service.deleteTicket('ticket-1')).rejects.toMatchObject({
+      status: 409,
+      response: { code: 'SOURCING_TICKET_HAS_ORDERS' },
+    });
+    expect(prisma.orderItem.count).toHaveBeenCalledWith({
+      where: { offerId: { in: ['soff_1', 'soff_2'] } },
+    });
+    expect(prisma.sourcingTicket.delete).not.toHaveBeenCalled();
+    expect(prisma.notification.deleteMany).not.toHaveBeenCalled();
+  });
+
   it('deletes the ticket and cleans up its offer notifications', async () => {
     const { service, prisma } = build();
 

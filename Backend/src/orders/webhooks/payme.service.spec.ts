@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /**
  * Payme Merchant API conformance suite.
@@ -170,6 +171,91 @@ describe('PaymeService (Merchant API)', () => {
       );
       expect(res.result.allow).toBe(true);
       expect(res.id).toBe(7);
+    });
+  });
+
+  // ── LOW-PAY-007: body shape and auth ordering ──────────────────────────────
+  describe('raw body hardening', () => {
+    it.each([
+      ['null', 'null'],
+      ['an array', '[{"id":1,"method":"CheckTransaction"}]'],
+      ['a number', '42'],
+      ['a string', '"CheckTransaction"'],
+      ['a boolean', 'true'],
+    ])('answers a JSON-RPC -32600 for %s instead of failing', async (_n, raw) => {
+      const res: any = await svc.handleRaw(AUTH, raw);
+      expect(res).toMatchObject({
+        jsonrpc: '2.0',
+        id: null,
+        error: { code: -32600 },
+      });
+      // Nothing was looked up for it.
+      expect(prisma.order.findUnique).not.toHaveBeenCalled();
+      expect(prisma.payment.findFirst).not.toHaveBeenCalled();
+    });
+
+    it('answers the same for an already-parsed null or array body', async () => {
+      for (const body of [null, [], 7]) {
+        const res: any = await svc.handle(AUTH, body as any);
+        expect(res.error.code).toBe(-32600);
+      }
+    });
+
+    it('refuses wrong credentials before any business processing, echoing the request id', async () => {
+      const res: any = await svc.handleRaw(
+        'Basic wrong',
+        JSON.stringify({
+          id: 9,
+          method: 'PerformTransaction',
+          params: { id: 'tx_1' },
+        }),
+      );
+      expect(res.error.code).toBe(-32504);
+      expect(res.id).toBe(9);
+      expect(prisma.order.findUnique).not.toHaveBeenCalled();
+      expect(prisma.payment.findFirst).not.toHaveBeenCalled();
+      expect(prisma.payment.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('wrong credentials win over a malformed or non-object body', async () => {
+      for (const raw of ['{"method": broken', 'null', '[]', '']) {
+        const res: any = await svc.handleRaw('Basic wrong', raw);
+        expect(res.error.code).toBe(-32504);
+        expect(res.id).toBeNull();
+      }
+    });
+
+    it('echoes only an id JSON-RPC allows', async () => {
+      const res: any = await svc.handleRaw(
+        AUTH,
+        JSON.stringify({ id: { evil: true }, method: 'NoSuchMethod' }),
+      );
+      expect(res.id).toBeNull();
+      expect(res.error.code).toBe(-32601);
+    });
+
+    it('logs neither the credentials nor the payload of a refused request', async () => {
+      const lines: string[] = [];
+      const spies = (['log', 'warn', 'error', 'debug'] as const).map((level) =>
+        jest
+          .spyOn(Logger.prototype, level)
+          .mockImplementation((...a: unknown[]) => {
+            lines.push(a.map(String).join(' '));
+          }),
+      );
+      try {
+        await svc.handleRaw(
+          'Basic c2VjcmV0LWd1ZXNz',
+          '{"id":1,"method":"CheckTransaction","params":{"id":"tx_secret"}}',
+        );
+        await svc.handleRaw(AUTH, 'null');
+      } finally {
+        spies.forEach((spy) => spy.mockRestore());
+      }
+      const all = lines.join('\n');
+      expect(all).not.toContain('c2VjcmV0LWd1ZXNz');
+      expect(all).not.toContain('tx_secret');
+      expect(all).not.toContain(KEY);
     });
   });
 

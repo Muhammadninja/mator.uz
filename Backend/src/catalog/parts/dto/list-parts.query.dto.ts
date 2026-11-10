@@ -1,4 +1,6 @@
-import { IsString, IsOptional, IsInt, IsIn, Min, Max } from 'class-validator';
+import { IsString, IsOptional, IsInt, IsIn, Min, Max,
+  MaxLength,
+} from 'class-validator';
 import { Transform, Type } from 'class-transformer';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { OilType, ProductKind } from '@prisma/client';
@@ -67,6 +69,7 @@ export class ListPartsQueryDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(64)
   vehicle_id?: string;
 
   @ApiPropertyOptional({
@@ -77,6 +80,7 @@ export class ListPartsQueryDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(64)
   category?: string;
 
   @ApiPropertyOptional({
@@ -90,6 +94,7 @@ export class ListPartsQueryDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(64)
   mainCategory?: string;
 
   @ApiPropertyOptional({
@@ -97,11 +102,13 @@ export class ListPartsQueryDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(64)
   vehicle_category?: string;
 
   @ApiPropertyOptional({ description: 'Free-text search over part title.' })
   @IsOptional()
   @IsString()
+  @MaxLength(200)
   q?: string;
 
   @ApiPropertyOptional({
@@ -110,6 +117,7 @@ export class ListPartsQueryDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(100)
   make?: string;
 
   @ApiPropertyOptional({
@@ -118,6 +126,7 @@ export class ListPartsQueryDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(100)
   model?: string;
 
   @ApiPropertyOptional({
@@ -126,6 +135,7 @@ export class ListPartsQueryDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(100)
   brand?: string;
 
   @ApiPropertyOptional({
@@ -243,11 +253,13 @@ export class ListPartsQueryDto {
   @IsIn(['price_asc', 'price_desc', 'relevance', 'bestseller'])
   sort?: string;
 
-  @ApiPropertyOptional({ minimum: 1 })
+  // Bounded: a page far past any real catalog is a 400, not a huge OFFSET.
+  @ApiPropertyOptional({ minimum: 1, maximum: 10000 })
   @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)
+  @Max(10000)
   page?: number;
 
   @ApiPropertyOptional({ minimum: 1, maximum: 100 })
