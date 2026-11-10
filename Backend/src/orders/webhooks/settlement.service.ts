@@ -12,6 +12,7 @@ import { RealtimeGateway } from '../../realtime/realtime.gateway';
 import { recordProviderRefund } from '../financial-refund.ledger';
 import { OFFLINE_PAYMENT_TYPES } from '../offline-order.policy';
 import { OrderStatusService } from '../order-status.service';
+import { extendHold } from '../inventory/inventory-reservation.store';
 import {
   PAYABLE_ORDER_STATUSES,
   PROVIDER_REFUNDABLE_ORDER_STATUSES,
@@ -362,11 +363,14 @@ export class SettlementService {
     reason?: number,
   ): Promise<void> {
     const ttlMin = Number(this.config.get<string>('ORDER_TTL_MIN') ?? 30);
+    const expiresAt = new Date(Date.now() + ttlMin * 60_000);
     const res = await tx.order.updateMany({
       where: { id: orderId, status: OrderStatus.PENDING_PAYMENT },
-      data: { expiresAt: new Date(Date.now() + ttlMin * 60_000) },
+      data: { expiresAt },
     });
     if (res.count) {
+      // The stock waits with the order: the customer can still pay for it.
+      await extendHold(tx, orderId, expiresAt);
       this.logger.log(
         `Order ${orderId} released after provider cancellation (reason ${reason ?? 'n/a'}) — payable for another ${ttlMin}m`,
       );

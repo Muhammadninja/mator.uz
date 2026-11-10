@@ -84,6 +84,7 @@ import type {
 } from './drivers-village.report';
 import { checkEnvironment } from './drivers-village-environment';
 import type { DriversVillageStore } from './drivers-village.store';
+import type { SourceFile } from '../../orders/inventory/inventory-reservation.store';
 import type {
   BatchWrite,
   ExistingPosition,
@@ -112,6 +113,11 @@ export interface ImportOptions {
   /** Defaults to 'drivers-village'. Only tests pass anything else. */
   catalogSellerId?: string;
   batchSize?: number;
+  /**
+   * When the supplier sent this file, for the reconciliation of Mator's sales. Without
+   * it the file's quantities are still applied, and no sale is taken as included.
+   */
+  sourceAt?: Date;
 }
 
 /** The projection capabilities the importer needs (CatalogProjectionService). */
@@ -122,9 +128,14 @@ export interface StockProjector {
   projectStockLevels(
     stockId: number,
     changed: { price: boolean; quantity: boolean },
+    source?: SourceFile,
   ): Promise<string | null>;
   /** Those columns, only while the part still holds what is expected. */
-  repairStockLevels(stockId: number, expected: ExpectedLevels): Promise<boolean>;
+  repairStockLevels(
+    stockId: number,
+    expected: ExpectedLevels,
+    source?: SourceFile,
+  ): Promise<boolean>;
 }
 
 export class DriversVillageImportService {
@@ -389,6 +400,9 @@ export class DriversVillageImportService {
       linked.id,
       rowReports,
       options.batchSize ?? IMPORT_LIMITS.batchSize,
+      options.sourceAt
+        ? { at: options.sourceAt, ref: `1C file ${fileName}` }
+        : undefined,
     );
     return finish();
   }
@@ -399,6 +413,7 @@ export class DriversVillageImportService {
     sellerId: number,
     rows: Map<number, RowReport>,
     batchSize: number,
+    source?: SourceFile,
   ): Promise<void> {
     const written = {
       created: 0,
@@ -513,6 +528,8 @@ export class DriversVillageImportService {
     // is recorded, not fatal: supply data is committed, and re-running the
     // import re-projects anything missing.
     const lineByCode = new Map(plans.map((p) => [p.row.code1c, p.row.line]));
+    // Only when there is one: every other call keeps its existing shape.
+    const sourceArg: [SourceFile] | [] = source ? [source] : [];
     const settled: number[] = [];
     for (const [code1c, entry] of toProject) {
       const { stockId, levels, expected, marked, remaining } = entry;
@@ -521,10 +538,18 @@ export class DriversVillageImportService {
       try {
         if (!levels) await this.projector.projectStock(stockId);
         else if (levels.price || levels.quantity)
-          await this.projector.projectStockLevels(stockId, levels);
+          await this.projector.projectStockLevels(
+            stockId,
+            levels,
+            ...sourceArg,
+          );
         const lost =
           !!expected &&
-          !(await this.projector.repairStockLevels(stockId, expected));
+          !(await this.projector.repairStockLevels(
+            stockId,
+            expected,
+            ...sourceArg,
+          ));
         if (worked) {
           written.projected += 1;
           rows.get(lineByCode.get(code1c)!)!.projected = true;

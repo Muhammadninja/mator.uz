@@ -13,6 +13,8 @@ export const IdPrefix = {
   PAYMENT: 'pay',
   FINANCIAL_REFUND: 'rfd',
   OFFLINE_COLLECTION: 'ocl',
+  INVENTORY_RESERVATION: 'ires',
+  STOCK_SHORTAGE: 'sshort',
   FINANCIAL_REFUND_ALLOCATION: 'rfa',
   SELLER_PAYOUT: 'spo',
   BOOKING: 'bk',

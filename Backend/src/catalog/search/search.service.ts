@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
+import { sellableWhere } from '../../orders/inventory/inventory-availability';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { clampLimit } from '../../common/pagination.util';
@@ -229,7 +230,7 @@ export class SearchService {
     const grouped = await this.prisma.catalogPart.groupBy({
       by: ['brandId'],
       where: {
-        AND: await this.listedParts(),
+        AND: [await this.listedParts(), sellableWhere(this.prisma)].flat(),
         inStock: true,
         brandId: { not: null },
       },

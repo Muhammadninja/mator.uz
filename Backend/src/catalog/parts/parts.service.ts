@@ -1,4 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { sellableWhere } from '../../orders/inventory/inventory-availability';
 import {
   Prisma,
   PartMainCategory,
@@ -574,7 +575,7 @@ export class PartsService {
     }
     if (q.gm_only === 'true') and.push({ isGm: true });
     if (q.oem_only === 'true') and.push({ isOem: true });
-    if (q.in_stock_only === 'true') and.push({ inStock: true });
+    if (q.in_stock_only === 'true') and.push({ inStock: true }, sellableWhere(this.prisma));
     // Free-text search: fuzzy title match OR exact article match. Article search
     // normalizes the query (strip separators, uppercase) and looks it up inside
     // the `oemNumbers` / `gmNumbers` arrays with `has` (exact membership → uses

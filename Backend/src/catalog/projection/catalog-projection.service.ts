@@ -8,6 +8,12 @@ import {
   PartVehicleCategory,
 } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { inventoryReservationsEnabled } from '../../orders/inventory/inventory-availability';
+import {
+  SourceFile,
+  lockParts,
+  reconcileFromSource,
+} from '../../orders/inventory/inventory-reservation.store';
 import {
   MAIN_CATEGORY_TO_SLUG,
   categoryParentMap,
@@ -252,6 +258,7 @@ export class CatalogProjectionService {
   async projectStockLevels(
     stockId: number,
     changed: { price: boolean; quantity: boolean },
+    source?: SourceFile,
   ): Promise<string | null> {
     const partId = CatalogProjectionService.catalogPartId(stockId);
     const [stock, part] = await Promise.all([
@@ -279,9 +286,57 @@ export class CatalogProjectionService {
       // As in projectStock: a real count only for an imported position.
       if (stock.sourceSystem) data.stockQty = stock.quantity;
     }
-    if (Object.keys(data).length > 0)
+    if (Object.keys(data).length === 0) return partId;
+    if (
+      changed.quantity &&
+      stock.sourceSystem &&
+      inventoryReservationsEnabled()
+    ) {
+      await this.writeReportedCount(
+        partId,
+        stock.quantity,
+        source,
+        async (tx) => {
+          await tx.catalogPart.update({ where: { id: partId }, data });
+          return true;
+        },
+      );
+    } else {
       await this.prisma.catalogPart.update({ where: { id: partId }, data });
+    }
     return partId;
+  }
+
+  /**
+   * Change a part's supplier-reported count and settle Mator's sales against it, in one
+   * transaction under the part's lock. Apart, a buyer could see the new count with the
+   * old deductions, or the old count with the sales already settled, and be sold a unit
+   * that does not exist.
+   */
+  private writeReportedCount(
+    partId: string,
+    newQty: number,
+    source: SourceFile | undefined,
+    write: (tx: Prisma.TransactionClient) => Promise<boolean>,
+  ): Promise<boolean> {
+    return this.prisma.$transaction(async (tx) => {
+      await lockParts(tx, [partId]);
+      const before = await tx.catalogPart.findUnique({
+        where: { id: partId },
+        select: { stockQty: true },
+      });
+      const written = await write(tx);
+      if (written && before) {
+        await reconcileFromSource(
+          tx,
+          partId,
+          before.stockQty,
+          newQty,
+          source ?? null,
+        );
+      }
+      return written;
+    });
   }
 
   /**
@@ -296,28 +351,37 @@ export class CatalogProjectionService {
       price?: string;
       quantity?: { stockQty: number; inStock: boolean };
     },
+    source?: SourceFile,
   ): Promise<boolean> {
     const stock = await this.prisma.stock.findUnique({
       where: { id: stockId },
       select: { priceUzs: true, quantity: true },
     });
     if (!stock) return false;
-    const { count } = await this.prisma.catalogPart.updateMany({
-      where: {
-        id: CatalogProjectionService.catalogPartId(stockId),
-        ...(expected.price !== undefined
-          ? { priceUzs: new Prisma.Decimal(expected.price) }
-          : {}),
-        ...(expected.quantity ?? {}),
-      },
-      data: {
-        ...(expected.price !== undefined ? { priceUzs: stock.priceUzs } : {}),
-        ...(expected.quantity
-          ? { stockQty: stock.quantity, inStock: stock.quantity > 0 }
-          : {}),
-      },
-    });
-    return count === 1;
+    const partId = CatalogProjectionService.catalogPartId(stockId);
+    const repair = async (
+      client: Pick<Prisma.TransactionClient, 'catalogPart'>,
+    ) => {
+      const { count } = await client.catalogPart.updateMany({
+        where: {
+          id: partId,
+          ...(expected.price !== undefined
+            ? { priceUzs: new Prisma.Decimal(expected.price) }
+            : {}),
+          ...(expected.quantity ?? {}),
+        },
+        data: {
+          ...(expected.price !== undefined ? { priceUzs: stock.priceUzs } : {}),
+          ...(expected.quantity
+            ? { stockQty: stock.quantity, inStock: stock.quantity > 0 }
+            : {}),
+        },
+      });
+      return count === 1;
+    };
+    return expected.quantity && inventoryReservationsEnabled()
+      ? this.writeReportedCount(partId, stock.quantity, source, repair)
+      : repair(this.prisma);
   }
 
   /**

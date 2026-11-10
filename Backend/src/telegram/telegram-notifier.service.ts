@@ -20,6 +20,16 @@ interface ExtractedFields {
   vin?: unknown;
   part_name?: unknown;
   preference?: unknown;
+  /** Present on a ticket opened because a checkout could not be supplied. */
+  stock_shortage?: {
+    part_id?: unknown;
+    part_numbers?: unknown;
+    requested_qty?: unknown;
+    seller?: unknown;
+    reported_qty?: unknown;
+    reserved_qty?: unknown;
+    reference?: unknown;
+  };
 }
 
 /**
@@ -157,10 +167,29 @@ export class TelegramNotifierService {
       this.row('Year', data.year),
       this.row('VIN', vin ? maskVin(vin) : null),
       this.row('Preference', data.preference),
+      ...this.shortageRows(data),
     ].filter((r): r is string => r !== null);
 
     rows.push('', `<i>Ticket ${this.escape(ticket.id)}</i>`);
     return rows.join('\n');
+  }
+
+  /** What a stock shortage adds to the card. Nothing about the customer. */
+  private shortageRows(data: ExtractedFields): (string | null)[] {
+    const s = data.stock_shortage;
+    if (!s) return [];
+    const numbers = Array.isArray(s.part_numbers)
+      ? s.part_numbers.join(', ')
+      : null;
+    return [
+      this.row('Part ID', s.part_id),
+      this.row('OEM/GM', numbers),
+      this.row('Quantity needed', s.requested_qty),
+      this.row('Could not supply', s.seller),
+      this.row('Supplier-reported', s.reported_qty),
+      this.row('Reserved', s.reserved_qty),
+      this.row('Reference', s.reference),
+    ];
   }
 
   /** A "<b>Label:</b> value" line, or null when the value is empty. */

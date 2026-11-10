@@ -12,7 +12,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { MarkCancelledOutcome, SettlementService } from './settlement.service';
 import { readPaymeConfig } from './payme.config';
 import { isPayableOrderStatus } from '../order-transitions';
-import { findUnavailableParts } from '../order-availability';
+import { findUnavailableForPayment } from '../inventory/payment-availability';
 import { OFFLINE_PAYMENT_TYPES } from '../offline-order.policy';
 import { parseSetFiscalData } from './payme-fiscal-receipt.util';
 import { PaymeFiscalReceiptService } from './payme-fiscal-receipt.service';
@@ -333,13 +333,7 @@ export class PaymeService {
     // the link was issued. Checked here, BEFORE funds are held, and not at
     // PerformTransaction, where refusing would bounce a payment the customer
     // already confirmed.
-    const unavailable = await findUnavailableParts(
-      this.prisma,
-      await this.prisma.orderItem.findMany({
-        where: { orderId: order.id },
-        select: { partId: true, title: true, quantity: true },
-      }),
-    );
+    const unavailable = await findUnavailableForPayment(this.prisma, order.id);
     if (unavailable.length > 0) {
       throw new PaymeError(-31008, 'Order items are no longer available');
     }

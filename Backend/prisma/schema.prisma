@@ -652,6 +652,7 @@ model Stock {
   updatedAt    DateTime           @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
   product      Product            @relation(fields: [productId], references: [id], onDelete: Cascade)
   seller       Seller             @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  reservations InventoryReservation[]
 
   @@unique([sellerId, productId])
   // Idempotency key of an imported position: re-importing the same code_1c
@@ -1519,6 +1520,11 @@ model CatalogPart {
   // On-hand unit count. The Smart-Inventory console reads/writes this; the
   // stock-status derivation (out/low/in) compares it to lowStockThreshold.
   stockQty           Int                  @default(0) @map("stock_qty")
+  // Units of stockQty Mator has promised: the unreleased, unreconciled part of this
+  // part's inventory_reservations. Written only with those rows, in one transaction.
+  // stockQty stays what the supplier reported; a buyer can have stockQty - reservedQty.
+  reservedQty        Int                  @default(0) @map("reserved_qty")
+  reservations       InventoryReservation[]
   // Per-row low-stock threshold. 0 < qty < threshold ⇒ "low_stock".
   lowStockThreshold  Int                  @default(5) @map("low_stock_threshold")
   deliveryEtaDaysMin Int?                 @map("delivery_eta_days_min")
@@ -1724,6 +1730,7 @@ model Order {
   vehicle           Vehicle?             @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
   deliveryAddress   Address?             @relation(fields: [deliveryAddressId], references: [id], onDelete: SetNull)
   items             OrderItem[]
+  inventoryReservations InventoryReservation[]
   payments          Payment[]
   statusHistory     OrderStatusHistory[]
   financialRefunds  FinancialRefund[]
@@ -1916,9 +1923,119 @@ model OrderItem {
   lineTotalUzs Decimal   @map("line_total_uzs") @db.Decimal(14, 2)
   scheduledAt  DateTime? @map("scheduled_at") @db.Timestamptz(3)
   order        Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  inventoryReservation InventoryReservation?
 
   @@index([orderId])
   @@map("order_items")
+}
+
+enum InventoryReservationStatus {
+  // Promised to an order that may still fall through.
+  HELD
+  // Sold: paid online, or handed to fulfilment. Stays deducted until the source shows it.
+  ALLOCATED
+  // Given back. The units are sellable again.
+  RELEASED
+  // The supplier's own count now includes this sale. Nothing is deducted any more.
+  RECONCILED
+}
+
+enum InventoryReconciliationSource {
+  SOURCE_IMPORT
+  OPERATOR
+}
+
+// One order line's claim on one counted position. The row outlives what it points at:
+// each foreign key is SET NULL and the *Ref and snapshot columns keep it readable, so a
+// sale stays on record when an order or part goes. A Telegram listing has no count and
+// gets no row.
+model InventoryReservation {
+  id                   String                         @id @db.VarChar(64)
+  orderId              String?                        @map("order_id") @db.VarChar(64)
+  orderItemId          String?                        @unique @map("order_item_id") @db.VarChar(64)
+  partId               String?                        @map("part_id") @db.VarChar(64)
+  // Set only for a part projected from a Stock row. HTTP and admin counts have none.
+  stockId              Int?                           @map("stock_id")
+  // Copies of the ids above. orderItemRef is the idempotency key of a reservation.
+  orderRef             String                         @map("order_ref") @db.VarChar(64)
+  orderItemRef         String                         @unique @map("order_item_ref") @db.VarChar(64)
+  partRef              String                         @map("part_ref") @db.VarChar(64)
+  sellerId             String                         @map("seller_id") @db.VarChar(64)
+  sellerName           String                         @map("seller_name") @db.VarChar(255)
+  title                String                         @db.VarChar(255)
+  partNumbers          String[]                       @map("part_numbers")
+  quantity             Int
+  // Units the source has shown, and units put back by hand after a return. What is still
+  // deducted is quantity - reconciledQty - restockedQty.
+  reconciledQty        Int                            @default(0) @map("reconciled_qty")
+  restockedQty         Int                            @default(0) @map("restocked_qty")
+  status               InventoryReservationStatus     @default(HELD)
+  createdAt            DateTime                       @default(now()) @map("created_at") @db.Timestamptz(3)
+  statusChangedAt      DateTime                       @default(now()) @map("status_changed_at") @db.Timestamptz(3)
+  // NULL for a cash or terminal order, which has no payment window.
+  expiresAt            DateTime?                      @map("expires_at") @db.Timestamptz(3)
+  // A source file can only show a sale it was exported after.
+  allocatedAt          DateTime?                      @map("allocated_at") @db.Timestamptz(3)
+  // The goods have left the seller. Ordinary cancellation no longer gives them back.
+  fulfilledAt          DateTime?                      @map("fulfilled_at") @db.Timestamptz(3)
+  // The order ended with goods out or money taken: waits for an operator's restock.
+  returnPendingAt      DateTime?                      @map("return_pending_at") @db.Timestamptz(3)
+  releasedAt           DateTime?                      @map("released_at") @db.Timestamptz(3)
+  releaseReason        String?                        @map("release_reason") @db.VarChar(500)
+  reconciledAt         DateTime?                      @map("reconciled_at") @db.Timestamptz(3)
+  reconciliationSource InventoryReconciliationSource? @map("reconciliation_source")
+  // Which file, or which operator and why.
+  reconciliationRef    String?                        @map("reconciliation_ref") @db.VarChar(500)
+  // Why the last file could not settle this sale. Cleared when something settles it.
+  reconciliationNote   String?                        @map("reconciliation_note") @db.VarChar(500)
+  order                Order?                         @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  orderItem            OrderItem?                     @relation(fields: [orderItemId], references: [id], onDelete: SetNull)
+  part                 CatalogPart?                   @relation(fields: [partId], references: [id], onDelete: SetNull)
+  stock                Stock?                         @relation(fields: [stockId], references: [id], onDelete: SetNull)
+
+  @@index([orderId])
+  @@index([partId, status])
+  @@index([stockId, status])
+  @@index([sellerId, status])
+  @@index([status, createdAt])
+  @@map("inventory_reservations")
+}
+
+enum StockShortageCause {
+  // The supplier does not have it, or Mator has already sold what it had.
+  SOURCE_STOCK
+  // The units exist, and other Mator orders are holding them for now.
+  MATOR_RESERVATIONS
+}
+
+// A checkout refused for quantity. Written after the order rolled back, so it never
+// describes an order that exists. dedupeKey is one cart line, quantity and cause: a retry
+// counts here and cannot open a second sourcing ticket.
+model StockShortageAttempt {
+  id                String             @id @db.VarChar(64)
+  dedupeKey         String             @unique @map("dedupe_key") @db.VarChar(200)
+  cartItemRef       String             @map("cart_item_ref") @db.VarChar(64)
+  partId            String             @map("part_id") @db.VarChar(64)
+  title             String             @db.VarChar(255)
+  partNumbers       String[]           @map("part_numbers")
+  sellerId          String             @map("seller_id") @db.VarChar(64)
+  sellerName        String             @map("seller_name") @db.VarChar(255)
+  requestedQty      Int                @map("requested_qty")
+  reportedQty       Int                @map("reported_qty")
+  heldQty           Int                @map("held_qty")
+  allocatedQty      Int                @map("allocated_qty")
+  availableQty      Int                @map("available_qty")
+  cause             StockShortageCause
+  alternativesCount Int                @default(0) @map("alternatives_count")
+  // The existing sourcing ticket this opened. A plain id, as tickets can be deleted.
+  sourcingTicketId  String?            @map("sourcing_ticket_id") @db.Uuid
+  attempts          Int                @default(1)
+  createdAt         DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
+  lastAttemptAt     DateTime           @default(now()) @map("last_attempt_at") @db.Timestamptz(3)
+
+  @@index([createdAt])
+  @@index([partId])
+  @@map("stock_shortage_attempts")
 }
 
 // Append-only audit trail of order status transitions. Each row snapshots the
@@ -2282,6 +2399,10 @@ enum AdminAuditAction {
   // and releasing it. The target is the order.
   ORDER_PAYOUT_HOLD_SET
   ORDER_PAYOUT_HOLD_RELEASED
+  // An operator's hand on an inventory reservation. The target is the order.
+  INVENTORY_RESERVATION_RECONCILED
+  INVENTORY_RESERVATION_RELEASED
+  INVENTORY_RESERVATION_RESTOCKED
 }
 
 // What kind of thing an audit entry is about, for entries whose target is not

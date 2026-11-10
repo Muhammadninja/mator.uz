@@ -26,6 +26,11 @@ import {
   findUnavailableParts,
   insufficientStockError,
 } from '../orders/order-availability';
+import {
+  availableUnits,
+  isOutOfStock,
+  reservedUnits,
+} from '../orders/inventory/inventory-availability';
 
 @Injectable()
 export class CartService {
@@ -104,7 +109,7 @@ export class CartService {
       if ((await loadCategoryTreeScope(this.prisma)).isHidden(part.categoryId)) {
         throw new NotFoundException('Part not found');
       }
-      if (!part.inStock) {
+      if (isOutOfStock(part)) {
         throw new ConflictException({
           code: PART_UNAVAILABLE,
           message: 'Part is out of stock',
@@ -129,8 +134,13 @@ export class CartService {
         (existing?.quantity ?? 0) + qty,
         MAX_CART_ITEM_QUANTITY,
       );
-      if (exceedsCountedStock(part.stockQty, requested)) {
-        throw insufficientStockError(partId, part.title, part.stockQty, requested);
+      if (exceedsCountedStock(part.stockQty, requested, reservedUnits(part))) {
+        throw insufficientStockError(
+          partId,
+          part.title,
+          availableUnits(part),
+          requested,
+        );
       }
       if (existing) {
         await this.prisma.cartItem.update({

@@ -25,6 +25,8 @@ import { AdminProductsController } from './categories/admin-products.controller'
 import { AdminInventoryService } from './inventory/admin-inventory.service';
 import { AdminInventoryController } from './inventory/admin-inventory.controller';
 import { AdminPhotoCoverageService } from './photo-coverage/admin-photo-coverage.service';
+import { AdminReservationsService } from './reservations/admin-reservations.service';
+import { AdminReservationsController } from './reservations/admin-reservations.controller';
 import { AdminPhotoCoverageController } from './photo-coverage/admin-photo-coverage.controller';
 import { AdminProductsRatingService } from './products/admin-products-rating.service';
 import { CatalogModule } from '../catalog/catalog.module';
@@ -73,6 +75,7 @@ import { FitmentStudioModule } from './fitment-studio/fitment-studio.module';
     AdminCategoryTransferService,
     AdminInventoryService,
     AdminPhotoCoverageService,
+    AdminReservationsService,
     AdminProductsRatingService,
   ],
   controllers: [
@@ -88,6 +91,7 @@ import { FitmentStudioModule } from './fitment-studio/fitment-studio.module';
     AdminProductsController,
     AdminInventoryController,
     AdminPhotoCoverageController,
+    AdminReservationsController,
   ],
 })
 export class AdminModule {}

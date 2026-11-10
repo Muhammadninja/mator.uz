@@ -62,9 +62,20 @@ import {
   DELIVERY_QUOTE_STALE,
   ORDER_TOTAL_CHANGED,
   PART_UNAVAILABLE,
+  UnavailableLine,
   assertAllAvailable,
   findUnavailableParts,
+  isShortage,
 } from './order-availability';
+import { inventoryReservationsEnabled } from './inventory/inventory-availability';
+import {
+  lockParts,
+  reserveOrderLines,
+} from './inventory/inventory-reservation.store';
+import {
+  StockConflictError,
+  StockConflictRefuser,
+} from './inventory/stock-conflict';
 import { findLineSellers } from './order-settlement';
 import { OFFLINE_PAYMENT_TYPES } from './offline-order.policy';
 import {
@@ -93,6 +104,17 @@ function currentCharges(charges: OrderCharges, delivery: DeliveryQuote | null) {
   };
 }
 
+/** With reservations on: quantity is the only thing wrong, so alternatives can help. */
+function refusedForQuantityAlone(
+  unavailable: readonly UnavailableLine[],
+): boolean {
+  return (
+    inventoryReservationsEnabled() &&
+    unavailable.length > 0 &&
+    unavailable.every(isShortage)
+  );
+}
+
 /** A price on the order moved between its check and its transaction. */
 class CartPricesMovedError extends Error {}
 
@@ -108,6 +130,7 @@ export type StatusActor = TransitionActor;
 @Injectable()
 export class OrdersService {
   private readonly logger = new Logger(OrdersService.name);
+  private readonly stockConflicts: StockConflictRefuser;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -118,7 +141,9 @@ export class OrdersService {
     private readonly discounts: DiscountService,
     private readonly audit: AdminAuditService,
     private readonly deliveryQuotes: DeliveryQuoteService,
-  ) {}
+  ) {
+    this.stockConflicts = new StockConflictRefuser(this.prisma, this.discounts);
+  }
 
   async createFromCart(userId: string, dto: CreateOrderDto) {
     const cart = await this.prisma.cart.findUnique({
@@ -145,12 +170,18 @@ export class OrdersService {
     // Never create an order for parts that can no longer be sold (out of stock,
     // removed, or a suspended dealer) — 409 PART_UNAVAILABLE naming them, so
     // the app can tell the buyer which cart lines to remove.
-    assertAllAvailable(
-      await findUnavailableParts(
-        this.prisma,
-        cart.items.map((i) => ({ partId: i.partId, title: i.title, quantity: i.quantity })),
-      ),
+    const unavailable = await findUnavailableParts(
+      this.prisma,
+      cart.items.map((i) => ({
+        partId: i.partId,
+        title: i.title,
+        quantity: i.quantity,
+      })),
     );
+    if (refusedForQuantityAlone(unavailable)) {
+      await this.stockConflicts.refuse(userId, cart.items, unavailable);
+    }
+    assertAllAvailable(unavailable);
 
     // The catalog is the price; the cart only remembers one. Stored now, outside any
     // transaction, because the 409 below must leave the cart showing the new prices.
@@ -323,14 +354,24 @@ export class OrdersService {
       assertSameCart(cart, locked);
       const lines = locked!.items;
 
-      await this.assertPricesStillCurrent(tx, lines, unitPriceOf);
-      // After the check above, whose FOR SHARE holds these parts until commit.
-      assertAllAvailable(
-        await findUnavailableParts(
+      // Before the FOR SHARE below: taking it first and upgrading would deadlock two
+      // checkouts of one part. By part id, so that overlapping carts wait in line.
+      if (inventoryReservationsEnabled()) {
+        await lockParts(
           tx,
-          lines.map((i) => ({ partId: i.partId, title: i.title, quantity: i.quantity })),
-        ),
+          lines.map((i) => i.partId).filter((id): id is string => !!id),
+        );
+      }
+      await this.assertPricesStillCurrent(tx, lines, unitPriceOf);
+      // After the check above, whose lock holds these parts until commit.
+      const stillUnavailable = await findUnavailableParts(
+        tx,
+        lines.map((i) => ({ partId: i.partId, title: i.title, quantity: i.quantity })),
       );
+      if (refusedForQuantityAlone(stillUnavailable)) {
+        throw new StockConflictError(stillUnavailable);
+      }
+      assertAllAvailable(stillUnavailable);
 
       const created = await tx.order.create({
         data: {
@@ -406,6 +447,8 @@ export class OrdersService {
       // order can never exist without its opening audit row.
       await this.orderStatus.recordCreation(tx, created.id, OrderStatus.PENDING_PAYMENT);
 
+      if (inventoryReservationsEnabled()) await reserveOrderLines(tx, created);
+
       // The cart is consumed by the order: the lines ordered, and no others.
       await consumeOrderedLines(
         tx,
@@ -423,6 +466,10 @@ export class OrdersService {
         err instanceof CartSnapshotMovedError
       ) {
         return this.refuseMovedPrices(cart, delivery);
+      }
+      if (err instanceof StockConflictError) {
+        // After the rollback, so nothing here can describe an order that exists.
+        return this.stockConflicts.refuse(userId, cart.items, err.lines);
       }
       if (err instanceof CartChangedError) {
         throw new ConflictException({
