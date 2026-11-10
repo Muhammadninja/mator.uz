@@ -69,6 +69,7 @@ interface CliArgs {
   dryRun: boolean;
   encoding?: (typeof SUPPORTED_ENCODINGS)[number];
   reportDir?: string;
+  sourceAt?: Date;
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -83,7 +84,11 @@ function parseArgs(argv: string[]): CliArgs {
       args.encoding = enc;
     } else if (a.startsWith('--report-dir='))
       args.reportDir = a.slice('--report-dir='.length);
-    else if (a.startsWith('--')) fail(`Unknown option ${a}`);
+    else if (a.startsWith('--source-date=')) {
+      const at = new Date(a.slice('--source-date='.length));
+      if (Number.isNaN(at.getTime())) fail('--source-date must be an ISO date');
+      args.sourceAt = at;
+    } else if (a.startsWith('--')) fail(`Unknown option ${a}`);
     else positional.push(a);
   }
   if (positional.length !== 1)
@@ -280,6 +285,7 @@ async function main(): Promise<number> {
       {
         dryRun: args.dryRun,
         encoding: args.encoding,
+        sourceAt: args.sourceAt,
       },
     );
 

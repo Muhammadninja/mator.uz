@@ -16,6 +16,7 @@ import { AdminInventoryController } from './inventory/admin-inventory.controller
 import { AdminManagementController } from './management/admin-management.controller';
 import { AdminPhotoCoverageController } from './photo-coverage/admin-photo-coverage.controller';
 import { AdminRefundsController } from './refunds/admin-refunds.controller';
+import { AdminReservationsController } from './reservations/admin-reservations.controller';
 
 const guard = new AdminRoleGuard(new Reflector());
 
@@ -66,6 +67,11 @@ const EVERY_ROLE: [string, { prototype: object }, string][] = [
   ['read the photo coverage list', AdminPhotoCoverageController, 'list'],
   ['read the refund registry', AdminRefundsController, 'list'],
   ["read an order's refunds", AdminRefundsController, 'forOrder'],
+  ['read reservations', AdminReservationsController, 'list'],
+  ['read reservation shortages', AdminReservationsController, 'shortages'],
+  ['reconcile a reservation', AdminReservationsController, 'reconcile'],
+  ['release a reservation', AdminReservationsController, 'release'],
+  ['restock a reservation', AdminReservationsController, 'restock'],
 ];
 
 const SUPER_ADMIN_ONLY: [string, { prototype: object }, string][] = [

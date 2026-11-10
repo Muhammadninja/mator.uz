@@ -57,6 +57,7 @@ function part(over: Partial<PartWithRelations> = {}): PartWithRelations {
     purchasePriceUzs: null,
     cashbackPct: 0 as never,
     stockQty: 1,
+    reservedQty: 0,
     lowStockThreshold: 0,
     // Curated rating: unrated by default (null average, zero ratings), which is
     // the state every row starts in. Tests that assert the rating override these.

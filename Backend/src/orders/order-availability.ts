@@ -2,6 +2,11 @@ import { ConflictException } from '@nestjs/common';
 import { DealerStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { loadCategoryTreeScope } from '../catalog/categories/category-tree-scope';
+import {
+  inventoryReservationsEnabled,
+  isOutOfStock,
+  reservedUnits,
+} from './inventory/inventory-availability';
 
 /**
  * Can these catalog parts still be sold? The availability gate shared by cart
@@ -19,11 +24,15 @@ import { loadCategoryTreeScope } from '../catalog/categories/category-tree-scope
  * count, and each writes `stockQty` and `inStock = quantity > 0` together, so a real zero
  * is always `inStock` false and is refused above as out of stock, available 0. Telegram
  * listings are the only rows with 0 and `inStock` true: nothing ever counted them, so
- * their quantity is not limited. Any other value of `stockQty` is the amount on hand.
+ * their quantity is not limited. A Driver's Village row is never one of them: its 0 is
+ * out of stock even if `inStock` disagrees (isOutOfStock). Any other value of `stockQty`
+ * is the amount on hand.
  *
- * There is no reservation or decrement model, so this refuses more than is on hand but
- * cannot stop two buyers each ordering the last unit. Reservation is a separate,
- * schema-level change.
+ * With inventory reservations on, what counts is the count less what Mator has promised
+ * (see inventory-availability.ts). Called under the part locks of order creation, that is
+ * what stops two buyers each ordering the last unit. Paying for an existing order goes
+ * through findUnavailableForPayment, which leaves out that order's own units and nobody
+ * else's.
  */
 export type UnavailableReason =
   | 'missing'
@@ -31,7 +40,9 @@ export type UnavailableReason =
   | 'dealer_suspended'
   | 'no_price'
   | 'insufficient_stock'
-  | 'category_hidden';
+  | 'category_hidden'
+  // Paying for an order whose hold ran out: it has no claim on the stock any more.
+  | 'reservation_expired';
 
 export interface UnavailableLine {
   partId: string;
@@ -42,9 +53,18 @@ export interface UnavailableLine {
   requestedQuantity?: number;
 }
 
+/** Refused for quantity alone, as opposed to a part that cannot be sold at all. */
+export function isShortage(line: UnavailableLine): boolean {
+  return line.reason === 'insufficient_stock' || line.reason === 'out_of_stock';
+}
+
 /** Does this count refuse `requested`? Only ever reached with `inStock` true, see above. */
-export function exceedsCountedStock(stockQty: number, requested: number): boolean {
-  return stockQty > 0 && requested > stockQty;
+export function exceedsCountedStock(
+  stockQty: number,
+  requested: number,
+  reservedQty = 0,
+): boolean {
+  return stockQty > 0 && requested > stockQty - reservedQty;
 }
 
 /** The 409 for asking more of a counted position than is on hand. */
@@ -86,6 +106,16 @@ export const ORDER_TOTAL_CHANGED = 'ORDER_TOTAL_CHANGED';
 export async function findUnavailableParts(
   prisma: Pick<PrismaService, 'catalogPart' | 'partCategory'>,
   lines: readonly { partId: string | null; title: string; quantity?: number }[],
+  options: {
+    /**
+     * Paying for an existing order (see payment-availability.ts): per part, the units
+     * promised to OTHER orders that come before this one. A part not in the map is held
+     * against every reservation, as for a new buyer.
+     */
+    reservedAhead?: ReadonlyMap<string, number>;
+    /** Parts this order held, whose hold has run out. */
+    lapsedParts?: ReadonlySet<string>;
+  } = {},
 ): Promise<UnavailableLine[]> {
   const partLines = lines.filter(
     (l): l is { partId: string; title: string; quantity?: number } => !!l.partId,
@@ -98,11 +128,15 @@ export async function findUnavailableParts(
       id: true,
       inStock: true,
       stockQty: true,
+      ...(inventoryReservationsEnabled() ? { reservedQty: true } : {}),
       priceUzs: true,
       categoryId: true,
+      sellerId: true,
       seller: { select: { status: true } },
     },
   });
+  const reservedOf = (part: { id: string; reservedQty?: number | null }) =>
+    options.reservedAhead?.get(part.id) ?? reservedUnits(part);
   const tree = await loadCategoryTreeScope(prisma);
   const byId = new Map(parts.map((p) => [p.id, p]));
 
@@ -124,11 +158,17 @@ export async function findUnavailableParts(
         ? 'dealer_suspended'
         : tree.isHidden(part.categoryId)
           ? 'category_hidden'
-        : !part.inStock
+        : isOutOfStock(part)
           ? 'out_of_stock'
+          : options.lapsedParts?.has(part.id)
+            ? 'reservation_expired'
           : Number(part.priceUzs) <= 0
             ? 'no_price'
-            : exceedsCountedStock(part.stockQty, requestedByPart.get(line.partId) ?? 0)
+            : exceedsCountedStock(
+                  part.stockQty,
+                  requestedByPart.get(line.partId) ?? 0,
+                  reservedOf(part),
+                )
               ? 'insufficient_stock'
               : null;
     if (reason === 'insufficient_stock' || reason === 'out_of_stock') {
@@ -136,7 +176,10 @@ export async function findUnavailableParts(
         partId: line.partId,
         title: line.title,
         reason,
-        availableQuantity: reason === 'out_of_stock' ? 0 : part!.stockQty,
+        availableQuantity:
+          reason === 'out_of_stock'
+            ? 0
+            : Math.max(0, part!.stockQty - reservedOf(part!)),
         requestedQuantity: requestedByPart.get(line.partId),
       });
     } else if (reason) {
@@ -151,9 +194,7 @@ export function assertAllAvailable(
   unavailable: readonly UnavailableLine[],
 ): void {
   if (unavailable.length === 0) return;
-  const short = unavailable.filter(
-    (u) => u.reason === 'insufficient_stock' || u.reason === 'out_of_stock',
-  );
+  const short = unavailable.filter(isShortage);
   throw new ConflictException({
     code: PART_UNAVAILABLE,
     message: `No longer available: ${unavailable

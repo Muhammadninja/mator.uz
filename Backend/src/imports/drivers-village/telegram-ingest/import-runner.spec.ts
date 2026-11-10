@@ -29,8 +29,9 @@ const path = require('path');
 const [file, ...flags] = process.argv.slice(2);
 const reportDir = flags.find((f) => f.startsWith('--report-dir=')).slice('--report-dir='.length);
 const dryRun = flags.includes('--dry-run');
+const sourceDate = (flags.find((f) => f.startsWith('--source-date=')) || '').slice('--source-date='.length) || null;
 const plan = JSON.parse(fs.readFileSync(file, 'utf8'));
-console.log('args ' + JSON.stringify({ file: path.basename(file), dryRun }));
+console.log('args ' + JSON.stringify({ file: path.basename(file), dryRun, sourceDate }));
 console.log('hash=' + (process.env.DV_TELEGRAM_API_HASH || 'absent') + ' db=' + (process.env.DATABASE_URL ? 'inherited' : 'absent'));
 console.error('a warning line');
 if (plan.report) {
@@ -51,7 +52,7 @@ function setup(env: NodeJS.ProcessEnv = {}) {
   );
   const run = (
     plan: object,
-    opts: { dryRun?: boolean; timeoutMs?: number } = {},
+    opts: { dryRun?: boolean; timeoutMs?: number; sourceDate?: string } = {},
   ) => {
     const file = join(dir, `export-${Math.random().toString(36).slice(2)}.txt`);
     writeFileSync(file, JSON.stringify(plan));
@@ -59,6 +60,7 @@ function setup(env: NodeJS.ProcessEnv = {}) {
       file,
       reportDir: join(dir, 'reports', String(Math.random()).slice(2)),
       dryRun: opts.dryRun ?? false,
+      sourceDate: opts.sourceDate,
       timeoutMs: opts.timeoutMs ?? 20_000,
     });
   };
@@ -79,6 +81,12 @@ function result(patch: Partial<ImportRunResult>): ImportRunResult {
 }
 
 describe('Telegram ingest — running the existing importer CLI', () => {
+  it('passes when the export was sent, so the importer knows which sales it can include', async () => {
+    const { log, run } = setup({ PATH: process.env.PATH });
+    await run({ exit: 0, report: reportStub() }, { sourceDate: '2026-11-01T10:00:00.000Z' });
+    expect(log.text()).toContain('"sourceDate":"2026-11-01T10:00:00.000Z"');
+  });
+
   it('passes the file, the report directory and --dry-run, and reads the report', async () => {
     const { log, run } = setup({ PATH: process.env.PATH });
     const res = await run(

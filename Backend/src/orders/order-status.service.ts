@@ -12,6 +12,7 @@ import {
   OFFLINE_PAYMENT_TYPES,
   waitingOfflineOrders,
 } from './offline-order.policy';
+import { applyOrderStatus } from './inventory/inventory-reservation.store';
 
 /**
  * Provider transaction state meaning "created, awaiting confirmation" — Payme
@@ -93,6 +94,7 @@ export class OrderStatusService {
       await client.orderStatusHistory.create({
         data: this.historyData(orderId, status, opts.actor, opts.note ?? null),
       });
+      await applyOrderStatus(client, orderId, status);
     };
     if (opts.tx) {
       await run(opts.tx);
@@ -126,6 +128,7 @@ export class OrderStatusService {
       await client.orderStatusHistory.create({
         data: this.historyData(orderId, status, opts.actor, opts.note ?? null),
       });
+      await applyOrderStatus(client, orderId, status);
       return true;
     };
     return opts.tx ? run(opts.tx) : this.prisma.$transaction(run);
@@ -189,6 +192,7 @@ export class OrderStatusService {
               'Expired: payment window elapsed',
             ),
           });
+          await applyOrderStatus(tx, id, OrderStatus.EXPIRED);
           expired += 1;
         }
       });
@@ -236,6 +240,7 @@ export class OrderStatusService {
           : {}),
       },
     });
+    await applyOrderStatus(tx, orderId, OrderStatus.CANCELLED);
     return true;
   }
 
@@ -279,6 +284,7 @@ export class OrderStatusService {
               `Expired: not confirmed by an operator within ${timeoutHours}h`,
             ),
           });
+          await applyOrderStatus(tx, order.id, OrderStatus.EXPIRED);
           expired.push(order);
         }
       });

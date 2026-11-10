@@ -138,6 +138,7 @@ export async function processExport(
     file: inboxFile,
     reportDir,
     dryRun: false,
+    sourceDate: entry.messageDate,
     timeoutMs: ctx.config.importTimeoutMs,
     signal: ctx.signal,
   });

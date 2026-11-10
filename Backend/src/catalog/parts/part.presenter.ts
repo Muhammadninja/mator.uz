@@ -1,4 +1,5 @@
 import { displayNumbers } from '../../common/normalize-oem.util';
+import { isBuyerInStock } from '../../orders/inventory/inventory-availability';
 import {
   Prisma,
   CompatibilityStatus,
@@ -350,7 +351,7 @@ export function presentPartItem(
     // applies) — the single place a discount reaches the buyer catalog.
     ...presentPricing(part, discount),
     currency: part.currency,
-    in_stock: part.inStock,
+    in_stock: isBuyerInStock(part),
     delivery_eta_days_min: part.deliveryEtaDaysMin,
     delivery_eta_days_max: part.deliveryEtaDaysMax,
     // Null when this LISTING has no compatibility concept — a universal one.

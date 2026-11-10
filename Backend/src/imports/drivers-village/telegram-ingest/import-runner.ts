@@ -55,6 +55,8 @@ export interface ImportRequest {
   file: string;
   reportDir: string;
   dryRun: boolean;
+  /** When the export was sent, ISO: tells the importer which sales it can include. */
+  sourceDate?: string;
   timeoutMs: number;
   signal?: AbortSignal;
 }
@@ -92,6 +94,7 @@ export class CliImportRunner implements ImportRunner {
       request.file,
       `--report-dir=${request.reportDir}`,
       ...(request.dryRun ? ['--dry-run'] : []),
+      ...(request.sourceDate ? [`--source-date=${request.sourceDate}`] : []),
     ];
     return new Promise((resolve) => {
       let timedOut = false;

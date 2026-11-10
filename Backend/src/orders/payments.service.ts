@@ -20,7 +20,8 @@ import { PaymeFiscalService } from './webhooks/payme-fiscal.service';
 import { findOpenPaymeInvoice } from './webhooks/payme-invoice.util';
 import { isPayableOrderStatus } from './order-transitions';
 import { isClickEnabled } from './webhooks/click.config';
-import { assertAllAvailable, findUnavailableParts } from './order-availability';
+import { assertAllAvailable } from './order-availability';
+import { findUnavailableForPayment } from './inventory/payment-availability';
 import { OFFLINE_PAYMENT_TYPES } from './offline-order.policy';
 
 @Injectable()
@@ -36,13 +37,7 @@ export class PaymentsService {
     // Stock can change between placing the order and paying it: refuse a
     // checkout link for an order whose parts can no longer be sold.
     assertAllAvailable(
-      await findUnavailableParts(
-        this.prisma,
-        await this.prisma.orderItem.findMany({
-          where: { orderId: order.id },
-          select: { partId: true, title: true, quantity: true },
-        }),
-      ),
+      await findUnavailableForPayment(this.prisma, order.id),
     );
     // Refuse BEFORE a checkout link exists. An order whose items lack fiscal
     // data (typically a dealer whose ИНН / ставка НДС is not configured yet)

@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { sellableWhere } from '../orders/inventory/inventory-availability';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AppLang, localizedCategoryName } from '../common/app-lang.util';
@@ -117,7 +118,13 @@ export class RagSearchService {
     const candidates = await this.prisma.catalogPart.findMany({
       // Never quote a part the catalog does not list: a suspended dealer's, or
       // one without a ready photo (catalog/buyer-visibility.ts).
-      where: { inStock: true, OR: or, ...BUYER_LISTED_PART, ...visible },
+      where: {
+        inStock: true,
+        OR: or,
+        ...BUYER_LISTED_PART,
+        ...visible,
+        AND: [sellableWhere(this.prisma)],
+      },
       include: {
         category: true,
         brand: true,
