@@ -3,10 +3,10 @@ import { Logger } from '@nestjs/common';
 /**
  * A hard cap on Redis commands this process has stopped waiting for.
  *
- * withRedisTimeout gives up WAITING on a command, but cannot cancel it: with
- * `maxRetriesPerRequest: null` and the offline queue (redis.provider.ts,
- * queue.config.ts) ioredis keeps it — and BullMQ keeps an add() parked until
- * the connection is ready — until Redis answers. Each such command holds its
+ * withRedisTimeout gives up WAITING on a command, but cannot cancel it: ioredis
+ * keeps it until it is answered or flushed, and on BullMQ's connections
+ * (`maxRetriesPerRequest: null`, queue.config.ts) an add() stays parked until
+ * the connection is ready. Each such command holds its
  * arguments (a job payload, a key) in memory. Before the bounds, a stuck caller
  * also stopped producing new commands (a bot handler held up the whole batch);
  * a bounded caller does not, so during a long outage the unanswered commands

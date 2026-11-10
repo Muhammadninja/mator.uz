@@ -27,11 +27,14 @@ import {
 export interface CategoryEdge {
   id: string;
   parentId: string | null;
+  /** Absent means active. */
+  isActive?: boolean;
 }
 
 export const CATEGORY_EDGE_SELECT = {
   id: true,
   parentId: true,
+  isActive: true,
 } satisfies Prisma.PartCategorySelect;
 
 /** The Prisma surface the loader reads: the client or a test double. */
@@ -60,6 +63,22 @@ export interface CategoryTreeScope {
   idsInMainCategory(bucket: PartMainCategory): string[];
   /** Every category id whose parts belong to `system`. */
   idsInVehicleCategory(system: PartVehicleCategory): string[];
+  /** Is this node, or any node above it, deactivated? */
+  isHidden(categoryId: string): boolean;
+  /** Every category id that is hidden, for filtering a query. */
+  hiddenIds(): string[];
+}
+
+/**
+ * THE rule for what a deactivated category does to buyers: its parts, and those of
+ * every node beneath it, are not listed, counted, searched or sold. The rows stay, and
+ * reactivating brings them back. Null when nothing is hidden, which is the usual case.
+ */
+export function visibleCategoryWhere(
+  tree: Pick<CategoryTreeScope, 'hiddenIds'>,
+): Prisma.CatalogPartWhereInput | null {
+  const hidden = tree.hiddenIds();
+  return hidden.length > 0 ? { categoryId: { notIn: hidden } } : null;
 }
 
 /**
@@ -101,12 +120,34 @@ export function categoryTreeScope(
   const classify = (categoryId: string) =>
     known.get(categoryId) ?? derive(categoryId);
 
+  const inactive = new Set(
+    edges.filter((e) => e.isActive === false).map((e) => e.id),
+  );
+  const hidden = new Set<string>();
+  if (inactive.size > 0) {
+    for (const { id } of edges) {
+      // Bounded by a seen-set, so a malformed cycle ends.
+      const seen = new Set<string>();
+      let node: string | null | undefined = id;
+      while (node && !seen.has(node)) {
+        if (inactive.has(node)) {
+          hidden.add(id);
+          break;
+        }
+        seen.add(node);
+        node = parentOf.get(node);
+      }
+    }
+  }
+
   return {
     classify,
     mainCategoryOf: (categoryId) => classify(categoryId).mainCategory,
     vehicleCategoryOf: (categoryId) => classify(categoryId).vehicleCategory,
     idsInMainCategory: (bucket) => [...(byMain.get(bucket) ?? [])],
     idsInVehicleCategory: (system) => [...(byVehicle.get(system) ?? [])],
+    isHidden: (categoryId) => hidden.has(categoryId),
+    hiddenIds: () => [...hidden],
   };
 }
 

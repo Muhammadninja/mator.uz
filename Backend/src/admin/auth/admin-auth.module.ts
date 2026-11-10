@@ -8,6 +8,7 @@ import { AdminAuditService } from './admin-audit.service';
 import { AdminAuthConfig } from './admin-auth.config';
 import { AdminAuthController } from './admin-auth.controller';
 import { AdminAuthService } from './admin-auth.service';
+import { AdminLoginProtection } from './admin-login-protection.service';
 import { AdminInviteController } from './admin-invite.controller';
 import { AdminInviteService } from './admin-invite.service';
 import { AdminTokenService } from './admin-token.service';
@@ -47,6 +48,7 @@ import { AdminJwtStrategy } from './strategies/admin-jwt.strategy';
     AdminAuditService,
     AdminAuthConfig,
     AdminAuthService,
+    AdminLoginProtection,
     AdminInviteService,
     AdminTokenService,
     AdminJwtStrategy,

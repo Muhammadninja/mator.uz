@@ -121,6 +121,8 @@ function same(a: string, b: string): boolean {
 const MODEL = 'claude-haiku-4-5';
 const MAX_TOKENS = 1024;
 const TEMPERATURE = 0.2;
+/** Another worker took the request over; one fresh look is enough. */
+const MAX_LEASE_RETRIES = 1;
 
 /**
  * AI chat for customer support + part sourcing.
@@ -159,6 +161,7 @@ export class AiChatService {
   async processUserMessage(
     dto: SendMessageDto,
     context: ChatRequestContext = { userId: null, idempotencyKey: null, selectedVehicleId: null },
+    leaseRetries = 0,
   ): Promise<ChatResponse> {
     const vehicle = await this.loadSelectedVehicle(context);
     const payloadHash = sourcingPayloadHash(dto.message, vehicle?.id ?? null, dto.vin);
@@ -185,8 +188,12 @@ export class AiChatService {
         await this.requests.release(claim).catch(() => undefined);
       }
       if (err instanceof SourcingLeaseLostError) {
-        // Another worker took this over: its result is the result.
-        return this.processUserMessage(dto, context);
+        // Another worker took this over: its result is the result. Bounded, so
+        // repeated losses cannot keep calling the model.
+        if (leaseRetries >= MAX_LEASE_RETRIES) {
+          throw new ServiceUnavailableException('AI chat is temporarily unavailable');
+        }
+        return this.processUserMessage(dto, context, leaseRetries + 1);
       }
       if (err instanceof HttpException) throw err;
       this.logger.error(

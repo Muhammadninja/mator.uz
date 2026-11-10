@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { getRequestId } from './request-context';
+import { RedisUnavailableError } from '../redis/redis-backlog';
 
 /** Stable machine-readable error codes the mobile client switches on. */
 const STATUS_CODE: Record<number, string> = {
@@ -90,6 +91,11 @@ export class HttpExceptionFilter implements ExceptionFilter {
         (exception as Error)?.stack,
       );
     }
+    // The app reads a 429's wait from this header.
+    const retryAfter = body.details?.retry_after_seconds;
+    if (status === HttpStatus.TOO_MANY_REQUESTS && typeof retryAfter === 'number') {
+      res.setHeader('Retry-After', String(retryAfter));
+    }
     // Hand the id to the client as well, so a user reporting "it failed" can
     // quote something that pinpoints the request in the logs. Safe to expose:
     // it is an opaque random token that reveals nothing about the system.
@@ -101,6 +107,16 @@ export class HttpExceptionFilter implements ExceptionFilter {
       const status = exception.getStatus();
       const resp = exception.getResponse();
       return { status, body: this.bodyFromHttpException(status, resp) };
+    }
+    // Redis not answering is an outage, not a bug: whatever needed it was refused.
+    if (exception instanceof RedisUnavailableError) {
+      return {
+        status: HttpStatus.SERVICE_UNAVAILABLE,
+        body: {
+          code: 'SERVICE_UNAVAILABLE',
+          message: 'Service is temporarily unavailable. Please try again shortly.',
+        },
+      };
     }
     // Non-HTTP (unexpected) errors -> 500.
     return {

@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron, CronExpression } from '@nestjs/schedule';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -8,6 +9,9 @@ const DEFAULT_RETENTION_DAYS = 90;
 const BATCH_SIZE = 5000;
 // Arbitrary app-wide constant identifying this job's Postgres advisory lock.
 const ADVISORY_LOCK_KEY = 911_001;
+// How long one run may take. Past it the transaction rolls back, releasing the lock,
+// and the next run starts again: it only ever deletes dead rows.
+const LOCK_HOLD_TIMEOUT_MS = 30 * 60 * 1000;
 
 @Injectable()
 export class RetentionService {
@@ -39,28 +43,33 @@ export class RetentionService {
     const startedAt = Date.now();
 
     try {
-      // Cross-instance guard: only the holder of the advisory lock proceeds.
-      const acquired = await this.acquireLock();
-      if (!acquired) {
-        this.logger.log('Another instance holds the retention lock — skipping this run');
-        return;
-      }
-
-      try {
-        const refreshDeleted = await this.cleanupExpiredRefreshTokens();
-        const verificationDeleted = await this.cleanupExpiredVerificationTokens();
-        this.logger.log(
-          `Retention complete in ${Date.now() - startedAt}ms — ` +
-            `refresh_tokens: ${refreshDeleted} deleted, ` +
-            `email_verification_tokens: ${verificationDeleted} deleted ` +
-            `(retentionDays=${this.retentionDays})`,
-        );
-      } finally {
-        await this.releaseLock();
-      }
+      // Cross-instance guard. The lock and the deletes share this one transaction, so
+      // they share one server connection, also under PgBouncer's transaction pooling,
+      // and need only one from the pool. Postgres releases the lock when the
+      // transaction ends, however that comes about, including a crash.
+      await this.prisma.$transaction(
+        async (tx) => {
+          const rows = await tx.$queryRaw<{ locked: boolean }[]>`
+            SELECT pg_try_advisory_xact_lock(${ADVISORY_LOCK_KEY}) AS locked
+          `;
+          if (rows[0]?.locked !== true) {
+            this.logger.log('Another instance holds the retention lock — skipping this run');
+            return;
+          }
+          const refreshDeleted = await this.cleanupExpiredRefreshTokens(tx);
+          const verificationDeleted = await this.cleanupExpiredVerificationTokens(tx);
+          this.logger.log(
+            `Retention complete in ${Date.now() - startedAt}ms — ` +
+              `refresh_tokens: ${refreshDeleted} deleted, ` +
+              `email_verification_tokens: ${verificationDeleted} deleted ` +
+              `(retentionDays=${this.retentionDays})`,
+          );
+        },
+        { maxWait: 10_000, timeout: LOCK_HOLD_TIMEOUT_MS },
+      );
     } catch (err) {
-      // Never throw out of a cron handler. Already-committed batches persist;
-      // the next scheduled run resumes cleanup (retry-safe by construction).
+      // Never throw out of a cron handler. The next scheduled run does the cleanup
+      // (retry-safe by construction).
       this.logger.error(
         `Retention run failed: ${(err as Error).message}`,
         (err as Error).stack,
@@ -75,17 +84,17 @@ export class RetentionService {
    * have expiresAt > now and are never matched. Index-backed by
    * refresh_tokens(expires_at).
    */
-  private cleanupExpiredRefreshTokens(): Promise<number> {
+  private cleanupExpiredRefreshTokens(tx: Prisma.TransactionClient): Promise<number> {
     const now = new Date();
     return this.batchedDelete(
       (take) =>
-        this.prisma.refreshToken.findMany({
+        tx.refreshToken.findMany({
           where: { expiresAt: { lt: now } },
           select: { id: true },
           take,
         }),
       (ids) =>
-        this.prisma.refreshToken
+        tx.refreshToken
           .deleteMany({ where: { id: { in: ids } } })
           .then((r) => r.count),
     );
@@ -102,26 +111,24 @@ export class RetentionService {
    * Active tokens (expiresAt >= now) can never match a past cutoff, so they
    * are structurally safe from deletion.
    */
-  private cleanupExpiredVerificationTokens(): Promise<number> {
+  private cleanupExpiredVerificationTokens(tx: Prisma.TransactionClient): Promise<number> {
     const cutoff = new Date(Date.now() - this.retentionDays * DAY_MS);
     return this.batchedDelete(
       (take) =>
-        this.prisma.emailVerificationToken.findMany({
+        tx.emailVerificationToken.findMany({
           where: { expiresAt: { lt: cutoff } },
           select: { id: true },
           take,
         }),
       (ids) =>
-        this.prisma.emailVerificationToken
+        tx.emailVerificationToken
           .deleteMany({ where: { id: { in: ids } } })
           .then((r) => r.count),
     );
   }
 
   /**
-   * Delete in bounded batches so each statement is a short, index-friendly
-   * transaction that never holds a long lock. Each batch commits independently,
-   * so a crash mid-run leaves a safe partial result that the next run finishes.
+   * Delete in bounded batches so each statement stays short and index-friendly.
    */
   private async batchedDelete(
     findIds: (take: number) => Promise<{ id: number }[]>,
@@ -135,21 +142,5 @@ export class RetentionService {
       if (rows.length < BATCH_SIZE) break;
     }
     return total;
-  }
-
-  // Postgres session-level advisory lock. NOTE: with a connection pool the
-  // unlock should land on the same backend; we treat the lock as best-effort
-  // mutual exclusion. The real safety net is idempotency — concurrent runs can
-  // only race to delete the same dead rows, which is harmless. For strict
-  // single execution, run the scheduler on one instance.
-  private async acquireLock(): Promise<boolean> {
-    const rows = await this.prisma.$queryRaw<{ locked: boolean }[]>`
-      SELECT pg_try_advisory_lock(${ADVISORY_LOCK_KEY}) AS locked
-    `;
-    return rows[0]?.locked === true;
-  }
-
-  private async releaseLock(): Promise<void> {
-    await this.prisma.$queryRaw`SELECT pg_advisory_unlock(${ADVISORY_LOCK_KEY})`;
   }
 }

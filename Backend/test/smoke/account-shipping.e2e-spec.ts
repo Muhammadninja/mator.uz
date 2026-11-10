@@ -68,7 +68,11 @@ describe('Account + Shipping smoke', () => {
 
   describe('Shipping', () => {
     const shipping = () =>
-      new ShippingService({ quoteCart: jest.fn() } as any);
+      new ShippingService(
+        { quoteCart: jest.fn() } as any,
+        { consume: jest.fn(async () => ({ allowed: true, retryAfter: 0 })) } as any,
+        { get: () => undefined } as any,
+      );
 
     it('offers pickup, free', async () => {
       const res: any = await shipping().quote('usr_1', {} as any);

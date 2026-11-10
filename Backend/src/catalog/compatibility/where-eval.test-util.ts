@@ -46,6 +46,10 @@ function matchScalar(actual: unknown, filter: unknown): boolean {
         if (!(expected as unknown[]).map(norm).includes(norm(actual)))
           return false;
         break;
+      case 'notIn':
+        if ((expected as unknown[]).map(norm).includes(norm(actual)))
+          return false;
+        break;
       case 'not':
         if (
           isPlainObject(expected)

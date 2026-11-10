@@ -4,6 +4,7 @@ import { RedisService } from './redis.service';
 import { CacheService } from './cache.service';
 import { DraftLock } from './draft-lock.service';
 import { FixedWindowRateLimiter, RATE_LIMITER } from './rate-limiter.service';
+import { AtomicBudget } from './atomic-budget.service';
 
 // Bind the algorithm-agnostic RATE_LIMITER token to the fixed-window
 // implementation. Consumers inject the token (typed as RateLimiter), so
@@ -21,7 +22,8 @@ const rateLimiterProvider = {
     CacheService,
     DraftLock,
     rateLimiterProvider,
+    AtomicBudget,
   ],
-  exports: [RedisService, CacheService, DraftLock, RATE_LIMITER],
+  exports: [RedisService, CacheService, DraftLock, RATE_LIMITER, AtomicBudget],
 })
 export class RedisModule {}

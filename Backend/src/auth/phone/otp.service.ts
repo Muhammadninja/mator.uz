@@ -17,6 +17,7 @@ import { prefixedId, IdPrefix } from '../../common/ulid.util';
 import { maskPhone } from '../../common/pii.util';
 import {
   RedisService,
+  RedisTimeoutError,
   assertRedisBacklogRoom,
   withRedisTimeout,
 } from '../../redis/redis.service';
@@ -30,8 +31,8 @@ import { resolveSmsLang, type SmsLang } from '../../sms/otp-message.i18n';
 
 const OTP_LENGTH = 6;
 const OTP_TTL_MS = 5 * 60 * 1000; // 5 min
-const RESEND_COOLDOWN_S = 60;
-const MAX_PER_HOUR = 5; // per MSISDN
+/** One OTP SMS per phone number in this many seconds; the only limit on sending. */
+const SEND_COOLDOWN_S = 60;
 const MAX_ATTEMPTS = 5; // code comparisons per request_id, ever
 /**
  * Code comparisons per phone per hour, across every request_id. Two codes' worth
@@ -41,6 +42,8 @@ const MAX_ATTEMPTS = 5; // code comparisons per request_id, ever
 const MAX_VERIFY_PER_HOUR = 10;
 /** How long a verification waits for the limiter before refusing with a 503. */
 const VERIFY_LIMITER_TIMEOUT_MS = 2_000;
+/** How long a request waits on the queue before the user is pointed at resend. */
+const ENQUEUE_TIMEOUT_MS = 3_000;
 
 const OTP_TTL_S = OTP_TTL_MS / 1000;
 // Redis TTL for the OTP record. Kept slightly longer than the logical lifetime
@@ -49,7 +52,15 @@ const OTP_TTL_S = OTP_TTL_MS / 1000;
 // instead of silently vanishing into the generic "invalid/already-used" path.
 // Logical expiry is still driven solely by `expiresAt` (Redis TTL is the reaper).
 const OTP_KEY_TTL_S = OTP_TTL_S + 60;
-const HOURLY_WINDOW_S = 60 * 60; // rolling hour for the per-MSISDN ceiling
+const HOURLY_WINDOW_S = 60 * 60; // rolling hour for the verification ceiling
+
+/** DEL only while the key still holds this claim, so a slow request cannot free a newer one. */
+const RELEASE_COOLDOWN_SCRIPT = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+`;
 
 /**
  * OTP purposes. `login` is the default (phone sign-in/registration) and matches
@@ -83,6 +94,12 @@ function slotOf(phoneE164: string, purpose: string): string {
   return purpose === OtpPurpose.PHONE_CHANGE_CURRENT
     ? `${purpose}:${phoneE164}`
     : phoneE164;
+}
+
+/** The cooldown's identity for a number: its digits, however they were written. */
+export function otpCooldownPhone(phone: string): string {
+  const digits = phone.replace(/\D/g, '');
+  return digits.startsWith('00') ? digits.slice(2) : digits;
 }
 
 export interface OtpIssued {
@@ -195,21 +212,65 @@ export class OtpService {
   }
 
   /**
-   * Rolling "N per hour per MSISDN" ceiling. Delegated to the injected
-   * {@link RateLimiter} (fixed-window: INCR + first-hit EXPIRE under the hood) —
-   * the limit (`MAX_PER_HOUR`), window (`HOURLY_WINDOW_S`) and 429 error are
-   * unchanged; only the counter mechanics moved into shared infrastructure.
+   * Take the phone's sending slot, or refuse. SET NX is one atomic step on the
+   * Redis all instances share, so of any number of concurrent requests exactly one
+   * gets through. A Redis failure propagates as a 503: no slot, no SMS.
    */
-  private async enforceHourlyCeiling(slot: string): Promise<void> {
-    const { allowed } = await this.rateLimiter.consume(
-      RedisKeys.rateOtpRequest(slot),
-      MAX_PER_HOUR,
-      HOURLY_WINDOW_S,
+  private async claimSendCooldown(
+    phoneE164: string,
+    claim: string,
+  ): Promise<void> {
+    const key = RedisKeys.otpSendCooldown(otpCooldownPhone(phoneE164));
+    if (await this.redis.setNxEx(key, SEND_COOLDOWN_S, claim)) return;
+    const remaining = await this.redis.ttl(key);
+    const retryAfter = remaining > 0 ? remaining : 1;
+    throw new HttpException(
+      {
+        code: 'OTP_COOLDOWN_ACTIVE',
+        message: `Please wait ${retryAfter}s before requesting a new code.`,
+        details: { retry_after_seconds: retryAfter },
+      },
+      HttpStatus.TOO_MANY_REQUESTS,
     );
-    if (!allowed) {
-      throw new HttpException(
-        'Too many OTP requests. Please try again later.',
-        HttpStatus.TOO_MANY_REQUESTS,
+  }
+
+  /** Best effort: if this fails too, the slot still expires by itself. */
+  private async releaseSendCooldown(
+    phoneE164: string,
+    claim: string,
+  ): Promise<void> {
+    await this.redis
+      .evalScript(
+        RELEASE_COOLDOWN_SCRIPT,
+        [RedisKeys.otpSendCooldown(otpCooldownPhone(phoneE164))],
+        [claim],
+      )
+      .catch((err: unknown) =>
+        this.logger.warn(
+          `OTP cooldown not released (expires by itself): ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
+  }
+
+  /** Put back what was there before an issue that never reached the queue. */
+  private async restoreRecord(
+    slot: string,
+    issuedRequestId: string,
+    previous: OtpRecord | null,
+  ): Promise<void> {
+    try {
+      if (previous) {
+        await this.persist(previous);
+        if (previous.requestId !== issuedRequestId) {
+          await this.redis.del(RedisKeys.otpRequest(issuedRequestId));
+        }
+        return;
+      }
+      await this.redis.del(RedisKeys.otp(slot));
+      await this.redis.del(RedisKeys.otpRequest(issuedRequestId));
+    } catch (err) {
+      this.logger.warn(
+        `OTP record not restored after a failed send: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }
@@ -238,47 +299,69 @@ export class OtpService {
     lang: SmsLang,
     expiresAt: number,
   ): Promise<void> {
-    await this.queue.enqueueOtpSms(
-      { phone: phoneE164, otp: { code, lang, expiresAt } },
-      { jobId: this.queue.otpSmsJobId(requestId, sendCount) },
+    // BullMQ's connection waits out an outage on purpose; this request must not.
+    assertRedisBacklogRoom('OTP SMS enqueue');
+    await withRedisTimeout(
+      this.queue.enqueueOtpSms(
+        { phone: phoneE164, otp: { code, lang, expiresAt } },
+        { jobId: this.queue.otpSmsJobId(requestId, sendCount) },
+      ),
+      ENQUEUE_TIMEOUT_MS,
+      'OTP SMS enqueue',
     );
   }
 
   /**
-   * Route a freshly generated OTP to the user. In dev mode the SMS pipeline is
-   * skipped entirely — the code is returned to the caller so the
-   * frontend can complete auth without a provider. In every other case this
-   * enqueues the delivery via {@link deliver}.
-   * Returns the plaintext code only in dev mode; `undefined` otherwise.
+   * Save a freshly generated OTP and hand it to the SMS queue. In dev mode the SMS
+   * pipeline is skipped and the code is returned so the frontend can complete auth
+   * without a provider; otherwise the return value is `undefined`.
    *
-   * Enqueue failures are logged and swallowed: the OTP is already valid in Redis
-   * and the user can resend, so a queue hiccup must not fail an otherwise
-   * successful issue (and must not leak a 500 to the auth screen).
+   * An SMS that could not be queued was not accepted, so the caller gets a 503:
+   * the previous code is put back and the phone's slot is freed for a retry. A
+   * queue that did not answer in time is different, because the job may still
+   * land and deliver this code. Then the new record and the slot both stay, and
+   * the slot expires by itself within a minute.
    */
-  private async dispatch(
-    phoneE164: string,
+  private async issue(
+    record: OtpRecord,
     code: string,
-    requestId: string,
     sendCount: number,
-    lang: SmsLang,
-    expiresAt: number,
+    previous: OtpRecord | null,
+    claim: string,
   ): Promise<string | undefined> {
-    if (this.devMode) {
-      this.logger.warn(
-        `[AUTH_DEV_MODE] OTP issued for ${maskPhone(phoneE164)} (SMS skipped)`,
-      );
-      return code;
-    }
+    const slot = slotOf(record.phoneE164, record.purpose);
     try {
-      await this.deliver(phoneE164, code, requestId, sendCount, lang, expiresAt);
+      await this.persist(record);
+      if (this.devMode) {
+        this.logger.warn(
+          `[AUTH_DEV_MODE] OTP issued for ${maskPhone(record.phoneE164)} (SMS skipped)`,
+        );
+        return code;
+      }
+      await this.deliver(
+        record.phoneE164,
+        code,
+        record.requestId,
+        sendCount,
+        resolveSmsLang(record.lang),
+        record.expiresAt,
+      );
+      return undefined;
     } catch (err) {
       this.logger.error(
-        `Failed to enqueue OTP SMS for ${maskPhone(phoneE164)} (code is still valid; user can resend): ${
+        `Failed to enqueue OTP SMS for ${maskPhone(record.phoneE164)}: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
+      if (!(err instanceof RedisTimeoutError)) {
+        await this.restoreRecord(slot, record.requestId, previous);
+        await this.releaseSendCooldown(record.phoneE164, claim);
+      }
+      throw new ServiceUnavailableException({
+        code: 'OTP_SEND_UNAVAILABLE',
+        message: 'The code could not be sent. Please try again shortly.',
+      });
     }
-    return undefined;
   }
 
   /**
@@ -299,12 +382,21 @@ export class OtpService {
     purpose: OtpPurpose = OtpPurpose.LOGIN,
     lang?: string | null,
   ): Promise<OtpIssued> {
-    await this.enforceHourlyCeiling(slotOf(phoneE164, purpose));
+    const slot = slotOf(phoneE164, purpose);
+    const requestId = prefixedId(IdPrefix.OTP);
+    // First: a refused request must not create a code or touch the live one.
+    await this.claimSendCooldown(phoneE164, requestId);
+    let previous: OtpRecord | null;
+    try {
+      previous = await this.loadByPhone(slot);
+    } catch (err) {
+      await this.releaseSendCooldown(phoneE164, requestId);
+      throw err;
+    }
 
     const code = this.generateCode();
     const now = Date.now();
     const expiresAt = new Date(now + OTP_TTL_MS);
-    const requestId = prefixedId(IdPrefix.OTP);
     const record: OtpRecord = {
       requestId,
       phoneE164,
@@ -317,22 +409,13 @@ export class OtpService {
       expiresAt: expiresAt.getTime(),
       lastSentAt: now,
     };
-    await this.persist(record);
-
     // sendCount 0 — the initial issue for this requestId.
-    const devOtpCode = await this.dispatch(
-      phoneE164,
-      code,
-      requestId,
-      0,
-      record.lang,
-      record.expiresAt,
-    );
+    const devOtpCode = await this.issue(record, code, 0, previous, requestId);
     this.logger.log(`OTP issued ${requestId} for ${maskPhone(phoneE164)}`);
     return {
       requestId,
       expiresAt,
-      resendAfterSeconds: RESEND_COOLDOWN_S,
+      resendAfterSeconds: SEND_COOLDOWN_S,
       otpLength: OTP_LENGTH,
       channel,
       devOtpCode,
@@ -348,13 +431,6 @@ export class OtpService {
       throw new BadRequestException('Invalid or already-used OTP request');
     }
 
-    const sinceLast = (Date.now() - record.lastSentAt) / 1000;
-    if (sinceLast < RESEND_COOLDOWN_S) {
-      throw new HttpException(
-        `Please wait ${Math.ceil(RESEND_COOLDOWN_S - sinceLast)}s before requesting a new code.`,
-        HttpStatus.TOO_MANY_REQUESTS,
-      );
-    }
     // The five attempts belong to the request_id and a resend keeps it, so a
     // spent request cannot be reopened, and an SMS for it could never be used.
     const attemptsKey = RedisKeys.otpAttempts(requestId);
@@ -365,7 +441,9 @@ export class OtpService {
         HttpStatus.TOO_MANY_REQUESTS,
       );
     }
-    await this.enforceHourlyCeiling(slotOf(record.phoneE164, record.purpose));
+    // The same slot a first request takes, so resending cannot get around it.
+    const claim = prefixedId(IdPrefix.OTP);
+    await this.claimSendCooldown(record.phoneE164, claim);
 
     const code = this.generateCode();
     const now = Date.now();
@@ -380,24 +458,22 @@ export class OtpService {
     // The new code lives longer than the counter was armed for: keep the counter
     // alive with it, or attempts already spent would be forgiven when it lapses.
     await this.redis.expire(attemptsKey, OTP_KEY_TTL_S);
-    await this.persist(updated);
 
     // A resend mints a NEW code, so it must reach the user: keying the job on
-    // the bumped resendCount gives it a distinct id from the previous send.
-    const devOtpCode = await this.dispatch(
-      record.phoneE164,
+    // the bumped resendCount gives it a distinct id from the previous send. The
+    // language is re-resolved in issue(): a record from the previous release has
+    // no `lang`, and a resend must not crash on it.
+    const devOtpCode = await this.issue(
+      updated,
       code,
-      record.requestId,
       updated.resendCount,
-      // Re-resolved rather than trusted: a record issued by the previous release
-      // carries no `lang`, and a resend must not crash on it.
-      resolveSmsLang(record.lang),
-      updated.expiresAt,
+      record,
+      claim,
     );
     return {
       requestId: record.requestId,
       expiresAt,
-      resendAfterSeconds: RESEND_COOLDOWN_S,
+      resendAfterSeconds: SEND_COOLDOWN_S,
       otpLength: OTP_LENGTH,
       channel: record.channel,
       devOtpCode,

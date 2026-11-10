@@ -41,7 +41,11 @@ describe('ShippingService.quote', () => {
       }),
       coverage: null,
     };
-    service = new ShippingService(quotes as never);
+    service = new ShippingService(
+      quotes as never,
+      { consume: jest.fn(async () => ({ allowed: true, retryAfter: 0 })) } as never,
+      { get: () => undefined } as never,
+    );
   });
 
   it('a build that names no method gets the answer it always had, whatever its address', async () => {
@@ -160,6 +164,7 @@ describe('ShippingService.quote', () => {
           'DELIVERY_OUTSIDE_COVERAGE',
           'DELIVERY_ROUTE_NOT_FOUND',
           'DELIVERY_ROUTING_UNAVAILABLE',
+          'DELIVERY_TOO_MANY_SELLERS',
           'PICKUP_LOCATION_MISSING',
         ].sort(),
       );
@@ -241,5 +246,37 @@ describe('ShippingQuoteDto, under the global ValidationPipe', () => {
     ['an unknown method', { delivery_method: 'teleport' }],
   ])('refuses a body stating %s', async (_, body) => {
     await expect(parse(body)).rejects.toBeDefined();
+  });
+
+  describe('the per-buyer quote limit (ORD-002)', () => {
+    const body = { delivery_method: 'courier', delivery_address_id: 'addr_1' } as never;
+
+    function limited(consume: jest.Mock) {
+      return new ShippingService(
+        { quoteCart: jest.fn() } as never,
+        { consume } as never,
+        { get: (k: string) => (k === 'DELIVERY_QUOTE_PER_MINUTE' ? '3' : undefined) } as never,
+      );
+    }
+
+    it('refuses past the limit, keyed on the buyer and read from the environment', async () => {
+      const consume = jest.fn(async () => ({ allowed: false, retryAfter: 42 }));
+      await expect(limited(consume).quote('usr_1', body)).rejects.toMatchObject({
+        status: 429,
+        response: { code: 'DELIVERY_QUOTE_LIMITED' },
+      });
+      expect(consume).toHaveBeenCalledWith('rate:delivery:quote:usr_1', 3, 60);
+    });
+
+    it('a pickup-only answer costs nothing, so it is not counted', async () => {
+      const consume = jest.fn();
+      await limited(consume).quote('usr_1', {} as never);
+      expect(consume).not.toHaveBeenCalled();
+    });
+
+    it('a limiter that cannot answer refuses the quote', async () => {
+      const consume = jest.fn().mockRejectedValue(new Error('down'));
+      await expect(limited(consume).quote('usr_1', body)).rejects.toThrow('down');
+    });
   });
 });

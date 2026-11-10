@@ -1,5 +1,6 @@
 import { ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
+import { RedisUnavailableError } from '../../redis/redis-backlog';
 
 /**
  * Like {@link JwtAuthGuard}, but never rejects the request.
@@ -15,11 +16,13 @@ export class OptionalJwtAuthGuard extends AuthGuard('jwt') {
   // Default handleRequest throws when there's no user; here we swallow the error
   // and hand back null so the route runs either way.
   handleRequest<TUser = unknown>(
-    _err: unknown,
+    err: unknown,
     user: TUser,
     _info?: unknown,
     _context?: ExecutionContext,
   ): TUser | null {
+    // Revocation could not be checked. That is an outage (503), not a guest.
+    if (err instanceof RedisUnavailableError) throw err;
     return (user as TUser) ?? null;
   }
 }
@@ -51,11 +54,12 @@ export class OptionalJwtForVehicleGuard extends OptionalJwtAuthGuard {
 @Injectable()
 export class JwtUnlessAnonymousGuard extends OptionalJwtAuthGuard {
   handleRequest<TUser = unknown>(
-    _err: unknown,
+    err: unknown,
     user: TUser,
     _info?: unknown,
     context?: ExecutionContext,
   ): TUser | null {
+    if (err instanceof RedisUnavailableError) throw err;
     if (user) return user;
     const req = context
       ?.switchToHttp()

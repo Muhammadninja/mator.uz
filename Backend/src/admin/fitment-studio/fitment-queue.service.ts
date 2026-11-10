@@ -13,6 +13,7 @@
  * pulls 300 rows and then navigates them by arrow key.
  */
 
+import { displayNumbers } from '../../common/normalize-oem.util';
 import {
   BadRequestException,
   Injectable,
@@ -189,7 +190,9 @@ export class FitmentQueueService {
       // Echoed so the operator can confirm the cross-reference without leaving
       // the queue. GM numbers count: on this catalogue they are the OEM
       // reference for a GM-labelled part.
-      oemNumbers: part.oemNumbers.length > 0 ? part.oemNumbers : part.gmNumbers,
+      oemNumbers: displayNumbers(
+        part.oemNumbers.length > 0 ? part.oemNumbers : part.gmNumbers,
+      ),
     };
   }
 
@@ -250,7 +253,9 @@ export class FitmentQueueService {
       // inventing one; the id is searchable instead.
       sku: null,
       oem,
-      oemNumbers: r.oemNumbers.length > 0 ? r.oemNumbers : r.gmNumbers,
+      oemNumbers: displayNumbers(
+        r.oemNumbers.length > 0 ? r.oemNumbers : r.gmNumbers,
+      ),
       tag: r.isOem || r.oemNumbers.length > 0 ? 'OEM' : 'AFTER',
       category: slug,
       suggestedNodeCategory: suggestedNodeFor(slug, rootSlug),

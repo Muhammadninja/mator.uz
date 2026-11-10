@@ -36,6 +36,7 @@ import {
   HAS_NO_CURATED_FITMENT,
   VEHICLE_FIT_SELECT,
   VehicleFitContext,
+  compatibilityFacetWhere,
   toVehicleFitContext,
   vehicleFitWhere,
 } from '../compatibility/vehicle-fitment';
@@ -43,6 +44,7 @@ import { BUYER_LISTED_PART } from '../buyer-visibility';
 import {
   CategoryTreeScope,
   loadCategoryTreeScope,
+  visibleCategoryWhere,
 } from '../categories/category-tree-scope';
 
 const DEFAULT_PAGE_SIZE = 20;
@@ -81,7 +83,7 @@ const SLUG_TO_MAIN_CATEGORY = new Map<string, PartMainCategory>(
  * `parent` chain: no extra round-trip, and a part (one categoryId) can only
  * match once.
  */
-function categorySubtreeWhere(
+export function categorySubtreeWhere(
   categoryId: string,
 ): Prisma.CatalogPartWhereInput {
   const beneath: Prisma.PartCategoryWhereInput[] = [];
@@ -91,6 +93,52 @@ function categorySubtreeWhere(
     descendant = { parent: { is: descendant } };
   }
   return { OR: [{ categoryId }, { category: { is: { OR: beneath } } }] };
+}
+
+/**
+ * Free text as buyers mean it: part of a title, or an article number however it was
+ * typed. The one definition the listing and POST /v1/search both use.
+ */
+export function partTextWhere(text: string): Prisma.CatalogPartWhereInput {
+  const normalized = normalizeOem(text);
+  const or: Prisma.CatalogPartWhereInput[] = [
+    { title: { contains: text, mode: 'insensitive' } },
+  ];
+  if (normalized.length > 0) {
+    or.push({ oemNumbers: { has: normalized } });
+    or.push({ gmNumbers: { has: normalized } });
+  }
+  return { OR: or };
+}
+
+/**
+ * The order of a buyer's result page, listing and POST /v1/search alike. An
+ * unrecognised sort (`relevance`, `newest`, `featured`) is newest first.
+ */
+export function partOrderBy(
+  sort?: string,
+): Prisma.CatalogPartOrderByWithRelationInput[] {
+  return [...partSortKeys(sort), { id: 'asc' }];
+}
+
+function partSortKeys(
+  sort?: string,
+): Prisma.CatalogPartOrderByWithRelationInput[] {
+  if (sort === 'price_asc') return [{ priceUzs: 'asc' }];
+  if (sort === 'price_desc') return [{ priceUzs: 'desc' }];
+  // Bestsellers first, then most-sold, then best-reviewed/rated, newest last.
+  // The composite means the sort stays sensible before is_bestseller/sales_count
+  // are populated (they fall through to the rating/review tiebreakers).
+  if (sort === 'bestseller') {
+    return [
+      { isBestseller: 'desc' },
+      { salesCount: 'desc' },
+      { reviewCount: 'desc' },
+      { ratingAvg: { sort: 'desc', nulls: 'last' } },
+      { createdAt: 'desc' },
+    ];
+  }
+  return [{ createdAt: 'desc' }];
 }
 
 /**
@@ -215,7 +263,7 @@ export class PartsService {
           max: Number(priceAgg._max.priceUzs ?? 0),
         },
         compatibility: vehicle
-          ? await this.compatibilityFacet(where, vehicle)
+          ? await this.compatibilityFacet(where, vehicle, total)
           : null,
         // Oil filter chips, present only when the result set can contain oils
         // (null otherwise) — a spare-part listing pays nothing for them.
@@ -248,6 +296,9 @@ export class PartsService {
       this.discounts.loadActiveSales(),
       loadCategoryTreeScope(this.prisma),
     ]);
+    if (tree.isHidden(part.categoryId)) {
+      throw new NotFoundException('Part not found');
+    }
     return presentPartItem(
       withTreeClassification(part, tree),
       vehicle,
@@ -266,6 +317,7 @@ export class PartsService {
       include: { compatibilities: true, fitmentBindings: CURATED_IDS_SELECT },
     });
     if (!part) throw new NotFoundException('Part not found');
+    await this.assertCategoryVisible(part.categoryId);
 
     const vehicle = await this.loadGarageVehicle(userId, vehicleId);
     const curated = curatedModelIds(part);
@@ -336,6 +388,7 @@ export class PartsService {
       where: { id: partId },
       select: {
         id: true,
+        categoryId: true,
         isUniversal: true,
         oemNumbers: true,
         compatibilities: true,
@@ -343,6 +396,7 @@ export class PartsService {
       },
     });
     if (!part) throw new NotFoundException('Part not found');
+    await this.assertCategoryVisible(part.categoryId);
 
     const vehicle = !userId
       ? null
@@ -442,6 +496,8 @@ export class PartsService {
     // (see buyer-visibility.ts). Part of the one `where` the count, the page
     // and every facet share, so it applies before skip/take.
     const and: Prisma.CatalogPartWhereInput[] = [BUYER_LISTED_PART];
+    const visible = visibleCategoryWhere(tree);
+    if (visible) and.push(visible);
 
     // Category filter — three-way, and EVERY branch filters on `category_id`.
     // The stored main_category / vehicle_category copies are never read here:
@@ -524,17 +580,7 @@ export class PartsService {
     // the `oemNumbers` / `gmNumbers` arrays with `has` (exact membership → uses
     // the GIN indexes). The `has` clauses are added only when the normalized
     // query is non-empty, so a punctuation-only `q` stays a pure title search.
-    if (q.q) {
-      const normalized = normalizeOem(q.q);
-      const or: Prisma.CatalogPartWhereInput[] = [
-        { title: { contains: q.q, mode: 'insensitive' } },
-      ];
-      if (normalized.length > 0) {
-        or.push({ oemNumbers: { has: normalized } });
-        or.push({ gmNumbers: { has: normalized } });
-      }
-      and.push({ OR: or });
-    }
+    if (q.q) and.push(partTextWhere(q.q));
 
     // Listing kind + the kind-specific attribute filters (motor oils).
     for (const cond of this.kindWhere(q)) and.push(cond);
@@ -739,27 +785,13 @@ export class PartsService {
   private buildOrderBy(
     sort?: string,
   ): Prisma.CatalogPartOrderByWithRelationInput[] {
-    return [...this.sortKeys(sort), { id: 'asc' }];
+    return partOrderBy(sort);
   }
 
-  private sortKeys(
-    sort?: string,
-  ): Prisma.CatalogPartOrderByWithRelationInput[] {
-    if (sort === 'price_asc') return [{ priceUzs: 'asc' }];
-    if (sort === 'price_desc') return [{ priceUzs: 'desc' }];
-    // Bestsellers first, then most-sold, then best-reviewed/rated, newest last.
-    // The composite means the sort stays sensible before is_bestseller/sales_count
-    // are populated (they fall through to the rating/review tiebreakers).
-    if (sort === 'bestseller') {
-      return [
-        { isBestseller: 'desc' },
-        { salesCount: 'desc' },
-        { reviewCount: 'desc' },
-        { ratingAvg: { sort: 'desc', nulls: 'last' } },
-        { createdAt: 'desc' },
-      ];
-    }
-    return [{ createdAt: 'desc' }];
+  /** Not found rather than forbidden: a hidden part is simply not in the catalog. */
+  private async assertCategoryVisible(categoryId: string): Promise<void> {
+    const tree = await loadCategoryTreeScope(this.prisma);
+    if (tree.isHidden(categoryId)) throw new NotFoundException('Part not found');
   }
 
   /**
@@ -966,27 +998,21 @@ export class PartsService {
     };
   }
 
+  /** Counted by the database, so its cost does not grow with the matching set. */
   private async compatibilityFacet(
     where: Prisma.CatalogPartWhereInput,
-    vehicle: VehicleCompatContext,
+    vehicle: VehicleFitContext,
+    total: number,
   ) {
-    const all = await this.prisma.catalogPart.findMany({
-      where,
-      select: { compatibilities: true, fitmentBindings: CURATED_IDS_SELECT },
-    });
-    let fits = 0;
-    let maybe = 0;
-    let doesNotFit = 0;
-    for (const p of all) {
-      const c = computeCompatibility(
-        p.compatibilities,
-        vehicle,
-        curatedModelIds(p),
-      );
-      if (c?.status === 'fits') fits++;
-      else if (c?.status === 'does_not_fit') doesNotFit++;
-      else maybe++;
-    }
-    return { fits, maybe, does_not_fit: doesNotFit };
+    const buckets = compatibilityFacetWhere(vehicle);
+    const [fits, doesNotFit] = await Promise.all([
+      this.prisma.catalogPart.count({ where: { AND: [where, buckets.fits] } }),
+      this.prisma.catalogPart.count({ where: { AND: [where, buckets.doesNotFit] } }),
+    ]);
+    return {
+      fits,
+      maybe: Math.max(total - fits - doesNotFit, 0),
+      does_not_fit: doesNotFit,
+    };
   }
 }

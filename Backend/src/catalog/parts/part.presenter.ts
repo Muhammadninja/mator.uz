@@ -1,3 +1,4 @@
+import { displayNumbers } from '../../common/normalize-oem.util';
 import {
   Prisma,
   CompatibilityStatus,
@@ -337,8 +338,8 @@ export function presentPartItem(
     is_universal: part.isUniversal,
     // Bestseller badge for the macro-category rollup (denormalized signal).
     is_bestseller: part.isBestseller,
-    oem_numbers: part.oemNumbers,
-    gm_numbers: part.gmNumbers,
+    oem_numbers: displayNumbers(part.oemNumbers),
+    gm_numbers: displayNumbers(part.gmNumbers),
     // 'GM' | 'OEM' | 'UNKNOWN' for a spare part — never guessed; UNKNOWN means
     // the seller left the number unlabeled and it is intentionally searchable as
     // both. NULL for a kind that has no part-number concept at all (motor oils):

@@ -14,7 +14,7 @@ import {
 } from '../compatibility/vehicle-fitment';
 import { VEHICLE_CATEGORIES } from './part-categories.catalog';
 import { buyerListed } from '../buyer-visibility';
-import { loadCategoryTreeScope } from './category-tree-scope';
+import { loadCategoryTreeScope, visibleCategoryWhere } from './category-tree-scope';
 
 /**
  * Per-category part counts summed under the key each category resolves to;
@@ -61,7 +61,10 @@ export class CategoriesService {
       this.vehicleScopeWhere(query.vehicle_id, userId),
       loadCategoryTreeScope(this.prisma),
     ]);
-    const vehicleWhere = buyerListed(scopeWhere);
+    const visible = visibleCategoryWhere(tree);
+    const vehicleWhere = buyerListed(
+      visible ? { AND: [...(scopeWhere ? [scopeWhere] : []), visible] } : scopeWhere,
+    );
 
     // Both scopes count parts per `category_id` and attribute each category to
     // its bucket / system through the live tree — the same derivation

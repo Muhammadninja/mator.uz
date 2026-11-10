@@ -147,6 +147,8 @@ export function settlementStore(seed: { payments: Row[]; orders: Row[] }) {
         ).length;
       },
     },
+    // Row locks: transactions here are already serialised, so only the call is kept.
+    $queryRaw: jest.fn(async () => []),
     $transaction: (fn: (tx: unknown) => Promise<unknown>) => {
       const run = async () => {
         const saved = {

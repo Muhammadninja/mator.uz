@@ -31,11 +31,13 @@ function makeService(opts: {
   vehicleByVin?: Record<string, unknown> | null;
 }) {
   const prisma = {
+    partCategory: { findMany: jest.fn().mockResolvedValue([]) },
     catalogPart: {
       findUnique: jest.fn().mockResolvedValue(
         opts.part
           ? {
               id: opts.part.id ?? 'part_1',
+              categoryId: 'cat',
               isUniversal: opts.part.isUniversal,
               oemNumbers: opts.part.oemNumbers ?? [],
               compatibilities: opts.part.compatibilities ?? [],

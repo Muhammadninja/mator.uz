@@ -16,6 +16,7 @@ function buildPart(over: Partial<any> = {}): any {
   return {
     id: 'part_belt',
     title: 'Timing belt',
+    gmNumbers: [],
     // The presenter reads the kind's capability table (part numbers, fitment),
     // so a row without it resolves `capabilitiesOf(undefined)` to undefined.
     // SPARE_PART is the column's schema default.
@@ -42,7 +43,7 @@ describe('Catalog/Search smoke', () => {
   beforeEach(() => (prisma = createPrismaMock()));
 
   it('search returns formatted results and facet counts', async () => {
-    const svc = new SearchService(prisma);
+    const svc = new SearchService(prisma, fakeDiscounts());
     prisma.catalogPart.count
       .mockResolvedValueOnce(2) // total
       .mockResolvedValueOnce(1) // under 200k
@@ -84,7 +85,7 @@ describe('Catalog/Search smoke', () => {
   });
 
   it('typeahead suggests the query plus matching products', async () => {
-    const svc = new SearchService(prisma);
+    const svc = new SearchService(prisma, fakeDiscounts());
     prisma.catalogPart.findMany.mockResolvedValue([{ id: 'part_belt', title: 'Timing belt' }]);
     const res = await svc.typeahead('belt');
     expect(res.suggestions[0]).toEqual({ text: 'belt', type: 'query' });

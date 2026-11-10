@@ -80,6 +80,7 @@ function build() {
     prisma as never,
     cloudinary as never,
     tokens,
+    { cancelUncollectedOffline: jest.fn() } as never,
   );
   const strategy = new JwtStrategy(fakeConfig(), prisma as never, tokens, keys);
 

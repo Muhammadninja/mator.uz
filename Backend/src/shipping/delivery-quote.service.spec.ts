@@ -9,6 +9,7 @@ import {
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { CacheService } from '../redis/cache.service';
+import { RedisUnavailableError } from '../redis/redis-backlog';
 import {
   createPrismaMock,
   fakeConfig,
@@ -98,12 +99,15 @@ describe('DeliveryQuoteService', () => {
   let routing: { name: string; routeDistanceMeters: jest.Mock };
   let service: DeliveryQuoteService;
 
+  const budget = { reserve: jest.fn(async () => ({ allowed: true })) };
+
   const build = (env: Record<string, string> = {}) =>
     new DeliveryQuoteService(
       prisma,
       new CacheService(redis),
       routing,
       fakeConfig({ DELIVERY_COVERAGE_POLYGON: TEST_DELIVERY_COVERAGE, ...env }),
+      budget as never,
     );
 
   /** Parts `part_<seller>` belonging to the storefronts of the given sellers. */
@@ -136,6 +140,88 @@ describe('DeliveryQuoteService', () => {
       },
       (err: unknown) => err,
     )) as { getResponse: () => { code: string } };
+
+  describe('protecting the routing quota (ORD-002)', () => {
+    const refused = { allowed: false, refusedBy: 'x', retryAfter: 3600 };
+    beforeEach(() => budget.reserve.mockClear());
+    afterEach(() => budget.reserve.mockResolvedValue({ allowed: true }));
+
+    it('a daily budget that is spent stops the paid call', async () => {
+      stock(seller());
+      budget.reserve.mockResolvedValue(refused);
+      await expect(
+        service.quote(USER, 'addr_1', [partLine('part_1')]),
+      ).rejects.toMatchObject({ status: 429 });
+      expect(routing.routeDistanceMeters).not.toHaveBeenCalled();
+    });
+
+    it('a budget that cannot be read stops the paid call', async () => {
+      stock(seller());
+      budget.reserve.mockRejectedValue(new RedisUnavailableError('down'));
+      await expect(
+        service.quote(USER, 'addr_1', [partLine('part_1')]),
+      ).rejects.toBeInstanceOf(RedisUnavailableError);
+      expect(routing.routeDistanceMeters).not.toHaveBeenCalled();
+    });
+
+    it('a cached route costs nothing', async () => {
+      stock(seller());
+      await service.quote(USER, 'addr_1', [partLine('part_1')]);
+      await service.quote(USER, 'addr_1', [partLine('part_1')]);
+      expect(routing.routeDistanceMeters).toHaveBeenCalledTimes(1);
+      expect(budget.reserve).toHaveBeenCalledTimes(1);
+    });
+
+    it('a point nudged by a few metres reuses the route', async () => {
+      stock(seller());
+      await service.quote(USER, 'addr_1', [partLine('part_1')]);
+      prisma.address.findUnique.mockResolvedValue({
+        ...ADDRESS,
+        lat: Number(ADDRESS.lat) + 0.00001,
+      });
+      await service.quote(USER, 'addr_1', [partLine('part_1')]);
+      expect(routing.routeDistanceMeters).toHaveBeenCalledTimes(1);
+    });
+
+    it('a point a street away is a route of its own', async () => {
+      stock(seller());
+      await service.quote(USER, 'addr_1', [partLine('part_1')]);
+      prisma.address.findUnique.mockResolvedValue({
+        ...ADDRESS,
+        lat: Number(ADDRESS.lat) + 0.001,
+      });
+      await service.quote(USER, 'addr_1', [partLine('part_1')]);
+      expect(routing.routeDistanceMeters).toHaveBeenCalledTimes(2);
+    });
+
+    it('too many sellers are refused before any routing call', async () => {
+      const limited = build({ DELIVERY_MAX_SELLERS_PER_QUOTE: '2' });
+      stock(seller({ id: 1 }), seller({ id: 2 }), seller({ id: 3 }));
+      const err = await refusal(
+        limited.quote(USER, 'addr_1', [
+          partLine('part_1'),
+          partLine('part_2'),
+          partLine('part_3'),
+        ]),
+      );
+      expect(err.getResponse().code).toBe('DELIVERY_TOO_MANY_SELLERS');
+      expect(routing.routeDistanceMeters).not.toHaveBeenCalled();
+      expect(budget.reserve).not.toHaveBeenCalled();
+    });
+
+    it('sellers within the limit each get their own route', async () => {
+      stock(
+        seller({ id: 1 }),
+        seller({ id: 2, locationLat: 41.25, locationLng: 69.2 }),
+      );
+      const quote = await service.quote(USER, 'addr_1', [
+        partLine('part_1'),
+        partLine('part_2'),
+      ]);
+      expect(routing.routeDistanceMeters).toHaveBeenCalledTimes(2);
+      expect(quote.shipments.map((s) => s.sellerId).sort()).toEqual([1, 2]);
+    });
+  });
 
   describe('a single seller', () => {
     it('prices the road distance from the seller to the saved address', async () => {
@@ -729,6 +815,7 @@ describe('DeliveryQuoteService', () => {
         new CacheService(broken as never),
         routing,
         fakeConfig({ DELIVERY_COVERAGE_POLYGON: TEST_DELIVERY_COVERAGE }),
+        budget as never,
       );
 
       await expect(quote(uncached)).resolves.toMatchObject({

@@ -5,6 +5,7 @@ import {
   Payment,
   PaymentProvider,
   PaymentStatus,
+  PaymentType,
   Prisma,
 } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -12,6 +13,7 @@ import { MarkCancelledOutcome, SettlementService } from './settlement.service';
 import { readPaymeConfig } from './payme.config';
 import { isPayableOrderStatus } from '../order-transitions';
 import { findUnavailableParts } from '../order-availability';
+import { OFFLINE_PAYMENT_TYPES } from '../offline-order.policy';
 import { parseSetFiscalData } from './payme-fiscal-receipt.util';
 import { PaymeFiscalReceiptService } from './payme-fiscal-receipt.service';
 import { findOpenPaymeInvoice } from './payme-invoice.util';
@@ -301,6 +303,7 @@ export class PaymeService {
   private async checkPerform(params: Record<string, any>) {
     const order = await this.orderFromAccount(params);
     this.assertAmount(order.totalUzs, params.amount);
+    this.assertPayableOnline(order);
     if (!isPayableOrderStatus(order.status)) {
       throw new PaymeError(-31008, 'Order is not awaiting payment');
     }
@@ -334,7 +337,7 @@ export class PaymeService {
       this.prisma,
       await this.prisma.orderItem.findMany({
         where: { orderId: order.id },
-        select: { partId: true, title: true },
+        select: { partId: true, title: true, quantity: true },
       }),
     );
     if (unavailable.length > 0) {
@@ -423,6 +426,7 @@ export class PaymeService {
 
     const order = await this.orderFromAccount(params);
     this.assertAmount(order.totalUzs, params.amount);
+    this.assertPayableOnline(order);
     if (!isPayableOrderStatus(order.status)) {
       throw new PaymeError(-31008, 'Order is not awaiting payment');
     }
@@ -794,6 +798,13 @@ export class PaymeService {
     if (!order)
       throw new PaymeError(-31050, 'Order not found', this.accountField);
     return order;
+  }
+
+  /** A cash or terminal order is settled in person; see PaymentsService. */
+  private assertPayableOnline(order: { paymentType: PaymentType | null }): void {
+    if (order.paymentType && OFFLINE_PAYMENT_TYPES.includes(order.paymentType)) {
+      throw new PaymeError(-31008, 'Order is not paid online');
+    }
   }
 
   private assertAmount(

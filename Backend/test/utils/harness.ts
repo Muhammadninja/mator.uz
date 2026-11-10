@@ -158,6 +158,14 @@ export function fakeRedis(): any {
   return {
     store,
     ttls,
+    // Budget scripts run on Redis itself; this double always admits.
+    evalScript: jest.fn(async () => [1, '', 0, 0, 0]),
+    setNxEx: jest.fn(async (key: string, ttl: number, claim: string) => {
+      if (store.has(key)) return false;
+      store.set(key, claim);
+      ttls.set(key, ttl);
+      return true;
+    }),
     get: jest.fn(async (key: string) => (store.has(key) ? store.get(key) : null)),
     set: jest.fn(async (key: string, value: unknown) => {
       store.set(key, value);
@@ -222,6 +230,10 @@ export function fakeDeliveryQuotes(): any {
 export function fakeQueue(): any {
   return {
     enqueueSms: jest.fn(async (data: unknown, opts?: unknown) => ({
+      id: (opts as any)?.jobId ?? 'sms_auto',
+      data,
+    })),
+    enqueueOtpSms: jest.fn(async (data: unknown, opts?: unknown) => ({
       id: (opts as any)?.jobId ?? 'sms_auto',
       data,
     })),

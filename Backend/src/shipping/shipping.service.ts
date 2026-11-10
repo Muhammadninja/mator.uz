@@ -1,4 +1,7 @@
-import { HttpException, Injectable } from '@nestjs/common';
+import { HttpException, HttpStatus, Inject, Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { RATE_LIMITER, type RateLimiter } from '../redis/rate-limiter.service';
+import { RedisKeys } from '../redis/redis.keys';
 import {
   COURIER_DELIVERY_UNAVAILABLE,
   DELIVERY_OUTSIDE_COVERAGE,
@@ -6,8 +9,10 @@ import {
 import {
   DELIVERY_ADDRESS_COORDINATES_MISSING,
   DELIVERY_ADDRESS_REQUIRED,
+  DELIVERY_QUOTE_LIMITED,
   DELIVERY_ROUTE_NOT_FOUND,
   DELIVERY_ROUTING_UNAVAILABLE,
+  DELIVERY_TOO_MANY_SELLERS,
   DeliveryQuoteService,
   PICKUP_LOCATION_MISSING,
 } from './delivery-quote.service';
@@ -27,7 +32,11 @@ export const COURIER_UNAVAILABLE_CODES: ReadonlySet<string> = new Set([
   PICKUP_LOCATION_MISSING,
   DELIVERY_ROUTE_NOT_FOUND,
   DELIVERY_ROUTING_UNAVAILABLE,
+  DELIVERY_TOO_MANY_SELLERS,
 ]);
+
+/** A buyer adjusting a cart re-quotes a few times a minute at most. */
+const DEFAULT_QUOTES_PER_MINUTE = 20;
 
 const PICKUP_LABEL = 'Olib ketish';
 const COURIER_LABEL = 'Kuryer';
@@ -80,7 +89,19 @@ function courierRefusal(err: unknown): UnavailableReason | null {
  */
 @Injectable()
 export class ShippingService {
-  constructor(private readonly quotes: DeliveryQuoteService) {}
+  private readonly quotesPerMinute: number;
+
+  constructor(
+    private readonly quotes: DeliveryQuoteService,
+    @Inject(RATE_LIMITER) private readonly limiter: RateLimiter,
+    config: ConfigService,
+  ) {
+    // Each courier quote may cost a paid routing call per seller, and the per-address
+    // limit does nothing against one account on many networks.
+    const value = Number(config.get<string>('DELIVERY_QUOTE_PER_MINUTE'));
+    this.quotesPerMinute =
+      Number.isInteger(value) && value > 0 ? value : DEFAULT_QUOTES_PER_MINUTE;
+  }
 
   /**
    * Whether couriers operate, and where: the very geometry enforced on saving an address and
@@ -117,6 +138,22 @@ export class ShippingService {
         ],
         currency: 'UZS',
       };
+    }
+
+    const { allowed, retryAfter } = await this.limiter.consume(
+      RedisKeys.rateDeliveryQuote(userId),
+      this.quotesPerMinute,
+      60,
+    );
+    if (!allowed) {
+      throw new HttpException(
+        {
+          code: DELIVERY_QUOTE_LIMITED,
+          message: 'Too many delivery price requests. Please try again shortly.',
+          details: { retry_after_seconds: retryAfter },
+        },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
     }
 
     const pickup: ShippingOption = {

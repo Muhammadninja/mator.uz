@@ -1,4 +1,5 @@
 import {
+  ConflictException,
   Injectable,
   NotFoundException,
   BadRequestException,
@@ -20,6 +21,7 @@ import { findOpenPaymeInvoice } from './webhooks/payme-invoice.util';
 import { isPayableOrderStatus } from './order-transitions';
 import { isClickEnabled } from './webhooks/click.config';
 import { assertAllAvailable, findUnavailableParts } from './order-availability';
+import { OFFLINE_PAYMENT_TYPES } from './offline-order.policy';
 
 @Injectable()
 export class PaymentsService {
@@ -38,7 +40,7 @@ export class PaymentsService {
         this.prisma,
         await this.prisma.orderItem.findMany({
           where: { orderId: order.id },
-          select: { partId: true, title: true },
+          select: { partId: true, title: true, quantity: true },
         }),
       ),
     );
@@ -181,6 +183,14 @@ export class PaymentsService {
       throw new NotFoundException('Order not found');
     if (!isPayableOrderStatus(order.status)) {
       throw new BadRequestException('Order is not awaiting payment');
+    }
+    // Paid in person and recorded by an operator: a second, online payment on the
+    // same order would charge the customer twice.
+    if (order.paymentType && OFFLINE_PAYMENT_TYPES.includes(order.paymentType)) {
+      throw new ConflictException({
+        code: 'OFFLINE_ORDER_NOT_PAYABLE_ONLINE',
+        message: 'This order is paid in cash or by terminal, not online.',
+      });
     }
     return order;
   }

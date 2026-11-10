@@ -362,3 +362,42 @@ describe('language', () => {
     expect(reply.reply_text).toContain('qabul qilindi');
   });
 });
+
+describe('no usage limits (SEC-009)', () => {
+  it('answers a guest without touching Redis or any counter', async () => {
+    const { service, create } = build();
+    const reply = await service.processUserMessage(message, guest);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(reply.reply_text).toEqual(expect.any(String));
+  });
+
+  it('answers a signed-in buyer the same way', async () => {
+    const { service, create } = build();
+    await service.processUserMessage(message, signedIn);
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it('replays a full 20,000-character history to the model', async () => {
+    const { service, create } = build();
+    const history = Array.from({ length: 10 }, (_, i) => ({
+      role: i % 2 ? 'assistant' : 'user',
+      content: 'x'.repeat(2000),
+    }));
+    await service.processUserMessage({ message: 'нужен радиатор', history } as never, guest);
+    const sent = (create.mock.calls[0] as any)[0].messages as { content: string }[];
+    expect(sent.reduce((n, m) => n + m.content.length, 0)).toBeGreaterThanOrEqual(20_000);
+  });
+
+  it('a provider failure is a 503', async () => {
+    const { service, create } = build();
+    create.mockRejectedValue(new Error('provider down'));
+    await expect(service.processUserMessage(message, guest)).rejects.toMatchObject({ status: 503 });
+  });
+
+  it('a lost lease is retried once, and then given up on', async () => {
+    const { service, create, requests } = build();
+    requests.commit.mockRejectedValue(new SourcingLeaseLostError());
+    await expect(service.processUserMessage(message, signedIn)).rejects.toMatchObject({ status: 503 });
+    expect(create).toHaveBeenCalledTimes(2);
+  });
+});

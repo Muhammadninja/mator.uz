@@ -40,12 +40,14 @@ function build(
     notifySessionsRevoked: jest.fn(),
   };
 
+  const orderStatus = { cancelUncollectedOffline: jest.fn(async () => true) };
   const service = new AccountDeletionService(
     prisma as never,
     cloudinary as never,
     tokens as never,
+    orderStatus as never,
   );
-  return { service, prisma, cloudinary, tokens };
+  return { service, prisma, cloudinary, tokens, orderStatus };
 }
 
 describe('AccountDeletionService', () => {
@@ -390,5 +392,37 @@ describe('AccountDeletionService — an order in progress blocks deletion', () =
     await service.deleteAccount(USER_ID);
 
     expect(steps).toEqual(['lock', 'check', 'first write']);
+  });
+
+  describe('uncollected offline orders (LOW-ORD-012)', () => {
+    it('cancels them before checking what still blocks deletion, and keeps the order', async () => {
+      const { service, prisma, orderStatus } = build();
+      const calls: string[] = [];
+      prisma.order.findMany.mockImplementation(async () => {
+        calls.push('find');
+        return [{ id: 'o1' }];
+      });
+      orderStatus.cancelUncollectedOffline.mockImplementation(async () => {
+        calls.push('cancel');
+        return true;
+      });
+      prisma.order.count.mockImplementation(async () => {
+        calls.push('check');
+        return 0;
+      });
+
+      await service.deleteAccount(USER_ID);
+
+      expect(calls.slice(0, 3)).toEqual(['find', 'cancel', 'check']);
+      expect(prisma.order.deleteMany ?? jest.fn()).not.toHaveBeenCalled();
+    });
+
+    it('an order that could not be cancelled still blocks deletion', async () => {
+      const { service, prisma, orderStatus } = build();
+      prisma.order.findMany.mockResolvedValue([{ id: 'o1' }]);
+      orderStatus.cancelUncollectedOffline.mockResolvedValue(false);
+      prisma.order.count.mockResolvedValue(1);
+      await expect(service.deleteAccount(USER_ID)).rejects.toMatchObject({ status: 409 });
+    });
   });
 });

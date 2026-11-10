@@ -304,8 +304,8 @@ export class ImageProcessingProcessor extends WorkerHost {
         // The failed run never got an ownership token — its read or its pickup
         // failed, or BullMQ failed the job itself (a job stalled past the
         // limit). It has no right to the row: nothing is written, nothing is
-        // settled, and the row stays as it is for recovery (a re-enqueue —
-        // /start — gives it a new run).
+        // settled, and the row stays as it is for recovery: a re-enqueue (/start)
+        // gives it a new run, and DraftCleanupProcessor fails it if its job is dead.
         this.logger.warn(
           `Image ${imageId} not marked FAILED: the failed run holds no ownership token (${err.message})`,
         );

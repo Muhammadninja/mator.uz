@@ -18,7 +18,14 @@ import {
 import { priceCartLines, refreshCartLinePrices } from './cart-pricing.util';
 import { DiscountService } from '../sales/discount.service';
 import { BUYER_VISIBLE_PART } from '../catalog/buyer-visibility';
-import { PART_UNAVAILABLE } from '../orders/order-availability';
+import { loadCategoryTreeScope } from '../catalog/categories/category-tree-scope';
+import {
+  PART_UNAVAILABLE,
+  assertAllAvailable,
+  exceedsCountedStock,
+  findUnavailableParts,
+  insufficientStockError,
+} from '../orders/order-availability';
 
 @Injectable()
 export class CartService {
@@ -94,10 +101,22 @@ export class CartService {
         where: { id: partId, ...BUYER_VISIBLE_PART },
       });
       if (!part) throw new NotFoundException('Part not found');
+      if ((await loadCategoryTreeScope(this.prisma)).isHidden(part.categoryId)) {
+        throw new NotFoundException('Part not found');
+      }
       if (!part.inStock) {
         throw new ConflictException({
           code: PART_UNAVAILABLE,
           message: 'Part is out of stock',
+          details: {
+            lines: [
+              {
+                part_id: partId,
+                available_quantity: 0,
+                requested_quantity: dto.quantity ?? 1,
+              },
+            ],
+          },
         });
       }
       const qty = dto.quantity ?? 1;
@@ -106,6 +125,13 @@ export class CartService {
       // capped server-side — DTO @Max(999) bounds a single request, but repeated
       // adds could otherwise stack past the ceiling.
       const existing = cart.items.find((i) => i.partId === partId && !i.serviceId);
+      const requested = Math.min(
+        (existing?.quantity ?? 0) + qty,
+        MAX_CART_ITEM_QUANTITY,
+      );
+      if (exceedsCountedStock(part.stockQty, requested)) {
+        throw insufficientStockError(partId, part.title, part.stockQty, requested);
+      }
       if (existing) {
         await this.prisma.cartItem.update({
           where: { id: existing.id },
@@ -163,10 +189,18 @@ export class CartService {
   }
 
   async updateItem(userId: string, itemId: string, quantity: number) {
-    await this.assertItemOwned(userId, itemId);
+    const item = await this.assertItemOwned(userId, itemId);
     if (quantity <= 0) {
       await this.prisma.cartItem.delete({ where: { id: itemId } });
     } else {
+      if (item.partId) {
+        // The gate order creation uses, so a saved line cannot be raised past it.
+        assertAllAvailable(
+          await findUnavailableParts(this.prisma, [
+            { partId: item.partId, title: item.title, quantity },
+          ]),
+        );
+      }
       await this.prisma.cartItem.update({ where: { id: itemId }, data: { quantity } });
     }
     return this.snapshot(userId);

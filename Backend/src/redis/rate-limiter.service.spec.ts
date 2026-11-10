@@ -83,7 +83,7 @@ describe('FixedWindowRateLimiter', () => {
 
     it('allows exactly up to the limit, then blocks the next hit', async () => {
       const { limiter } = build();
-      const key = RedisKeys.rateOtpRequest('+998901112233');
+      const key = RedisKeys.rateOtpVerify('+998901112233');
 
       for (let i = 1; i <= LIMIT; i++) {
         const res = await limiter.consume(key, LIMIT, WINDOW);

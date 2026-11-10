@@ -12,6 +12,10 @@ import {
 import { ActiveSale, DiscountService } from '../sales/discount.service';
 import { expandToken } from './part-synonyms.util';
 import { BUYER_LISTED_PART } from '../catalog/buyer-visibility';
+import {
+  loadCategoryTreeScope,
+  visibleCategoryWhere,
+} from '../catalog/categories/category-tree-scope';
 
 /** A matched in-stock part returned to the chat client. */
 export interface StockItem {
@@ -109,10 +113,11 @@ export class RagSearchService {
       { brand: { is: { name: { contains: f, mode: 'insensitive' } } } },
     ]);
 
+    const visible = visibleCategoryWhere(await loadCategoryTreeScope(this.prisma));
     const candidates = await this.prisma.catalogPart.findMany({
       // Never quote a part the catalog does not list: a suspended dealer's, or
       // one without a ready photo (catalog/buyer-visibility.ts).
-      where: { inStock: true, OR: or, ...BUYER_LISTED_PART },
+      where: { inStock: true, OR: or, ...BUYER_LISTED_PART, ...visible },
       include: {
         category: true,
         brand: true,

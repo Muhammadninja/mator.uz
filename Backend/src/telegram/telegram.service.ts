@@ -3484,6 +3484,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         DraftStatus.READY_FOR_PREVIEW,
         DraftStatus.COMMITTING,
         draft.version,
+        { notExpiredAt: new Date() },
       ));
     if (!claimed) {
       await ctx.reply(t(lang, 'confirm.alreadyProcessed'));
@@ -3965,6 +3966,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       DraftStatus.READY_FOR_PREVIEW,
       DraftStatus.COMMITTING,
       session.draftVersion,
+      { notExpiredAt: new Date() },
     );
     if (!claimed) {
       await ctx.reply(t(lang, 'confirm.alreadyProcessed'));

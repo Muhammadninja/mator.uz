@@ -7,6 +7,7 @@ import {
 import {
   MyIdStatus,
   OrderActorType,
+  OrderStatus,
   PaymentProvider,
   Prisma,
 } from '@prisma/client';
@@ -14,6 +15,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CloudinaryService } from '../cloudinary/cloudinary.service';
 import { TokenService } from '../auth/tokens/token.service';
 import { ACTIVE_ORDER_STATUSES } from '../orders/order-transitions';
+import { OFFLINE_PAYMENT_TYPES } from '../orders/offline-order.policy';
+import { OrderStatusService } from '../orders/order-status.service';
 import {
   isPaymeTransactionExpired,
   PaymeState,
@@ -115,6 +118,7 @@ export class AccountDeletionService {
     private readonly prisma: PrismaService,
     private readonly cloudinary: CloudinaryService,
     private readonly tokens: TokenService,
+    private readonly orderStatus: OrderStatusService,
   ) {}
 
   /**
@@ -140,6 +144,7 @@ export class AccountDeletionService {
       // either committed before this lock (and the check below sees it) or
       // waits for this transaction to finish.
       await tx.$queryRaw`SELECT id FROM app_users WHERE id = ${userId}::uuid FOR UPDATE`;
+      await this.cancelUncollectedOfflineOrders(tx, userId);
       await this.assertNoActiveOrders(tx, userId);
 
       // ── 1. Detach buyer PII from the RETAINED orders ──────────────────────
@@ -265,6 +270,31 @@ export class AccountDeletionService {
     this.logger.log(
       `Account ${userId} deleted (orders retained, PII anonymized)`,
     );
+  }
+
+  /**
+   * A cash or terminal order nobody has taken up, with no money collected, does not
+   * outlive the buyer's decision to leave. Anything further along still blocks below.
+   * The order and its history are kept, like every retained order.
+   */
+  private async cancelUncollectedOfflineOrders(
+    tx: Prisma.TransactionClient,
+    userId: string,
+  ): Promise<void> {
+    const waiting = await tx.order.findMany({
+      where: {
+        userId,
+        status: OrderStatus.PENDING_PAYMENT,
+        paymentType: { in: OFFLINE_PAYMENT_TYPES },
+      },
+      select: { id: true },
+    });
+    for (const { id } of waiting) {
+      await this.orderStatus.cancelUncollectedOffline(tx, id, {
+        customerId: userId,
+        note: 'Cancelled: the customer deleted their account',
+      });
+    }
   }
 
   /**

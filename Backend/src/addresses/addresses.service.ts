@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
   UnprocessableEntityException,
@@ -19,6 +20,9 @@ import { GeoPoint, toGeoPoint } from '../shipping/routing/routing-provider';
 import { CreateAddressDto } from './dto/create-address.dto';
 import { UpdateAddressDto } from './dto/update-address.dto';
 import { presentAddress } from './address.presenter';
+
+/** More than any buyer delivers to; the limit is on points to price routes from. */
+const MAX_ADDRESSES_PER_USER = 20;
 
 /**
  * Structural shape accepted by {@link AddressesService.upsertDefault}. Matches
@@ -225,6 +229,12 @@ export class AddressesService {
       this.statedPoint(dto.lat, dto.lng),
     );
     const existingCount = await this.prisma.address.count({ where: { userId } });
+    if (existingCount >= MAX_ADDRESSES_PER_USER) {
+      throw new ConflictException({
+        code: 'ADDRESS_LIMIT_REACHED',
+        message: 'You have saved the maximum number of addresses. Remove one to add another.',
+      });
+    }
     const makeDefault = dto.is_default === true || existingCount === 0;
 
     const created = await this.prisma.$transaction(async (tx) => {

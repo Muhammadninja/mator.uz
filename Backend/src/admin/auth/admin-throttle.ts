@@ -2,6 +2,7 @@ import { ExecutionContext } from '@nestjs/common';
 import { createHmac, timingSafeEqual } from 'crypto';
 import type { Request } from 'express';
 import { ADMIN_JWT_AUDIENCE, ADMIN_JWT_ISSUER } from './admin-auth.config';
+import { verifiedPanelClientIp } from './admin-client-ip';
 
 /**
  * Who a request's rate limit belongs to, for the global throttler.
@@ -88,8 +89,12 @@ export const THROTTLERS = [
     ttl: 60 * 1000,
     limit: 100,
     getTracker: (req: Record<string, unknown>) => {
-      const admin = adminOf(req as unknown as Request);
-      return admin ? `admin:${admin}` : ((req.ip as string) ?? 'unknown');
+      const request = req as unknown as Request;
+      const admin = adminOf(request);
+      if (admin) return `admin:${admin}`;
+      // The panel signs in on its operators' behalf from one address; a request it
+      // signed counts against the operator's own address instead.
+      return verifiedPanelClientIp(request) ?? request.ip ?? 'unknown';
     },
   },
   {

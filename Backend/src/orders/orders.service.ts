@@ -148,7 +148,7 @@ export class OrdersService {
     assertAllAvailable(
       await findUnavailableParts(
         this.prisma,
-        cart.items.map((i) => ({ partId: i.partId, title: i.title })),
+        cart.items.map((i) => ({ partId: i.partId, title: i.title, quantity: i.quantity })),
       ),
     );
 
@@ -328,7 +328,7 @@ export class OrdersService {
       assertAllAvailable(
         await findUnavailableParts(
           tx,
-          lines.map((i) => ({ partId: i.partId, title: i.title })),
+          lines.map((i) => ({ partId: i.partId, title: i.title, quantity: i.quantity })),
         ),
       );
 
@@ -693,6 +693,41 @@ export class OrdersService {
     this.logger.log(`Order ${order.id} status ${from.toLowerCase()} → ${to.toLowerCase()} (operator)`);
 
     return presentOrder(updated);
+  }
+
+  /**
+   * The buyer backs out of a cash or terminal order nobody has taken up or collected
+   * money for. Repeating it answers with the cancelled order.
+   */
+  async cancelOwnOfflineOrder(userId: string, orderId: string) {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      select: { userId: true, status: true },
+    });
+    if (!order || order.userId !== userId) {
+      throw new NotFoundException('Order not found');
+    }
+    if (order.status !== OrderStatus.CANCELLED) {
+      const cancelled = await this.prisma.$transaction((tx) =>
+        this.orderStatus.cancelUncollectedOffline(tx, orderId, {
+          customerId: userId,
+          note: 'Cancelled by the customer',
+        }),
+      );
+      if (!cancelled) {
+        throw new ConflictException({
+          code: 'ORDER_NOT_CANCELLABLE',
+          message: 'This order can no longer be cancelled from the app.',
+        });
+      }
+      this.logger.log(`Order ${orderId} cancelled by its customer`);
+    }
+    return presentOrder(
+      await this.prisma.order.findUniqueOrThrow({
+        where: { id: orderId },
+        include: ORDER_INCLUDE,
+      }),
+    );
   }
 
   /**

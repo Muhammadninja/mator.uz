@@ -56,8 +56,28 @@ export const RedisKeys = {
   // hit. Keep the `rate:<action>:<subject>` shape so keyspaces never collide
   // and every limiter is greppable. Add a new builder here per action rather
   // than formatting keys at the call site.
-  rateOtpRequest: (phone: string): string => `rate:otp:request:${phone}`,
+  // One OTP SMS per phone per minute; holds the claim of the request that sent it.
+  otpSendCooldown: (phone: string): string => `otp:cooldown:${phone}`,
   rateOtpVerify: (phone: string): string => `rate:otp:verify:${phone}`,
+  // Delivery quotes and paid routing calls, per buyer (see RoutingBudgetService).
+  rateDeliveryQuote: (userId: string): string => `rate:delivery:quote:${userId}`,
+  budgetRoutingDay: (userId: string): string => `budget:routing:day:${userId}`,
+  // Admin sign-in failures (see AdminLoginProtection). Hashed, so no email or
+  // address sits in the keyspace.
+  adminLoginAccountFails: (account: string): string =>
+    `rate:admin:login:acct:${account}`,
+  adminLoginAccountLock: (account: string): string =>
+    `lock:admin:login:acct:${account}`,
+  adminLoginPairFails: (pair: string): string =>
+    `rate:admin:login:pair:${pair}`,
+  adminLoginPairLock: (pair: string): string =>
+    `lock:admin:login:pair:${pair}`,
+  adminLoginIpFails: (ip: string): string => `rate:admin:login:ip:${ip}`,
+  adminLoginIpLock: (ip: string): string => `lock:admin:login:ip:${ip}`,
+  adminLoginTrusted: (pair: string): string =>
+    `admin:login:trusted:${pair}`,
+  // A panel signature already used; each one is good for a single request.
+  adminPanelProof: (proof: string): string => `admin:panel:proof:${proof}`,
   // Wrong passwords on a Basic Auth page, per client; see BasicAuthThrottle.
   rateBasicAuth: (scope: string, client: string): string =>
     `rate:basic-auth:${scope}:${client}`,

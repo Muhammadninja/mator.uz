@@ -14,6 +14,7 @@ import {
 } from './common/swagger-auth.middleware';
 import { BasicAuthThrottle } from './common/basic-auth-throttle';
 import { RATE_LIMITER, type RateLimiter } from './redis/rate-limiter.service';
+import { resolveTrustProxy } from './common/trust-proxy.util';
 import {
   SYNC_INVENTORY_PATH,
   syncInventoryBodyMiddleware,
@@ -84,10 +85,13 @@ async function bootstrap() {
   // stopping the long-polling bot cleanly instead of leaving it dangling.
   app.enableShutdownHooks();
 
-  // Trust the first hop (Nginx) so req.ip reflects the real client IP instead
-  // of the proxy's — required for per-IP throttling (@nestjs/throttler) to key
-  // on individual clients rather than bucketing everyone behind Nginx together.
-  app.getHttpAdapter().getInstance().set('trust proxy', 1);
+  // Trust only a proxy on this machine (Nginx, see docs/DEPLOYMENT.md) so req.ip
+  // is the real client's address. Unlike a hop count, a client that reaches the
+  // app port directly cannot pick its own address with X-Forwarded-For.
+  app
+    .getHttpAdapter()
+    .getInstance()
+    .set('trust proxy', resolveTrustProxy(process.env.TRUST_PROXY));
 
   // Correlation id, FIRST in the chain so every subsequent log line — including
   // ones emitted by rejected requests — can carry it. Echoed back as
@@ -204,7 +208,10 @@ async function bootstrap() {
   // Fire OnModuleDestroy on SIGTERM/SIGINT so the Telegram bot stops its long
   // poll cleanly on restart (otherwise the next instance gets a 409 Conflict).
   app.enableShutdownHooks();
-  await app.listen(process.env.PORT ?? 3000);
+  // BIND_HOST=127.0.0.1 keeps the app port off the network; see docs/DEPLOYMENT.md.
+  const bindHost = process.env.BIND_HOST?.trim();
+  if (bindHost) await app.listen(process.env.PORT ?? 3000, bindHost);
+  else await app.listen(process.env.PORT ?? 3000);
   logger.log(`Mator backend listening on port ${process.env.PORT ?? 3000}`);
 }
 bootstrap();
