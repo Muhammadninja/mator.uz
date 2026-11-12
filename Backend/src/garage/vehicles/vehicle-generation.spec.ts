@@ -4,6 +4,7 @@ import {
   resolveGeneration,
   type VariantRow,
 } from './vehicle-generation';
+import { planVehicleIdentity } from '../vehicle-images/vehicle-image.identity';
 
 // The Chevrolet Nexia rows exactly as migration 20261115000000 sets them.
 const N100: VariantRow = {
@@ -182,6 +183,96 @@ describe('imageSubject', () => {
     });
     expect(imageSubject(generic, resolve(2023))).toEqual({
       review: 'generation_unresolved',
+    });
+  });
+});
+
+describe('image identity per generation (generationId stays null)', () => {
+  const make = { id: 'chevrolet', name: 'Chevrolet' };
+  const generic: VariantRow = {
+    ...N100,
+    id: 'nexia',
+    name: 'Nexia',
+    yearFrom: null,
+    yearTo: null,
+  };
+  const siblings = ['Cobalt', 'Nexia', 'Nexia 1', 'Nexia 2', 'Nexia 3'];
+  const plan = (
+    model: VariantRow,
+    year: number,
+    trim: { id: string; modelId: string; name: string } | null = null,
+  ) =>
+    planVehicleIdentity({
+      year,
+      make,
+      model,
+      trim,
+      siblingModelNames: siblings.filter((n) => n !== model.name),
+    });
+  const subjectPlan = (year: number) => {
+    const s = imageSubject(generic, resolve(year));
+    return 'model' in s ? plan(s.model, year) : s;
+  };
+
+  it('Nexia 2 and Nexia 3 of the same year are different identities, keyed by their catalog rows', () => {
+    const n150 = plan(N150, 2016);
+    const r3 = plan(R3, 2016);
+    if (n150.kind !== 'request' || r3.kind !== 'request')
+      throw new Error('expected requests');
+    expect(n150.identity).toMatchObject({
+      modelId: 'nexia-2',
+      generationId: null,
+      faceliftId: null,
+    });
+    expect(r3.identity).toMatchObject({
+      modelId: 'nexia-3',
+      generationId: null,
+      faceliftId: null,
+    });
+    expect(n150.identityKey).not.toBe(r3.identityKey);
+    expect(n150.display).toEqual({
+      manufacturer: 'Chevrolet',
+      model: 'Nexia 2',
+    });
+    expect(r3.display).toEqual({ manufacturer: 'Chevrolet', model: 'Nexia 3' });
+  });
+
+  it('a year-resolved generic Nexia shares the identity of the same car saved as its generation row', () => {
+    const viaGeneric = subjectPlan(2018);
+    const direct = plan(R3, 2018);
+    if (viaGeneric.kind !== 'request' || direct.kind !== 'request')
+      throw new Error('expected requests');
+    expect(viaGeneric.identityKey).toBe(direct.identityKey);
+    expect(subjectPlan(2012)).toMatchObject({
+      identity: { modelId: 'nexia-2' },
+    });
+  });
+
+  it('a trim keeps the generic model + trim identity, distinct from the generation rows', () => {
+    const trimmed = plan(generic, 2016, {
+      id: 'nexia-3-ls',
+      modelId: 'nexia',
+      name: 'LS',
+    });
+    const r3 = plan(R3, 2016);
+    if (trimmed.kind !== 'request' || r3.kind !== 'request')
+      throw new Error('expected requests');
+    expect(trimmed.identity).toMatchObject({
+      modelId: 'nexia',
+      trimId: 'nexia-3-ls',
+      generationId: null,
+    });
+    expect(trimmed.identityKey).not.toBe(r3.identityKey);
+  });
+
+  it('a generation row outside its sourced years is held for review, never requested', () => {
+    expect(plan(R3, 2023)).toEqual({
+      kind: 'review',
+      reason: 'year_outside_model_range',
+    });
+    expect(plan(N150, 2017)).toEqual({
+      kind: 'review',
+      reason: 'year_outside_model_range',
     });
   });
 });
