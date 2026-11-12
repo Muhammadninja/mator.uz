@@ -1,7 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
-import { BookingStatus } from '@prisma/client';
+import { BookingStatus, NotificationType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { OrderStatusService } from '../orders/order-status.service';
 
 /**
@@ -17,6 +18,7 @@ export class BookingHoldSweeper {
   constructor(
     private readonly prisma: PrismaService,
     private readonly orderStatus: OrderStatusService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   @Cron(CronExpression.EVERY_MINUTE, { name: 'booking-hold-sweep', timeZone: 'UTC' })
@@ -30,8 +32,31 @@ export class BookingHoldSweeper {
       this.orderStatus.expireOverdue(now),
     ]);
 
-    if (bookings.count || expiredOrders) {
-      this.logger.log(`Swept ${bookings.count} expired holds, ${expiredOrders} unpaid orders`);
+    for (const order of expiredOrders) {
+      await this.notifyExpired(order);
+    }
+
+    if (bookings.count || expiredOrders.length) {
+      this.logger.log(
+        `Swept ${bookings.count} expired holds, ${expiredOrders.length} unpaid orders`,
+      );
+    }
+  }
+
+  /** Best effort: the order has already moved, and the next sweep must still run. */
+  private async notifyExpired(order: { id: string; userId: string }): Promise<void> {
+    try {
+      await this.notifications.emit(order.userId, {
+        type: NotificationType.ORDER_STATUS_CHANGED,
+        title: 'Buyurtma muddati tugadi',
+        body: "Buyurtmangiz belgilangan muddatda to'lanmadi va yopildi. Kerak boʻlsa, yangi buyurtma bering.",
+        data: { order_id: order.id, status: 'expired' },
+        deeplinkPath: '/(tabs)/(cart)/order-confirmation',
+      });
+    } catch (err) {
+      this.logger.error(
+        `Could not notify about expired order ${order.id}: ${(err as Error).message}`,
+      );
     }
   }
 }

@@ -94,12 +94,16 @@ export class OrdersController {
   // the caller carries an admin token (HS256), never a mobile app-user one; this
   // route therefore carries no JwtAuthGuard at all (see the class-level note).
   // Every admin role is an operator here; AdminRoleGuard 403s anything else.
-  /** The buyer's own cash or terminal order, while no money has been collected. */
+  /**
+   * The buyer's own unpaid order: cash or terminal while no money has been
+   * collected, or online while it waits for payment. 409 ORDER_NOT_CANCELLABLE
+   * once paid or taken up; idempotent once cancelled or expired.
+   */
   @Post(':id/cancel')
   @UseGuards(JwtAuthGuard)
   @HttpCode(HttpStatus.OK)
   cancel(@Request() req: { user: { id: string } }, @Param('id') id: string) {
-    return this.orders.cancelOwnOfflineOrder(req.user.id, id);
+    return this.orders.cancelOwnOrder(req.user.id, id);
   }
 
   @Patch(':id/status')

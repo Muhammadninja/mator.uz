@@ -94,6 +94,12 @@ import {
 
 const DEFAULT_ORDER_LIMIT = 20;
 
+/** Where a buyer's cancel of an unpaid order ends up; a repeat answers with the order. */
+const CLOSED_UNPAID_STATUSES: OrderStatus[] = [
+  OrderStatus.CANCELLED,
+  OrderStatus.EXPIRED,
+];
+
 /**
  * What an order placed now would charge, as a 409 states it beside its code: the same figures,
  * named as the order and the cart name them. `delivery_quote_id` is the quote those figures
@@ -796,11 +802,24 @@ export class OrdersService {
       include: ORDER_INCLUDE,
     });
 
-    // Notify the owning customer the same way the payment webhook does:
-    // live socket event + persisted inbox row / push (gated by prefs). Best
-    // effort, for the webhook's reason: the transition is committed, so a failing
-    // socket or inbox write must not tell the operator it did not happen, which
-    // is what would make them retry into a 409.
+    await this.notifyStatusChanged(order, to, from);
+    this.logger.log(`Order ${order.id} status ${from.toLowerCase()} → ${to.toLowerCase()} (operator)`);
+
+    return presentOrder(updated);
+  }
+
+  /**
+   * Tell the owning customer the same way the payment webhook does: live socket
+   * event + persisted inbox row / push (gated by prefs). Best effort, for the
+   * webhook's reason: the transition is committed, so a failing socket or inbox
+   * write must not tell the caller it did not happen, which is what would make
+   * them retry into a 409.
+   */
+  private async notifyStatusChanged(
+    order: { id: string; userId: string },
+    to: OrderStatus,
+    from: OrderStatus,
+  ): Promise<void> {
     try {
       this.realtime.emit(order.userId, {
         type: 'order_status_changed',
@@ -822,37 +841,65 @@ export class OrdersService {
         `Status notification failed for order ${order.id}: ${(err as Error).message}`,
       );
     }
-    this.logger.log(`Order ${order.id} status ${from.toLowerCase()} → ${to.toLowerCase()} (operator)`);
-
-    return presentOrder(updated);
   }
 
   /**
-   * The buyer backs out of a cash or terminal order nobody has taken up or collected
-   * money for. Repeating it answers with the cancelled order.
+   * The buyer backs out of an order nothing has been paid for:
+   *   • cash or terminal, while nobody has taken it up or collected money;
+   *   • online (Payme), while it waits for payment, even with a Payme transaction
+   *     open. Past `expires_at` with no open transaction it is EXPIRED instead,
+   *     which is what the sweep would have made it.
+   * An order already CANCELLED or EXPIRED answers with itself, so a repeat (or two
+   * screens sending it at once) is harmless. Anything else is 409.
    */
-  async cancelOwnOfflineOrder(userId: string, orderId: string) {
+  async cancelOwnOrder(userId: string, orderId: string) {
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
-      select: { userId: true, status: true },
+      select: { userId: true, status: true, paymentType: true },
     });
     if (!order || order.userId !== userId) {
       throw new NotFoundException('Order not found');
     }
-    if (order.status !== OrderStatus.CANCELLED) {
-      const cancelled = await this.prisma.$transaction((tx) =>
-        this.orderStatus.cancelUncollectedOffline(tx, orderId, {
-          customerId: userId,
-          note: 'Cancelled by the customer',
-        }),
-      );
-      if (!cancelled) {
-        throw new ConflictException({
-          code: 'ORDER_NOT_CANCELLABLE',
-          message: 'This order can no longer be cancelled from the app.',
+    if (!CLOSED_UNPAID_STATUSES.includes(order.status)) {
+      const offline =
+        !!order.paymentType && OFFLINE_PAYMENT_TYPES.includes(order.paymentType);
+      const moved = await this.prisma.$transaction(async (tx) => {
+        if (!offline) {
+          return this.orderStatus.cancelUnpaidOnline(tx, orderId, {
+            customerId: userId,
+            now: new Date(),
+          });
+        }
+        const cancelled = await this.orderStatus.cancelUncollectedOffline(
+          tx,
+          orderId,
+          { customerId: userId, note: 'Cancelled by the customer' },
+        );
+        return cancelled ? OrderStatus.CANCELLED : null;
+      });
+      if (moved) {
+        await this.notifyStatusChanged(
+          { id: orderId, userId },
+          moved,
+          order.status,
+        );
+        this.logger.log(
+          `Order ${orderId} ${moved.toLowerCase()} on its customer's cancel`,
+        );
+      } else {
+        // Lost a race to a concurrent cancel or the expiry sweep: same answer
+        // as a repeat. Lost it to a payment, or never cancellable: refused.
+        const now = await this.prisma.order.findUnique({
+          where: { id: orderId },
+          select: { status: true },
         });
+        if (!now || !CLOSED_UNPAID_STATUSES.includes(now.status)) {
+          throw new ConflictException({
+            code: 'ORDER_NOT_CANCELLABLE',
+            message: 'This order can no longer be cancelled from the app.',
+          });
+        }
       }
-      this.logger.log(`Order ${orderId} cancelled by its customer`);
     }
     return presentOrder(
       await this.prisma.order.findUniqueOrThrow({

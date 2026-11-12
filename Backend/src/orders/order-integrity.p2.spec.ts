@@ -377,53 +377,208 @@ describe('cancelling an uncollected offline order (LOW-ORD-012)', () => {
   });
 
   describe('the buyer endpoint', () => {
-    function build(status: OrderStatus, cancelled: boolean, userId = 'u1') {
+    function build(
+      status: OrderStatus,
+      moved: boolean | OrderStatus | null,
+      {
+        userId = 'u1',
+        paymentType = PaymentType.CASH as PaymentType | null,
+        after = status,
+      }: { userId?: string; paymentType?: PaymentType | null; after?: OrderStatus } = {},
+    ) {
+      const findUnique = jest
+        .fn()
+        .mockResolvedValueOnce({ userId, status, paymentType })
+        .mockResolvedValue({ status: after });
       const prisma = {
         order: {
-          findUnique: jest.fn(async () => ({ userId, status })),
+          findUnique,
           findUniqueOrThrow: jest.fn(async () => buildOrder({ id: 'o1', status: OrderStatus.CANCELLED, items: [] })),
         },
         $transaction: jest.fn(async (fn: any) => fn({})),
       };
-      const orderStatus = { cancelUncollectedOffline: jest.fn(async () => cancelled) };
+      const orderStatus = {
+        cancelUncollectedOffline: jest.fn(async () => moved === true),
+        cancelUnpaidOnline: jest.fn(async () => (typeof moved === 'string' ? moved : null)),
+      };
+      const realtime = { emit: jest.fn() };
+      const notifications = { emit: jest.fn(async () => ({})) };
       const service = Object.create(OrdersService.prototype);
-      Object.assign(service, { prisma, orderStatus, logger: { log: jest.fn() } });
-      return { service, orderStatus };
+      Object.assign(service, {
+        prisma,
+        orderStatus,
+        realtime,
+        notifications,
+        logger: { log: jest.fn(), error: jest.fn() },
+      });
+      return { service, orderStatus, realtime, notifications };
     }
 
-    it('cancels an eligible order', async () => {
-      const { service, orderStatus } = build(OrderStatus.PENDING_PAYMENT, true);
-      await service.cancelOwnOfflineOrder('u1', 'o1');
+    it('cancels an eligible cash order and tells the buyer', async () => {
+      const { service, orderStatus, notifications } = build(OrderStatus.PENDING_PAYMENT, true);
+      await service.cancelOwnOrder('u1', 'o1');
       expect(orderStatus.cancelUncollectedOffline).toHaveBeenCalledTimes(1);
+      expect(orderStatus.cancelUnpaidOnline).not.toHaveBeenCalled();
+      expect(notifications.emit).toHaveBeenCalledWith(
+        'u1',
+        expect.objectContaining({ data: { order_id: 'o1', status: 'cancelled' } }),
+      );
     });
 
-    it('repeating it is harmless', async () => {
-      const { service, orderStatus } = build(OrderStatus.CANCELLED, false);
-      await expect(service.cancelOwnOfflineOrder('u1', 'o1')).resolves.toBeDefined();
+    it.each([PaymentType.PAYME, null])('cancels an unpaid %s order through the online path', async (paymentType) => {
+      const { service, orderStatus, realtime } = build(OrderStatus.PENDING_PAYMENT, OrderStatus.CANCELLED, {
+        paymentType,
+      });
+      await service.cancelOwnOrder('u1', 'o1');
+      expect(orderStatus.cancelUnpaidOnline).toHaveBeenCalledWith({}, 'o1', {
+        customerId: 'u1',
+        now: expect.any(Date),
+      });
       expect(orderStatus.cancelUncollectedOffline).not.toHaveBeenCalled();
+      expect(realtime.emit).toHaveBeenCalledWith(
+        'u1',
+        expect.objectContaining({ data: expect.objectContaining({ status: 'cancelled' }) }),
+      );
     });
 
-    it.each([OrderStatus.PROCESSING, OrderStatus.SHIPPED, OrderStatus.DELIVERED])(
-      'a %s order is refused',
-      async (status) => {
-        const { service } = build(status, false);
-        await expect(service.cancelOwnOfflineOrder('u1', 'o1')).rejects.toMatchObject({
+    it('an online order past its window is answered as expired', async () => {
+      const { service, notifications } = build(OrderStatus.PENDING_PAYMENT, OrderStatus.EXPIRED, {
+        paymentType: PaymentType.PAYME,
+      });
+      await service.cancelOwnOrder('u1', 'o1');
+      expect(notifications.emit).toHaveBeenCalledWith(
+        'u1',
+        expect.objectContaining({ data: { order_id: 'o1', status: 'expired' } }),
+      );
+    });
+
+    it.each([OrderStatus.CANCELLED, OrderStatus.EXPIRED])('repeating it on a %s order is harmless', async (status) => {
+      const { service, orderStatus, notifications } = build(status, false, { paymentType: PaymentType.PAYME });
+      await expect(service.cancelOwnOrder('u1', 'o1')).resolves.toBeDefined();
+      expect(orderStatus.cancelUncollectedOffline).not.toHaveBeenCalled();
+      expect(orderStatus.cancelUnpaidOnline).not.toHaveBeenCalled();
+      expect(notifications.emit).not.toHaveBeenCalled();
+    });
+
+    it('losing the race to the sweep or a second cancel still answers 200', async () => {
+      const { service, notifications } = build(OrderStatus.PENDING_PAYMENT, null, {
+        paymentType: PaymentType.PAYME,
+        after: OrderStatus.EXPIRED,
+      });
+      await expect(service.cancelOwnOrder('u1', 'o1')).resolves.toBeDefined();
+      expect(notifications.emit).not.toHaveBeenCalled();
+    });
+
+    it('losing the race to a payment is refused', async () => {
+      const { service } = build(OrderStatus.PENDING_PAYMENT, null, {
+        paymentType: PaymentType.PAYME,
+        after: OrderStatus.PAID,
+      });
+      await expect(service.cancelOwnOrder('u1', 'o1')).rejects.toMatchObject({
+        response: { code: 'ORDER_NOT_CANCELLABLE' },
+      });
+    });
+
+    it.each([
+      OrderStatus.PAID,
+      OrderStatus.PROCESSING,
+      OrderStatus.SHIPPED,
+      OrderStatus.DELIVERED,
+      OrderStatus.REFUNDED,
+    ])('a %s order is refused', async (status) => {
+      for (const paymentType of [PaymentType.CASH, PaymentType.PAYME]) {
+        const { service } = build(status, false, { paymentType });
+        await expect(service.cancelOwnOrder('u1', 'o1')).rejects.toMatchObject({
           response: { code: 'ORDER_NOT_CANCELLABLE' },
         });
-      },
-    );
+      }
+    });
 
     it('a collected order is refused', async () => {
       const { service } = build(OrderStatus.PENDING_PAYMENT, false);
-      await expect(service.cancelOwnOfflineOrder('u1', 'o1')).rejects.toMatchObject({
+      await expect(service.cancelOwnOrder('u1', 'o1')).rejects.toMatchObject({
         response: { code: 'ORDER_NOT_CANCELLABLE' },
       });
     });
 
     it('someone else’s order is not found', async () => {
-      const { service, orderStatus } = build(OrderStatus.PENDING_PAYMENT, true, 'other');
-      await expect(service.cancelOwnOfflineOrder('u1', 'o1')).rejects.toMatchObject({ status: 404 });
+      const { service, orderStatus } = build(OrderStatus.PENDING_PAYMENT, true, { userId: 'other' });
+      await expect(service.cancelOwnOrder('u1', 'o1')).rejects.toMatchObject({ status: 404 });
       expect(orderStatus.cancelUncollectedOffline).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('cancelling an unpaid online order', () => {
+    const now = new Date('2026-11-12T10:00:00.000Z');
+    function online(
+      order: { status?: OrderStatus; paymentType?: PaymentType | null; expiresAt?: Date | null; open?: boolean },
+      count = 1,
+    ) {
+      const tx = {
+        $queryRaw: jest.fn(async () => []),
+        order: {
+          findUnique: jest.fn(async () => ({
+            status: order.status ?? OrderStatus.PENDING_PAYMENT,
+            paymentType: order.paymentType === undefined ? PaymentType.PAYME : order.paymentType,
+            expiresAt: order.expiresAt === undefined ? new Date(now.getTime() + 60_000) : order.expiresAt,
+            payments: order.open ? [{ id: 'pay_1' }] : [],
+          })),
+          updateMany: jest.fn(async () => ({ count })),
+        },
+        orderStatusHistory: { create: jest.fn(async () => ({})) },
+      };
+      return { tx, service: new OrderStatusService({} as any) };
+    }
+
+    it('cancels inside the window, under the row lock, guarded on status and payments', async () => {
+      const { tx, service } = online({});
+      await expect(service.cancelUnpaidOnline(tx as any, 'o1', { customerId: 'u1', now })).resolves.toBe(
+        OrderStatus.CANCELLED,
+      );
+      expect(tx.$queryRaw).toHaveBeenCalledTimes(1);
+      const { where, data } = (tx.order.updateMany.mock.calls[0] as any[])[0];
+      expect(where).toMatchObject({
+        id: 'o1',
+        status: OrderStatus.PENDING_PAYMENT,
+        payments: { none: { status: { in: [PaymentStatus.PAID, PaymentStatus.REFUNDED] } } },
+      });
+      expect(data).toEqual({ status: OrderStatus.CANCELLED });
+      expect(tx.orderStatusHistory.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ status: OrderStatus.CANCELLED, actorType: 'CUSTOMER', actorId: 'u1' }),
+      });
+    });
+
+    it('cancels with a Payme transaction open: its Perform is then refused', async () => {
+      const { tx, service } = online({ open: true, expiresAt: new Date(now.getTime() - 60_000) });
+      await expect(service.cancelUnpaidOnline(tx as any, 'o1', { customerId: 'u1', now })).resolves.toBe(
+        OrderStatus.CANCELLED,
+      );
+    });
+
+    it('expires an order whose window elapsed with no open transaction', async () => {
+      const { tx, service } = online({ expiresAt: now });
+      await expect(service.cancelUnpaidOnline(tx as any, 'o1', { customerId: 'u1', now })).resolves.toBe(
+        OrderStatus.EXPIRED,
+      );
+      expect(tx.orderStatusHistory.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ status: OrderStatus.EXPIRED, actorType: 'SYSTEM' }),
+      });
+    });
+
+    it.each([
+      ['a cash order', { paymentType: PaymentType.CASH }],
+      ['a terminal order', { paymentType: PaymentType.TERMINAL }],
+      ['a paid order', { status: OrderStatus.PAID }],
+    ] as const)('leaves %s alone', async (_label, order) => {
+      const { tx, service } = online(order);
+      await expect(service.cancelUnpaidOnline(tx as any, 'o1', { customerId: 'u1', now })).resolves.toBeNull();
+      expect(tx.order.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('writes no history when a payment won the race', async () => {
+      const { tx, service } = online({}, 0);
+      await expect(service.cancelUnpaidOnline(tx as any, 'o1', { customerId: 'u1', now })).resolves.toBeNull();
+      expect(tx.orderStatusHistory.create).not.toHaveBeenCalled();
     });
   });
 });

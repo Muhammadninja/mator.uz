@@ -193,8 +193,8 @@ describeWithDb('Inventory reservations (real PostgreSQL)', () => {
     const buyer = await buyerWith([[id, 2]]);
     const order = (await place(buyer)) as unknown as { order_id: string };
     expect(await held(id)).toBe(2);
-    await orders().cancelOwnOfflineOrder(buyer.id, order.order_id);
-    await orders().cancelOwnOfflineOrder(buyer.id, order.order_id);
+    await orders().cancelOwnOrder(buyer.id, order.order_id);
+    await orders().cancelOwnOrder(buyer.id, order.order_id);
     expect(await held(id)).toBe(0);
   });
 
