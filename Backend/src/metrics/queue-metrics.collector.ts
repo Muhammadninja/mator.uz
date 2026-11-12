@@ -19,7 +19,7 @@ import { MetricsService } from './metrics.service';
  * Read-only with respect to the queues: `getJobCounts` and `getWorkers` only —
  * no job, payload, retry policy or workflow is touched.
  *
- * All four registered queues are injected by name from QUEUE_NAMES, mirroring
+ * All registered queues are injected by name from QUEUE_NAMES, mirroring
  * how OpsModule obtains the same instances (re-registration resolves the SAME
  * queues via DI; it does not create a second set and registers no processors).
  */
@@ -54,12 +54,16 @@ export class QueueMetricsCollector {
     @InjectQueue(QUEUE_NAMES.NOTIFICATIONS)
     notificationsQueue?: Queue,
     @Optional() @InjectQueue(QUEUE_NAMES.MAINTENANCE) maintenanceQueue?: Queue,
+    @Optional()
+    @InjectQueue(QUEUE_NAMES.VEHICLE_IMAGES)
+    vehicleImagesQueue?: Queue,
   ) {
     const entries: [string, Queue | undefined][] = [
       [QUEUE_NAMES.IMAGE_PROCESSING, imageQueue],
       [QUEUE_NAMES.SMS, smsQueue],
       [QUEUE_NAMES.NOTIFICATIONS, notificationsQueue],
       [QUEUE_NAMES.MAINTENANCE, maintenanceQueue],
+      [QUEUE_NAMES.VEHICLE_IMAGES, vehicleImagesQueue],
     ];
     this.queues = new Map(
       entries.filter((e): e is [string, Queue] => e[1] !== undefined),
@@ -76,7 +80,7 @@ export class QueueMetricsCollector {
    * scrape that loses everything.
    *
    * Queues are sampled in parallel so total scrape latency is one round trip,
-   * not four.
+   * not one per queue.
    */
   async collect(): Promise<void> {
     if (!this.config.enabled || !this.config.queueMetricsEnabled) return;

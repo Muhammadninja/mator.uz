@@ -62,6 +62,7 @@ function buildMonitor(
     smsQueue,
     idle(),
     idle(),
+    idle(),
   );
   return { monitor, alerts };
 }
@@ -202,8 +203,8 @@ describe('QueueMonitorService', () => {
       expect(
         alerts.raised.some((a) => a.type === ALERT_TYPES.MONITOR_ERROR),
       ).toBe(true);
-      // The other three queues were still sampled — one bad queue is not fatal.
-      expect(samples).toHaveLength(3);
+      // The other queues were still sampled — one bad queue is not fatal.
+      expect(samples).toHaveLength(SAMPLED_QUEUES.length - 1);
     });
 
     it('returns a sample for every sampled queue', async () => {

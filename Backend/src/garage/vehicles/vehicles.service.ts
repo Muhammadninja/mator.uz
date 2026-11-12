@@ -7,6 +7,8 @@ import { UpdateVehicleDto } from './dto/update-vehicle.dto';
 import { VEHICLE_INCLUDE, presentVehicle } from './vehicle.presenter';
 import { RealtimeGateway } from '../../realtime/realtime.gateway';
 import { NotificationsService } from '../../notifications/notifications.service';
+import { VehicleImagesService } from '../vehicle-images/vehicle-images.service';
+import { presentVehicleImage } from '../vehicle-images/vehicle-image.state';
 
 @Injectable()
 export class VehiclesService {
@@ -14,6 +16,7 @@ export class VehiclesService {
     private readonly prisma: PrismaService,
     private readonly realtime: RealtimeGateway,
     private readonly notifications: NotificationsService,
+    private readonly images: VehicleImagesService,
   ) {}
 
   async list(userId: string, opts: { includeDeleted: boolean; include3d: boolean }) {
@@ -29,23 +32,33 @@ export class VehiclesService {
   }
 
   async create(userId: string, dto: CreateVehicleDto) {
-    await this.assertCatalogRefs(dto);
+    const catalog = await this.assertCatalogRefs(dto);
+    // Vehicle image identity from the catalog rows just read (null when the
+    // integration is off). Never blocks creation.
+    const imagePlan = await this.images.prepare({
+      year: dto.year,
+      model: catalog.model,
+      trim: catalog.trim,
+    });
     const model3dAssetId = dto.trim_id ? await this.resolve3dAsset(dto.trim_id) : null;
 
     // First vehicle is always primary; otherwise honor the requested flag.
     const existingCount = await this.prisma.vehicle.count({ where: { userId, deletedAt: null } });
     const makePrimary = dto.is_primary === true || existingCount === 0;
 
-    const created = await this.prisma.$transaction(async (tx) => {
+    const vehicleId = prefixedId(IdPrefix.VEHICLE);
+    const committed = await this.prisma.$transaction(async (tx) => {
       if (makePrimary) {
         await tx.vehicle.updateMany({
           where: { userId, isPrimary: true },
           data: { isPrimary: false },
         });
       }
-      return tx.vehicle.create({
+      // Transactional outbox: the image request commits with the vehicle or not at all.
+      const image = await this.images.stage(tx, vehicleId, imagePlan);
+      const row = await tx.vehicle.create({
         data: {
-          id: prefixedId(IdPrefix.VEHICLE),
+          id: vehicleId,
           userId,
           isPrimary: makePrimary,
           nickname: dto.nickname,
@@ -63,10 +76,14 @@ export class VehiclesService {
           mileageKm: dto.mileage_km,
           fuelType: this.toEnum(FuelType, dto.fuel_type),
           model3dAssetId,
+          ...image.data,
         },
         include: VEHICLE_INCLUDE,
       });
+      return { created: row, imageOutboxId: image.outboxId };
     });
+    const { created, imageOutboxId } = committed;
+    this.images.kick(imageOutboxId);
 
     const vehicle = presentVehicle(created, true);
     this.realtime.emitGarageEvent(userId, 'vehicle.created', vehicle);
@@ -81,6 +98,33 @@ export class VehiclesService {
       include: VEHICLE_INCLUDE,
     });
     return presentVehicle(vehicle!, true);
+  }
+
+  /**
+   * GET /:id/image: the vehicle's image state, refreshed from the pipeline when
+   * that is due (short timeout; a pipeline failure returns the stored state).
+   */
+  async getImage(userId: string, vehicleId: string) {
+    const owned = await this.assertOwned(userId, vehicleId);
+    await this.images.refresh(owned.imageIdentityKey);
+    const row = await this.prisma.vehicle.findUnique({
+      where: { id: vehicleId },
+      select: {
+        imageReviewReason: true,
+        imageIdentity: {
+          select: {
+            status: true,
+            reason: true,
+            imageUrl: true,
+            imageVersion: true,
+          },
+        },
+      },
+    });
+    return {
+      vehicle_id: vehicleId,
+      vehicle_image: presentVehicleImage(row ?? {}),
+    };
   }
 
   /**
@@ -188,8 +232,9 @@ export class VehiclesService {
     if (!model || model.makeId !== dto.make_id) {
       throw new BadRequestException('Unknown or mismatched make_id/model_id');
     }
+    let trim: { id: string; modelId: string; name: string } | null = null;
     if (dto.trim_id) {
-      const trim = await this.prisma.vehicleTrim.findUnique({ where: { id: dto.trim_id } });
+      trim = await this.prisma.vehicleTrim.findUnique({ where: { id: dto.trim_id } });
       if (!trim || trim.modelId !== dto.model_id) {
         throw new BadRequestException('Unknown or mismatched trim_id');
       }
@@ -198,6 +243,7 @@ export class VehiclesService {
       const engine = await this.prisma.vehicleEngine.findUnique({ where: { id: dto.engine_id } });
       if (!engine) throw new BadRequestException('Unknown engine_id');
     }
+    return { model, trim };
   }
 
   private async resolve3dAsset(trimId: string): Promise<string | null> {

@@ -1086,6 +1086,12 @@ model Vehicle {
   mileageKm              Int?                 @map("mileage_km")
   fuelType               FuelType?            @map("fuel_type")
   model3dAssetId         String?              @map("model_3d_asset_id") @db.VarChar(64)
+  /// Canonical vehicle-image identity (SHA-256 hex) this vehicle shows; null for
+  /// vehicles created before Phase 3E, while the integration is off, or under review.
+  imageIdentityKey       String?              @map("image_identity_key") @db.Char(64)
+  /// Set when the identity was ambiguous: the vehicle keeps the placeholder and is
+  /// flagged for review (see vehicle-image.identity.ts IMAGE_REVIEW_REASONS).
+  imageReviewReason      String?              @map("image_review_reason") @db.VarChar(64)
   deletedAt              DateTime?            @map("deleted_at") @db.Timestamptz(3)
   createdAt              DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt              DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
@@ -1096,6 +1102,7 @@ model Vehicle {
   trim         VehicleTrim?         @relation(fields: [trimId], references: [id], onDelete: SetNull)
   engine       VehicleEngine?       @relation(fields: [engineId], references: [id], onDelete: SetNull)
   model3dAsset Vehicle3dAsset?      @relation(fields: [model3dAssetId], references: [id], onDelete: SetNull)
+  imageIdentity VehicleImageIdentity? @relation(fields: [imageIdentityKey], references: [identityKey], onDelete: SetNull)
   bookings     Booking[]
   aiSessions   AiSession[]
   orders       Order[]
@@ -1103,7 +1110,71 @@ model Vehicle {
 
   @@index([userId])
   @@index([userId, isPrimary])
+  @@index([imageIdentityKey])
+  @@index([imageReviewReason])
   @@map("vehicles")
+}
+
+// ── Vehicle images (Phase 3E: Garage ↔ Vehicle Image Pipeline) ────────────────
+enum VehicleImageStatus {
+  PENDING
+  APPROVED
+  UNAVAILABLE
+}
+
+enum VehicleImageOutboxStatus {
+  PENDING
+  DISPATCHED
+  DEAD
+}
+
+/// Local copy of the pipeline's state for one canonical identity, shared by every
+/// Garage vehicle with that identity. The pipeline stays the source of truth; this
+/// row is what Garage responses read, so they never wait on the pipeline.
+model VehicleImageIdentity {
+  /// SHA-256 hex of the canonical tuple: the pipeline's `identityKey`.
+  identityKey       String               @id @map("identity_key") @db.Char(64)
+  /// The exact 7-field canonical identity sent to the pipeline.
+  identity          Json
+  /// Display facts sent with it ({manufacturer, model, trim?}).
+  display           Json
+  status            VehicleImageStatus   @default(PENDING)
+  reason            String?              @db.VarChar(64)
+  pipelineStatus    String?              @map("pipeline_status") @db.VarChar(32)
+  pipelineRequestId String?              @map("pipeline_request_id") @db.VarChar(64)
+  /// Published (public HTTPS) URL and version; set only once approved and published.
+  imageUrl          String?              @map("image_url") @db.VarChar(2048)
+  imageVersion      Int?                 @map("image_version")
+  lastSyncedAt      DateTime?            @map("last_synced_at") @db.Timestamptz(3)
+  nextSyncAt        DateTime?            @map("next_sync_at") @db.Timestamptz(3)
+  createdAt         DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
+  vehicles          Vehicle[]
+  outbox            VehicleImageOutbox[]
+
+  @@index([nextSyncAt])
+  @@map("vehicle_image_identities")
+}
+
+/// Transactional outbox: a row is written in the SAME transaction as the Garage
+/// vehicle, and the vehicle-images queue delivers it to the pipeline afterwards.
+/// At most one PENDING row per identity: a partial unique index the migration
+/// adds by hand (Prisma cannot express it).
+model VehicleImageOutbox {
+  id           String                   @id @db.VarChar(64)
+  identityKey  String                   @map("identity_key") @db.Char(64)
+  status       VehicleImageOutboxStatus @default(PENDING)
+  /// Delivery attempts started; also part of the BullMQ jobId, so each attempt is claimed once.
+  attempts     Int                      @default(0)
+  availableAt  DateTime                 @default(now()) @map("available_at") @db.Timestamptz(3)
+  lastError    String?                  @map("last_error") @db.VarChar(200)
+  createdAt    DateTime                 @default(now()) @map("created_at") @db.Timestamptz(3)
+  dispatchedAt DateTime?                @map("dispatched_at") @db.Timestamptz(3)
+  identity     VehicleImageIdentity     @relation(fields: [identityKey], references: [identityKey], onDelete: Cascade)
+
+  @@index([status, availableAt])
+  @@index([identityKey])
+  @@map("vehicle_image_outbox")
 }
 
 model VehicleStatusEvent {

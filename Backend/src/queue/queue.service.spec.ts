@@ -89,6 +89,9 @@ describe('Queue infrastructure', () => {
         // NOTIFICATIONS so an alert never queues behind the user-facing push
         // backlog it may be reporting on.
         ALERTS: 'alerts',
+        // Garage → Vehicle Image Pipeline outbox delivery and status sync
+        // (src/garage/vehicle-images).
+        VEHICLE_IMAGES: 'vehicle-images',
       });
     });
   });

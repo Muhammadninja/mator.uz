@@ -79,6 +79,7 @@ function buildMetricsModule() {
         { name: QUEUE_NAMES.SMS },
         { name: QUEUE_NAMES.NOTIFICATIONS },
         { name: QUEUE_NAMES.MAINTENANCE },
+        { name: QUEUE_NAMES.VEHICLE_IMAGES },
       ),
     ],
     // No controller at all when disabled — an operator who turns metrics off

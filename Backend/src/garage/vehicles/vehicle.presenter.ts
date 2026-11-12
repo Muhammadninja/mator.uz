@@ -1,4 +1,5 @@
 import { Prisma } from '@prisma/client';
+import { presentVehicleImage } from '../vehicle-images/vehicle-image.state';
 
 // Relations needed to build the contract's nested vehicle DTO.
 export const VEHICLE_INCLUDE = {
@@ -7,6 +8,10 @@ export const VEHICLE_INCLUDE = {
   trim: true,
   engine: true,
   model3dAsset: { include: { variants: true } },
+  // Stored pipeline state only: reading a vehicle never calls the pipeline.
+  imageIdentity: {
+    select: { status: true, reason: true, imageUrl: true, imageVersion: true },
+  },
 } satisfies Prisma.VehicleInclude;
 
 export type VehicleWithRelations = Prisma.VehicleGetPayload<{ include: typeof VEHICLE_INCLUDE }>;
@@ -55,6 +60,8 @@ export function presentVehicle(v: VehicleWithRelations, include3d = true) {
             checksum_sha256: v.model3dAsset.checksumSha256,
           }
         : null,
+    // Phase 3E: pending | approved | unavailable. url/version only once published.
+    vehicle_image: presentVehicleImage(v),
     created_at: v.createdAt.toISOString(),
     updated_at: v.updatedAt.toISOString(),
   };

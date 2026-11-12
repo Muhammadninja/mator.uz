@@ -26,6 +26,20 @@ export const QUEUE_NAMES = {
    *  be backlogged or stalled, which is one of the conditions we alert ON. An
    *  alert must never queue behind the incident it is reporting. */
   ALERTS: 'alerts',
+  /** Garage → Vehicle Image Pipeline: outbox delivery, outbox relay and status
+   *  sync (src/garage/vehicle-images). Separate so a pipeline outage backs up only
+   *  this queue, never image processing, SMS or push. */
+  VEHICLE_IMAGES: 'vehicle-images',
+} as const;
+
+/** Named jobs on the VEHICLE_IMAGES queue. */
+export const VEHICLE_IMAGE_JOBS = {
+  /** Deliver one outbox row to the pipeline (one attempt per job). */
+  DISPATCH: 'dispatch',
+  /** Repeatable: enqueue outbox rows that are due (missed or retrying). */
+  RELAY: 'relay',
+  /** Repeatable: refresh identities whose pipeline state is due a re-check. */
+  SYNC: 'sync',
 } as const;
 
 /**

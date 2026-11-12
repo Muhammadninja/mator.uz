@@ -66,6 +66,7 @@ async function buildApp(env: Record<string, string | undefined> = {}) {
     [QUEUE_NAMES.SMS]: stubQueue({ waiting: 1, active: 0 }, 2),
     [QUEUE_NAMES.NOTIFICATIONS]: stubQueue({ waiting: 0 }, 1),
     [QUEUE_NAMES.MAINTENANCE]: stubQueue({ waiting: 0 }, 1),
+    [QUEUE_NAMES.VEHICLE_IMAGES]: stubQueue({ waiting: 0 }, 1),
   };
 
   const builder = Test.createTestingModule({
