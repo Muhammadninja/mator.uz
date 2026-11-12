@@ -85,6 +85,9 @@ enum LegalDocumentType {
   TERMS_OF_USE
   PRIVACY_POLICY
   PERSONAL_DATA_CONSENT
+  /// Informational, never accepted: shown at checkout, in Legal Documents and
+  /// from a delivered order. Not in REQUIRED_LEGAL_DOCUMENT_TYPES.
+  REFUND_POLICY
 }
 
 enum OtpChannel {

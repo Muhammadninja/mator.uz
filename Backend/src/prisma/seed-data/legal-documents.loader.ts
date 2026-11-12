@@ -37,6 +37,13 @@ export interface LegalDocumentSeedSource {
   locale: string;
   title: string;
   content: string;
+  /**
+   * The date the document's own text names as its effective date, at 00:00 UTC
+   * (a calendar date: read it back with the UTC date part). Null while the text
+   * still has the `__.__.____` blank or names no date: such a document is a
+   * draft and the seed does not publish it.
+   */
+  effectiveAt: Date | null;
 }
 
 /** Interface languages the documents ship in (mirrors common/app-lang.util). */
@@ -65,6 +72,20 @@ const UNRESOLVED_DRAFT_MARKERS = [
   '[PRIVACY EMAIL]',
   '[ТЕЛЕФОН]',
 ] as const;
+
+/**
+ * The line every document states its effective date on, per locale, e.g.
+ * `**Effective Date:** 01.09.2026`. The date in the text is the only source of
+ * `effective_at`, so the two can never disagree.
+ */
+const EFFECTIVE_DATE_LABELS: Record<LegalLocale, string> = {
+  en: 'Effective Date',
+  ru: 'Дата вступления в силу',
+  uz: 'Kuchga kirish sanasi',
+};
+
+/** The blank a draft carries until its effective date is decided. */
+export const LEGAL_DATE_BLANK = '__.__.____';
 
 /** Every (type, locale) pair that must exist for the seed to be complete. */
 const REQUIRED_SOURCE_COUNT =
@@ -273,7 +294,50 @@ function toSource(
     }
   }
 
-  return { type, version: parsedVersion, locale, title, content };
+  const effectiveAt = parseEffectiveDate(content, locale as LegalLocale, filename);
+
+  return { type, version: parsedVersion, locale, title, content, effectiveAt };
+}
+
+/**
+ * The effective date stated in the text, or null for a draft (the blank, or no
+ * date line at all). A date that is present but malformed, or two date lines
+ * that disagree, are fatal: publishing under a guessed date is not an option.
+ */
+function parseEffectiveDate(
+  content: string,
+  locale: LegalLocale,
+  filename: string,
+): Date | null {
+  const label = EFFECTIVE_DATE_LABELS[locale].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(`^\\*\\*${label}:\\*\\*[ \\t]*(\\S+)[ \\t]*$`, 'gm');
+  const values = [...content.matchAll(pattern)].map((m) => m[1]);
+  if (values.length === 0) return null;
+  if (new Set(values).size > 1) {
+    throw new LegalSourceError(
+      `${filename}: the text states different effective dates (${values.join(', ')}).`,
+    );
+  }
+  const value = values[0];
+  if (value === LEGAL_DATE_BLANK) return null;
+
+  const match = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(value);
+  const date = match
+    ? new Date(Date.UTC(Number(match[3]), Number(match[2]) - 1, Number(match[1])))
+    : null;
+  // Round-trip check: 31.02.2026 would otherwise roll over to 3 March.
+  if (
+    !match ||
+    !date ||
+    date.getUTCDate() !== Number(match[1]) ||
+    date.getUTCMonth() !== Number(match[2]) - 1
+  ) {
+    throw new LegalSourceError(
+      `${filename}: effective date "${value}" is not a DD.MM.YYYY date. ` +
+        `Use ${LEGAL_DATE_BLANK} while the date is not decided.`,
+    );
+  }
+  return date;
 }
 
 /**
@@ -332,9 +396,37 @@ export function loadLegalDocuments(
     );
   }
 
+  assertOneDatePerVersion(sources);
   if (requireCompleteSet) assertCompleteSet(sources, directory);
 
   return sources;
+}
+
+/**
+ * Every locale of one document version takes effect on the same day, and is
+ * either dated or still a draft in all of them. A version dated in one language
+ * only would publish for some users and not others.
+ */
+function assertOneDatePerVersion(sources: LegalDocumentSeedSource[]): void {
+  const byVersion = new Map<string, LegalDocumentSeedSource[]>();
+  for (const source of sources) {
+    const key = `${source.type} v${source.version}`;
+    byVersion.set(key, [...(byVersion.get(key) ?? []), source]);
+  }
+  for (const [key, group] of byVersion) {
+    const dates = new Set(
+      group.map((s) => (s.effectiveAt ? s.effectiveAt.toISOString().slice(0, 10) : 'undated')),
+    );
+    if (dates.size > 1) {
+      throw new LegalSourceError(
+        `${key}: the locales state different effective dates (` +
+          group
+            .map((s) => `${s.locale}: ${s.effectiveAt?.toISOString().slice(0, 10) ?? LEGAL_DATE_BLANK}`)
+            .join(', ') +
+          '). One version takes effect on one day, in every language.',
+      );
+    }
+  }
 }
 
 /**

@@ -65,3 +65,29 @@ describe('order presenter: payment window', () => {
     );
   });
 });
+
+describe('order presenter: delivered_at', () => {
+  it('loads only the FIRST DELIVERED transition, so a repeat cannot move the date', () => {
+    expect(ORDER_INCLUDE.statusHistory).toEqual({
+      where: { status: OrderStatus.DELIVERED },
+      orderBy: { createdAt: 'asc' },
+      select: { createdAt: true },
+      take: 1,
+    });
+  });
+
+  it('reports when the order was delivered', () => {
+    const view = presentOrder(
+      order({
+        status: OrderStatus.DELIVERED,
+        statusHistory: [{ createdAt: new Date('2026-11-12T14:05:00Z') }],
+      }),
+    );
+    expect(view.delivered_at).toBe('2026-11-12T14:05:00.000Z');
+  });
+
+  it('is null before delivery and for rows loaded without the relation', () => {
+    expect(presentOrder(order({ statusHistory: [] })).delivered_at).toBeNull();
+    expect(presentOrder(order()).delivered_at).toBeNull();
+  });
+});

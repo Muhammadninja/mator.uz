@@ -24,6 +24,9 @@ export const REQUIRED_LEGAL_DOCUMENT_TYPES: readonly LegalDocumentType[] = [
 /** Machine-readable code the client switches on (see HttpExceptionFilter). */
 export const LEGAL_ACCEPTANCE_REQUIRED = 'LEGAL_ACCEPTANCE_REQUIRED';
 
+/** A claimed acceptance names a document that is not part of the consent set. */
+export const LEGAL_DOCUMENT_NOT_ACCEPTABLE = 'LEGAL_DOCUMENT_NOT_ACCEPTABLE';
+
 /** Request provenance captured server-side; never supplied by the client. */
 export interface LegalAcceptanceContext {
   ipAddress?: string | null;
@@ -60,6 +63,29 @@ export class LegalService {
       ),
     );
     return documents.map((doc) => presentLegalDocument(doc, true));
+  }
+
+  /**
+   * The version of `type` currently in force, in the best available language.
+   *
+   * Serves every type, including informational ones such as REFUND_POLICY that
+   * are not part of the consent set, so a screen can show a document without
+   * knowing its version. Nothing published for the type is a 404, not a 500:
+   * unlike a required document, an informational one may legitimately not be
+   * seeded yet, and the client shows "unavailable" for it.
+   */
+  async getCurrentDocument(
+    type: LegalDocumentType,
+    lang: AppLang,
+  ): Promise<LegalDocumentResponse> {
+    const doc = await this.findActiveDocument(this.prisma, type, lang);
+    if (!doc) {
+      throw new NotFoundException({
+        code: 'NOT_FOUND',
+        message: `No ${type} document is published.`,
+      });
+    }
+    return presentLegalDocument(doc, REQUIRED_LEGAL_DOCUMENT_TYPES.includes(type));
   }
 
   /** One specific historical version, for audit/history screens. */
@@ -253,6 +279,19 @@ export class LegalService {
       seen.add(item.type);
     }
 
+    // Only the consent set can be accepted. An informational document such as
+    // REFUND_POLICY passes the DTO's enum check, but recording "consent" to it
+    // would be evidence of an agreement that never existed.
+    const notAcceptable = claimed
+      .map((c) => c.type)
+      .filter((t) => !REQUIRED_LEGAL_DOCUMENT_TYPES.includes(t));
+    if (notAcceptable.length > 0) {
+      throw new BadRequestException({
+        code: LEGAL_DOCUMENT_NOT_ACCEPTABLE,
+        message: `These documents are informational and cannot be accepted: ${notAcceptable.join(', ')}.`,
+      });
+    }
+
     const missing = REQUIRED_LEGAL_DOCUMENT_TYPES.filter((t) => !seen.has(t));
     if (missing.length > 0) {
       throw new BadRequestException({
@@ -337,7 +376,26 @@ export class LegalService {
     type: LegalDocumentType,
     lang: AppLang,
   ): Promise<LegalDocument> {
-    const doc =
+    const doc = await this.findActiveDocument(db, type, lang);
+    if (!doc) {
+      // A required document with no active version in any language is a server
+      // misconfiguration (unseeded environment), not a client error — hence 500
+      // via the default filter rather than a 4xx blaming the caller.
+      throw new Error(
+        `No active ${type} legal document is published (locale: ${lang}). ` +
+          'Run the legal document seed.',
+      );
+    }
+    return doc;
+  }
+
+  /** {@link resolveActiveDocument}'s lookup, answering null instead of throwing. */
+  private async findActiveDocument(
+    db: Db,
+    type: LegalDocumentType,
+    lang: AppLang,
+  ): Promise<LegalDocument | null> {
+    return (
       (await db.legalDocument.findFirst({
         where: { type, locale: lang, isActive: true },
       })) ??
@@ -349,18 +407,8 @@ export class LegalService {
       (await db.legalDocument.findFirst({
         where: { type, isActive: true },
         orderBy: { locale: 'asc' },
-      }));
-
-    if (!doc) {
-      // A required document with no active version in any language is a server
-      // misconfiguration (unseeded environment), not a client error — hence 500
-      // via the default filter rather than a 4xx blaming the caller.
-      throw new Error(
-        `No active ${type} legal document is published (locale: ${lang}). ` +
-          'Run the legal document seed.',
-      );
-    }
-    return doc;
+      }))
+    );
   }
 
   /** The active version number for `type`, or null when none is published. */

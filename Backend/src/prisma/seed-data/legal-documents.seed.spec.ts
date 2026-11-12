@@ -1,7 +1,6 @@
 import { LegalDocumentType } from '@prisma/client';
 import {
   LEGAL_LOCALES,
-  LEGAL_V1_EFFECTIVE_AT,
   isPlaceholderLegalContent,
   legalDocumentSeed,
 } from './legal-documents.seed';
@@ -30,8 +29,13 @@ describe('legal document seed', () => {
     expect(new Set(seed.map((d) => d.locale))).toEqual(new Set(LEGAL_LOCALES));
   });
 
-  it('is v1 across the board', () => {
-    expect(seed.every((d) => d.version === 1)).toBe(true);
+  it('ships exactly the expected versions per document', () => {
+    const versions = (type: LegalDocumentType) =>
+      [...new Set(seed.filter((d) => d.type === type).map((d) => d.version))].sort();
+    expect(versions(LegalDocumentType.TERMS_OF_USE)).toEqual([1, 2]);
+    expect(versions(LegalDocumentType.PRIVACY_POLICY)).toEqual([1]);
+    expect(versions(LegalDocumentType.PERSONAL_DATA_CONSENT)).toEqual([1]);
+    expect(versions(LegalDocumentType.REFUND_POLICY)).toEqual([1]);
   });
 
   it('has a unique (type, version, locale) per row — the DB unique key', () => {
@@ -83,10 +87,16 @@ describe('legal document seed', () => {
     }
   });
 
-  it('uses a FIXED effective date, so re-seeding does not shift it', () => {
-    expect(LEGAL_V1_EFFECTIVE_AT.toISOString()).toBe('2026-08-31T00:00:00.000Z');
-    expect(LEGAL_V1_EFFECTIVE_AT.getTime()).toBe(
-      new Date('2026-08-31T00:00:00.000Z').getTime(),
-    );
+  it('takes every effective date from the text — v1 is 01.09.2026, as its text says', () => {
+    for (const doc of seed.filter((d) => d.version === 1 && d.type !== LegalDocumentType.REFUND_POLICY)) {
+      expect(doc.effectiveAt?.toISOString()).toBe('2026-09-01T00:00:00.000Z');
+    }
+  });
+
+  it('leaves the documents whose date is still blank unpublished', () => {
+    // Expected to CHANGE when the owner fills in the dates: it documents the
+    // current state (Terms v2 and the Refund & Returns Policy are drafts).
+    const drafts = seed.filter((d) => d.effectiveAt === null).map((d) => `${d.type} v${d.version}`);
+    expect(new Set(drafts)).toEqual(new Set(['TERMS_OF_USE v2', 'REFUND_POLICY v1']));
   });
 });

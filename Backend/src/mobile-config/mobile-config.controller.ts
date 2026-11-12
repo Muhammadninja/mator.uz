@@ -18,7 +18,7 @@ export class MobileConfigController {
   @Get('config')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Mobile app config — force-update gate, store links + legal URLs.',
+    summary: 'Mobile app config — force-update gate, store links, legal URLs, support contacts.',
     description:
       'privacy_policy_url / terms_url are the stable public URLs the app links ' +
       'to from its legal screen and that App Store Connect requires. They are ' +
@@ -35,6 +35,11 @@ export class MobileConfigController {
           'https://play.google.com/store/apps/details?id=com.mator.myapp',
         privacy_policy_url: 'https://mator.uz/legal/privacy',
         terms_url: 'https://mator.uz/legal/terms',
+        support: {
+          phone: '+998502030318',
+          email: 'support@example.com',
+          telegram_username: 'Mator_AutoParts',
+        },
       },
     },
   })

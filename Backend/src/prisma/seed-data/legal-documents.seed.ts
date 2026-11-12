@@ -23,14 +23,18 @@ import {
  * Edit the relevant `docs/legal/<document>.v<version>.<locale>.md` and re-run
  * `npm run seed`. No backend code change is required.
  *
+ * The effective date is the one the text states (`**Effective Date:** …`); a
+ * document whose date is still `__.__.____` is not published.
+ *
  * Once real text is published and users have accepted it, that version is
- * FROZEN: the seed will not overwrite it (see seedLegalDocuments). Further
+ * FROZEN: the seed will not overwrite it (see legal-documents.publish.ts). Further
  * changes are a NEW version — add `<document>.v2.<locale>.md` — never an edit,
  * because an acceptance record that points at rewritten text proves nothing.
  */
 
 export type { LegalDocumentSeedSource } from './legal-documents.loader';
 export {
+  LEGAL_DATE_BLANK,
   LEGAL_PLACEHOLDER_MARKER,
   LEGAL_LOCALES,
   LegalSourceError,
@@ -41,18 +45,6 @@ export {
 
 /** Shape the seed writes. Kept as an alias so callers need not rename. */
 export type LegalDocumentSeed = LegalDocumentSeedSource;
-
-/**
- * The date v1 takes effect. Fixed rather than `new Date()` so re-running the
- * seed does not shift the effective date of an already-published document.
- *
- * Publication state (`effectiveAt`, `isActive`) is owned HERE and by the seed,
- * not by the markdown: a source file describes what a document says, while the
- * database decides which version is in force. Letting a file edit flip the
- * active version would make "what must this user accept?" answerable only by
- * reading the filesystem.
- */
-export const LEGAL_V1_EFFECTIVE_AT = new Date('2026-08-31T00:00:00.000Z');
 
 /**
  * Every document source, read from `docs/legal`.

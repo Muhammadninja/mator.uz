@@ -9,7 +9,7 @@
 
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { LegalDocumentType } from '@prisma/client';
-import { LegalService } from './legal.service';
+import { LegalService, REQUIRED_LEGAL_DOCUMENT_TYPES } from './legal.service';
 
 const EFFECTIVE_AT = new Date('2026-08-31T00:00:00.000Z');
 const ACCEPTED_AT = new Date('2026-08-31T12:33:10.000Z');
@@ -168,8 +168,10 @@ describe('LegalService', () => {
 
       expect(res).toHaveLength(3);
       expect(res.map((d) => d.type).sort()).toEqual(
-        [...Object.values(LegalDocumentType)].sort(),
+        [...REQUIRED_LEGAL_DOCUMENT_TYPES].sort(),
       );
+      // Informational documents are not part of the consent set.
+      expect(res.map((d) => d.type)).not.toContain(LegalDocumentType.REFUND_POLICY);
       expect(res.every((d) => d.locale === 'ru')).toBe(true);
     });
 
@@ -229,6 +231,57 @@ describe('LegalService', () => {
       // id / isActive / createdAt / updatedAt must never reach the client.
       expect(first).not.toHaveProperty('id');
       expect(first).not.toHaveProperty('isActive');
+    });
+  });
+
+  describe('getCurrentDocument', () => {
+    it('serves an informational document in the requested locale, not required', async () => {
+      const service = new LegalService(makePrismaMock() as never);
+
+      const res = await service.getCurrentDocument(LegalDocumentType.REFUND_POLICY, 'uz');
+
+      expect(res.type).toBe(LegalDocumentType.REFUND_POLICY);
+      expect(res.locale).toBe('uz');
+      expect(res.version).toBe(1);
+      expect(res.is_required).toBe(false);
+    });
+
+    it('marks a consent document as required', async () => {
+      const service = new LegalService(makePrismaMock() as never);
+
+      const res = await service.getCurrentDocument(LegalDocumentType.TERMS_OF_USE, 'ru');
+
+      expect(res.is_required).toBe(true);
+    });
+
+    it('serves the ACTIVE version, never a newer unpublished draft', async () => {
+      const documents = [
+        doc({ type: LegalDocumentType.REFUND_POLICY, version: 1, isActive: true }),
+        doc({ type: LegalDocumentType.REFUND_POLICY, version: 2, isActive: false }),
+      ];
+      const service = new LegalService(makePrismaMock(documents) as never);
+
+      const res = await service.getCurrentDocument(LegalDocumentType.REFUND_POLICY, 'ru');
+
+      expect(res.version).toBe(1);
+    });
+
+    it('falls back to the default locale when the translation is missing', async () => {
+      const documents = [doc({ type: LegalDocumentType.REFUND_POLICY, locale: 'ru' })];
+      const service = new LegalService(makePrismaMock(documents) as never);
+
+      const res = await service.getCurrentDocument(LegalDocumentType.REFUND_POLICY, 'en');
+
+      expect(res.locale).toBe('ru');
+    });
+
+    it('404s (not 500) when nothing is published for the type', async () => {
+      const documents = [doc({ type: LegalDocumentType.TERMS_OF_USE })];
+      const service = new LegalService(makePrismaMock(documents) as never);
+
+      await expect(
+        service.getCurrentDocument(LegalDocumentType.REFUND_POLICY, 'ru'),
+      ).rejects.toBeInstanceOf(NotFoundException);
     });
   });
 
@@ -403,6 +456,22 @@ describe('LegalService', () => {
         ),
       ).rejects.toMatchObject({
         response: { code: 'LEGAL_ACCEPTANCE_REQUIRED' },
+      });
+      expect(prisma.legalAcceptance.createMany).not.toHaveBeenCalled();
+    });
+
+    it('rejects an informational document and records nothing', async () => {
+      const prisma = makePrismaMock();
+      const service = new LegalService(prisma as never);
+
+      await expect(
+        service.accept(
+          'user_1',
+          [...ALL_CURRENT, { type: LegalDocumentType.REFUND_POLICY, version: 1 }],
+          {},
+        ),
+      ).rejects.toMatchObject({
+        response: { code: 'LEGAL_DOCUMENT_NOT_ACCEPTABLE' },
       });
       expect(prisma.legalAcceptance.createMany).not.toHaveBeenCalled();
     });
