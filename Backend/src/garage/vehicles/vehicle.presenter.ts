@@ -1,10 +1,26 @@
 import { Prisma } from '@prisma/client';
 import { presentVehicleImage } from '../vehicle-images/vehicle-image.state';
+import {
+  presentGeneration,
+  resolveGeneration,
+  type VariantRow,
+} from './vehicle-generation';
+
+/** The catalog fields a generation-specific row contributes. */
+export const VARIANT_SELECT = {
+  id: true,
+  makeId: true,
+  name: true,
+  bodyType: true,
+  yearFrom: true,
+  yearTo: true,
+} satisfies Prisma.VehicleModelRefSelect;
 
 // Relations needed to build the contract's nested vehicle DTO.
 export const VEHICLE_INCLUDE = {
   make: true,
-  model: true,
+  // Generation-specific rows of the model, for `generation` (empty for most models).
+  model: { include: { variants: { select: VARIANT_SELECT } } },
   trim: true,
   engine: true,
   model3dAsset: { include: { variants: true } },
@@ -62,7 +78,25 @@ export function presentVehicle(v: VehicleWithRelations, include3d = true) {
         : null,
     // Phase 3E: pending | approved | unavailable. url/version only once published.
     vehicle_image: presentVehicleImage(v),
+    // Generic models only (null otherwise, or when a trim was picked): which
+    // generation the picture shows, or the options to choose from.
+    generation: presentGeneration(vehicleGeneration(v)),
     created_at: v.createdAt.toISOString(),
     updated_at: v.updatedAt.toISOString(),
   };
+}
+
+/** The vehicle's generation resolution from its loaded catalog rows. */
+export function vehicleGeneration(v: {
+  year: number;
+  trimId: string | null;
+  variantModelId: string | null;
+  model: { variants: VariantRow[] } | null;
+}) {
+  return resolveGeneration({
+    year: v.year,
+    trimId: v.trimId,
+    variants: v.model?.variants ?? [],
+    chosenVariantId: v.variantModelId,
+  });
 }

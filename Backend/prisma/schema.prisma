@@ -1005,14 +1005,23 @@ model VehicleModelRef {
   yearFrom        Int?             @map("year_from")
   yearTo          Int?             @map("year_to")
   bodyType        String?          @map("body_type") @db.VarChar(60)
+  /// Set on a generation-specific row (`nexia-3`) to the generic row it is a
+  /// generation of (`nexia`). With `year_from`/`year_to`, it lets the Garage tell
+  /// which generation a generic-model vehicle is. Visual identity only: fitment
+  /// never reads it.
+  variantOfModelId String?          @map("variant_of_model_id") @db.VarChar(64)
   createdAt       DateTime         @default(now()) @map("created_at")
   updatedAt       DateTime         @updatedAt @map("updated_at")
   make            VehicleMake      @relation(fields: [makeId], references: [id], onDelete: Cascade)
+  variantOf       VehicleModelRef? @relation("ModelVariants", fields: [variantOfModelId], references: [id], onDelete: SetNull)
+  variants        VehicleModelRef[] @relation("ModelVariants")
   trims           VehicleTrim[]
-  vehicles        Vehicle[]
+  vehicles        Vehicle[]        @relation("VehicleModel")
+  variantVehicles Vehicle[]        @relation("VehicleVariantModel")
   fitmentBindings FitmentBinding[]
 
   @@index([makeId])
+  @@index([variantOfModelId])
   @@map("vehicle_models")
 }
 
@@ -1095,13 +1104,18 @@ model Vehicle {
   /// Set when the identity was ambiguous: the vehicle keeps the placeholder and is
   /// flagged for review (see vehicle-image.identity.ts IMAGE_REVIEW_REASONS).
   imageReviewReason      String?              @map("image_review_reason") @db.VarChar(64)
+  /// The owner's pick of a generation-specific catalog row (`nexia-3`) for a
+  /// generic-model vehicle whose year alone does not tell the generation. Visual
+  /// identity only: `model_id` keeps driving fitment.
+  variantModelId         String?              @map("variant_model_id") @db.VarChar(64)
   deletedAt              DateTime?            @map("deleted_at") @db.Timestamptz(3)
   createdAt              DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt              DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   user         AppUser              @relation(fields: [userId], references: [id], onDelete: Cascade)
   make         VehicleMake          @relation(fields: [makeId], references: [id], onDelete: Restrict)
-  model        VehicleModelRef      @relation(fields: [modelId], references: [id], onDelete: Restrict)
+  model        VehicleModelRef      @relation("VehicleModel", fields: [modelId], references: [id], onDelete: Restrict)
+  variantModel VehicleModelRef?     @relation("VehicleVariantModel", fields: [variantModelId], references: [id], onDelete: SetNull)
   trim         VehicleTrim?         @relation(fields: [trimId], references: [id], onDelete: SetNull)
   engine       VehicleEngine?       @relation(fields: [engineId], references: [id], onDelete: SetNull)
   model3dAsset Vehicle3dAsset?      @relation(fields: [model3dAssetId], references: [id], onDelete: SetNull)
@@ -1115,6 +1129,7 @@ model Vehicle {
   @@index([userId, isPrimary])
   @@index([imageIdentityKey])
   @@index([imageReviewReason])
+  @@index([variantModelId])
   @@map("vehicles")
 }
 

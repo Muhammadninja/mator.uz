@@ -35,4 +35,14 @@ export class UpdateVehicleDto {
   @IsString()
   @MaxLength(50)
   vin?: string;
+
+  /**
+   * The owner's pick among the vehicle's `generation.options` (a catalog model id),
+   * or null to clear it. Only for a `choice_required` year; never with a trim.
+   * Changes the picture only, never fitment.
+   */
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  variant_model_id?: string | null;
 }

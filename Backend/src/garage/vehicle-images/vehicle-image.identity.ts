@@ -193,6 +193,12 @@ export const IMAGE_REVIEW_REASONS = {
   YEAR_OUTSIDE_MODEL_RANGE: 'year_outside_model_range',
   /** A catalog row is missing or does not satisfy the pipeline's identity contract. */
   IDENTITY_INVALID: 'identity_invalid',
+  /**
+   * The model has generation-specific catalog rows and the year matches none, or
+   * more than one with no owner pick yet (vehicle-generation.ts). Asking for the
+   * generic model would leave the generation to the pipeline to guess.
+   */
+  GENERATION_UNRESOLVED: 'generation_unresolved',
 } as const;
 export type ImageReviewReason =
   (typeof IMAGE_REVIEW_REASONS)[keyof typeof IMAGE_REVIEW_REASONS];

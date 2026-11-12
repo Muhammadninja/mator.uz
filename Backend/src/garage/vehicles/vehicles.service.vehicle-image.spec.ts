@@ -9,6 +9,7 @@ const MODEL = {
   bodyType: null,
   yearFrom: null,
   yearTo: null,
+  variants: [],
 };
 
 function row(over: Record<string, unknown> = {}) {
