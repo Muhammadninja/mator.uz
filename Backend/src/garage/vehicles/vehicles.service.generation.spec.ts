@@ -146,6 +146,26 @@ describe('Garage create: generic-model generation', () => {
     ]);
   });
 
+  it('does not treat an undecoded VIN or a conflicting VIN year as generation evidence', async () => {
+    const { svc, prisma, images } = setup();
+    const res: any = await svc.create(
+      'usr_1',
+      create(2016, { vin: 'XWBTF69V9HA000000' }),
+    );
+    expect(res.generation.status).toBe('choice_required');
+    expect(prisma.vehicle.create.mock.calls[0][0].data).toMatchObject({
+      modelId: 'nexia',
+      year: 2016,
+      vin: 'XWBTF69V9HA000000',
+    });
+    expect(images.prepare).toHaveBeenCalledWith({
+      year: 2016,
+      model: null,
+      trim: null,
+      review: 'generation_unresolved',
+    });
+  });
+
   it('a year outside every generation is not inferred', async () => {
     const { svc, images } = setup();
     const res: any = await svc.create('usr_1', create(2024));
