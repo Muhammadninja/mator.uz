@@ -9,6 +9,7 @@ import { APP_GUARD } from '@nestjs/core';
 import request from 'supertest';
 import { LegalDocumentType } from '@prisma/client';
 import { LegalModule } from '../../src/legal/legal.module';
+import { REQUIRED_LEGAL_DOCUMENT_TYPES } from '../../src/legal/legal.service';
 import { PrismaModule } from '../../src/prisma/prisma.module';
 import { PrismaService } from '../../src/prisma/prisma.service';
 import { RedisModule } from '../../src/redis/redis.module';
@@ -188,7 +189,7 @@ describe('Legal API (e2e)', () => {
   });
 
   const ALL = {
-    acceptances: Object.values(LegalDocumentType).map((type) => ({
+    acceptances: REQUIRED_LEGAL_DOCUMENT_TYPES.map((type) => ({
       type,
       version: 1,
     })),
@@ -291,6 +292,30 @@ describe('Legal API (e2e)', () => {
         .get('/v1/legal/documents/PRIVACY_POLICY/99')
         .expect(404);
       expect(res.body.code).toBe('NOT_FOUND');
+    });
+  });
+
+  describe('GET /v1/legal/documents/:type', () => {
+    it('serves the Refund & Returns Policy publicly, marked not required', async () => {
+      const res = await request(app.getHttpServer())
+        .get('/v1/legal/documents/REFUND_POLICY')
+        .set('Accept-Language', 'uz')
+        .expect(200);
+      expect(res.body.type).toBe('REFUND_POLICY');
+      expect(res.body.locale).toBe('uz');
+      expect(res.body.is_required).toBe(false);
+    });
+
+    it('400s on an unknown document type', async () => {
+      const res = await request(app.getHttpServer())
+        .get('/v1/legal/documents/COOKIE_BANNER')
+        .expect(400);
+      expect(res.body.code).toBe('VALIDATION_FAILED');
+    });
+
+    it('keeps the consent list free of informational documents', async () => {
+      const res = await request(app.getHttpServer()).get('/v1/legal/documents').expect(200);
+      expect(res.body.documents.map((d: any) => d.type)).not.toContain('REFUND_POLICY');
     });
   });
 

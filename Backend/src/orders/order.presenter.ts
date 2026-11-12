@@ -10,6 +10,18 @@ export const ORDER_INCLUDE = {
     select: { id: true },
     take: 1,
   },
+  // When the order was handed over: the FIRST DELIVERED transition (every status
+  // change writes one row). Feeds `delivered_at`, from which the app counts the
+  // return window of the Refund & Returns Policy. DELIVERED is terminal in
+  // order-transitions.ts, so there is one such row; taking the first means a
+  // repeated DELIVERED write (a data repair, a bypass of the transition table)
+  // can never move the window later without a new handover.
+  statusHistory: {
+    where: { status: OrderStatus.DELIVERED },
+    orderBy: { createdAt: 'asc' },
+    select: { createdAt: true },
+    take: 1,
+  },
 } satisfies Prisma.OrderInclude;
 export type OrderWithItems = Prisma.OrderGetPayload<{ include: typeof ORDER_INCLUDE }>;
 
@@ -54,6 +66,9 @@ export function presentOrder(order: OrderWithItems) {
     // The app counts down to `expires_at` only while this is false. It never
     // changes an order by itself: expiry is the backend's sweep.
     expiry_suspended: isExpirySuspended(order),
+    // Null until the order has been delivered, and for an order delivered before
+    // status history existed. Rows loaded without the relation read as null.
+    delivered_at: order.statusHistory?.[0]?.createdAt.toISOString() ?? null,
     created_at: order.createdAt.toISOString(),
     updated_at: order.updatedAt.toISOString(),
   };

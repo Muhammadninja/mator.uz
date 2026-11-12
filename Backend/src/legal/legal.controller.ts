@@ -26,6 +26,7 @@ import { resolveRequestLang } from '../common/app-lang.util';
 import { LegalService } from './legal.service';
 import { AcceptLegalDocumentsDto } from './dto/accept-legal-documents.dto';
 import { LegalDocumentVersionParamsDto } from './dto/legal-document-version.params.dto';
+import { LegalDocumentTypeParamsDto } from './dto/legal-document-type.params.dto';
 
 const DOCUMENT_EXAMPLE = {
   type: LegalDocumentType.TERMS_OF_USE,
@@ -101,6 +102,36 @@ export class LegalController {
       resolveRequestLang(acceptLanguage),
     );
     return { documents };
+  }
+
+  @Get('documents/:type')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'The version of one document currently in force.',
+    description:
+      'Public. Serves any document type, including informational ones that are ' +
+      'never accepted (REFUND_POLICY), so a screen can show a document without ' +
+      'knowing its version. `is_required` is false for those. 404 when no ' +
+      'version of the type is published.',
+  })
+  @ApiParam({ name: 'type', enum: LegalDocumentType })
+  @ApiHeader(ACCEPT_LANGUAGE_HEADER)
+  @ApiOkResponse({
+    schema: {
+      example: {
+        ...DOCUMENT_EXAMPLE,
+        type: LegalDocumentType.REFUND_POLICY,
+        title: 'Политика возврата и возмещения',
+        content: '# Политика возврата и возмещения\n\n…',
+        is_required: false,
+      },
+    },
+  })
+  getCurrentDocument(
+    @Param() params: LegalDocumentTypeParamsDto,
+    @Headers('accept-language') acceptLanguage?: string,
+  ) {
+    return this.legal.getCurrentDocument(params.type, resolveRequestLang(acceptLanguage));
   }
 
   // Declared BEFORE nothing conflicting, but kept after `documents` for

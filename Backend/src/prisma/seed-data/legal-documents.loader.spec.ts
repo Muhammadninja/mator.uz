@@ -73,6 +73,8 @@ describe('legal documents loader', () => {
         locale: 'ru',
         title: 'Политика конфиденциальности',
         content: 'Полный текст документа.',
+        // No date line in the text: a draft, not published by the seed.
+        effectiveAt: null,
       },
     ]);
   });
@@ -308,14 +310,15 @@ describe('legal documents loader', () => {
   });
 
   // ── 9. The complete expected v1 set ──────────────────────────────────────
-  it('loads exactly 9 sources for a complete v1 set', () => {
+  it('loads exactly 12 sources for a complete v1 set', () => {
     writeCompleteSet();
 
     const sources = loadLegalDocuments(dir);
     expect(sources).toHaveLength(
       Object.keys(LegalDocumentType).length * LEGAL_LOCALES.length,
     );
-    expect(sources).toHaveLength(9);
+    // 4 documents (3 consent documents + REFUND_POLICY) × 3 locales.
+    expect(sources).toHaveLength(12);
   });
 
   it('fails when a translation is missing from the set', () => {
@@ -344,7 +347,7 @@ describe('legal documents loader', () => {
     }
 
     const sources = loadLegalDocuments(dir);
-    expect(sources).toHaveLength(12);
+    expect(sources).toHaveLength(15);
     // v1 is retained: it is the text existing users accepted.
     expect(
       sources.filter((s) => s.type === 'PRIVACY_POLICY' && s.version === 1),
@@ -363,7 +366,7 @@ describe('legal documents loader', () => {
     write('README.md', '# How legal documents work\n');
     write('00-PRE-PUBLICATION-CHECKLIST.md', '# Checklist\n');
 
-    expect(loadLegalDocuments(dir)).toHaveLength(9);
+    expect(loadLegalDocuments(dir)).toHaveLength(12);
   });
 
   // ── 10. Title / content mapping ──────────────────────────────────────────
@@ -420,7 +423,57 @@ describe('legal documents loader', () => {
 
     it('finds the real source files through the resolved directory', () => {
       const sources = loadLegalDocuments();
-      expect(sources).toHaveLength(9);
+      // 4 documents × 3 locales at v1, plus terms-of-use v2 in 3 locales.
+      expect(sources).toHaveLength(15);
+    });
+  });
+
+  // ── Effective date: the text is its only source ─────────────────────────
+  describe('effective date', () => {
+    const LABEL = { en: 'Effective Date', ru: 'Дата вступления в силу', uz: 'Kuchga kirish sanasi' };
+    const dated = (locale: 'en' | 'ru' | 'uz', date: string, extra = '') =>
+      `# Doc\n\n**${LABEL[locale]}:** ${date}\n\nТекст.${extra}`;
+    const one = (locale: 'en' | 'ru' | 'uz', date: string, extra = '') => {
+      write(`refund-policy.v1.${locale}.md`, valid('REFUND_POLICY', 1, locale, 'R', dated(locale, date, extra)));
+      return loadPartial()[0];
+    };
+
+    it.each(['en', 'ru', 'uz'] as const)('reads the %s date line as a calendar date at 00:00 UTC', (locale) => {
+      expect(one(locale, '01.09.2026').effectiveAt?.toISOString()).toBe('2026-09-01T00:00:00.000Z');
+    });
+
+    it('treats the __.__.____ blank as a draft (no date)', () => {
+      expect(one('ru', '__.__.____').effectiveAt).toBeNull();
+    });
+
+    it('accepts the same date stated twice (header and footer)', () => {
+      const footer = `\n\n**${LABEL.ru}:** 01.09.2026`;
+      expect(one('ru', '01.09.2026', footer).effectiveAt?.toISOString()).toBe('2026-09-01T00:00:00.000Z');
+    });
+
+    it('refuses two different dates in one text', () => {
+      expect(() => one('ru', '01.09.2026', `\n\n**${LABEL.ru}:** 02.09.2026`)).toThrow(
+        /different effective dates/,
+      );
+    });
+
+    it.each(['1.9.2026', '2026-09-01', '31.02.2026', '00.09.2026', 'скоро'])(
+      'refuses a malformed date %s instead of guessing',
+      (value) => {
+        expect(() => one('en', value)).toThrow(/not a DD\.MM\.YYYY date/);
+      },
+    );
+
+    it('refuses locales of one version that take effect on different days', () => {
+      write('refund-policy.v1.ru.md', valid('REFUND_POLICY', 1, 'ru', 'R', dated('ru', '01.09.2026')));
+      write('refund-policy.v1.uz.md', valid('REFUND_POLICY', 1, 'uz', 'R', dated('uz', '02.09.2026')));
+      expect(loadPartial).toThrow(/locales state different effective dates/);
+    });
+
+    it('refuses a version dated in one language and still a draft in another', () => {
+      write('refund-policy.v1.ru.md', valid('REFUND_POLICY', 1, 'ru', 'R', dated('ru', '01.09.2026')));
+      write('refund-policy.v1.en.md', valid('REFUND_POLICY', 1, 'en', 'R', dated('en', '__.__.____')));
+      expect(loadPartial).toThrow(/locales state different effective dates/);
     });
   });
 

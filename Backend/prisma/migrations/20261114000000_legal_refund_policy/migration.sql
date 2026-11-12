@@ -1,0 +1,15 @@
+-- Adds the Refund & Returns Policy as a fourth legal document type.
+--
+-- Purely additive: one new enum value. No table is altered and no row is
+-- rewritten. The document is informational, not a consent: it is not one of
+-- REQUIRED_LEGAL_DOCUMENT_TYPES, so no user is asked to accept it and
+-- GET /v1/legal/documents (the consent set) is unchanged.
+--
+-- Kept free of any statement that USES the value: PostgreSQL restricts
+-- `ALTER TYPE ... ADD VALUE` from sharing a transaction with a use of the new
+-- value. The rows come from `npm run seed` (docs/legal/refund-policy.v1.*.md).
+-- IF NOT EXISTS makes a re-run a clean no-op.
+--
+-- Deploy order: this migration BEFORE the code. An older build never reads or
+-- writes the value, so rolling the application back leaves the database valid.
+ALTER TYPE "LegalDocumentType" ADD VALUE IF NOT EXISTS 'REFUND_POLICY';

@@ -31,6 +31,7 @@
     "backfill:part-number-search-forms": "ts-node --compiler-options '{\"module\":\"commonjs\"}' prisma/backfill-part-number-search-forms.ts",
     "backfill:fitment-priority": "ts-node --compiler-options '{\"module\":\"commonjs\"}' prisma/backfill-fitment-priority.ts",
     "seed": "ts-node --compiler-options '{\"module\":\"commonjs\"}' src/prisma/seed.ts",
+    "seed:legal": "ts-node --compiler-options '{\"module\":\"commonjs\"}' src/prisma/seed-legal.ts",
     "seed:categories": "ts-node --compiler-options '{\"module\":\"commonjs\"}' prisma/seed-categories.ts",
     "seed:oem": "ts-node --compiler-options '{\"module\":\"commonjs\"}' prisma/seed-oem.ts",
     "seed:oem:csv": "ts-node --compiler-options '{\"module\":\"commonjs\"}' prisma/seed-oem-from-csv.ts",

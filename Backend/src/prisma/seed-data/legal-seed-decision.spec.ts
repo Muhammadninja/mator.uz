@@ -16,6 +16,7 @@ describe('legal seed decision', () => {
     locale: 'ru',
     title: 'Политика конфиденциальности',
     content: '# Политика\n\nФинальный утверждённый текст.',
+    effectiveAt: new Date('2026-09-01T00:00:00.000Z'),
     ...overrides,
   });
 

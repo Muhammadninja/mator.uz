@@ -66,3 +66,56 @@ describe('MobileConfigService.getConfig', () => {
     );
   });
 });
+
+describe('MobileConfigService support contacts', () => {
+  const original = { ...process.env };
+  const SUPPORT_VARS = ['APP_SUPPORT_PHONE', 'APP_SUPPORT_EMAIL', 'APP_SUPPORT_TELEGRAM'] as const;
+
+  beforeEach(() => {
+    for (const key of SUPPORT_VARS) delete process.env[key];
+  });
+  afterAll(() => {
+    process.env = original;
+  });
+
+  it('serves every channel as null when unset', () => {
+    expect(new MobileConfigService().getConfig().support).toEqual({
+      phone: null,
+      email: null,
+      telegram_username: null,
+    });
+  });
+
+  it('normalises the configured values', () => {
+    process.env.APP_SUPPORT_PHONE = ' +998 (50) 203-03-18 ';
+    process.env.APP_SUPPORT_EMAIL = 'matorinnovations@gmail.com';
+    process.env.APP_SUPPORT_TELEGRAM = '@Mator_AutoParts';
+
+    expect(new MobileConfigService().getConfig().support).toEqual({
+      phone: '+998502030318',
+      email: 'matorinnovations@gmail.com',
+      telegram_username: 'Mator_AutoParts',
+    });
+  });
+
+  it('adds the + to a bare international number and accepts a t.me link', () => {
+    process.env.APP_SUPPORT_PHONE = '998502030318';
+    process.env.APP_SUPPORT_TELEGRAM = 'https://t.me/Mator_AutoParts';
+
+    const support = new MobileConfigService().getConfig().support;
+    expect(support.phone).toBe('+998502030318');
+    expect(support.telegram_username).toBe('Mator_AutoParts');
+  });
+
+  it('hides a malformed channel instead of serving it', () => {
+    process.env.APP_SUPPORT_PHONE = 'call us';
+    process.env.APP_SUPPORT_EMAIL = 'not-an-email';
+    process.env.APP_SUPPORT_TELEGRAM = '@ab';
+
+    expect(new MobileConfigService().getConfig().support).toEqual({
+      phone: null,
+      email: null,
+      telegram_username: null,
+    });
+  });
+});

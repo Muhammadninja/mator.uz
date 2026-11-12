@@ -30,6 +30,15 @@ describe('order-transitions (single source of truth)', () => {
     expect(canTransition(OrderStatus.CANCELLED, OrderStatus.PAID)).toBe(false);
   });
 
+  it('DELIVERED is terminal: the return window counts from one handover only', () => {
+    // The app counts the Refund & Returns Policy window from delivered_at; an
+    // order that could leave DELIVERED and re-enter it would reopen the window.
+    expect(ALLOWED_TRANSITIONS[OrderStatus.DELIVERED]).toEqual([]);
+    for (const to of Object.values(OrderStatus)) {
+      expect(canTransition(OrderStatus.DELIVERED, to)).toBe(false);
+    }
+  });
+
   it('active (in-progress) orders = exactly the non-terminal statuses', () => {
     expect([...ACTIVE_ORDER_STATUSES].sort()).toEqual(
       [
