@@ -44,6 +44,17 @@ export class VehiclesController {
     return this.vehicles.get(req.user.id, id);
   }
 
+  /**
+   * Vehicle image status refresh (Phase 3E). Same auth and ownership as GET /:id.
+   * Returns `{ vehicle_id, vehicle_image }`, where `vehicle_image` has the same
+   * shape as on the vehicle itself.
+   */
+  @Get(':id/image')
+  @HttpCode(HttpStatus.OK)
+  getImage(@Request() req: { user: { id: string } }, @Param('id') id: string) {
+    return this.vehicles.getImage(req.user.id, id);
+  }
+
   @Post()
   @HttpCode(HttpStatus.CREATED)
   create(@Request() req: { user: { id: string } }, @Body() dto: CreateVehicleDto) {

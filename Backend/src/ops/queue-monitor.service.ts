@@ -72,6 +72,7 @@ export class QueueMonitorService implements OnModuleInit, OnModuleDestroy {
     @InjectQueue(QUEUE_NAMES.SMS) smsQueue: Queue,
     @InjectQueue(QUEUE_NAMES.NOTIFICATIONS) notificationsQueue: Queue,
     @InjectQueue(QUEUE_NAMES.MAINTENANCE) maintenanceQueue: Queue,
+    @InjectQueue(QUEUE_NAMES.VEHICLE_IMAGES) vehicleImagesQueue: Queue,
   ) {
     this.config = resolveQueueMonitorConfig(config);
     this.queues = new Map<string, Queue>([
@@ -79,6 +80,7 @@ export class QueueMonitorService implements OnModuleInit, OnModuleDestroy {
       [QUEUE_NAMES.SMS, smsQueue],
       [QUEUE_NAMES.NOTIFICATIONS, notificationsQueue],
       [QUEUE_NAMES.MAINTENANCE, maintenanceQueue],
+      [QUEUE_NAMES.VEHICLE_IMAGES, vehicleImagesQueue],
     ]);
   }
 

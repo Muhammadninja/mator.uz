@@ -35,6 +35,7 @@ import { bullBoardImports } from './bull-board.imports';
       { name: QUEUE_NAMES.SMS },
       { name: QUEUE_NAMES.NOTIFICATIONS },
       { name: QUEUE_NAMES.MAINTENANCE },
+      { name: QUEUE_NAMES.VEHICLE_IMAGES },
     ),
     // JwtAuthGuard's 'jwt' passport strategy for the admin queue-health endpoint.
     AuthModule,

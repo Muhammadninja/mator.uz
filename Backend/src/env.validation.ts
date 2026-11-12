@@ -4,6 +4,7 @@ import { validateDeliveryEnv } from './shipping/delivery.config';
 import { validateRuntimeEnv } from './common/runtime-env';
 import { validateSmsEnv } from './sms/sms-env.config';
 import { validateClickEnv } from './orders/webhooks/click.config';
+import { validateVehicleImageEnv } from './garage/vehicle-images/vehicle-image.config';
 
 /**
  * Boot-time environment validation, run by ConfigModule's `validate` hook
@@ -22,14 +23,18 @@ import { validateClickEnv } from './orders/webhooks/click.config';
  *   • Auth: AUTH_DEV_MODE=true is refused in production.
  *   • Delivery: any delivery rate or area that is set must make sense, and an area
  *     needs UZMAPS_API_KEY in production. No area at all is valid: couriers are off.
+ *   • Vehicle images: off by default; if enabled, it needs the pipeline URL (https,
+ *     or http to loopback) and its ≥32-char server-to-server request token.
  */
 export function validateEnv(
   env: Record<string, unknown>,
 ): Record<string, unknown> {
-  return validateDeliveryEnv(
-    validateAuthEnv(
-      validatePaymeEnv(
-        validateClickEnv(validateSmsEnv(validateRuntimeEnv(env))),
+  return validateVehicleImageEnv(
+    validateDeliveryEnv(
+      validateAuthEnv(
+        validatePaymeEnv(
+          validateClickEnv(validateSmsEnv(validateRuntimeEnv(env))),
+        ),
       ),
     ),
   );

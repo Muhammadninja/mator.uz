@@ -39,6 +39,7 @@ export const IdPrefix = {
   SALE: 'sale',
   SALE_TARGET: 'stgt',
   SOURCING_OFFER: 'soff',
+  VEHICLE_IMAGE_OUTBOX: 'vio',
 } as const;
 
 export type IdPrefix = (typeof IdPrefix)[keyof typeof IdPrefix];

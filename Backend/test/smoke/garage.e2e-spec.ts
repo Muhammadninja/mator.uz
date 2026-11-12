@@ -12,7 +12,14 @@ describe('Garage smoke', () => {
     prisma = createPrismaMock();
     realtime = { emitGarageEvent: jest.fn() };
     notifications = { emit: jest.fn().mockResolvedValue(undefined) };
-    svc = new VehiclesService(prisma, realtime as any, notifications as any);
+    // Vehicle image integration off: no identity, no outbox, nothing queued.
+    const images = {
+      prepare: jest.fn().mockResolvedValue(null),
+      stage: jest.fn().mockResolvedValue({ data: {}, outboxId: null }),
+      kick: jest.fn(),
+      refresh: jest.fn().mockResolvedValue(undefined),
+    };
+    svc = new VehiclesService(prisma, realtime as any, notifications as any, images as any);
   });
 
   const createDto = {
