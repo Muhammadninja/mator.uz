@@ -138,10 +138,12 @@ export class OrderStatusService {
    * Expire every overdue unpaid order (the sweeper cron). Each expiry is applied
    * under a status guard and, only when it actually flips a row, writes one
    * SYSTEM history entry — so a concurrent payment landing between the scan and
-   * the write can never produce a phantom "expired" history row. Returns the
-   * number of orders expired.
+   * the write can never produce a phantom "expired" history row.
+   *
+   * @returns the orders this call actually expired, so the caller can tell
+   *          their buyers.
    */
-  async expireOverdue(now: Date): Promise<number> {
+  async expireOverdue(now: Date): Promise<{ id: string; userId: string }[]> {
     const overdue = await this.prisma.order.findMany({
       where: {
         status: OrderStatus.PENDING_PAYMENT,
@@ -165,11 +167,12 @@ export class OrderStatusService {
           { paymentType: { notIn: OFFLINE_PAYMENT_TYPES } },
         ],
       },
-      select: { id: true },
+      select: { id: true, userId: true },
     });
 
-    let expired = 0;
-    for (const { id } of overdue) {
+    const expired: { id: string; userId: string }[] = [];
+    for (const order of overdue) {
+      const { id } = order;
       await this.prisma.$transaction(async (tx) => {
         // Conditional flip: only transitions rows still PENDING_PAYMENT and
         // still free of an active provider transaction, so an order that was
@@ -193,11 +196,92 @@ export class OrderStatusService {
             ),
           });
           await applyOrderStatus(tx, id, OrderStatus.EXPIRED);
-          expired += 1;
+          expired.push(order);
         }
       });
     }
     return expired;
+  }
+
+  /**
+   * The buyer backs out of an unpaid online (Payme) order. Under the row lock
+   * Payme's CreateTransaction takes, so a transaction cannot be bound to the order
+   * while it closes. Only PENDING_PAYMENT, so a payment that lands first wins: its
+   * move to PAID is conditional on the status too, and the loser matches nothing.
+   *
+   * An open Payme transaction does not stop it. That transaction's PerformTransaction
+   * is then refused (the order is no longer payable) and Payme does not charge.
+   *
+   * An order whose payment window already elapsed, with no open transaction, is
+   * EXPIRED rather than CANCELLED: the sweep would have expired it, and the buyer's
+   * request merely got there first.
+   *
+   * @returns the status this call moved the order to, or null when it moved nothing.
+   */
+  async cancelUnpaidOnline(
+    tx: Prisma.TransactionClient,
+    orderId: string,
+    by: { customerId: string; now: Date },
+  ): Promise<OrderStatus | null> {
+    await tx.$queryRaw`SELECT id FROM orders WHERE id = ${orderId} FOR UPDATE`;
+    const order = await tx.order.findUnique({
+      where: { id: orderId },
+      select: {
+        status: true,
+        paymentType: true,
+        expiresAt: true,
+        payments: {
+          where: { providerState: ACTIVE_PROVIDER_STATE },
+          select: { id: true },
+          take: 1,
+        },
+      },
+    });
+    if (
+      !order ||
+      order.status !== OrderStatus.PENDING_PAYMENT ||
+      (order.paymentType && OFFLINE_PAYMENT_TYPES.includes(order.paymentType))
+    ) {
+      return null;
+    }
+    const lapsed =
+      order.expiresAt !== null &&
+      order.expiresAt.getTime() <= by.now.getTime() &&
+      order.payments.length === 0;
+    const to = lapsed ? OrderStatus.EXPIRED : OrderStatus.CANCELLED;
+
+    const res = await tx.order.updateMany({
+      where: {
+        id: orderId,
+        status: OrderStatus.PENDING_PAYMENT,
+        payments: {
+          none: { status: { in: [PaymentStatus.PAID, PaymentStatus.REFUNDED] } },
+        },
+      },
+      data: { status: to },
+    });
+    if (res.count !== 1) return null;
+    await tx.orderStatusHistory.create({
+      data: lapsed
+        ? this.historyData(
+            orderId,
+            to,
+            undefined,
+            'Expired: payment window elapsed',
+          )
+        : {
+            ...this.historyData(
+              orderId,
+              to,
+              undefined,
+              'Cancelled by the customer',
+            ),
+            actorType: OrderActorType.CUSTOMER,
+            actorId: by.customerId,
+          },
+    });
+    await applyOrderStatus(tx, orderId, to);
+    return to;
   }
 
   /**

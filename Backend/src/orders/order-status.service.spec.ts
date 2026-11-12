@@ -166,13 +166,17 @@ describe('OrderStatusService', () => {
     const now = new Date('2026-07-20T12:00:00.000Z');
 
     it('expires only rows still pending and writes one history row each', async () => {
-      prisma.order.findMany.mockResolvedValue([{ id: 'ord_1' }, { id: 'ord_2' }]);
+      prisma.order.findMany.mockResolvedValue([
+        { id: 'ord_1', userId: 'u1' },
+        { id: 'ord_2', userId: 'u2' },
+      ]);
       // ord_1 still pending (flips), ord_2 was paid since the scan (no-op).
       prisma.order.updateMany.mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 0 });
 
       const expired = await service.expireOverdue(now);
 
-      expect(expired).toBe(1);
+      // Only the order that moved comes back, so only its buyer is told.
+      expect(expired).toEqual([{ id: 'ord_1', userId: 'u1' }]);
       expect(prisma.order.updateMany).toHaveBeenCalledWith({
         where: {
           id: 'ord_1',
@@ -192,7 +196,7 @@ describe('OrderStatusService', () => {
     it('does nothing when there are no overdue orders', async () => {
       prisma.order.findMany.mockResolvedValue([]);
 
-      expect(await service.expireOverdue(now)).toBe(0);
+      expect(await service.expireOverdue(now)).toEqual([]);
       expect(prisma.order.updateMany).not.toHaveBeenCalled();
       expect(prisma.orderStatusHistory.create).not.toHaveBeenCalled();
     });
