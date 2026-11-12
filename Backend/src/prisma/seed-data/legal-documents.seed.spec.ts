@@ -79,11 +79,9 @@ describe('legal document seed', () => {
     expect(isPlaceholderLegalContent(undefined)).toBe(true);
   });
 
-  it('flags the untranslated locales as placeholders', () => {
-    // uz/en are not translated yet. This test is expected to CHANGE when they
-    // are: it documents the current state rather than freezing it.
-    for (const doc of seed.filter((d) => d.locale !== 'ru')) {
-      expect(isPlaceholderLegalContent(doc.content)).toBe(true);
+  it('ships localized text instead of placeholder markers', () => {
+    for (const doc of seed) {
+      expect(isPlaceholderLegalContent(doc.content)).toBe(false);
     }
   });
 
@@ -93,10 +91,8 @@ describe('legal document seed', () => {
     }
   });
 
-  it('leaves the documents whose date is still blank unpublished', () => {
-    // Expected to CHANGE when the owner fills in the dates: it documents the
-    // current state (Terms v2 and the Refund & Returns Policy are drafts).
-    const drafts = seed.filter((d) => d.effectiveAt === null).map((d) => `${d.type} v${d.version}`);
-    expect(new Set(drafts)).toEqual(new Set(['TERMS_OF_USE v2', 'REFUND_POLICY v1']));
+  it('all current source documents include an effective date', () => {
+    const undated = seed.filter((d) => d.effectiveAt === null);
+    expect(undated).toEqual([]);
   });
 });
