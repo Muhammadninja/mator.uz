@@ -10,10 +10,16 @@ import {
   UseGuards,
   HttpCode,
   HttpStatus,
+  Headers,
+  Res,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiHeader, ApiTags } from '@nestjs/swagger';
 import { AdminRole } from '@prisma/client';
-import type { Request as ExpressRequest } from 'express';
+import type {
+  Request as ExpressRequest,
+  Response as ExpressResponse,
+} from 'express';
+import { parseIdempotencyKey } from './order-idempotency';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { Roles } from '../admin/auth/decorators/roles.decorator';
 import { AdminJwtGuard } from '../admin/auth/guards/admin-jwt.guard';
@@ -43,8 +49,27 @@ export class OrdersController {
   @Post()
   @UseGuards(JwtAuthGuard)
   @HttpCode(HttpStatus.CREATED)
-  create(@Request() req: { user: { id: string } }, @Body() dto: CreateOrderDto) {
-    return this.orders.createFromCart(req.user.id, dto);
+  @ApiHeader({
+    name: 'Idempotency-Key',
+    required: false,
+    description:
+      'One key per checkout. A retry with the same key and request returns the order already placed.',
+  })
+  async create(
+    @Request() req: { user: { id: string } },
+    @Body() dto: CreateOrderDto,
+    @Headers('idempotency-key') rawKey: string | undefined,
+    @Res({ passthrough: true }) res: ExpressResponse,
+  ) {
+    const key = parseIdempotencyKey(rawKey);
+    const { order, replayed } = await this.orders.checkout(
+      req.user.id,
+      dto,
+      key,
+    );
+    // Same status and body as the first answer; this only tells a log or a test apart.
+    if (replayed) res.setHeader('Idempotent-Replayed', 'true');
+    return order;
   }
 
   // Order history (paginated, optional status filter). Declared before the

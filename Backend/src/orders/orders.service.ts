@@ -77,6 +77,12 @@ import {
   StockConflictRefuser,
 } from './inventory/stock-conflict';
 import { findLineSellers } from './order-settlement';
+import {
+  OrderIdempotencyClaim,
+  checkoutPayloadHash,
+  findSettledCheckout,
+  recordOrderIdempotency,
+} from './order-idempotency';
 import { OFFLINE_PAYMENT_TYPES } from './offline-order.policy';
 import {
   OrderCharges,
@@ -145,7 +151,56 @@ export class OrdersService {
     this.stockConflicts = new StockConflictRefuser(this.prisma, this.discounts);
   }
 
-  async createFromCart(userId: string, dto: CreateOrderDto) {
+  /**
+   * POST /v1/orders. With an Idempotency-Key, a checkout already placed under it is
+   * answered with that same order, whatever the cart holds now, and is looked for first,
+   * before the cart (which that checkout emptied) is even read. A new key places the order
+   * and registers the key in one transaction. A concurrent attempt with the same key fails
+   * on its own (the cart it planned from is gone, or the key's unique index), and once its
+   * transaction is rolled back it finds the winner's row and answers with that order.
+   */
+  async checkout(
+    userId: string,
+    dto: CreateOrderDto,
+    idempotencyKey: string | null,
+  ): Promise<{ order: ReturnType<typeof presentOrder>; replayed: boolean }> {
+    if (!idempotencyKey) {
+      return { order: await this.createFromCart(userId, dto), replayed: false };
+    }
+    const claim: OrderIdempotencyClaim = {
+      userId,
+      idempotencyKey,
+      payloadHash: checkoutPayloadHash(dto),
+    };
+    const earlier = await this.replayCheckout(claim);
+    if (earlier) return { order: earlier, replayed: true };
+    try {
+      return {
+        order: await this.createFromCart(userId, dto, claim),
+        replayed: false,
+      };
+    } catch (err) {
+      const settled = await this.replayCheckout(claim);
+      if (settled) return { order: settled, replayed: true };
+      throw err;
+    }
+  }
+
+  private async replayCheckout(claim: OrderIdempotencyClaim) {
+    const orderId = await findSettledCheckout(this.prisma, claim);
+    if (!orderId) return null;
+    const order = await this.prisma.order.findFirst({
+      where: { id: orderId, userId: claim.userId },
+      include: ORDER_INCLUDE,
+    });
+    return order ? presentOrder(order) : null;
+  }
+
+  async createFromCart(
+    userId: string,
+    dto: CreateOrderDto,
+    idempotency: OrderIdempotencyClaim | null = null,
+  ) {
     const cart = await this.prisma.cart.findUnique({
       where: { userId },
       include: { items: { include: { offer: { select: { sellerTgId: true } } } } },
@@ -472,6 +527,8 @@ export class OrdersService {
         where: { id: cart.id },
         data: { promoCode: null, promoDiscountUzs: null },
       });
+      // Last, so a key is registered only for an order that is otherwise complete.
+      if (idempotency) await recordOrderIdempotency(tx, idempotency, created.id);
       return created;
     }).catch((err: unknown) => {
       if (
