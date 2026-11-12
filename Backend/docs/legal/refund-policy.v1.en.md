@@ -7,7 +7,7 @@ title: "Refund & Returns Policy"
 
 # Refund & Returns Policy
 
-**Effective Date:** __.__.____
+**Effective Date:** 01.09.2026
 
 This Refund & Returns Policy applies to products purchased through the Mator mobile application and is governed by the laws of the Republic of Uzbekistan.
 
