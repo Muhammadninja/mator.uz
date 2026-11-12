@@ -831,6 +831,7 @@ model AppUser {
   legalAcceptances       LegalAcceptance[]
 
   sourcingRequests SourcingRequest[]
+  orderIdempotency OrderIdempotency[]
 
   @@index([deletedAt])
   @@map("app_users")
@@ -1734,6 +1735,7 @@ model Order {
   payments          Payment[]
   statusHistory     OrderStatusHistory[]
   financialRefunds  FinancialRefund[]
+  idempotency       OrderIdempotency?
   // Set while the registry accounts for all the money this order took in, so "is a
   // refund still owed" can be filtered without summing per row. Maintained only in
   // the transaction that writes the registry: see financial-refund.ledger.ts.
@@ -2812,6 +2814,27 @@ model SourcingRequest {
 
   @@unique([userId, idempotencyKey])
   @@map("sourcing_requests")
+}
+
+// One checkout per (buyer, Idempotency-Key). Written in the transaction that creates the
+// order, so a row exists exactly when its order does: a retry finds it and gets that order
+// back, and a failed checkout leaves nothing behind. Kept for as long as the order exists,
+// so an old key can never place a second order; past `expiresAt` the key is only refused.
+model OrderIdempotency {
+  id             String   @id @default(uuid()) @db.Uuid
+  userId         String   @map("user_id") @db.Uuid
+  idempotencyKey String   @map("idempotency_key") @db.VarChar(128)
+  // SHA-256 of the canonical checkout request. Reusing a key for anything else is a conflict.
+  payloadHash    String   @map("payload_hash") @db.Char(64)
+  orderId        String   @unique @map("order_id") @db.VarChar(64)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  // End of the replay window. After it the key is refused, never reused.
+  expiresAt      DateTime @map("expires_at") @db.Timestamptz(3)
+  user           AppUser  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  order          Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, idempotencyKey])
+  @@map("order_idempotency")
 }
 
 // Whether a ticket's staff notification has gone out. NULL on tickets from
