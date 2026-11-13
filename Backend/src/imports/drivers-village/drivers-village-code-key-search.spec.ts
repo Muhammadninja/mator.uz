@@ -20,11 +20,14 @@ async function search(
   const prisma = {
     partCategory: { findMany: partCategoryFindMany() },
     catalogPart: {
-      count: () => Promise.resolve(0),
-      findMany: (args: { where: unknown }) => {
-        where = args.where;
-        return Promise.resolve([]);
+      // The listing's own predicate is the one its total is counted over (the
+      // first count). Its page is read tier by tier — exact numbers first
+      // (catalog/search/part-relevance.ts) — so no single page query holds it.
+      count: (args: { where: unknown }) => {
+        where ??= args.where;
+        return Promise.resolve(0);
       },
+      findMany: () => Promise.resolve([]),
       groupBy: () => Promise.resolve([]),
       aggregate: () => Promise.resolve({ _min: {}, _max: {} }),
     },

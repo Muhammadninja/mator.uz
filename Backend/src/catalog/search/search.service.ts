@@ -20,11 +20,13 @@ import {
   loadCategoryTreeScope,
   visibleCategoryWhere,
 } from '../categories/category-tree-scope';
+import { categorySubtreeWhere, partOrderBy } from '../parts/parts.service';
 import {
-  categorySubtreeWhere,
-  partOrderBy,
   partTextWhere,
-} from '../parts/parts.service';
+  ranksByRelevance,
+  relevanceTiers,
+  tieredPage,
+} from './part-relevance';
 import { DiscountService } from '../../sales/discount.service';
 
 const MAX_SEARCH_LIMIT = 50;
@@ -78,7 +80,8 @@ export class SearchService {
     const offset = dto.pageToken ? decodePageToken(dto.pageToken) : 0;
 
     // The listing's own definitions: only buyer-listed parts in visible categories,
-    // title or article number, a category with everything beneath it. Kept under AND
+    // title or part number (search/part-relevance.ts), a category with
+    // everything beneath it. Kept under AND
     // so the `seller` rating filter below can still be spread in beside it.
     const conditions = await this.listedParts();
     if (q) conditions.push(partTextWhere(q));
@@ -89,14 +92,23 @@ export class SearchService {
     const [total, fetched, catGroup, under200k, between, highRated, sales] =
       await Promise.all([
         this.prisma.catalogPart.count({ where }),
-        this.prisma.catalogPart.findMany({
+        tieredPage(
+          (w) => this.prisma.catalogPart.count({ where: w }),
+          (w, skip, take) =>
+            this.prisma.catalogPart.findMany({
+              where: w,
+              include: { category: true },
+              orderBy: partOrderBy(dto.sortBy),
+              skip,
+              take,
+            }),
           where,
-          include: { category: true },
-          orderBy: partOrderBy(dto.sortBy),
-          skip: offset,
+          // Exact part-number matches first, unless the buyer chose a sort.
+          q && ranksByRelevance(dto.sortBy) ? relevanceTiers(q) : [{}],
+          offset,
           // One past the page says whether another page exists.
-          take: limit + 1,
-        }),
+          limit + 1,
+        ),
         this.prisma.catalogPart.groupBy({
           by: ['categoryId'],
           where,
@@ -233,11 +245,23 @@ export class SearchService {
     if (term) suggestions.push({ text: term, type: 'query' });
 
     if (term) {
-      const products = await this.prisma.catalogPart.findMany({
-        where: { AND: [...(await this.listedParts()), partTextWhere(term)] },
-        select: { id: true, title: true },
-        take: Math.max(0, safeLimit - 1),
-      });
+      // Exact part-number matches first, then titles; newest first within each,
+      // so the same text always suggests the same parts.
+      const products = await tieredPage(
+        (w) => this.prisma.catalogPart.count({ where: w }),
+        (w, skip, take) =>
+          this.prisma.catalogPart.findMany({
+            where: w,
+            select: { id: true, title: true },
+            orderBy: partOrderBy(),
+            skip,
+            take,
+          }),
+        { AND: [...(await this.listedParts()), partTextWhere(term)] },
+        relevanceTiers(term),
+        0,
+        Math.max(0, safeLimit - 1),
+      );
       for (const p of products) {
         suggestions.push({
           text: p.title,
