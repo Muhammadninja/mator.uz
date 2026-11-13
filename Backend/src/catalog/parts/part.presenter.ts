@@ -1,5 +1,8 @@
 import { displayNumbers } from '../../common/normalize-oem.util';
-import { fitModelIds } from '../compatibility/vehicle-fitment';
+import {
+  fitModelIds,
+  hasVerifiedSourceFit,
+} from '../compatibility/vehicle-fitment';
 import { isBuyerInStock } from '../../orders/inventory/inventory-availability';
 import {
   Prisma,
@@ -26,6 +29,7 @@ import {
 /** Curated (admin Fitment Studio) bindings, as the card and checks need them. */
 export const CURATED_FITMENT_SELECT = {
   vehicleModelId: true,
+  status: true,
   vehicleModel: { select: { name: true, make: { select: { name: true } } } },
 } satisfies Prisma.FitmentBindingSelect;
 
@@ -53,6 +57,10 @@ export interface VehicleCompatContext {
   trimId: string | null;
   engineId: string | null;
   year: number;
+  /** Canonical names, read only by the verified dealer fitment rule. */
+  makeName?: string | null;
+  modelName?: string | null;
+  generationModelName?: string;
 }
 
 /** Distinct VehicleModelRef ids a part is curated to (empty = not curated). */
@@ -63,6 +71,37 @@ export function curatedModelIds(part: {
     ...new Set((part.fitmentBindings ?? []).map((b) => b.vehicleModelId)),
   ];
 }
+
+/**
+ * A part's curated fitment, split by how sure the operator was. `ids` is every
+ * model it is bound to (the operator's complete list); `confirmed` only the
+ * models with at least one binding that is not MAYBE. A binding read without
+ * its status counts as confirmed (the column defaults to EXACT_MATCH).
+ */
+export interface CuratedFitment {
+  ids: readonly string[];
+  confirmed: readonly string[];
+}
+
+export function curatedFitment(part: {
+  fitmentBindings?: { vehicleModelId: string; status?: string | null }[] | null;
+}): CuratedFitment {
+  const bindings = part.fitmentBindings ?? [];
+  return {
+    ids: [...new Set(bindings.map((b) => b.vehicleModelId))],
+    confirmed: [
+      ...new Set(
+        bindings
+          .filter((b) => b.status !== 'MAYBE')
+          .map((b) => b.vehicleModelId),
+      ),
+    ],
+  };
+}
+
+const isCuratedFitment = (
+  c: readonly string[] | CuratedFitment,
+): c is CuratedFitment => !Array.isArray(c);
 
 export interface CompatibilityResult {
   status: string; // fits | maybe | does_not_fit
@@ -82,23 +121,33 @@ export function formatUzs(amount: Prisma.Decimal | number): string {
  * Order of evidence (strongest first):
  *   1. a trim(+year) row in part_compatibilities — its own status;
  *   2. a CURATED binding (fitment_bindings) to the vehicle's exact model
- *      (VehicleModelRef id) — "fits";
- *   3. an engine row — FITS is downgraded to "maybe" (trim unconfirmed);
- *   4. data exists but none of it covers this vehicle — "does_not_fit": trim/
+ *      (VehicleModelRef id) — "fits", or "maybe" when every binding to it is
+ *      MAYBE (the operator was unsure; that still overrides a dealer row);
+ *   3. a VERIFIED dealer row (`verifiedSourceFit`, from hasVerifiedSourceFit
+ *      in catalog/compatibility/vehicle-fitment.ts) naming the vehicle's make
+ *      and model — "fits";
+ *   4. an engine row — FITS is downgraded to "maybe" (trim unconfirmed);
+ *   5. data exists but none of it covers this vehicle — "does_not_fit": trim/
  *      engine rows that all miss, or a curated model list without this model
  *      (curation is the operator's complete answer for the part);
- *   5. no data at all — "maybe".
+ *   6. no data at all — "maybe".
  *
- * Legacy name-based fit rows (catalog_part_fits) never produce "fits" here:
- * they are seller-entered and unverified, so they only widen the LISTING (see
- * catalog/compatibility/vehicle-fitment.ts), never assert an exact match.
+ * Other legacy name-based fit rows (Telegram sellers, make-wide rows) never
+ * produce "fits": they are unverified, so they only widen the LISTING, never
+ * assert an exact match. A verified dealer part whose rows name other models
+ * is not "does_not_fit" either — not listed is not an explicit no.
  */
 export function computeCompatibility(
   compatibilities: PartWithRelations['compatibilities'],
   vehicle: VehicleCompatContext | null,
-  curatedModels: readonly string[] = [],
+  curated: readonly string[] | CuratedFitment = [],
+  verifiedSourceFit = false,
 ): CompatibilityResult | null {
   if (!vehicle) return null;
+  // A bare id list (older callers) means every binding is confirmed.
+  const { ids: curatedModels, confirmed } = isCuratedFitment(curated)
+    ? curated
+    : { ids: curated, confirmed: curated };
 
   const trimMatch = compatibilities.find(
     (c) =>
@@ -114,7 +163,16 @@ export function computeCompatibility(
     };
   }
 
-  if (fitModelIds(vehicle).some((id) => curatedModels.includes(id))) {
+  const ownCurated = fitModelIds(vehicle).filter((id) =>
+    curatedModels.includes(id),
+  );
+  if (ownCurated.length > 0) {
+    return ownCurated.some((id) => confirmed.includes(id))
+      ? { status: 'fits', confidence: 1, notes: null }
+      : { status: 'maybe', confidence: 0, notes: null };
+  }
+
+  if (verifiedSourceFit) {
     return { status: 'fits', confidence: 1, notes: null };
   }
 
@@ -151,8 +209,11 @@ function fitSlug(name: string): string {
  * The card's `fits[]` / `make_fits[]`. A part with curated bindings shows its
  * curated models (and no make-wide claim) — the same set the garage filter and
  * the compatibility check use — so the card never advertises a model a buyer's
- * garage would then be refused. Uncurated parts keep the legacy projected rows.
- * The wire shape is identical either way.
+ * garage would then be refused. Only CONFIRMED curated models are listed: the
+ * app titles this list «Подходит для автомобилей», so a model the operator
+ * bound as MAYBE is left out (and a part bound only as MAYBE lists nothing —
+ * its legacy rows do not come back, curation still decides). Uncurated parts
+ * keep the legacy projected rows. The wire shape is identical either way.
  */
 function presentFitment(part: PartWithRelations) {
   const curated = part.fitmentBindings ?? [];
@@ -167,7 +228,7 @@ function presentFitment(part: PartWithRelations) {
       }
     >();
     for (const b of curated) {
-      if (byModel.has(b.vehicleModelId)) continue;
+      if (b.status === 'MAYBE' || byModel.has(b.vehicleModelId)) continue;
       const makeName = b.vehicleModel.make.name;
       const modelName = b.vehicleModel.name;
       byModel.set(b.vehicleModelId, {
@@ -367,7 +428,8 @@ export function presentPartItem(
       ? computeCompatibility(
           part.compatibilities,
           vehicle,
-          curatedModelIds(part),
+          curatedFitment(part),
+          hasVerifiedSourceFit(part, vehicle),
         )
       : null,
     // Static make/model fitment for this part — "Fits: Chevrolet Cobalt, …"

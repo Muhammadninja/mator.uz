@@ -40,11 +40,13 @@ import {
   PartWithRelations,
   presentPartItem,
   computeCompatibility,
+  curatedFitment,
   curatedModelIds,
   VehicleCompatContext,
 } from './part.presenter';
 import { ActiveSale, DiscountResult, DiscountService } from '../../sales/discount.service';
 import {
+  hasVerifiedSourceFit,
   HAS_NO_CURATED_FITMENT,
   VEHICLE_FIT_SELECT,
   VehicleFitContext,
@@ -166,10 +168,15 @@ function withTreeClassification<
   return { ...part, ...tree.classify(part.categoryId) };
 }
 
-/** Only the curated model ids — what a compatibility decision reads. */
+/** The curated model ids and their status — what a compatibility decision reads. */
 const CURATED_IDS_SELECT = {
-  select: { vehicleModelId: true },
+  select: { vehicleModelId: true, status: true },
 } satisfies Prisma.FitmentBindingFindManyArgs;
+
+/** The legacy row names the verified dealer rule reads. */
+const VERIFIED_FIT_ROW_SELECT = {
+  select: { makeName: true, modelName: true },
+} satisfies Prisma.CatalogPartFitFindManyArgs;
 
 @Injectable()
 export class PartsService {
@@ -348,14 +355,23 @@ export class PartsService {
     // here too and its numbers and fitment cannot be enumerated by id.
     const part = await this.prisma.catalogPart.findFirst({
       where: { id: partId, ...BUYER_LISTED_PART },
-      include: { compatibilities: true, fitmentBindings: CURATED_IDS_SELECT },
+      include: {
+        compatibilities: true,
+        fitmentBindings: CURATED_IDS_SELECT,
+        fits: VERIFIED_FIT_ROW_SELECT,
+      },
     });
     if (!part) throw new NotFoundException('Part not found');
     await this.assertCategoryVisible(part.categoryId);
 
     const vehicle = await this.loadGarageVehicle(userId, vehicleId);
     const curated = curatedModelIds(part);
-    const result = computeCompatibility(part.compatibilities, vehicle, curated);
+    const result = computeCompatibility(
+      part.compatibilities,
+      vehicle,
+      curatedFitment(part),
+      hasVerifiedSourceFit(part, vehicle),
+    );
     const curatedFit =
       !!vehicle &&
       fitModelIds(vehicle).some((id) => curated.includes(id)) &&
@@ -424,10 +440,13 @@ export class PartsService {
       select: {
         id: true,
         categoryId: true,
+        sellerId: true,
         isUniversal: true,
         oemNumbers: true,
         compatibilities: true,
         fitmentBindings: CURATED_IDS_SELECT,
+        // Only for the verified dealer rule (hasVerifiedSourceFit).
+        fits: VERIFIED_FIT_ROW_SELECT,
       },
     });
     if (!part) throw new NotFoundException('Part not found');
@@ -452,10 +471,15 @@ export class PartsService {
 
     // No vehicle resolved (neither id nor vin matched a row) → we genuinely
     // can't tell, so UNCERTAIN rather than a false negative. A curated binding
-    // to the vehicle's exact model is enough for EXACT_MATCH on its own.
+    // to the vehicle's exact model, or a verified dealer row naming its make and
+    // model, is enough for EXACT_MATCH on its own.
     const internal =
-      computeCompatibility(part.compatibilities, vehicle, curatedModelIds(part))
-        ?.status ?? 'maybe';
+      computeCompatibility(
+        part.compatibilities,
+        vehicle,
+        curatedFitment(part),
+        hasVerifiedSourceFit(part, vehicle),
+      )?.status ?? 'maybe';
     return this.presentCompatibility(
       part.id,
       echoedVehicleId,
