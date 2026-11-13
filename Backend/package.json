@@ -19,6 +19,7 @@
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
     "test:integration": "jest --config ./test/jest-integration.json --runInBand",
+    "test:staging-infra": "node --test scripts/staging-infra.test.cjs",
     "grafana:build": "ts-node --compiler-options '{\"module\":\"commonjs\"}' scripts/grafana/generate.ts",
     "grafana:test": "jest --rootDir . --testPathPatterns scripts/grafana",
     "grafana:check": "npm run grafana:build && npm run grafana:test",

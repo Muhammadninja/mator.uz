@@ -1,0 +1,3 @@
+# Backend currently authenticates with REDIS_PASSWORD and no ACL username.
+# This default user exists only on this isolated staging Redis instance.
+user default on >replace-with-a-random-staging-redis-password ~* &* +@all
