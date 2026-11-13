@@ -105,6 +105,66 @@ export const PROD_REFERENCE_2026_09_25: ReferenceSnapshot = {
   ],
 };
 
+/**
+ * Production reference state on 2026-11-12 (Wave 1 audit), read the same way:
+ * Chevrolet, BYD and Volkswagen models as the live Reference API served them,
+ * the G-2 rows applied, and the makes that are now inactive (Ravon, SsangYong,
+ * Skoda and Genesis were created active by G-2 and later switched off). The
+ * API exposes neither sort numbers nor year/body fields, so sortOrder is
+ * positional and the facts are unset; the real values come from the snapshot
+ * SQL before any apply.
+ */
+export const PROD_REFERENCE_2026_11_12: ReferenceSnapshot = {
+  makes: [
+    ...PROD_REFERENCE_2026_09_25.makes.map((m) => ({ ...m })),
+    referenceMake('ravon', 'Ravon', 12),
+    referenceMake('ssangyong', 'SsangYong', 13),
+    referenceMake('skoda', 'Skoda', 14),
+    referenceMake('genesis', 'Genesis', 15),
+  ],
+  models: [
+    ...models('chevrolet', [
+      ['cobalt', 'Cobalt'],
+      ['malibu', 'Malibu'],
+      ['orlando', 'Orlando'],
+      ['nexia', 'Nexia'],
+      ['lacetti', 'Lacetti'],
+      ['gentra', 'Gentra'],
+      ['tracker-2', 'Tracker'],
+      ['spark', 'Spark'],
+      ['tracker', 'Tracker'],
+      ['nexia-3', 'Nexia 3'],
+      ['captiva', 'Captiva'],
+      ['onix', 'Onix'],
+      ['genrta-lacetti', 'Genrta'],
+      ['damas', 'Damas'],
+      ['nexia-2', 'Nexia 2'],
+      ['chevrolet-matiz', 'Matiz'],
+      ['equinox', 'Equinox'],
+      ['traverse', 'Traverse'],
+      ['tahoe', 'Tahoe'],
+      ['trailblazer', 'Trailblazer'],
+      ['epica', 'Epica'],
+      ['labo', 'Labo'],
+      ['nexia-1', 'Nexia 1'],
+      ['tacuma', 'Tacuma'],
+      ['cruze', 'Cruze'],
+    ]),
+    ...PROD_REFERENCE_2026_09_25.models
+      .filter((m) => m.makeId !== 'chevrolet')
+      .map((m) => ({ ...m })),
+    ...models('ravon', [['r4-cobalt', 'R4 (Cobalt)']]),
+    ...models('ssangyong', [
+      ['torres', 'Torres'],
+      ['rexton', 'Rexton'],
+      ['korando', 'Korando'],
+      ['musso', 'Musso'],
+    ]),
+    ...models('skoda', [['kodiaq', 'Kodiaq']]),
+    ...models('genesis', [['g90', 'G90']]),
+  ],
+};
+
 export const cloneSnapshot = (s: ReferenceSnapshot): ReferenceSnapshot => ({
   makes: s.makes.map((m) => ({ ...m })),
   models: s.models.map((m) => ({ ...m })),

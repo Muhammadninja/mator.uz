@@ -37,6 +37,46 @@ export interface SeedReferenceModel {
   name: string;
   /** Where the pair is used today (audit, 2026-09-25). */
   evidence: string;
+  /**
+   * Official pages showing the model is offered in Uzbekistan. Required by
+   * datasets whose policy says `requireAvailabilitySources`.
+   */
+  availability?: SourceRef[];
+  /** Written on a NEW row only; an existing row's value is never touched. */
+  bodyType?: SourcedValue<string>;
+  /** Written on a NEW row only. A model year of a car on sale is not this. */
+  yearFrom?: SourcedValue<number>;
+  /** Written on a NEW row only. Omitted while the model is still produced. */
+  yearTo?: SourcedValue<number>;
+}
+
+/** One verifiable reference: the page, who published it, and what it says. */
+export interface SourceRef {
+  /** https URL of the page that states the fact. */
+  url: string;
+  /** Who published the page (manufacturer, official distributor). */
+  publisher: string;
+  /** YYYY-MM-DD the page was read. */
+  accessedOn: string;
+  /** What the page says, quoted as closely as the page allows. */
+  quote: string;
+}
+
+/** A fact the seed may write, never without the source that states it. */
+export interface SourcedValue<T> {
+  value: T;
+  source: SourceRef;
+}
+
+/**
+ * A model that was considered and deliberately NOT added: it needs an owner
+ * decision or an official source first. Printed on every run, never planned.
+ */
+export interface HeldCandidate {
+  makeId: string;
+  name: string;
+  reason: string;
+  sources: SourceRef[];
 }
 
 /** A deliberate visibility change for ONE named make; never a generic rule. */

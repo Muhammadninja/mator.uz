@@ -1,4 +1,6 @@
 import {
+  HeldCandidate,
+  REFERENCE_KNOWN_ISSUES,
   REFERENCE_MAKE_STATE_CHANGES,
   REFERENCE_NEW_MAKES,
   REFERENCE_NEW_MODELS,
@@ -6,6 +8,11 @@ import {
   SeedReferenceMake,
   SeedReferenceModel,
 } from './seed-data/vehicle-reference.seed';
+import {
+  describeSources,
+  modelFactErrors,
+  plannedFacts,
+} from './vehicle-reference-facts';
 
 /**
  * Pure planning for the G-2 vehicle reference seed: given the dataset and one
@@ -14,16 +21,36 @@ import {
  * `vehicle-reference-seed.ts`, which runs the plan.
  */
 
+/**
+ * What a dataset is allowed to do. Omitted = the G-2 behaviour (new makes and
+ * the listed make-state changes allowed, no sources required).
+ */
+export interface ReferenceDatasetPolicy {
+  allowNewMakes: boolean;
+  allowMakeStateChanges: boolean;
+  /** Every model needs an official availability source. */
+  requireAvailabilitySources: boolean;
+}
+
 export interface ReferenceDataset {
+  /** Printed in the report header, e.g. "G-2". */
+  label?: string;
+  policy?: ReferenceDatasetPolicy;
   makes: SeedReferenceMake[];
   models: SeedReferenceModel[];
   makeStateChanges: SeedMakeStateChange[];
+  /** Existing-data problems the dataset deliberately leaves alone. */
+  knownIssues?: string[];
+  /** Candidates considered and not added; printed, never planned. */
+  held?: HeldCandidate[];
 }
 
 export const VEHICLE_REFERENCE_DATASET: ReferenceDataset = {
+  label: 'G-2',
   makes: REFERENCE_NEW_MAKES,
   models: REFERENCE_NEW_MODELS,
   makeStateChanges: REFERENCE_MAKE_STATE_CHANGES,
+  knownIssues: REFERENCE_KNOWN_ISSUES,
 };
 
 export interface ExistingMake {
@@ -39,6 +66,15 @@ export interface ExistingModel {
   makeId: string;
   name: string;
   sortOrder: number;
+  /** Read for the report and the post-write check; the seed never writes them on an existing row. */
+  yearFrom?: number | null;
+  yearTo?: number | null;
+  bodyType?: string | null;
+  /**
+   * Set on a visual generation row (`nexia-3` → `nexia`). Such rows are hidden
+   * from the picker, so they never count for a new row's sort position.
+   */
+  variantOfModelId?: string | null;
 }
 
 export interface ReferenceSnapshot {
@@ -59,6 +95,12 @@ export interface PlannedModel {
   name: string;
   sortOrder: number;
   evidence: string;
+  /** Sourced facts written on the new row; null when the dataset states none. */
+  yearFrom: number | null;
+  yearTo: number | null;
+  bodyType: string | null;
+  /** Where each fact comes from, for the report. */
+  sources: string[];
 }
 
 export interface PlannedStateChange {
@@ -69,6 +111,7 @@ export interface PlannedStateChange {
 }
 
 export interface ReferencePlan {
+  label: string;
   /** Dataset rows already present exactly as the dataset describes them. */
   unchangedMakes: string[];
   unchangedModels: string[];
@@ -85,6 +128,14 @@ export interface ReferencePlan {
   untouched: { makes: number; models: number };
   /** Makes that already hold several models with the same name (informational). */
   duplicateNames: string[];
+  /**
+   * Dataset facts for a row that already exists and holds something else.
+   * Informational: existing rows are never written (owner decision 5), so an
+   * admin's value always stays.
+   */
+  preservedFacts: string[];
+  knownIssues: string[];
+  held: HeldCandidate[];
 }
 
 export const isBlocked = (plan: ReferencePlan): boolean =>
@@ -103,8 +154,42 @@ const MAX_NAME = 120; // VarChar(120)
 /** Case-insensitive name key, matching how garage fitment compares names. */
 const nameKey = (name: string): string => name.trim().toLowerCase();
 
-function validateDataset(dataset: ReferenceDataset): string[] {
+function validateDataset(dataset: ReferenceDataset, today: Date): string[] {
   const errors: string[] = [];
+  const policy = dataset.policy;
+  if (policy && !policy.allowNewMakes && dataset.makes.length > 0) {
+    errors.push(
+      `this dataset may not create makes, but lists ${dataset.makes.map((m) => m.id).join(', ')}`,
+    );
+  }
+  if (
+    policy &&
+    !policy.allowMakeStateChanges &&
+    dataset.makeStateChanges.length > 0
+  ) {
+    errors.push(
+      `this dataset may not change is_active of a make, but lists ${dataset.makeStateChanges.map((c) => c.makeId).join(', ')}`,
+    );
+  }
+  for (const m of dataset.models) {
+    errors.push(
+      ...modelFactErrors(m, {
+        requireAvailability: policy?.requireAvailabilitySources ?? false,
+        today,
+      }),
+    );
+  }
+  for (const h of dataset.held ?? []) {
+    if (
+      dataset.models.some(
+        (m) => m.makeId === h.makeId && nameKey(m.name) === nameKey(h.name),
+      )
+    ) {
+      errors.push(
+        `"${h.name}" (${h.makeId}) is both held and planned; it must be one or the other`,
+      );
+    }
+  }
   const checkId = (label: string, id: string) => {
     if (!ID_PATTERN.test(id) || id.length > MAX_ID) {
       errors.push(
@@ -170,8 +255,10 @@ function validateDataset(dataset: ReferenceDataset): string[] {
 export function planVehicleReferenceSeed(
   dataset: ReferenceDataset,
   snapshot: ReferenceSnapshot,
+  opts: { today?: Date } = {},
 ): ReferencePlan {
   const plan: ReferencePlan = {
+    label: dataset.label ?? 'Vehicle reference',
     unchangedMakes: [],
     unchangedModels: [],
     newMakes: [],
@@ -179,9 +266,12 @@ export function planVehicleReferenceSeed(
     stateChanges: [],
     stateUnchanged: [],
     conflicts: [],
-    errors: validateDataset(dataset),
+    errors: validateDataset(dataset, opts.today ?? new Date()),
     untouched: { makes: 0, models: 0 },
     duplicateNames: [],
+    preservedFacts: [],
+    knownIssues: dataset.knownIssues ?? [],
+    held: dataset.held ?? [],
   };
 
   const makeById = new Map(snapshot.makes.map((m) => [m.id, m]));
@@ -191,7 +281,9 @@ export function planVehicleReferenceSeed(
   let nextMakeSort = Math.max(0, ...snapshot.makes.map((m) => m.sortOrder)) + 1;
   const nextModelSort = new Map<string, number>();
   const takeModelSort = (makeId: string) => {
-    const existing = snapshot.models.filter((m) => m.makeId === makeId);
+    const existing = snapshot.models.filter(
+      (m) => m.makeId === makeId && !m.variantOfModelId,
+    );
     const next =
       nextModelSort.get(makeId) ??
       Math.max(0, ...existing.map((m) => m.sortOrder)) + 1;
@@ -254,6 +346,15 @@ export function planVehicleReferenceSeed(
         );
       } else {
         plan.unchangedModels.push(model.id);
+        const facts = plannedFacts(model);
+        for (const field of ['yearFrom', 'yearTo', 'bodyType'] as const) {
+          const stored = existing[field] ?? null;
+          if (facts[field] !== null && facts[field] !== stored) {
+            plan.preservedFacts.push(
+              `model "${model.id}": ${field} stays ${JSON.stringify(stored)}; the dataset's ${JSON.stringify(facts[field])} is not written to an existing row`,
+            );
+          }
+        }
       }
       continue;
     }
@@ -273,6 +374,8 @@ export function planVehicleReferenceSeed(
       name: model.name,
       sortOrder: takeModelSort(model.makeId),
       evidence: model.evidence,
+      ...plannedFacts(model),
+      sources: describeSources(model),
     });
   }
 

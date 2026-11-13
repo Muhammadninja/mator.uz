@@ -1,6 +1,7 @@
 import { Prisma, PrismaClient } from '@prisma/client';
 import { RedisKeys } from '../redis/redis.keys';
 import {
+  ExistingModel,
   isBlocked,
   isNoop,
   planVehicleReferenceSeed,
@@ -11,8 +12,8 @@ import {
 } from './vehicle-reference-plan';
 
 /**
- * G-2 vehicle reference seed: adds the makes and models the Garage picker is
- * missing, without disturbing what is already live.
+ * Vehicle reference seed (G-2, then Wave 1…): adds the makes and models the
+ * Garage picker is missing, without disturbing what is already live.
  *
  * ── Design rules (planning lives in vehicle-reference-plan.ts) ──────────────
  *  • PLAN FIRST — the whole run is computed from one read of the reference
@@ -28,8 +29,12 @@ import {
  *  • ONE TRANSACTION — the apply re-plans inside a serializable transaction,
  *    writes, then re-reads and checks that every pre-existing row is unchanged
  *    (apart from the planned is_active flips). Any surprise rolls it all back.
- *  • EXPLICIT VISIBILITY — `is_active` changes only for makes named in
- *    REFERENCE_MAKE_STATE_CHANGES; empty makes are not disabled by rule.
+ *  • EXPLICIT VISIBILITY — `is_active` changes only for makes named in the
+ *    dataset's makeStateChanges; empty makes are not disabled by rule. A
+ *    dataset whose policy forbids state changes or new makes is refused.
+ *  • FACTS ON NEW ROWS ONLY — year range and body type feed the vehicle-image
+ *    identity, so they are written when a row is created and never on an
+ *    existing row; the post-write check rolls back if one changed.
  */
 
 type ReferenceReader = Pick<PrismaClient, 'vehicleMake' | 'vehicleModelRef'>;
@@ -49,16 +54,39 @@ export async function loadReferenceSnapshot(
       orderBy: { id: 'asc' },
     }),
     db.vehicleModelRef.findMany({
-      select: { id: true, makeId: true, name: true, sortOrder: true },
+      select: {
+        id: true,
+        makeId: true,
+        name: true,
+        sortOrder: true,
+        yearFrom: true,
+        yearTo: true,
+        bodyType: true,
+        variantOfModelId: true,
+      },
       orderBy: { id: 'asc' },
     }),
   ]);
   return { makes, models };
 }
 
+type ModelFacts = Pick<
+  ExistingModel,
+  'yearFrom' | 'yearTo' | 'bodyType' | 'variantOfModelId'
+>;
+
+/** The image-identity inputs of a model row; absent and null are the same. */
+const sameFacts = (a: ModelFacts, b: ModelFacts): boolean =>
+  (a.yearFrom ?? null) === (b.yearFrom ?? null) &&
+  (a.yearTo ?? null) === (b.yearTo ?? null) &&
+  (a.bodyType ?? null) === (b.bodyType ?? null) &&
+  (a.variantOfModelId ?? null) === (b.variantOfModelId ?? null);
+
 /**
- * After the writes: every pre-existing row must be exactly as before, except the
- * planned is_active flips, and the new rows must be exactly as planned.
+ * After the writes: every pre-existing row must be exactly as before (year
+ * range, body type and generation link included), except the planned
+ * is_active flips, and the new rows must be exactly as planned (never a
+ * generation row).
  */
 export function verifyApplied(
   before: ReferenceSnapshot,
@@ -89,7 +117,8 @@ export function verifyApplied(
       !now ||
       now.makeId !== m.makeId ||
       now.name !== m.name ||
-      now.sortOrder !== m.sortOrder
+      now.sortOrder !== m.sortOrder ||
+      !sameFacts(now, m)
     ) {
       problems.push(`model "${m.id}" changed unexpectedly`);
     }
@@ -112,7 +141,8 @@ export function verifyApplied(
       !now ||
       now.makeId !== m.makeId ||
       now.name !== m.name ||
-      now.sortOrder !== m.sortOrder
+      now.sortOrder !== m.sortOrder ||
+      !sameFacts(now, m)
     ) {
       problems.push(`new model "${m.id}" was not written as planned`);
     }
@@ -151,14 +181,16 @@ export interface ReferenceSeedResult {
  */
 export async function runVehicleReferenceSeed(
   prisma: PrismaClient,
-  opts: { apply: boolean; dataset?: ReferenceDataset },
+  opts: { apply: boolean; dataset?: ReferenceDataset; today?: Date },
 ): Promise<ReferenceSeedResult> {
   const dataset = opts.dataset ?? VEHICLE_REFERENCE_DATASET;
+  const planOpts = { today: opts.today };
   if (!opts.apply) {
     return {
       plan: planVehicleReferenceSeed(
         dataset,
         await loadReferenceSnapshot(prisma),
+        planOpts,
       ),
       applied: false,
     };
@@ -167,7 +199,7 @@ export async function runVehicleReferenceSeed(
   const plan = await prisma.$transaction(
     async (tx) => {
       const before = await loadReferenceSnapshot(tx);
-      const planned = planVehicleReferenceSeed(dataset, before);
+      const planned = planVehicleReferenceSeed(dataset, before, planOpts);
       if (isBlocked(planned)) {
         throw new ReferenceSeedAbort(
           'blocked by conflicts or errors; nothing written',
@@ -193,6 +225,10 @@ export async function runVehicleReferenceSeed(
             makeId: m.makeId,
             name: m.name,
             sortOrder: m.sortOrder,
+            // Sourced facts, on this NEW row only (null when none is stated).
+            yearFrom: m.yearFrom,
+            yearTo: m.yearTo,
+            bodyType: m.bodyType,
           },
         });
       }
