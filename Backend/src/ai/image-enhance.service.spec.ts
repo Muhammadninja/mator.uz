@@ -146,8 +146,9 @@ describe('ImageEnhanceService.removeBackground', () => {
 
   // What FLUX may change is decided by the prompt alone. These tests pin its
   // key requirements rather than its wording: the part is asked to stay exactly
-  // as photographed, only the background is replaced, rust is not mentioned at
-  // all, and nothing invites FLUX to improve the part. They cannot judge a
+  // as photographed, only the background is replaced and the part uniformly
+  // scaled into a centered 82% box, rust is not mentioned at all, and nothing
+  // invites FLUX to improve the part. They cannot judge a
   // generated image — only a real FLUX run on control photos can.
   describe('the catalog-photo prompt', () => {
     /** Run one successful edit and return the prompt it submitted. */
@@ -177,81 +178,158 @@ describe('ImageEnhanceService.removeBackground', () => {
     // Each behavior is one rule in the prompt, and it must name every item.
     it.each<[string, RegExp, string[]]>([
       [
-        'preserves the exact original part as shown in the input image',
-        /^- Preserve the exact original\b/,
-        ['automotive part', 'input image'],
+        'uses the input photo as the only source of the product',
+        /^Use the input photo\b/,
+        ['only and exact source of the product'],
       ],
       [
-        'keeps surface characteristics, textures, colors, materials and markings as in the source image',
-        /^- Preserve all original surface characteristics\b/,
+        'preserves the part exactly and does not regenerate it',
+        /^\*\*CRITICAL:/,
         [
-          'surface characteristics',
-          'textures',
-          'colors',
-          'materials',
-          'markings',
-          'exactly as they appear in the source image',
+          'Preserve the original auto part exactly as it appears in the input image',
+          'Do not regenerate or modify the part',
         ],
       ],
       [
-        'keeps labels, OEM numbers and GM logos as in the source image',
-        /^- Preserve all original surface characteristics\b/,
-        ['labels', 'OEM numbers', 'GM logos'],
+        'treats the part as a protected, immutable foreground object',
+        /^The auto part must be treated\b/,
+        ['protected, immutable foreground object'],
       ],
       [
-        'keeps scratches, dirt, wear and physical imperfections as in the source image',
-        /^- Preserve all original surface characteristics\b/,
-        ['scratches', 'dirt', 'wear', 'physical imperfections'],
+        'permits removing the original background',
+        /^1\. /,
+        ['Remove the original background'],
       ],
       [
-        'invents, adds, removes or exaggerates no visual detail',
-        /^- Do not invent\b/,
-        ['invent', 'add', 'remove', 'exaggerate', 'visual details'],
+        'permits replacing it with pure white (#FFFFFF)',
+        /^2\. /,
+        ['perfectly pure white background (#FFFFFF)'],
       ],
       [
-        'introduces no surface defect that the original image does not show',
-        /^- Do not introduce\b/,
-        ['surface defects', 'not present in the original image'],
+        'permits a uniform resize to a consistent size',
+        /^3\. /,
+        ['Uniformly resize the entire auto part', 'consistent visual size'],
       ],
       [
-        'keeps geometry, proportions, structure, components and orientation',
-        /^- Do not change\b/,
-        ['geometry', 'proportions', 'structure', 'components', 'orientation'],
+        'permits centering the part',
+        /^4\. /,
+        ['Center the part on the canvas'],
       ],
       [
-        'replaces only the original background, with pure white (#FFFFFF)',
-        /^- Replace only the original background\b/,
-        ['perfectly pure white (#FFFFFF) background'],
+        'keeps shape, geometry, proportions and dimensions',
+        /^- Original shape\b/,
+        ['shape', 'geometry', 'proportions', 'dimensions'],
       ],
       [
-        'keeps the part completely unchanged',
-        /^- Keep the automotive part\b/,
-        ['completely unchanged'],
-      ],
-      [
-        'keeps the original camera angle and perspective',
-        /^- Preserve the original camera angle\b/,
-        ['camera angle', 'perspective'],
-      ],
-      [
-        'frames the whole part centered on the square canvas at about 85-90%, at its own proportions',
-        /^Framing:/,
+        'keeps every component and small detail',
+        /^- Every component\b/,
         [
-          'whole part in view',
-          'centered',
-          'square canvas',
-          '85-90%',
-          'original proportions',
+          'opening',
+          'hole',
+          'connector',
+          'wire',
+          'clip',
+          'screw',
+          'edge',
+          'small detail',
         ],
       ],
       [
-        'ends with a photorealistic photo on pure white, visually identical to the input',
-        /^Final result:/,
+        'keeps colors, materials, textures and surface characteristics',
+        /^- Original colors\b/,
+        ['colors', 'materials', 'textures', 'surface characteristics'],
+      ],
+      [
+        'keeps dirt, dust, scratches, cracks, wear and damage',
+        /^- All original dirt\b/,
+        ['dirt', 'dust', 'scratches', 'cracks', 'wear', 'damage'],
+      ],
+      [
+        'keeps logos, labels, inscriptions, serial, OEM and GM numbers',
+        /^- Every logo\b/,
         [
-          'photorealistic product photograph',
-          'pure white background',
-          'visually identical',
-          'original input image',
+          'logo',
+          'label',
+          'inscription',
+          'serial number',
+          'OEM number',
+          'GM marking',
+        ],
+      ],
+      [
+        'shows only the details visible in the input image',
+        /^Show only the details\b/,
+        ['visible in the input image'],
+      ],
+      [
+        'adds, removes, invents or replaces no part of the object',
+        /^Do not add\b/,
+        ['add', 'remove', 'invent', 'replace', 'any part of the object'],
+      ],
+      [
+        'keeps the viewing angle, perspective and orientation',
+        /^Do not change the viewing angle\b/,
+        ['perspective', 'orientation'],
+      ],
+      [
+        'scales uniformly, with the same factor on both axes',
+        /^- Scale the complete object uniformly\b/,
+        ['same scale factor horizontally and vertically'],
+      ],
+      [
+        'keeps the exact original aspect ratio',
+        /^- Preserve the exact original aspect ratio\b/,
+        ['aspect ratio'],
+      ],
+      [
+        'never stretches, squeezes, deforms or distorts',
+        /^- Never stretch\b/,
+        ['stretch', 'squeeze', 'deform', 'distort'],
+      ],
+      [
+        'fits the whole object inside an 82% × 82% box',
+        /^- Fit the complete object\b/,
+        ['82% × 82% bounding box of the canvas'],
+      ],
+      [
+        'keeps the object size consistent across images',
+        /^- Keep reasonably consistent\b/,
+        ['visual object size across all product images'],
+      ],
+      ['never crops the object', /^- Never crop\b/, ['any part of the object']],
+      [
+        'centers the object',
+        /^- Position the object\b/,
+        ['center of the canvas'],
+      ],
+      [
+        'asks for a 1000 × 1000 image',
+        /^- Image dimensions:/,
+        ['1000 × 1000 pixels'],
+      ],
+      [
+        'asks for a uniform pure white (#FFFFFF) background',
+        /^- Background:/,
+        ['perfectly uniform pure white (#FFFFFF)'],
+      ],
+      [
+        'adds nothing to the canvas',
+        /^- No gradients\b/,
+        [
+          'decorations',
+          'additional objects',
+          'text',
+          'frames',
+          'artificial effects',
+        ],
+      ],
+      [
+        'puts preserving the part above every other instruction',
+        /^The original auto part must remain\b/,
+        [
+          'visually identical to the source photograph',
+          'Background removal and uniform resizing are the only acceptable modifications',
+          'preserving the original product always takes priority',
         ],
       ],
     ])('%s', async (_behavior, pattern, items) => {
@@ -272,23 +350,25 @@ describe('ImageEnhanceService.removeBackground', () => {
       // "clean", "pristine", "restored", "like new" and "polished" read as a
       // target state for the part, and enhance / repair / restore / improve name
       // the very thing the prompt must not provoke — even negated: FLUX.2 has no
-      // negative prompt and naming a thing draws the model toward it. Preserving
-      // is stated positively instead ("exactly as", "completely unchanged").
+      // negative prompt and naming a thing draws the model toward it. The
+      // owner's "Do not clean, repair, restore…" list is replaced by "Show only
+      // the details visible in the input image". ("reconstruct" stays allowed:
+      // the owner's "Do not add, remove, invent, reconstruct or replace" rule.)
       expect(await sentPrompt()).not.toMatch(
-        /\b(clean\w*|pristine|like new|polish\w*|enhanc\w*|improv\w*|restor\w*|repair\w*|retouch\w*|beautif\w*|refurbish\w*|renew\w*|reconstruct\w*|rebuil\w*|denois\w*|brighten\w*|upscal\w*)\b/i,
+        /\b(clean\w*|pristine|like new|polish\w*|enhanc\w*|improv\w*|restor\w*|repair\w*|retouch\w*|beautif\w*|refurbish\w*|renew\w*|rebuil\w*|denois\w*|brighten\w*|upscal\w*)\b/i,
       );
     });
 
-    it('names inventing, adding or removing only inside "Do not" rules', async () => {
+    it('names inventing, adding or removing only in "Do not" rules or about the background', async () => {
       const mentions = lines(await sentPrompt()).filter((l) =>
         /\b(remov\w*|eras\w*|delet\w*|eliminat\w*|insert\w*|modif\w*|alter\w*|adjust\w*|edit\w*|redraw\w*|regenerat\w*|recreat\w*|invent\w*|exaggerat\w*|correct\w*|add(?:s|ed|ing)?|fix(?:es|ed|ing)?)\b/i.test(
           l,
         ),
       );
-      // Not vacuous: the "Do not" rule itself is found.
+      // Not vacuous: the "Do not add…" rule itself is found.
       expect(mentions.length).toBeGreaterThan(0);
       for (const mention of mentions) {
-        expect(mention).toMatch(/^- Do not /);
+        expect(mention).toMatch(/\bDo not\b|\bbackground\b/i);
       }
     });
 
@@ -307,9 +387,7 @@ describe('ImageEnhanceService.removeBackground', () => {
         ),
       );
       expect(mentions).toHaveLength(1);
-      expect(mentions[0]).toMatch(
-        /^- Preserve all original surface characteristics\b/,
-      );
+      expect(mentions[0]).toMatch(/^- All original dirt\b/);
     });
 
     it('has no "sharp…" wording', async () => {
