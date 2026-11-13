@@ -125,7 +125,7 @@ describe('Wave 1 plan against the 2026-11-12 production snapshot', () => {
         makeId: 'chevrolet',
         name: 'Suburban',
         sortOrder: 25, // Chevrolet's 25 rows are 0–24 here
-        bodyType: 'suv',
+        bodyType: 'SUV',
         yearFrom: null,
         yearTo: null,
       }),
@@ -155,7 +155,7 @@ describe('Wave 1 plan against the 2026-11-12 production snapshot', () => {
     for (const line of [
       'Wave 1 vehicle reference seed: DRY-RUN',
       "New models (1): appended after each make's existing models",
-      'body_type suv, year_from null, year_to null',
+      'body_type SUV, year_from null, year_to null',
       'Held back, not planned (8)',
       '? volkswagen  Teramont X',
       'Facts for existing rows, NOT written (0)',
@@ -208,14 +208,14 @@ describe('Wave 1 plan against the 2026-11-12 production snapshot', () => {
       makeId: 'chevrolet',
       name: 'Suburban',
       sortOrder: 25,
-      bodyType: 'SUV',
+      bodyType: 'Crossover',
     });
     const p = plan(snap);
     expect(isBlocked(p)).toBe(false);
     expect(p.newModels).toEqual([]);
     expect(p.unchangedModels).toEqual(['suburban']);
     expect(p.preservedFacts).toEqual([
-      expect.stringContaining('bodyType stays "SUV"'),
+      expect.stringContaining('bodyType stays "Crossover"'),
     ]);
   });
 });
@@ -250,7 +250,7 @@ describe('Wave 1 apply (in-memory database)', () => {
       sortOrder: 25,
       yearFrom: null,
       yearTo: null,
-      bodyType: 'suv',
+      bodyType: 'SUV',
     });
   });
 

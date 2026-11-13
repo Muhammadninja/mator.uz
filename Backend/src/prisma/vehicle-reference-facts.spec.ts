@@ -27,7 +27,7 @@ describe('modelFactErrors', () => {
     expect(
       errors(
         model({
-          bodyType: { value: 'suv', source: SRC },
+          bodyType: { value: 'SUV', source: SRC },
           yearFrom: { value: 2020, source: SRC },
           yearTo: { value: 2024, source: SRC },
         }),
@@ -66,14 +66,14 @@ describe('modelFactErrors', () => {
     expect(
       errors(
         model({
-          bodyType: { value: 'suv', source: undefined as unknown as SourceRef },
+          bodyType: { value: 'SUV', source: undefined as unknown as SourceRef },
         }),
       ),
     ).toEqual([expect.stringContaining('bodyType: a source is required')]);
   });
 
   it('allows only the controlled body-type vocabulary', () => {
-    for (const value of ['SUV', 'crossover', 'minivan', 'Sedan ']) {
+    for (const value of ['suv', 'Crossover', 'Minivan', 'Sedan ', 'sedan']) {
       expect(errors(model({ bodyType: { value, source: SRC } }))).toEqual([
         expect.stringContaining(`body type "${value}" is not one of`),
       ]);
@@ -109,7 +109,7 @@ describe('plannedFacts', () => {
       bodyType: null,
     });
     expect(
-      plannedFacts(model({ bodyType: { value: 'van', source: SRC } })),
-    ).toEqual({ yearFrom: null, yearTo: null, bodyType: 'van' });
+      plannedFacts(model({ bodyType: { value: 'Panel Van', source: SRC } })),
+    ).toEqual({ yearFrom: null, yearTo: null, bodyType: 'Panel Van' });
   });
 });

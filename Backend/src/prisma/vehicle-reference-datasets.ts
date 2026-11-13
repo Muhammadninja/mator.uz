@@ -4,6 +4,11 @@ import {
   WAVE1_MODELS,
 } from './seed-data/vehicle-reference-wave1.seed';
 import {
+  WAVE2_HELD,
+  WAVE2_KNOWN_ISSUES,
+  WAVE2_MODELS,
+} from './seed-data/vehicle-reference-wave2.seed';
+import {
   ReferenceDataset,
   VEHICLE_REFERENCE_DATASET,
 } from './vehicle-reference-plan';
@@ -32,7 +37,23 @@ export const WAVE1_DATASET: ReferenceDataset = {
   held: WAVE1_HELD,
 };
 
+/** Wave 2: inventory-driven, same policy as Wave 1. */
+export const WAVE2_DATASET: ReferenceDataset = {
+  label: 'Wave 2',
+  policy: {
+    allowNewMakes: false,
+    allowMakeStateChanges: false,
+    requireAvailabilitySources: true,
+  },
+  makes: [],
+  models: WAVE2_MODELS,
+  makeStateChanges: [],
+  knownIssues: WAVE2_KNOWN_ISSUES,
+  held: WAVE2_HELD,
+};
+
 export const REFERENCE_DATASETS: Record<string, ReferenceDataset> = {
   g2: VEHICLE_REFERENCE_DATASET,
   'wave-1': WAVE1_DATASET,
+  'wave-2': WAVE2_DATASET,
 };
