@@ -65,7 +65,7 @@ FROM vehicle_models m
 WHERE m.year_from IS NOT NULL OR m.year_to IS NOT NULL OR m.body_type IS NOT NULL
 ORDER BY m.make_id, m.id;
 
-\echo '4. body_type values in use (new rows must use: sedan hatchback liftback wagon coupe convertible suv mpv van pickup)'
+\echo '4. body_type values in use (new rows must use: Sedan Hatchback Liftback Wagon Coupe Convertible SUV MPV Van "Panel Van" Pickup)'
 SELECT body_type, count(*) AS models
 FROM vehicle_models
 WHERE body_type IS NOT NULL

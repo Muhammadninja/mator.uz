@@ -77,7 +77,9 @@ export const WAVE1_MODELS: SeedReferenceModel[] = [
       },
     ],
     bodyType: {
-      value: 'suv',
+      // Production holds 'suv' (applied before the spelling decision); the seed
+      // never rewrites an existing row, so that one row is fixed by hand.
+      value: 'SUV',
       source: {
         ...CHEVROLET_UZ_CATALOGUE,
         quote: 'SUBURBAN HIGH COUNTRY is listed under the catalogue tab "SUV"',
