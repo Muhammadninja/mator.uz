@@ -87,10 +87,6 @@ export class VehicleImagePipelineClient {
     return this.config.requestTimeoutMs;
   }
 
-  get marketRegion(): string | null {
-    return this.config.marketRegion;
-  }
-
   request(
     identity: CanonicalVehicleIdentity,
     display: VehicleImageDisplay,

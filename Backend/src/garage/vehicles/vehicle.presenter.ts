@@ -32,6 +32,8 @@ export const VEHICLE_INCLUDE = {
       imageUrl: true,
       imageVersion: true,
       catalogAssetKey: true,
+      // Only to tell a market-aware identity from a legacy one (vehicle-image.state.ts).
+      identity: true,
     },
   },
 } satisfies Prisma.VehicleInclude;
@@ -84,11 +86,48 @@ export function presentVehicle(v: VehicleWithRelations, include3d = true) {
         : null,
     // Phase 3E: pending | approved | unavailable. url/version only once published.
     vehicle_image: presentVehicleImage(v),
+    // What the vehicle was resolved to when it was added (saved, never recomputed).
+    identity: presentVehicleIdentity(v),
     // Generic models only (null otherwise, or when a trim was picked): which
     // generation the picture shows, or the options to choose from.
     generation: presentGeneration(vehicleGeneration(v)),
     created_at: v.createdAt.toISOString(),
     updated_at: v.updatedAt.toISOString(),
+  };
+}
+
+/**
+ * The `identity` field: the snapshot saved when the vehicle was added.
+ *
+ *   verified      catalog row, generation, facelift and market resolved from the
+ *                 catalog and the verified vehicle image registry
+ *   needs_review  more than one identity is possible, or none is verified; the
+ *                 vehicle is kept with its make, model and year, nothing guessed
+ *   unresolved    added before identities were resolved
+ *
+ * `year_basis` names the kind of year in `year`: always the build year.
+ */
+export function presentVehicleIdentity(v: {
+  imageReviewReason: string | null;
+  identityModelId: string | null;
+  identityGenerationId: string | null;
+  identityFaceliftId: string | null;
+  identityMarket: string | null;
+}) {
+  const status = v.imageReviewReason
+    ? ('needs_review' as const)
+    : v.identityModelId
+      ? ('verified' as const)
+      : ('unresolved' as const);
+  const verified = status === 'verified';
+  return {
+    status,
+    reason: v.imageReviewReason ?? null,
+    model_id: verified ? v.identityModelId : null,
+    generation_id: verified ? v.identityGenerationId : null,
+    facelift_id: verified ? v.identityFaceliftId : null,
+    market: verified ? v.identityMarket : null,
+    year_basis: 'production' as const,
   };
 }
 

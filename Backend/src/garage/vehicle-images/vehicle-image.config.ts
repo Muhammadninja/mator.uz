@@ -11,7 +11,10 @@
  *   VEHICLE_IMAGE_REQUEST_TOKEN         The pipeline's VEHICLE_IMAGE_REQUEST_TOKEN
  *                                       (server-to-server bearer, ≥32 chars). Never the
  *                                       admin token.
- *   VEHICLE_IMAGE_MARKET_REGION         Explicit two-letter market code; required when enabled.
+ *   VEHICLE_IMAGE_MARKET_REGION         Retired and ignored. A vehicle's market comes from
+ *                                       the verified vehicle image registry, per vehicle
+ *                                       (vehicle-image.catalog.ts), never from a global
+ *                                       setting. A leftover value does not stop boot.
  *   VEHICLE_IMAGE_REQUEST_TIMEOUT_MS    Per-call timeout for queue calls, 1000–60000
  *                                       (default 10000). The status-refresh endpoint uses
  *                                       min(this, 3000).
@@ -23,7 +26,6 @@ export interface VehicleImageConfig {
   enabled: boolean;
   baseUrl: string | null;
   requestToken: string | null;
-  marketRegion: string | null;
   requestTimeoutMs: number;
 }
 
@@ -100,13 +102,8 @@ export function parseVehicleImageConfig(get: (key: string) => unknown): {
     );
   }
 
-  const rawMarketRegion = text(get('VEHICLE_IMAGE_MARKET_REGION'));
-  let marketRegion: string | null = null;
-  if (rawMarketRegion && /^[A-Z]{2}$/.test(rawMarketRegion)) marketRegion = rawMarketRegion;
-  else if (enabled) errors.push('VEHICLE_IMAGE_MARKET_REGION must be a verified two-letter uppercase region code when vehicle images are enabled.');
-
   return {
-    config: { enabled, baseUrl, requestToken, marketRegion, requestTimeoutMs },
+    config: { enabled, baseUrl, requestToken, requestTimeoutMs },
     errors,
   };
 }
@@ -137,5 +134,5 @@ export function readVehicleImageConfig(
     errors.length === 0 &&
     !!config.baseUrl &&
     !!config.requestToken;
-  return { ...config, enabled: usable && !!config.marketRegion };
+  return { ...config, enabled: usable };
 }

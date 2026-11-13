@@ -85,10 +85,31 @@ function setup(stored = row()) {
         ? { kind: 'review', reason: input.review }
         : { kind: 'request', model: input.model.id },
     ),
+    // Same data shape as VehicleImagesService.stage: every snapshot column, explicit nulls.
     stage: jest.fn(async (_tx: any, _id: string, plan: any) =>
       plan.kind === 'review'
-        ? { data: { imageReviewReason: plan.reason }, outboxId: null }
-        : { data: { imageIdentityKey: 'k'.repeat(64) }, outboxId: 'vio_1' },
+        ? {
+            data: {
+              imageIdentityKey: null,
+              imageReviewReason: plan.reason,
+              identityModelId: null,
+              identityGenerationId: null,
+              identityFaceliftId: null,
+              identityMarket: null,
+            },
+            outboxId: null,
+          }
+        : {
+            data: {
+              imageIdentityKey: 'k'.repeat(64),
+              imageReviewReason: null,
+              identityModelId: plan.model,
+              identityGenerationId: plan.model,
+              identityFaceliftId: null,
+              identityMarket: 'UZ',
+            },
+            outboxId: 'vio_1',
+          },
     ),
     kick: jest.fn(),
     refresh: jest.fn(),
@@ -166,17 +187,38 @@ describe('Garage create: generic-model generation', () => {
     });
   });
 
-  it('a year outside every generation is not inferred', async () => {
-    const { svc, images } = setup();
+  it('a year no verified generation covers is not a car that was built: refused, nothing saved', async () => {
+    for (const year of [2007, 2023, 2024]) {
+      const { svc, prisma, images } = setup();
+      const err: unknown = await svc
+        .create('usr_1', create(year))
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(BadRequestException);
+      expect((err as BadRequestException).getResponse()).toEqual({
+        code: 'VEHICLE_YEAR_UNSUPPORTED',
+        message: `Nexia is not available for ${year}.`,
+        details: { year, year_from: 2008, year_to: 2022 },
+      });
+      expect(images.prepare).not.toHaveBeenCalled();
+      expect(prisma.vehicle.create).not.toHaveBeenCalled();
+    }
+  });
+
+  it('a generation whose range is not verified (open) never rejects a year', async () => {
+    const { svc, prisma, images } = setup();
+    prisma.vehicleModelRef.findUnique.mockResolvedValue({
+      ...NEXIA,
+      variants: [N150, { ...R3, yearTo: null }],
+    });
     const res: any = await svc.create('usr_1', create(2024));
     expect(images.prepare).toHaveBeenCalledWith(
       expect.objectContaining({ review: 'generation_unresolved' }),
     );
-    expect(res.generation).toEqual({
-      status: 'unresolved',
-      source: null,
-      model: null,
-      options: [],
+    expect(res.generation.status).toBe('unresolved');
+    expect(res.identity).toMatchObject({
+      status: 'needs_review',
+      reason: 'generation_unresolved',
+      model_id: null,
     });
   });
 
@@ -211,6 +253,8 @@ describe('Garage PATCH variant_model_id', () => {
       variantModelId: 'nexia-3',
       imageIdentityKey: 'k'.repeat(64),
       imageReviewReason: null,
+      identityModelId: 'nexia-3',
+      identityMarket: 'UZ',
     });
     for (const fitment of ['modelId', 'makeId', 'trimId', 'year', 'engineId']) {
       expect(data).not.toHaveProperty(fitment);
@@ -232,6 +276,8 @@ describe('Garage PATCH variant_model_id', () => {
       variantModelId: null,
       imageIdentityKey: null,
       imageReviewReason: 'generation_unresolved',
+      identityModelId: null,
+      identityMarket: null,
     });
     expect(res.generation.status).toBe('choice_required');
   });
@@ -274,7 +320,7 @@ describe('Garage PATCH variant_model_id', () => {
     expect(prisma.vehicle.update).not.toHaveBeenCalled();
   });
 
-  it('with the image integration off, stores the pick and leaves the image state alone', async () => {
+  it('when the catalog cannot be read, stores the pick and leaves the identity and image state alone', async () => {
     const { svc, prisma, images } = setup();
     images.prepare.mockResolvedValue(null as any);
     await svc.update('usr_1', 'veh_1', { variant_model_id: 'nexia-2' });
@@ -282,6 +328,7 @@ describe('Garage PATCH variant_model_id', () => {
     expect(data.variantModelId).toBe('nexia-2');
     expect(data).not.toHaveProperty('imageIdentityKey');
     expect(data).not.toHaveProperty('imageReviewReason');
+    expect(data).not.toHaveProperty('identityModelId');
     expect(images.stage).not.toHaveBeenCalled();
   });
 

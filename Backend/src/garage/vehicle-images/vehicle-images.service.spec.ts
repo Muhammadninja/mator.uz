@@ -17,21 +17,46 @@ const PLAN: IdentityPlan = {
   display: { manufacturer: 'BYD', model: 'Han' },
   identityKey: KEY,
 };
+/** What a request plan saves on the vehicle (no resolved snapshot on PLAN). */
+const LINKED = {
+  imageIdentityKey: KEY,
+  imageReviewReason: null,
+  identityModelId: null,
+  identityGenerationId: null,
+  identityFaceliftId: null,
+  identityMarket: null,
+};
+const RESOLVED = {
+  modelId: 'cobalt',
+  generationId: 'cobalt-gen2',
+  faceliftId: null,
+  marketRegion: 'UZ',
+};
+const CATALOG_PLAN: IdentityPlan = {
+  ...PLAN,
+  resolved: RESOLVED,
+  catalogAsset: { assetKey: 'cobalt-gen2', match: 'exact' },
+};
 
 function setup(
   state: {
     status: VehicleImageStatus;
     reason?: string | null;
     lastSyncedAt?: Date | null;
+    catalogAssetKey?: string | null;
   },
   openOutbox = false,
 ) {
   const tx = {
     vehicleImageIdentity: {
       createMany: jest.fn().mockResolvedValue({ count: 1 }),
-      findUniqueOrThrow: jest
-        .fn()
-        .mockResolvedValue({ reason: null, lastSyncedAt: null, ...state }),
+      findUniqueOrThrow: jest.fn().mockResolvedValue({
+        reason: null,
+        lastSyncedAt: null,
+        catalogAssetKey: null,
+        ...state,
+      }),
+      update: jest.fn().mockResolvedValue({}),
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     },
     vehicleImageOutbox: {
@@ -63,7 +88,7 @@ describe('VehicleImagesService.stage (transactional outbox)', () => {
   it('a new identity gets exactly one outbox row in the same transaction', async () => {
     const { svc, tx } = setup({ status: VehicleImageStatus.PENDING });
     const staged = await svc.stage(tx as any, 'veh_1', PLAN);
-    expect(staged.data).toEqual({ imageIdentityKey: KEY });
+    expect(staged.data).toEqual(LINKED);
     expect(staged.outboxId).toMatch(/^vio_/);
     expect(tx.vehicleImageIdentity.createMany).toHaveBeenCalledWith(
       expect.objectContaining({ skipDuplicates: true }),
@@ -100,7 +125,7 @@ describe('VehicleImagesService.stage (transactional outbox)', () => {
   it('an approved identity is reused immediately, with no request', async () => {
     const { svc, tx } = setup({ status: VehicleImageStatus.APPROVED });
     const staged = await svc.stage(tx as any, 'veh_1', PLAN);
-    expect(staged).toEqual({ data: { imageIdentityKey: KEY }, outboxId: null });
+    expect(staged).toEqual({ data: LINKED, outboxId: null });
   });
 
   it.each(['generation_failed', 'rejected'])(
@@ -116,7 +141,17 @@ describe('VehicleImagesService.stage (transactional outbox)', () => {
     },
   );
 
-  it.each(['dispatch_failed', 'request_missing'])(
+  const RESET = {
+    status: VehicleImageStatus.PENDING,
+    reason: null,
+    imageUrl: null,
+    imageVersion: null,
+    catalogAssetKey: null,
+    lastSyncedAt: null,
+    nextSyncAt: null,
+  };
+
+  it.each(['dispatch_failed', 'request_missing', 'not_requested'])(
     'a %s identity (no AI job failed) is requested again',
     async (reason) => {
       const { svc, tx } = setup({
@@ -129,17 +164,96 @@ describe('VehicleImagesService.stage (transactional outbox)', () => {
           identityKey: KEY,
           status: VehicleImageStatus.UNAVAILABLE,
           reason,
+          catalogAssetKey: null,
         },
-        data: {
-          status: VehicleImageStatus.PENDING,
-          reason: null,
-          lastSyncedAt: null,
-          nextSyncAt: null,
-        },
+        data: RESET,
       });
       expect(staged.outboxId).toMatch(/^vio_/);
     },
   );
+
+  it('a registry image whose approval was withdrawn is asked of the pipeline once', async () => {
+    const { svc, tx } = setup({
+      status: VehicleImageStatus.APPROVED,
+      catalogAssetKey: 'spark-m300',
+    });
+    const staged = await svc.stage(tx as any, 'veh_1', PLAN);
+    expect(tx.vehicleImageIdentity.updateMany).toHaveBeenCalledWith({
+      where: {
+        identityKey: KEY,
+        status: VehicleImageStatus.APPROVED,
+        reason: null,
+        catalogAssetKey: 'spark-m300',
+      },
+      data: RESET,
+    });
+    expect(staged.outboxId).toMatch(/^vio_/);
+  });
+
+  it('an approved registry image wins: saved as approved, no pipeline, no outbox, never synced', async () => {
+    for (const enabled of [true, false]) {
+      const { svc, tx, delivery } = setup({
+        status: VehicleImageStatus.UNAVAILABLE,
+        reason: 'request_missing',
+      });
+      delivery.enabled = enabled;
+      const staged = await svc.stage(tx as any, 'veh_1', CATALOG_PLAN);
+      const catalog = {
+        status: VehicleImageStatus.APPROVED,
+        reason: null,
+        imageUrl: null,
+        imageVersion: 1,
+        catalogAssetKey: 'cobalt-gen2',
+        lastSyncedAt: null,
+        nextSyncAt: null,
+      };
+      const [[created]] = tx.vehicleImageIdentity.createMany.mock.calls as [
+        [{ data: unknown[] }],
+      ];
+      expect(created.data[0]).toMatchObject(catalog);
+      expect(tx.vehicleImageIdentity.update).toHaveBeenCalledWith({
+        where: { identityKey: KEY },
+        data: catalog,
+      });
+      expect(staged).toEqual({
+        data: {
+          imageIdentityKey: KEY,
+          imageReviewReason: null,
+          identityModelId: 'cobalt',
+          identityGenerationId: 'cobalt-gen2',
+          identityFaceliftId: null,
+          identityMarket: 'UZ',
+        },
+        outboxId: null,
+      });
+      expect(tx.vehicleImageOutbox.createMany).not.toHaveBeenCalled();
+    }
+  });
+
+  it('integration off: a verified identity is saved as not requested, nothing is queued', async () => {
+    const { svc, tx, delivery } = setup({ status: VehicleImageStatus.PENDING });
+    delivery.enabled = false;
+    const staged = await svc.stage(tx as any, 'veh_1', {
+      ...PLAN,
+      resolved: RESOLVED,
+      catalogAsset: null,
+    });
+    const [[created]] = tx.vehicleImageIdentity.createMany.mock.calls as [
+      [{ data: unknown[] }],
+    ];
+    expect(created.data[0]).toMatchObject({
+      identityKey: KEY,
+      status: VehicleImageStatus.UNAVAILABLE,
+      reason: 'not_requested',
+    });
+    expect(staged.data).toMatchObject({
+      imageIdentityKey: KEY,
+      identityMarket: 'UZ',
+    });
+    expect(staged.outboxId).toBeNull();
+    expect(tx.vehicleImageIdentity.findUniqueOrThrow).not.toHaveBeenCalled();
+    expect(tx.vehicleImageOutbox.createMany).not.toHaveBeenCalled();
+  });
 
   it('an ambiguous identity is flagged on the vehicle and touches nothing else', async () => {
     const { svc, tx } = setup({ status: VehicleImageStatus.PENDING });
@@ -148,13 +262,20 @@ describe('VehicleImagesService.stage (transactional outbox)', () => {
       reason: 'duplicate_model_name',
     });
     expect(staged).toEqual({
-      data: { imageReviewReason: 'duplicate_model_name' },
+      data: {
+        imageIdentityKey: null,
+        imageReviewReason: 'duplicate_model_name',
+        identityModelId: null,
+        identityGenerationId: null,
+        identityFaceliftId: null,
+        identityMarket: null,
+      },
       outboxId: null,
     });
     expect(tx.vehicleImageIdentity.createMany).not.toHaveBeenCalled();
   });
 
-  it('disabled (no plan) writes nothing', async () => {
+  it('no plan (catalog unreadable) writes nothing', async () => {
     const { svc, tx } = setup({ status: VehicleImageStatus.PENDING });
     expect(await svc.stage(tx as any, 'veh_1', null)).toEqual({
       data: {},
@@ -183,23 +304,57 @@ describe('VehicleImagesService.prepare / kick', () => {
     yearTo: null,
   };
 
-  it('builds the plan from catalog tables', async () => {
-    const { svc, prisma } = setup({ status: VehicleImageStatus.PENDING });
-    const plan = await svc.prepare({ year: 2024, model, trim: null });
-    expect(plan).toMatchObject({
-      kind: 'request',
-      identity: PLAN.kind === 'request' ? PLAN.identity : null,
-    });
-    expect(prisma.vehicleModelRef.findMany).toHaveBeenCalledWith({
-      where: { makeId: 'byd', id: { not: 'byd-han' } },
-      select: { name: true },
+  const cobalt = {
+    id: 'cobalt',
+    makeId: 'chevrolet',
+    name: 'Cobalt',
+    bodyType: 'Sedan',
+    yearFrom: null,
+    yearTo: null,
+  };
+
+  it('builds the plan from catalog tables and the registry, enabled or not', async () => {
+    for (const enabled of [true, false]) {
+      const { svc, prisma, delivery } = setup({
+        status: VehicleImageStatus.PENDING,
+      });
+      delivery.enabled = enabled;
+      prisma.vehicleMake.findUnique.mockResolvedValue({
+        id: 'chevrolet',
+        name: 'Chevrolet',
+      });
+      prisma.vehicleModelRef.findMany.mockResolvedValue([{ name: 'Gentra' }]);
+      const plan = await svc.prepare({ year: 2020, model: cobalt, trim: null });
+      expect(plan).toMatchObject({
+        kind: 'request',
+        identity: {
+          makeId: 'chevrolet',
+          modelId: 'cobalt',
+          marketRegion: 'UZ',
+        },
+        resolved: {
+          modelId: 'cobalt',
+          generationId: 'cobalt-gen2',
+          marketRegion: 'UZ',
+        },
+        catalogAsset: { assetKey: 'cobalt-gen2', match: 'exact' },
+      });
+      expect(prisma.vehicleModelRef.findMany).toHaveBeenCalledWith({
+        where: { makeId: 'chevrolet', id: { not: 'cobalt' } },
+        select: { name: true },
+      });
+    }
+  });
+
+  it('a model no verified registry entry covers is kept for review, never requested', async () => {
+    const { svc } = setup({ status: VehicleImageStatus.PENDING });
+    expect(await svc.prepare({ year: 2024, model, trim: null })).toEqual({
+      kind: 'review',
+      reason: 'market_unverified',
     });
   });
 
-  it('returns null when disabled or when the catalog read fails (creation goes on)', async () => {
-    const off = setup({ status: VehicleImageStatus.PENDING });
-    off.delivery.enabled = false;
-    expect(await off.svc.prepare({ year: 2024, model, trim: null })).toBeNull();
+  it('returns null when the catalog read fails (creation goes on)', async () => {
     const broken = setup({ status: VehicleImageStatus.PENDING });
     broken.prisma.vehicleMake.findUnique.mockRejectedValue(
       new Error('db down'),
@@ -209,27 +364,22 @@ describe('VehicleImagesService.prepare / kick', () => {
     ).toBeNull();
   });
 
-  it('an unresolved generation is a review, never a request, and only while enabled', async () => {
-    const on = setup({ status: VehicleImageStatus.PENDING });
-    expect(
-      await on.svc.prepare({
-        year: 2016,
-        model: null,
-        trim: null,
-        review: 'generation_unresolved',
-      }),
-    ).toEqual({ kind: 'review', reason: 'generation_unresolved' });
-    expect(on.prisma.vehicleMake.findUnique).not.toHaveBeenCalled();
-    const off = setup({ status: VehicleImageStatus.PENDING });
-    off.delivery.enabled = false;
-    expect(
-      await off.svc.prepare({
-        year: 2016,
-        model: null,
-        trim: null,
-        review: 'generation_unresolved',
-      }),
-    ).toBeNull();
+  it('an unresolved generation is a review, never a request, enabled or not', async () => {
+    for (const enabled of [true, false]) {
+      const { svc, prisma, delivery } = setup({
+        status: VehicleImageStatus.PENDING,
+      });
+      delivery.enabled = enabled;
+      expect(
+        await svc.prepare({
+          year: 2016,
+          model: null,
+          trim: null,
+          review: 'generation_unresolved',
+        }),
+      ).toEqual({ kind: 'review', reason: 'generation_unresolved' });
+      expect(prisma.vehicleMake.findUnique).not.toHaveBeenCalled();
+    }
   });
 
   it('kick is fire-and-forget: a Redis failure never reaches the caller', async () => {

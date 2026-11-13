@@ -1,0 +1,219 @@
+/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access -- registry fixtures are mutated as untyped JSON on purpose */
+import { createHash } from 'node:crypto';
+import { VEHICLE_IMAGE_CATALOG_SOURCE } from './vehicle-image-catalog.data';
+import {
+  approvedCatalogAsset,
+  catalogIdentityFacts,
+  isApprovedCatalogAssetKey,
+  parseVehicleImageCatalog,
+  VEHICLE_IMAGE_CATALOG,
+  type CatalogAsset,
+} from './vehicle-image.catalog';
+
+const chevy = (
+  modelId: string,
+  year: number,
+  trimId: string | null = null,
+) => ({
+  makeId: 'chevrolet',
+  modelId,
+  year,
+  trimId,
+});
+
+describe('vehicle image registry (vendored)', () => {
+  it('is byte for byte MatorUI- services/vehicle-image-catalog.json @ 18beffa5', () => {
+    // Update together with the commit/hash in vehicle-image-catalog.data.ts.
+    expect(
+      createHash('sha256').update(VEHICLE_IMAGE_CATALOG_SOURCE).digest('hex'),
+    ).toBe('a741e09860870b1fa3d5740eab94b0611573cb0bc90032708ba8c1e732ed285b');
+    expect(VEHICLE_IMAGE_CATALOG).toHaveLength(25);
+  });
+
+  it('approves exactly the three owner-approved images', () => {
+    const approved = VEHICLE_IMAGE_CATALOG.filter(
+      (a) => a.approvalStatus === 'approved',
+    ).map((a) => a.assetKey);
+    expect(approved.sort()).toEqual(['cobalt-gen2', 'gentra', 'nexia-r3']);
+    for (const key of ['cobalt-gen2', 'gentra', 'nexia-r3'])
+      expect(isApprovedCatalogAssetKey(key)).toBe(true);
+    for (const key of [
+      'nexia-n150',
+      'spark-m300',
+      'tracker-gen3',
+      'malibu-gen1',
+    ])
+      expect(isApprovedCatalogAssetKey(key)).toBe(false);
+  });
+
+  it('refuses a malformed registry instead of guessing', () => {
+    const good = JSON.parse(VEHICLE_IMAGE_CATALOG_SOURCE);
+    const broken = (mutate: (a: any) => void) => {
+      const copy = JSON.parse(JSON.stringify(good));
+      mutate(copy.assets[0]);
+      return () => parseVehicleImageCatalog(copy);
+    };
+    expect(broken((a) => (a.marketRegion = 'uz'))).toThrow(/marketRegion/);
+    expect(broken((a) => (a.approvalStatus = 'ok'))).toThrow(/approvalStatus/);
+    expect(broken((a) => (a.modelMappings[0].yearTo = 1990))).toThrow(/year/);
+    expect(broken((a) => (a.assetKey = 'Cobalt Gen2'))).toThrow(/assetKey/);
+    expect(broken((a) => (a.identityVerified = 'yes'))).toThrow(/flags/);
+    expect(() =>
+      parseVehicleImageCatalog({ assets: [good.assets[0], good.assets[0]] }),
+    ).toThrow(/duplicate/);
+  });
+});
+
+describe('catalogIdentityFacts: market, generation, facelift per vehicle', () => {
+  it.each([
+    ['cobalt', 2020, 'UZ', 'cobalt-gen2'],
+    ['gentra', 2019, 'UZ', 'gentra'],
+    ['lacetti', 2021, 'UZ', 'gentra'],
+    ['nexia-3', 2018, 'UZ', 'nexia-3'],
+    ['nexia-2', 2012, 'UZ', 'nexia-2'],
+  ])(
+    '%s %i → verified %s, generation %s',
+    (model, year, market, generation) => {
+      expect(catalogIdentityFacts(chevy(model, year))).toEqual({
+        status: 'verified',
+        marketRegion: market,
+        generationId: generation,
+        faceliftId: null,
+      });
+    },
+  );
+
+  it.each([
+    ['spark', 2020],
+    ['tracker', 2022],
+    ['tracker-2', 2022],
+    ['malibu', 2020],
+    ['nexia', 2018], // the generic row: only its generation rows are verified
+    ['nexia-1', 2005],
+    ['cobalt', 2012], // before the verified Uzbek Cobalt range
+    ['lacetti', 2015], // the Gentra years: not the 2020+ alias
+    ['nexia-2', 2008], // 2008 is outside the verified N150 mapping
+  ])('%s %i → unverified (no market is assumed)', (model, year) => {
+    expect(catalogIdentityFacts(chevy(model, year))).toEqual({
+      status: 'unverified',
+    });
+  });
+
+  it('never answers for another make with the same model id', () => {
+    expect(
+      catalogIdentityFacts({
+        makeId: 'ravon',
+        modelId: 'gentra',
+        year: 2019,
+        trimId: null,
+      }),
+    ).toEqual({ status: 'unverified' });
+  });
+
+  it('a Nexia trimmed as Nexia 3 is verified through the trim prefix', () => {
+    expect(
+      catalogIdentityFacts(chevy('nexia', 2018, 'nexia-3-ls')),
+    ).toMatchObject({
+      status: 'verified',
+      generationId: 'nexia-3',
+    });
+    expect(
+      catalogIdentityFacts(chevy('nexia', 2018, 'nexia-2-ls')).status,
+    ).toBe('unverified');
+  });
+
+  const entry = (over: Partial<CatalogAsset>): CatalogAsset => ({
+    id: 'x',
+    makeId: 'chevrolet',
+    modelMappings: [{ modelId: 'spark', yearFrom: 2010, yearTo: 2022 }],
+    generationId: null,
+    faceliftId: null,
+    marketRegion: 'UZ',
+    identityVerified: true,
+    generationVerified: false,
+    approvalStatus: 'pending',
+    assetKey: 'x',
+    ...over,
+  });
+
+  it('disagreeing verified entries are ambiguous; a rejected image wins over approval', () => {
+    expect(
+      catalogIdentityFacts(chevy('spark', 2020), [
+        entry({ id: 'a', marketRegion: 'UZ' }),
+        entry({ id: 'b', marketRegion: 'US' }),
+      ]),
+    ).toEqual({ status: 'ambiguous' });
+    expect(
+      catalogIdentityFacts(chevy('spark', 2020), [
+        entry({ id: 'a', generationVerified: true, generationId: 'm300' }),
+        entry({ id: 'b', generationVerified: true, generationId: 'm400' }),
+      ]),
+    ).toEqual({ status: 'ambiguous' });
+    expect(
+      catalogIdentityFacts(chevy('spark', 2020), [
+        entry({ id: 'a', approvalStatus: 'rejected' }),
+      ]),
+    ).toEqual({ status: 'rejected' });
+    // An unverified identity says nothing, even with a market.
+    expect(
+      catalogIdentityFacts(chevy('spark', 2020), [
+        entry({ id: 'a', identityVerified: false }),
+      ]),
+    ).toEqual({ status: 'unverified' });
+  });
+
+  it('an unverified generation id is not reported', () => {
+    expect(
+      catalogIdentityFacts(chevy('spark', 2020), [
+        entry({ generationId: 'm300', generationVerified: false }),
+      ]),
+    ).toEqual({
+      status: 'verified',
+      marketRegion: 'UZ',
+      generationId: null,
+      faceliftId: null,
+    });
+  });
+});
+
+describe('approvedCatalogAsset: exact, then verified compatible', () => {
+  const uz = (model: string, year: number, trim: string | null = null) => ({
+    ...chevy(model, year, trim),
+    marketRegion: 'UZ',
+  });
+
+  it('exact images', () => {
+    expect(approvedCatalogAsset(uz('cobalt', 2020))).toEqual({
+      assetKey: 'cobalt-gen2',
+      match: 'exact',
+    });
+    expect(approvedCatalogAsset(uz('gentra', 2016))).toEqual({
+      assetKey: 'gentra',
+      match: 'exact',
+    });
+    expect(approvedCatalogAsset(uz('nexia-3', 2018))).toEqual({
+      assetKey: 'nexia-r3',
+      match: 'exact',
+    });
+  });
+
+  it('verified compatible images (registry aliases)', () => {
+    expect(approvedCatalogAsset(uz('lacetti', 2021))).toEqual({
+      assetKey: 'gentra',
+      match: 'compatible',
+    });
+    expect(approvedCatalogAsset(uz('nexia', 2018, 'nexia-3-ls'))).toEqual({
+      assetKey: 'nexia-r3',
+      match: 'compatible',
+    });
+  });
+
+  it('no image for a pending one, another market, or out of range', () => {
+    expect(approvedCatalogAsset(uz('nexia-2', 2012))).toBeNull();
+    expect(
+      approvedCatalogAsset({ ...uz('cobalt', 2020), marketRegion: 'US' }),
+    ).toBeNull();
+    expect(approvedCatalogAsset(uz('cobalt', 2012))).toBeNull();
+    expect(approvedCatalogAsset(uz('spark', 2020))).toBeNull();
+  });
+});
