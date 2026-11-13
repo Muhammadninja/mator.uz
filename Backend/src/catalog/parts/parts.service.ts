@@ -45,6 +45,7 @@ import {
   VEHICLE_FIT_SELECT,
   VehicleFitContext,
   compatibilityFacetWhere,
+  fitModelIds,
   toVehicleFitContext,
   vehicleFitWhere,
 } from '../compatibility/vehicle-fitment';
@@ -354,8 +355,8 @@ export class PartsService {
     const curated = curatedModelIds(part);
     const result = computeCompatibility(part.compatibilities, vehicle, curated);
     const curatedFit =
-      !!vehicle?.modelId &&
-      curated.includes(vehicle.modelId) &&
+      !!vehicle &&
+      fitModelIds(vehicle).some((id) => curated.includes(id)) &&
       result?.status === 'fits';
 
     // A universal product fits every vehicle by definition, so answer `fits`
