@@ -1,4 +1,3 @@
-import { REFERENCE_KNOWN_ISSUES } from './seed-data/vehicle-reference.seed';
 import { isBlocked, isNoop, ReferencePlan } from './vehicle-reference-plan';
 
 export type ReferenceSeedOutcome = 'dry-run' | 'applied' | 'blocked';
@@ -19,8 +18,8 @@ export function formatVehicleReferenceReport(
 
   out.push(
     opts.outcome === 'dry-run'
-      ? 'G-2 vehicle reference seed: DRY-RUN, nothing is written (pass --apply to write)'
-      : 'G-2 vehicle reference seed: APPLY',
+      ? `${plan.label} vehicle reference seed: DRY-RUN, nothing is written (pass --apply to write)`
+      : `${plan.label} vehicle reference seed: APPLY`,
     `Target: ${opts.target}`,
   );
 
@@ -42,7 +41,9 @@ export function formatVehicleReferenceReport(
     `New models (${plan.newModels.length}): appended after each make's existing models`,
     plan.newModels.map(
       (m) =>
-        `+ ${m.makeId.padEnd(11)} ${m.id.padEnd(16)} ${m.name.padEnd(14)} sort ${String(m.sortOrder).padEnd(4)} ${m.evidence}`,
+        `+ ${m.makeId.padEnd(11)} ${m.id.padEnd(16)} ${m.name.padEnd(14)} sort ${String(m.sortOrder).padEnd(4)} ${m.evidence}` +
+        `\n      body_type ${m.bodyType ?? 'null'}, year_from ${m.yearFrom ?? 'null'}, year_to ${m.yearTo ?? 'null'}` +
+        m.sources.map((s) => `\n      ${s}`).join(''),
     ),
   );
   section(`Explicit make-state changes (${plan.stateChanges.length})`, [
@@ -63,9 +64,20 @@ export function formatVehicleReferenceReport(
     plan.errors.map((e) => `✗ ${e}`),
   );
   section(
+    `Facts for existing rows, NOT written (${plan.preservedFacts.length}): existing rows keep their values`,
+    plan.preservedFacts.map((f) => `= ${f}`),
+  );
+  section(
+    `Held back, not planned (${plan.held.length}): needs an owner decision or an official source`,
+    plan.held.map(
+      (h) =>
+        `? ${h.makeId.padEnd(11)} ${h.name}\n      ${h.reason}\n      source: ${h.sources.map((s) => s.url).join(' | ')}`,
+    ),
+  );
+  section(
     'Known issues left for separate migrations (not changed by this seed)',
     [
-      ...REFERENCE_KNOWN_ISSUES.map((i) => `- ${i}`),
+      ...plan.knownIssues.map((i) => `- ${i}`),
       ...plan.duplicateNames.map(
         (d) => `- in the database now, same name twice: ${d}`,
       ),
