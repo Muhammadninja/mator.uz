@@ -6,6 +6,7 @@ const path = require('node:path');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { validateStagingTarget } = require('./staging/staging-target-guard.cjs');
+const { validateStagingRuntime } = require('./staging/staging-runtime-guard.cjs');
 
 const root = path.resolve(__dirname, '..');
 const validEnv = {
@@ -20,6 +21,22 @@ test('staging DB guard accepts only the dedicated loopback database and role', (
   assert.match(validateStagingTarget({ ...validEnv, DIRECT_URL: validEnv.DIRECT_URL.replace('mator_staging', 'mator') }).join(' '), /mator_staging/);
   assert.match(validateStagingTarget({ ...validEnv, NODE_ENV: 'production' }).join(' '), /NODE_ENV/);
   assert.match(validateStagingTarget({ ...validEnv, SEED_ADMIN_PASSWORD: 'present' }).join(' '), /bootstrap an admin/);
+});
+
+test('staging runtime refuses production database and non-staging image pipeline targets', () => {
+  const runtimeEnv = {
+    ...validEnv,
+    VEHICLE_IMAGES_ENABLED: 'true',
+    VEHICLE_IMAGE_PIPELINE_URL: 'http://127.0.0.1:8048',
+    VEHICLE_IMAGE_REQUEST_TOKEN: 's'.repeat(40),
+    REDIS_HOST: '127.0.0.1',
+    REDIS_PORT: '6380',
+  };
+  assert.deepEqual(validateStagingRuntime(runtimeEnv), []);
+  assert.match(validateStagingRuntime({ ...runtimeEnv, DATABASE_URL: runtimeEnv.DATABASE_URL.replace('mator_staging', 'mator') }).join(' '), /mator_staging/);
+  assert.match(validateStagingRuntime({ ...runtimeEnv, VEHICLE_IMAGE_PIPELINE_URL: 'https://api.mator.uz/vehicle-images' }).join(' '), /staging loopback/);
+  assert.match(validateStagingRuntime({ ...runtimeEnv, VEHICLE_IMAGE_REQUEST_TOKEN: 'replace-with-token' }).join(' '), /token/);
+  assert.match(validateStagingRuntime({ ...runtimeEnv, REDIS_PORT: '6379' }).join(' '), /isolated staging loopback/);
 });
 
 test('PM2 staging config is a dedicated loopback fork and uses the staging launcher', () => {
@@ -37,6 +54,7 @@ test('PM2 staging config is a dedicated loopback fork and uses the staging launc
 test('staging launcher sanitizes inherited environment and fixes pipeline endpoint', () => {
   const launcher = readFileSync(path.join(root, 'scripts/staging/start-backend-staging.sh'), 'utf8');
   assert.match(launcher, /env -i/);
+  assert.match(launcher, /staging-runtime-guard\.cjs/);
   assert.match(launcher, /DOTENV_CONFIG_PATH=\/etc\/mator\/backend-staging\.env/);
   assert.match(launcher, /BIND_HOST=127\.0\.0\.1/);
   const envExample = readFileSync(path.join(root, 'deploy/staging/backend-staging.env.example'), 'utf8');

@@ -12,6 +12,16 @@ if (( NODE_MAJOR < 20 )); then echo 'Backend staging requires Node.js 20 or newe
 [[ -f /etc/mator/backend-staging.env ]] || { echo 'Staging env file is missing.' >&2; exit 1; }
 [[ $(stat -c '%a' /etc/mator/backend-staging.env) == 600 ]] || { echo 'Staging env file must have mode 600.' >&2; exit 1; }
 
+/usr/bin/env -i \
+  PATH="$PATH" \
+  HOME=/home/mator-backend-staging \
+  NODE_ENV=staging \
+  PORT=3001 \
+  BIND_HOST=127.0.0.1 \
+  DOTENV_CONFIG_PATH=/etc/mator/backend-staging.env \
+  NODE_OPTIONS=--require=dotenv/config \
+  "$NODE_BIN" "$APP_ROOT/scripts/staging/staging-runtime-guard.cjs"
+
 exec /usr/bin/env -i \
   PATH="$PATH" \
   HOME=/home/mator-backend-staging \
