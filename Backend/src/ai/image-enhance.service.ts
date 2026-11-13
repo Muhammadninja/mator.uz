@@ -16,49 +16,76 @@ const FLUX_ENDPOINT = 'https://api.bfl.ai/v1/flux-2-pro';
 // Target canvas. FLUX.2 accepts explicit width/height (nullable ints, min 64) to
 // fix the output resolution; there is no aspect_ratio field, so this is how the
 // exact 1000×1000 output is requested. The prompt handles composition inside it
-// (centered, ~85–90% fill) — width/height only set the canvas.
+// (centered, inside an 82% × 82% box) — width/height only set the canvas.
 const OUTPUT_WIDTH = 1000;
 const OUTPUT_HEIGHT = 1000;
 
 // The single prompt used for every request: preserve the original part exactly,
-// replace only its background with flat pure white, and frame the whole part on
-// the square canvas. The wording is the product owner's; the priority is the
-// most exact preservation of the original part, never a better-looking one.
-// Deliberate choices:
+// replace only its background with flat pure white, and scale the whole part
+// uniformly into a fixed, centered box on the square canvas. The wording is the
+// product owner's (2026-11-13); the priority is the most exact preservation of
+// the original part, never a better-looking one. Two deliberate departures from
+// the owner's text, approved by them:
 //  • Rust is not mentioned anywhere — not "rust", "rust-free" or "no rust". Named
 //    separately, it draws FLUX's attention and it sometimes paints rust onto
-//    clean parts. Keeping what is really there is still required, stated for all
-//    surface characteristics at once (scratches, dirt, wear, physical
-//    imperfections), and adding any defect the photo does not show is forbidden.
-//  • No "clean", "pristine", "restored", "like new" or "polished", and no
-//    enhance / repair / restore / improve either, not even negated: FLUX.2 has no
-//    negative prompt and naming a thing tends to draw the model toward it, so
-//    preservation is stated positively ("exactly as they appear", "completely
-//    unchanged"). The "Do not" rules that remain name only invention and geometry.
-//  • No lighting instruction: "studio lighting" invites relighting the part, and
-//    its shadows contradict a perfectly pure white background.
-//  • No "sharp…" wording: the model reads it as license to reconstruct detail,
-//    text included.
-//  • Framing (whole part in view, centered, ~85–90%) is its own rule. Only the
-//    camera angle and perspective of the original are kept, not its "product
-//    positioning", which would contradict centering on the forced square canvas.
+//    clean parts. Keeping what is really there is still required for dirt, dust,
+//    scratches, cracks, wear and damage.
+//  • Instead of "Do not clean, repair, restore, beautify, simplify, sharpen,
+//    recolor, retouch or enhance", one positive rule: "Show only the details
+//    visible in the input image." FLUX.2 has no negative prompt and naming a
+//    thing tends to draw the model toward it, so no "clean", "pristine",
+//    "restored", "like new", "polished", enhance / repair / improve, or "sharp…"
+//    appears, not even negated.
+// No lighting instruction either: relighting changes the part itself.
 // A prompt asks, it cannot guarantee: FLUX re-synthesizes the whole canvas, so
 // compliance is only ever verified on real generated images. FLUX.2 [pro] applies
 // prompt upsampling by default, so the model does not see this text exactly as
 // written; this request does not set disable_pup.
 const FLUX_PROMPT = [
-  'Strict product preservation rules:',
-  '- Preserve the exact original automotive part as shown in the input image.',
-  '- Preserve all original surface characteristics, textures, colors, materials, markings, labels, OEM numbers, GM logos, scratches, dirt, wear, and physical imperfections exactly as they appear in the source image.',
-  '- Do not invent, add, remove, or exaggerate any visual details.',
-  '- Do not introduce any surface defects or characteristics that are not present in the original image.',
-  "- Do not change the product's geometry, proportions, structure, components, or orientation.",
-  'Background replacement only:',
-  '- Replace only the original background with a perfectly pure white (#FFFFFF) background.',
-  '- Keep the automotive part completely unchanged.',
-  '- Preserve the original camera angle and perspective.',
-  'Framing: Keep the whole part in view, centered on the square canvas and filling about 85-90% of it, at its original proportions.',
-  'Final result: A photorealistic product photograph on a pure white background, with the automotive part remaining visually identical to the original input image.',
+  'Use the input photo as the only and exact source of the product.',
+  '',
+  '**CRITICAL: Preserve the original auto part exactly as it appears in the input image. Do not regenerate or modify the part.**',
+  '',
+  'The auto part must be treated as a protected, immutable foreground object.',
+  '',
+  '**The ONLY permitted operations are:**',
+  '1. Remove the original background.',
+  '2. Replace it with a perfectly pure white background (#FFFFFF).',
+  '3. Uniformly resize the entire auto part to achieve a consistent visual size across product images.',
+  '4. Center the part on the canvas.',
+  '',
+  '**STRICT PRODUCT PRESERVATION RULES:**',
+  '',
+  'Preserve the original object exactly, including:',
+  '- Original shape, geometry, proportions and dimensions.',
+  '- Every component, opening, hole, connector, wire, clip, screw, edge and small detail.',
+  '- Original colors, materials, textures and surface characteristics.',
+  '- All original dirt, dust, scratches, cracks, wear and damage.',
+  '- Every logo, label, inscription, serial number, OEM number and GM marking.',
+  '',
+  'Show only the details visible in the input image.',
+  '',
+  'Do not add, remove, invent, reconstruct or replace any part of the object.',
+  '',
+  'Do not change the viewing angle, perspective or orientation.',
+  '',
+  '**SCALING AND COMPOSITION:**',
+  '',
+  '- Scale the complete object uniformly, using the same scale factor horizontally and vertically.',
+  '- Preserve the exact original aspect ratio.',
+  '- Never stretch, squeeze, deform or distort the object.',
+  '- Fit the complete object inside a standardized 82% × 82% bounding box of the canvas.',
+  '- Keep reasonably consistent visual object size across all product images.',
+  '- Never crop any part of the object.',
+  '- Position the object in the center of the canvas.',
+  '',
+  '**OUTPUT:**',
+  '- Image dimensions: 1000 × 1000 pixels.',
+  '- Background: perfectly uniform pure white (#FFFFFF).',
+  '- No gradients, decorations, additional objects, text, frames or artificial effects.',
+  '',
+  '**FINAL PRIORITY:**',
+  'The original auto part must remain visually identical to the source photograph. Background removal and uniform resizing are the only acceptable modifications. If preserving the original product conflicts with any other instruction, preserving the original product always takes priority.',
 ].join('\n');
 
 // Output container. The result is an opaque image on a white background (no alpha
