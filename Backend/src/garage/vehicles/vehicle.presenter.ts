@@ -26,7 +26,13 @@ export const VEHICLE_INCLUDE = {
   model3dAsset: { include: { variants: true } },
   // Stored pipeline state only: reading a vehicle never calls the pipeline.
   imageIdentity: {
-    select: { status: true, reason: true, imageUrl: true, imageVersion: true },
+    select: {
+      status: true,
+      reason: true,
+      imageUrl: true,
+      imageVersion: true,
+      catalogAssetKey: true,
+    },
   },
 } satisfies Prisma.VehicleInclude;
 

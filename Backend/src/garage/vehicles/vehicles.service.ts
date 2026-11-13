@@ -136,6 +136,7 @@ export class VehiclesService {
             reason: true,
             imageUrl: true,
             imageVersion: true,
+            catalogAssetKey: true,
           },
         },
       },

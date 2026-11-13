@@ -159,6 +159,7 @@ describe('VehiclesService + vehicle images', () => {
           reason: null,
           imageUrl: 'https://cdn.test/h.webp',
           imageVersion: 2,
+          catalogAssetKey: null,
         },
       }),
     ]);
@@ -193,6 +194,7 @@ describe('VehiclesService + vehicle images', () => {
           reason: null,
           imageUrl: 'https://cdn.test/h.webp',
           imageVersion: 1,
+        catalogAssetKey: null,
         },
       });
     await expect(svc.getImage('usr_1', 'veh_1')).resolves.toEqual({
@@ -205,6 +207,34 @@ describe('VehiclesService + vehicle images', () => {
       },
     });
     expect(images.refresh).toHaveBeenCalledWith('k'.repeat(64));
+  });
+
+  it('returns an approved bundled catalog key from the Garage image refresh route', async () => {
+    const { svc, prisma } = setup();
+    prisma.vehicle.findUnique
+      .mockResolvedValueOnce(row({ imageIdentityKey: 'k'.repeat(64) }))
+      .mockResolvedValueOnce({
+        imageReviewReason: null,
+        imageIdentity: {
+          status: VehicleImageStatus.APPROVED,
+          reason: null,
+          imageUrl: null,
+          imageVersion: 1,
+          catalogAssetKey: 'cobalt-gen2',
+        },
+      });
+    await expect(svc.getImage('usr_1', 'veh_1')).resolves.toEqual({
+      vehicle_id: 'veh_1',
+      vehicle_image: {
+        status: 'approved',
+        url: null,
+        version: 1,
+        catalog_asset_key: 'cobalt-gen2',
+        reason: null,
+      },
+    });
+    const query = prisma.vehicle.findUnique.mock.calls[1][0];
+    expect(query.select.imageIdentity.select.catalogAssetKey).toBe(true);
   });
 
   it("GET /:id/image hides another user's vehicle", async () => {
