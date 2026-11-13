@@ -86,7 +86,11 @@ export class ReferenceService {
         const models = await this.prisma.vehicleModelRef.findMany({
           // Hide every model of an inactive brand — models have no active flag
           // of their own, so the parent make's isActive gates them.
-          where: { makeId, make: { isActive: true } },
+          where: {
+            makeId,
+            make: { isActive: true },
+            variantOfModelId: null,
+          },
           orderBy: { sortOrder: 'asc' },
           select: { id: true, makeId: true, name: true },
         });

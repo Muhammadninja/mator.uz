@@ -11,10 +11,10 @@
  * PROJECTION RULES (frontend 5 levels → backend 4-level schema, schema UNCHANGED):
  *   • VehicleBrand      → VehicleMake        (id = frontend brand id, e.g. "chevrolet")
  *   • VehicleModel      → VehicleModelRef    (id = frontend model id, e.g. "cobalt")
- *   • VehicleGeneration → NOT stored as an entity. Its identity is preserved
- *     INSIDE the trim id/slug (e.g. "cobalt-p2-premier"). yearRange is NOT
- *     migrated — year-based fitment lives in PartCompatibility.years[] (a
- *     deliberate Do-NOT-change decision).
+ *   • Most VehicleGeneration rows are represented by the generation-bearing
+ *     trim id/slug (e.g. "cobalt-p2-premier"). The Garage image resolver also
+ *     stores explicit visual-only Nexia generation model rows below. Neither
+ *     path changes PartCompatibility.years[] or fitment.
  *   • VehicleTrim       → VehicleTrim. id = frontend trim id (already carries the
  *     generation, e.g. "cobalt-p2-premier"). modelId resolves through
  *     generation → model, so it ALWAYS points at the model (e.g. "cobalt").
@@ -40,6 +40,12 @@ export interface SeedModel {
   makeId: string;
   name: string;
   sortOrder: number;
+}
+
+export interface SeedModelVariant extends SeedModel {
+  parentModelId: string;
+  yearFrom: number;
+  yearTo: number;
 }
 
 export interface SeedTrim {
@@ -101,6 +107,16 @@ export const SEED_MODELS: SeedModel[] = [
   { id: 'hyundai-creta', makeId: 'hyundai', name: 'Creta', sortOrder: 22 },
   { id: 'lada-niva', makeId: 'lada', name: 'Niva', sortOrder: 23 },
   { id: 'lada-granta', makeId: 'lada', name: 'Granta', sortOrder: 24 },
+];
+
+/** Visual Nexia generations; Garage fitment continues to use the generic model. */
+export const SEED_MODEL_VARIANTS: SeedModelVariant[] = [
+  { id: 'nexia-1', makeId: 'chevrolet', name: 'Nexia 1', sortOrder: 1001,
+    parentModelId: 'nexia', yearFrom: 1996, yearTo: 2008 },
+  { id: 'nexia-2', makeId: 'chevrolet', name: 'Nexia 2', sortOrder: 1002,
+    parentModelId: 'nexia', yearFrom: 2008, yearTo: 2016 },
+  { id: 'nexia-3', makeId: 'chevrolet', name: 'Nexia 3', sortOrder: 1003,
+    parentModelId: 'nexia', yearFrom: 2016, yearTo: 2022 },
 ];
 
 // ── Trims (from UZ_TRIMS; modelId resolved via generation → model) ───────────

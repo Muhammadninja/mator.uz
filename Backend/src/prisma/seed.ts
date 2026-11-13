@@ -3,6 +3,7 @@ import * as bcrypt from 'bcrypt';
 import {
   SEED_MAKES,
   SEED_MODELS,
+  SEED_MODEL_VARIANTS,
   SEED_TRIMS,
   SEED_ENGINES,
 } from './seed-data/vehicle-catalog.seed';
@@ -113,6 +114,28 @@ async function seedVehicleCatalog() {
       where: { id: m.id },
       update: { makeId: m.makeId, name: m.name, sortOrder: m.sortOrder },
       create: { id: m.id, makeId: m.makeId, name: m.name, sortOrder: m.sortOrder },
+    });
+  }
+  // Generation rows are linked to the generic model after it exists. They are
+  // visual identity metadata only; fitment continues to use `nexia`.
+  for (const variant of SEED_MODEL_VARIANTS) {
+    const { parentModelId, yearFrom, yearTo, ...model } = variant;
+    await prisma.vehicleModelRef.upsert({
+      where: { id: model.id },
+      update: {
+        makeId: model.makeId,
+        name: model.name,
+        sortOrder: model.sortOrder,
+        yearFrom,
+        yearTo,
+        variantOfModelId: parentModelId,
+      },
+      create: {
+        ...model,
+        yearFrom,
+        yearTo,
+        variantOfModelId: parentModelId,
+      },
     });
   }
   // Trims (FK → model; id already encodes the frontend generation).

@@ -9,7 +9,10 @@ BEGIN
     SELECT 1 FROM "vehicle_models"
     WHERE "id" = 'nexia' AND "make_id" = 'chevrolet'
   ) THEN
-    RAISE EXCEPTION 'Cannot create Nexia generation rows: Chevrolet Nexia base row is missing';
+    -- On a brand-new database the reference seed has not run yet. It creates
+    -- the same canonical rows after migrate deploy; existing deployments with
+    -- a Garage catalog get the rows here before the updated backend starts.
+    RETURN;
   END IF;
 
   INSERT INTO "vehicle_models" ("id", "make_id", "name", "sort_order")

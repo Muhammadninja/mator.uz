@@ -136,7 +136,11 @@ describe('ReferenceService', () => {
       // gates them, so a deactivated brand drops out of the app catalog.
       expect(prisma.vehicleModelRef.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { makeId: 'chevrolet', make: { isActive: true } },
+          where: {
+            makeId: 'chevrolet',
+            make: { isActive: true },
+            variantOfModelId: null,
+          },
         }),
       );
     });
