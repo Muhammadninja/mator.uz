@@ -7,10 +7,11 @@ import { AppLang, localizedCategoryName } from '../common/app-lang.util';
 import { SupportedLang } from '../common/i18n.util';
 import {
   computeCompatibility,
-  curatedModelIds,
+  curatedFitment,
   formatUzs,
   type VehicleCompatContext,
 } from '../catalog/parts/part.presenter';
+import { hasVerifiedSourceFit } from '../catalog/compatibility/vehicle-fitment';
 import { ActiveSale, DiscountService } from '../sales/discount.service';
 import { expandToken } from './part-synonyms.util';
 import { BUYER_LISTED_PART } from '../catalog/buyer-visibility';
@@ -130,7 +131,8 @@ export class RagSearchService {
         category: true,
         brand: true,
         compatibilities: true,
-        fitmentBindings: { select: { vehicleModelId: true } },
+        fitmentBindings: { select: { vehicleModelId: true, status: true } },
+        fits: { select: { makeName: true, modelName: true } },
       },
       take: CANDIDATE_LIMIT,
     });
@@ -196,14 +198,21 @@ export class RagSearchService {
   private fitFor(
     row: {
       isUniversal: boolean;
+      sellerId: string;
       compatibilities: Parameters<typeof computeCompatibility>[0];
-      fitmentBindings: { vehicleModelId: string }[];
+      fitmentBindings: { vehicleModelId: string; status?: string | null }[];
+      fits?: { makeName: string; modelName: string }[];
     },
     vehicle: VehicleCompatContext | null,
   ): StockItem['fit'] | 'NOT_FIT' {
     if (!vehicle) return null;
     if (row.isUniversal) return 'FITS';
-    const status = computeCompatibility(row.compatibilities, vehicle, curatedModelIds(row))?.status;
+    const status = computeCompatibility(
+      row.compatibilities,
+      vehicle,
+      curatedFitment(row),
+      hasVerifiedSourceFit(row, vehicle),
+    )?.status;
     if (status === 'does_not_fit') return 'NOT_FIT';
     return status === 'fits' ? 'FITS' : 'UNKNOWN';
   }

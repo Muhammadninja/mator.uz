@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { resolveGeneration } from '../../garage/vehicles/vehicle-generation';
+import { DRIVERS_VILLAGE_CATALOG_SELLER_ID } from '../../imports/drivers-village/drivers-village.constants';
 
 /**
  * The ONE buyer-facing compatibility decision path, shared by the parts listing
@@ -21,6 +22,17 @@ import { resolveGeneration } from '../../garage/vehicles/vehicle-generation';
  *      every Chevrolet part.) A make-wide row matches on the make alone, which
  *      is exactly what make-wide means.
  *   4. TRIM/ENGINE rows (`part_compatibilities`) — unchanged.
+ *
+ * ── Verified dealer fitment (2026-11-13) ────────────────────────────────────
+ * Legacy rows widen the LISTING for every seller, but they are evidence of an
+ * exact fit only from a dealer in VERIFIED_FITMENT_SELLER_IDS: the Driver's
+ * Village 1C list, whose categories and fitment the owner corrected and
+ * re-imported. Such a part is a confirmed fit for a vehicle when one of its
+ * per-model rows names the vehicle's make AND its model (or resolved
+ * generation) — the same rows the listing matches. Make-wide rows ("every
+ * Chevrolet") and Telegram-seller rows stay unconfirmed, a dealer part whose
+ * rows name other models stays unconfirmed (not listed is not "does not fit"),
+ * and a curated binding still overrides everything legacy.
  *
  * ── Resolved generation (Wave 3) ────────────────────────────────────────────
  * A generic model (`nexia`) can have hidden generation rows (`nexia-1/2/3`,
@@ -200,10 +212,98 @@ export const HAS_NO_CURATED_FITMENT = {
   fitmentBindings: { none: {} },
 } satisfies Prisma.CatalogPartWhereInput;
 
+/**
+ * CatalogSeller ids whose per-model fit rows are verified fitment (owner
+ * decision 2026-11-13: the corrected Driver's Village import). Adding a dealer
+ * here turns its name rows into confirmed fits, so it is a business decision.
+ */
+export const VERIFIED_FITMENT_SELLER_IDS: readonly string[] = [
+  DRIVERS_VILLAGE_CATALOG_SELLER_ID,
+];
+
 const sameName = (value: string) => ({
   equals: value,
   mode: 'insensitive' as const,
 });
+
+/** The model names a legacy per-model row may carry for this vehicle. */
+function legacyModelNames(v: {
+  modelName?: string | null;
+  generationModelName?: string;
+}): string[] {
+  return [v.modelName, v.generationModelName].filter((n): n is string => !!n);
+}
+
+/** One per-model legacy row naming this make and one of its model names. */
+function legacyModelFits(v: {
+  makeName?: string | null;
+  modelName?: string | null;
+  generationModelName?: string;
+}): Prisma.CatalogPartWhereInput[] {
+  if (!v.makeName) return [];
+  const makeName = v.makeName;
+  return legacyModelNames(v).map((modelName) => ({
+    fits: {
+      some: {
+        AND: [
+          { makeName: sameName(makeName) },
+          { modelName: sameName(modelName) },
+        ],
+      },
+    },
+  }));
+}
+
+/** The vehicle facts a verified-dealer decision reads. */
+export type VerifiedFitVehicle = {
+  makeName?: string | null;
+  modelName?: string | null;
+  generationModelName?: string;
+};
+
+/**
+ * Whether a part is a CONFIRMED fit through verified dealer fitment: its
+ * dealer is verified, it has no curated binding, and a per-model row names the
+ * vehicle's make and model (or resolved generation). Case-insensitive, like the
+ * listing's `mode: 'insensitive'` match. The single in-memory twin of
+ * verifiedSourceFitWhere.
+ */
+export function hasVerifiedSourceFit(
+  part: {
+    sellerId?: string | null;
+    fits?: ReadonlyArray<{ makeName: string; modelName: string }> | null;
+    fitmentBindings?: ReadonlyArray<unknown> | null;
+  },
+  v: VerifiedFitVehicle | null,
+): boolean {
+  if (!v?.makeName) return false;
+  if (!part.sellerId || !VERIFIED_FITMENT_SELLER_IDS.includes(part.sellerId)) {
+    return false;
+  }
+  if ((part.fitmentBindings?.length ?? 0) > 0) return false;
+  const make = v.makeName.toLowerCase();
+  const models = legacyModelNames(v).map((n) => n.toLowerCase());
+  return (part.fits ?? []).some(
+    (f) =>
+      f.makeName.toLowerCase() === make &&
+      models.includes(f.modelName.toLowerCase()),
+  );
+}
+
+/** hasVerifiedSourceFit as a `where`, or null when the vehicle names no model. */
+export function verifiedSourceFitWhere(
+  v: VerifiedFitVehicle,
+): Prisma.CatalogPartWhereInput | null {
+  const rows = legacyModelFits(v);
+  if (rows.length === 0) return null;
+  return {
+    AND: [
+      { sellerId: { in: [...VERIFIED_FITMENT_SELLER_IDS] } },
+      HAS_NO_CURATED_FITMENT,
+      { OR: rows },
+    ],
+  };
+}
 
 /**
  * Restrict a catalog query to the parts that fit one garage vehicle. See the
@@ -219,24 +319,7 @@ export function vehicleFitWhere(
     or.push({ fitmentBindings: { some: bindingTo(modelIds) } });
   }
 
-  const legacy: Prisma.CatalogPartWhereInput[] = [];
-  const legacyModelNames = [v.modelName, v.generationModelName].filter(
-    (n): n is string => !!n,
-  );
-  if (v.makeName) {
-    for (const modelName of legacyModelNames) {
-      legacy.push({
-        fits: {
-          some: {
-            AND: [
-              { makeName: sameName(v.makeName) },
-              { modelName: sameName(modelName) },
-            ],
-          },
-        },
-      });
-    }
-  }
+  const legacy: Prisma.CatalogPartWhereInput[] = legacyModelFits(v);
   if (v.makeName) {
     legacy.push({ makeFits: { some: { makeName: sameName(v.makeName) } } });
   }
@@ -266,10 +349,12 @@ export function vehicleFitWhere(
  * The compatibility facet as two counts' worth of `where`, so the database does the
  * counting: the same decision computeCompatibility makes for one part, in its order.
  *   1. a trim row for this trim and year decides, with its own status;
- *   2. else a curated binding to this model is a fit;
- *   3. else an engine row decides, FITS read down to maybe;
- *   4. else any other fitment data at all means it does not fit;
- *   5. else it is a maybe, which is whatever the other two leave.
+ *   2. else a confirmed (not MAYBE) curated binding to this model is a fit;
+ *      a MAYBE-only binding decides "maybe" (it is in no bucket below);
+ *   3. else a verified dealer row for this make and model is a fit;
+ *   4. else an engine row decides, FITS read down to maybe;
+ *   5. else any other fitment data at all means it does not fit;
+ *   6. else it is a maybe, which is whatever the other two leave.
  */
 export function compatibilityFacetWhere(v: VehicleFitContext): {
   fits: Prisma.CatalogPartWhereInput;
@@ -284,7 +369,11 @@ export function compatibilityFacetWhere(v: VehicleFitContext): {
   const modelIds = fitModelIds(v);
   const curated: Prisma.CatalogPartWhereInput | null =
     modelIds.length > 0
-      ? { fitmentBindings: { some: bindingTo(modelIds) } }
+      ? {
+          fitmentBindings: {
+            some: { ...bindingTo(modelIds), status: { not: 'MAYBE' } },
+          },
+        }
       : null;
   const notTrim: Prisma.CatalogPartWhereInput[] = trimRow
     ? [{ compatibilities: { none: trimRow } }]
@@ -296,6 +385,10 @@ export function compatibilityFacetWhere(v: VehicleFitContext): {
   const notEngine: Prisma.CatalogPartWhereInput[] = engineRow
     ? [{ compatibilities: { none: engineRow } }]
     : [];
+  const verified = verifiedSourceFitWhere(v);
+  const notVerified: Prisma.CatalogPartWhereInput[] = verified
+    ? [{ NOT: verified }]
+    : [];
 
   const fits: Prisma.CatalogPartWhereInput[] = [];
   const doesNotFit: Prisma.CatalogPartWhereInput[] = [];
@@ -306,11 +399,14 @@ export function compatibilityFacetWhere(v: VehicleFitContext): {
     });
   }
   if (curated) fits.push({ AND: [...notTrim, curated] });
+  // `verified` already requires no curated binding at all, so notCurated holds.
+  if (verified) fits.push({ AND: [...notTrim, verified] });
   if (engineRow) {
     doesNotFit.push({
       AND: [
         ...notTrim,
         ...notCurated,
+        ...notVerified,
         { compatibilities: { some: { AND: [engineRow, { status: 'DOES_NOT_FIT' }] } } },
       ],
     });
@@ -319,6 +415,7 @@ export function compatibilityFacetWhere(v: VehicleFitContext): {
     AND: [
       ...notTrim,
       ...notCurated,
+      ...notVerified,
       ...notEngine,
       { OR: [{ compatibilities: { some: {} } }, { fitmentBindings: { some: {} } }] },
     ],
