@@ -307,16 +307,17 @@ describe('PartsService.checkCompatibility — curated Fitment Studio bindings', 
     expect(res.isCompatible).toBe(false);
   });
 
-  it('a seller/import row naming the exact make+model never yields EXACT_MATCH on its own', async () => {
+  it('a Telegram-seller row naming the exact make+model never yields EXACT_MATCH on its own', async () => {
     const { svc, prisma } = makeService({
       part: { isUniversal: false, compatibilities: [] },
       vehicleById: VEHICLE,
     });
-    // Even were the legacy rows returned, they are not evidence this check
-    // reads: they are seller-entered names, so at most the listing shows the
-    // part — the verdict stays UNCERTAIN.
+    // Seller-entered names from an unverified dealer: at most the listing shows
+    // the part — the verdict stays UNCERTAIN. Only a verified dealer's rows
+    // (tracker-compatibility.spec.ts) confirm a fit.
     prisma.catalogPart.findFirst.mockResolvedValue({
       id: 'part_1',
+      sellerId: 'seller_7',
       isUniversal: false,
       oemNumbers: [],
       compatibilities: [],
@@ -333,7 +334,9 @@ describe('PartsService.checkCompatibility — curated Fitment Studio bindings', 
     const [{ select }] = prisma.catalogPart.findFirst.mock.calls[0] as [
       { select: Record<string, unknown> },
     ];
-    expect(select).not.toHaveProperty('fits');
+    // Fit rows are read for the verified-dealer rule; make-wide rows never are.
+    expect(select).toHaveProperty('sellerId', true);
+    expect(select).toHaveProperty('fits');
     expect(select).not.toHaveProperty('makeFits');
   });
 

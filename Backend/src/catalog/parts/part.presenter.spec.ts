@@ -91,9 +91,15 @@ function part(over: Partial<PartWithRelations> = {}): PartWithRelations {
 }
 
 /** A curated Fitment Studio binding as PART_INCLUDE loads it. */
-function binding(vehicleModelId: string, model: string, make = 'Chevrolet') {
+function binding(
+  vehicleModelId: string,
+  model: string,
+  make = 'Chevrolet',
+  status: 'EXACT_MATCH' | 'MAYBE' = 'EXACT_MATCH',
+) {
   return {
     vehicleModelId,
+    status,
     vehicleModel: { name: model, make: { name: make } },
   };
 }
@@ -594,5 +600,38 @@ describe('presentPartItem — curated fitment (fitment_bindings)', () => {
     expect(presentPartItem(curated, spark).compatibility?.status).toBe(
       'does_not_fit',
     );
+  });
+
+  it('a MAYBE binding is not listed under fits[] and its compatibility is "maybe"', () => {
+    const tracker = {
+      modelId: 'tracker',
+      trimId: null,
+      engineId: null,
+      year: 2016,
+    };
+    const out = presentPartItem(
+      part({
+        fitmentBindings: [
+          binding('tracker', 'Tracker', 'Chevrolet', 'MAYBE'),
+          binding('tracker-2', 'Tracker', 'Chevrolet', 'EXACT_MATCH'),
+        ],
+      }),
+      tracker,
+    );
+    // Only the confirmed tracker-2 binding (both rows are named "Tracker").
+    expect(out.fits).toHaveLength(1);
+    expect(out.compatibility?.status).toBe('maybe');
+  });
+
+  it('a part bound only as MAYBE lists no fits and does not fall back to legacy rows', () => {
+    const out = presentPartItem(
+      part({
+        fitmentBindings: [binding('tracker', 'Tracker', 'Chevrolet', 'MAYBE')],
+        fits: [fit()],
+      }),
+      null,
+    );
+    expect(out.fits).toEqual([]);
+    expect(out.make_fits).toEqual([]);
   });
 });
