@@ -211,7 +211,8 @@ describe('image identity per generation (generationId stays null)', () => {
     });
   const subjectPlan = (year: number) => {
     const s = imageSubject(generic, resolve(year));
-    return 'model' in s ? plan(s.model, year) : s;
+    if (!('model' in s)) throw new Error(`expected a generation for ${year}`);
+    return plan(s.model, year);
   };
 
   it('Nexia 2 and Nexia 3 of the same year are different identities, keyed by their catalog rows', () => {
