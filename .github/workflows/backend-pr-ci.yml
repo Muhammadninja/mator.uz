@@ -1,0 +1,81 @@
+name: backend-pr-ci
+
+on:
+  push:
+    branches:
+      - claude/nexia-generation
+    paths:
+      - 'Backend/**'
+      - '.github/workflows/backend-pr-ci.yml'
+  pull_request:
+    paths:
+      - 'Backend/**'
+      - '.github/workflows/backend-pr-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-pr-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: mator_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d mator_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/mator_ci?schema=public
+      DIRECT_URL: postgresql://postgres:postgres@localhost:5432/mator_ci?schema=public
+    steps:
+      - name: Check out PR
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: Backend/package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci --prefix Backend
+
+      - name: Validate Prisma schema and generate client
+        working-directory: Backend
+        run: |
+          npx prisma validate --schema prisma/schema.prisma
+          npx prisma generate --schema prisma/schema.prisma
+
+      - name: Run backend unit tests
+        run: npm test --prefix Backend -- --runInBand
+
+      - name: Build backend
+        run: npm run build --prefix Backend
+
+      - name: Validate migration order and apply to isolated PostgreSQL
+        working-directory: Backend
+        run: |
+          set -euo pipefail
+          test -f prisma/migrations/20261113000000_vehicle_image_integration/migration.sql
+          test -f prisma/migrations/20261115000000_vehicle_model_variants/migration.sql
+          test "$(find prisma/migrations -mindepth 1 -maxdepth 1 -type d -name '202611*vehicle*' -printf '%f\n' | sort | paste -sd ' ' -)" = \
+            "20261113000000_vehicle_image_integration 20261115000000_vehicle_model_variants"
+          npx prisma migrate deploy --schema prisma/schema.prisma
+          npx prisma migrate status --schema prisma/schema.prisma
+          applied=$(psql 'postgresql://postgres:postgres@localhost:5432/mator_ci' -v ON_ERROR_STOP=1 -Atc "SELECT count(*) FROM \"_prisma_migrations\" WHERE migration_name IN ('20261113000000_vehicle_image_integration', '20261115000000_vehicle_model_variants') AND finished_at IS NOT NULL AND rolled_back_at IS NULL")
+          test "$applied" = 2

@@ -1,14 +1,25 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
-import { Drivetrain, FuelType, NotificationType, VehicleTransmission } from '@prisma/client';
+import { Drivetrain, FuelType, NotificationType, Vehicle, VehicleTransmission } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { prefixedId, IdPrefix } from '../../common/ulid.util';
 import { CreateVehicleDto } from './dto/create-vehicle.dto';
 import { UpdateVehicleDto } from './dto/update-vehicle.dto';
-import { VEHICLE_INCLUDE, presentVehicle } from './vehicle.presenter';
+import {
+  VARIANT_SELECT,
+  VEHICLE_INCLUDE,
+  presentVehicle,
+} from './vehicle.presenter';
+import {
+  imageSubject,
+  resolveGeneration,
+  variantsForYear,
+  type VariantRow,
+} from './vehicle-generation';
 import { RealtimeGateway } from '../../realtime/realtime.gateway';
 import { NotificationsService } from '../../notifications/notifications.service';
 import { VehicleImagesService } from '../vehicle-images/vehicle-images.service';
 import { presentVehicleImage } from '../vehicle-images/vehicle-image.state';
+import type { IdentityPlan } from '../vehicle-images/vehicle-image.identity';
 
 @Injectable()
 export class VehiclesService {
@@ -34,12 +45,20 @@ export class VehiclesService {
   async create(userId: string, dto: CreateVehicleDto) {
     const catalog = await this.assertCatalogRefs(dto);
     // Vehicle image identity from the catalog rows just read (null when the
-    // integration is off). Never blocks creation.
-    const imagePlan = await this.images.prepare({
+    // integration is off). Never blocks creation. A generic model is pictured as
+    // the generation its year resolves to; an unresolved one is not requested.
+    const generation = resolveGeneration({
       year: dto.year,
-      model: catalog.model,
-      trim: catalog.trim,
+      trimId: catalog.trim?.id ?? null,
+      variants: catalog.model.variants,
+      chosenVariantId: null,
     });
+    const imagePlan = await this.prepareImage(
+      dto.year,
+      catalog.model,
+      catalog.trim,
+      generation,
+    );
     const model3dAssetId = dto.trim_id ? await this.resolve3dAsset(dto.trim_id) : null;
 
     // First vehicle is always primary; otherwise honor the requested flag.
@@ -155,14 +174,30 @@ export class VehiclesService {
   }
 
   async update(userId: string, vehicleId: string, dto: UpdateVehicleDto) {
-    await this.assertOwned(userId, vehicleId);
+    const owned = await this.assertOwned(userId, vehicleId);
+    const variant =
+      dto.variant_model_id !== undefined
+        ? await this.planVariantPick(owned, dto.variant_model_id)
+        : null;
 
+    let imageOutboxId: string | null = null;
     const updated = await this.prisma.$transaction(async (tx) => {
       if (dto.is_primary === true) {
         await tx.vehicle.updateMany({
           where: { userId, isPrimary: true, id: { not: vehicleId } },
           data: { isPrimary: false },
         });
+      }
+      // A generation pick re-plans the picture with the vehicle's write. With the
+      // integration off (no plan), the stored image state is left as it is.
+      let imageData = {};
+      if (variant?.plan) {
+        const image = await this.images.stage(tx, vehicleId, variant.plan);
+        imageOutboxId = image.outboxId;
+        imageData = {
+          imageIdentityKey: image.data.imageIdentityKey ?? null,
+          imageReviewReason: image.data.imageReviewReason ?? null,
+        };
       }
       return tx.vehicle.update({
         where: { id: vehicleId },
@@ -174,10 +209,13 @@ export class VehiclesService {
           colorHex: dto.color_hex,
           licensePlate: dto.license_plate,
           vin: dto.vin,
+          ...(variant ? { variantModelId: variant.variantModelId } : {}),
+          ...imageData,
         },
         include: VEHICLE_INCLUDE,
       });
     });
+    this.images.kick(imageOutboxId);
 
     const vehicle = presentVehicle(updated, true);
     this.realtime.emitGarageEvent(userId, 'vehicle.updated', vehicle);
@@ -227,8 +265,63 @@ export class VehiclesService {
     return v;
   }
 
+  /**
+   * PATCH `variant_model_id`: the owner's pick of a generation for a generic-model
+   * vehicle. Accepted only among the generations its year leaves open, and never
+   * over a picked trim (more precise, so it wins). Null clears the pick.
+   */
+  private async planVariantPick(
+    vehicle: Vehicle,
+    variantModelId: string | null,
+  ) {
+    const model = await this.prisma.vehicleModelRef.findUnique({
+      where: { id: vehicle.modelId },
+      include: { variants: { select: VARIANT_SELECT } },
+    });
+    if (!model || model.variants.length === 0 || vehicle.trimId) {
+      throw new BadRequestException('This vehicle has no generation to choose');
+    }
+    const options = variantsForYear(model.variants, vehicle.year);
+    const allowed =
+      options.length > 1 && options.some((v) => v.id === variantModelId);
+    if (variantModelId !== null && !allowed) {
+      throw new BadRequestException(
+        'variant_model_id is not a generation option for this vehicle',
+      );
+    }
+    const generation = resolveGeneration({
+      year: vehicle.year,
+      trimId: null,
+      variants: model.variants,
+      chosenVariantId: variantModelId,
+    });
+    const plan = await this.prepareImage(vehicle.year, model, null, generation);
+    return { variantModelId, plan };
+  }
+
+  /** The image plan for the catalog row the vehicle is pictured as. */
+  private prepareImage(
+    year: number,
+    model: VariantRow,
+    trim: { id: string; modelId: string; name: string } | null,
+    generation: ReturnType<typeof resolveGeneration>,
+  ): Promise<IdentityPlan | null> {
+    const subject = imageSubject(model, generation);
+    return 'review' in subject
+      ? this.images.prepare({
+          year,
+          model: null,
+          trim: null,
+          review: subject.review,
+        })
+      : this.images.prepare({ year, model: subject.model, trim });
+  }
+
   private async assertCatalogRefs(dto: CreateVehicleDto) {
-    const model = await this.prisma.vehicleModelRef.findUnique({ where: { id: dto.model_id } });
+    const model = await this.prisma.vehicleModelRef.findUnique({
+      where: { id: dto.model_id },
+      include: { variants: { select: VARIANT_SELECT } },
+    });
     if (!model || model.makeId !== dto.make_id) {
       throw new BadRequestException('Unknown or mismatched make_id/model_id');
     }

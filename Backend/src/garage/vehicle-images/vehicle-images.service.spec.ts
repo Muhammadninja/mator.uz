@@ -209,6 +209,29 @@ describe('VehicleImagesService.prepare / kick', () => {
     ).toBeNull();
   });
 
+  it('an unresolved generation is a review, never a request, and only while enabled', async () => {
+    const on = setup({ status: VehicleImageStatus.PENDING });
+    expect(
+      await on.svc.prepare({
+        year: 2016,
+        model: null,
+        trim: null,
+        review: 'generation_unresolved',
+      }),
+    ).toEqual({ kind: 'review', reason: 'generation_unresolved' });
+    expect(on.prisma.vehicleMake.findUnique).not.toHaveBeenCalled();
+    const off = setup({ status: VehicleImageStatus.PENDING });
+    off.delivery.enabled = false;
+    expect(
+      await off.svc.prepare({
+        year: 2016,
+        model: null,
+        trim: null,
+        review: 'generation_unresolved',
+      }),
+    ).toBeNull();
+  });
+
   it('kick is fire-and-forget: a Redis failure never reaches the caller', async () => {
     const { svc, queue } = setup({ status: VehicleImageStatus.PENDING });
     queue.add.mockRejectedValue(new Error('ECONNREFUSED'));

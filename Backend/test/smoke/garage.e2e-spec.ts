@@ -34,7 +34,11 @@ describe('Garage smoke', () => {
   } as any;
 
   it('creates the first vehicle as primary and emits vehicle.created', async () => {
-    prisma.vehicleModelRef.findUnique.mockResolvedValue({ id: 'model_cobalt', makeId: 'make_chevrolet' });
+    prisma.vehicleModelRef.findUnique.mockResolvedValue({
+      id: 'model_cobalt',
+      makeId: 'make_chevrolet',
+      variants: [],
+    });
     prisma.vehicleTrim.findUnique.mockResolvedValue({ id: 'trim_lt', modelId: 'model_cobalt' });
     prisma.vehicleEngine.findUnique.mockResolvedValue({ id: 'engine_b15d2' });
     prisma.vehicle3dAsset.findFirst.mockResolvedValue(null);

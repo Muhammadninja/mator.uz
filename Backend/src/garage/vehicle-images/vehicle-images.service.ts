@@ -12,6 +12,7 @@ import { QUEUE_NAMES } from '../../queue/queue.constants';
 import {
   planVehicleIdentity,
   type IdentityPlan,
+  type ImageReviewReason,
   type VehicleIdentitySource,
 } from './vehicle-image.identity';
 import { REDISPATCHABLE_REASONS } from './vehicle-image.state';
@@ -51,13 +52,20 @@ export class VehicleImagesService {
    * (make, model, the picked trim, and the make's other model names for the
    * ambiguity check). Null when the integration is off, or when the catalog
    * could not be read; the vehicle is still created.
+   *
+   * `model` is the catalog row the picture is of: the vehicle's own model, or the
+   * generation-specific row its generation resolved to. `review` keeps the
+   * vehicle on the placeholder without asking the pipeline.
    */
   async prepare(input: {
     year: number;
     model: VehicleIdentitySource['model'];
     trim: VehicleIdentitySource['trim'];
+    review?: ImageReviewReason;
   }): Promise<IdentityPlan | null> {
-    if (!this.delivery.enabled || !input.model) return null;
+    if (!this.delivery.enabled) return null;
+    if (input.review) return { kind: 'review', reason: input.review };
+    if (!input.model) return null;
     try {
       const [make, siblings] = await Promise.all([
         this.prisma.vehicleMake.findUnique({
