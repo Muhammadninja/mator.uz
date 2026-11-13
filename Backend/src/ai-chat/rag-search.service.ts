@@ -14,6 +14,7 @@ import {
 import { hasVerifiedSourceFit } from '../catalog/compatibility/vehicle-fitment';
 import { ActiveSale, DiscountService } from '../sales/discount.service';
 import { expandToken } from './part-synonyms.util';
+import { partNumbersInText } from '../common/part-number.util';
 import { BUYER_LISTED_PART } from '../catalog/buyer-visibility';
 import {
   loadCategoryTreeScope,
@@ -115,27 +116,53 @@ export class RagSearchService {
       { title: { contains: escapeLike(f), mode: 'insensitive' } },
       { brand: { is: { name: { contains: escapeLike(f), mode: 'insensitive' } } } },
     ]);
+    // A part number in the request (with a digit: "96879797", "sp-1362") also
+    // matches a stored GM/OEM number exactly — never by prefix, never through a
+    // cross-reference — and such a part ranks above any title match.
+    // (part-number.util: the whole text, or 5+ character pieces beside words.)
+    const numberKeys = partNumbersInText(query.partName);
+    const numberOr: Prisma.CatalogPartWhereInput[] = numberKeys.flatMap(
+      (key) => [{ oemNumbers: { has: key } }, { gmNumbers: { has: key } }],
+    );
+    const hasExactNumber = (row: {
+      oemNumbers?: string[];
+      gmNumbers?: string[];
+    }) =>
+      numberKeys.some(
+        (k) => !!row.oemNumbers?.includes(k) || !!row.gmNumbers?.includes(k),
+      );
 
     const visible = visibleCategoryWhere(await loadCategoryTreeScope(this.prisma));
-    const candidates = await this.prisma.catalogPart.findMany({
-      // Never quote a part the catalog does not list: a suspended dealer's, or
-      // one without a ready photo (catalog/buyer-visibility.ts).
-      where: {
-        inStock: true,
-        OR: or,
-        ...BUYER_LISTED_PART,
-        ...visible,
-        AND: [sellableWhere(this.prisma)],
-      },
-      include: {
-        category: true,
-        brand: true,
-        compatibilities: true,
-        fitmentBindings: { select: { vehicleModelId: true, status: true } },
-        fits: { select: { makeName: true, modelName: true } },
-      },
-      take: CANDIDATE_LIMIT,
-    });
+    const read = (match: Prisma.CatalogPartWhereInput[]) =>
+      this.prisma.catalogPart.findMany({
+        // Never quote a part the catalog does not list: a suspended dealer's, or
+        // one without a ready photo (catalog/buyer-visibility.ts).
+        where: {
+          inStock: true,
+          OR: match,
+          ...BUYER_LISTED_PART,
+          ...visible,
+          AND: [sellableWhere(this.prisma)],
+        },
+        include: {
+          category: true,
+          brand: true,
+          compatibilities: true,
+          fitmentBindings: { select: { vehicleModelId: true, status: true } },
+          fits: { select: { makeName: true, modelName: true } },
+        },
+        take: CANDIDATE_LIMIT,
+      });
+    // The exact-number parts get their own read, so title matches beyond the
+    // candidate limit can never crowd them out.
+    const [exactRows, otherRows] = await Promise.all([
+      numberOr.length > 0 ? read(numberOr) : Promise.resolve([]),
+      read([...or, ...numberOr]),
+    ]);
+    const seen = new Set<string>();
+    const candidates = [...exactRows, ...otherRows].filter((r) =>
+      seen.has(r.id) ? false : (seen.add(r.id), true),
+    );
 
     const vehicle = query.vehicle ?? null;
     const ranked = candidates
@@ -150,11 +177,17 @@ export class RagSearchService {
           (n, forms) => (forms.some((f) => hay.includes(f)) ? n + 1 : n),
           0,
         );
-        return { row, score, fit: fit as StockItem['fit'] };
+        return {
+          row,
+          score,
+          exact: hasExactNumber(row),
+          fit: fit as StockItem['fit'],
+        };
       })
-      .filter((c) => c.score > 0)
+      .filter((c) => c.exact || c.score > 0)
       .sort(
         (a, b) =>
+          Number(b.exact) - Number(a.exact) ||
           b.score - a.score ||
           Number(b.fit === 'FITS') - Number(a.fit === 'FITS') ||
           a.row.priceUzs.toNumber() - b.row.priceUzs.toNumber(),

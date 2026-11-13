@@ -321,13 +321,30 @@ describe('PartsService — search and sort survive ProductKind', () => {
   });
 
   it('an article-shaped query ALSO matches the OEM/GM number arrays', async () => {
-    const { and } = await whereFor({ q: 'sp-1362' });
+    // Wave 5: the stored spelling as typed (and its uppercase) first, then the
+    // canonical form — every one an exact `has`, never a prefix. The page is
+    // read tier by tier (exact numbers first), each tier AND-ed onto the
+    // listing's own where, so the listing predicate is the tier's first term.
+    const { where } = await whereFor({ q: 'sp-1362' });
+    const listing = (where.AND as { AND: Record<string, unknown>[] }[])[0];
     expect(
-      hasCond(and, {
+      hasCond(listing.AND, {
         OR: [
           { title: { contains: 'sp-1362', mode: 'insensitive' } },
-          { oemNumbers: { has: 'SP1362' } },
-          { gmNumbers: { has: 'SP1362' } },
+          {
+            OR: [
+              { oemNumbers: { has: 'sp-1362' } },
+              { gmNumbers: { has: 'sp-1362' } },
+              { oemNumbers: { has: 'SP-1362' } },
+              { gmNumbers: { has: 'SP-1362' } },
+            ],
+          },
+          {
+            OR: [
+              { oemNumbers: { has: 'SP1362' } },
+              { gmNumbers: { has: 'SP1362' } },
+            ],
+          },
         ],
       }),
     ).toBe(true);

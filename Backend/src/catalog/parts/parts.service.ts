@@ -1,5 +1,4 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { escapeLike } from '../../common/like-escape.util';
 import {
   inIdOrder,
   isPriceSort,
@@ -16,7 +15,12 @@ import {
   OilType,
 } from '@prisma/client';
 import { OIL_TYPE_LABELS, formatVolume } from '../../common/motor-oil.util';
-import { normalizeOem } from '../../common/normalize-oem.util';
+import {
+  partTextWhere,
+  ranksByRelevance,
+  relevanceTiers,
+  tieredPage,
+} from '../search/part-relevance';
 import { MAIN_CATEGORY_TO_SLUG } from '../categories/category-map';
 import { MAX_DEPTH } from '../categories/part-category.service';
 import {
@@ -106,22 +110,9 @@ export function categorySubtreeWhere(
   return { OR: [{ categoryId }, { category: { is: { OR: beneath } } }] };
 }
 
-/**
- * Free text as buyers mean it: part of a title, or an article number however it was
- * typed. The one definition the listing and POST /v1/search both use.
- */
-export function partTextWhere(text: string): Prisma.CatalogPartWhereInput {
-  const normalized = normalizeOem(text);
-  const or: Prisma.CatalogPartWhereInput[] = [
-    // Literal text: a `%` or `_` the buyer typed is not a wildcard (INFO-9).
-    { title: { contains: escapeLike(text), mode: 'insensitive' } },
-  ];
-  if (normalized.length > 0) {
-    or.push({ oemNumbers: { has: normalized } });
-    or.push({ gmNumbers: { has: normalized } });
-  }
-  return { OR: or };
-}
+// Free text as buyers mean it — title or part number — now lives with its
+// ranking in search/part-relevance.ts; re-exported here for existing imports.
+export { partTextWhere };
 
 /**
  * The order of a buyer's result page, listing and POST /v1/search alike. An
@@ -258,13 +249,24 @@ export class PartsService {
             where: { id: { in: scan.pageIds } },
             include: PART_INCLUDE,
           })
-        : this.prisma.catalogPart.findMany({
+        : tieredPage(
+            (w) => this.prisma.catalogPart.count({ where: w }),
+            (w, skip, take) =>
+              this.prisma.catalogPart.findMany({
+                where: w,
+                include: PART_INCLUDE,
+                orderBy: this.buildOrderBy(effectiveSort),
+                skip,
+                take,
+              }),
             where,
-            include: PART_INCLUDE,
-            orderBy: this.buildOrderBy(effectiveSort),
-            skip: (page - 1) * pageSize,
-            take: pageSize,
-          }),
+            // Exact part-number matches first, unless the buyer chose a sort.
+            query.q && ranksByRelevance(query.sort)
+              ? relevanceTiers(query.q)
+              : [{}],
+            (page - 1) * pageSize,
+            pageSize,
+          ),
       this.prisma.catalogPart.groupBy({
         by: ['brandId'],
         where: brandFacetWhere,
@@ -632,11 +634,11 @@ export class PartsService {
     if (q.gm_only === 'true') and.push({ isGm: true });
     if (q.oem_only === 'true') and.push({ isOem: true });
     if (q.in_stock_only === 'true') and.push({ inStock: true }, sellableWhere(this.prisma));
-    // Free-text search: fuzzy title match OR exact article match. Article search
-    // normalizes the query (strip separators, uppercase) and looks it up inside
-    // the `oemNumbers` / `gmNumbers` arrays with `has` (exact membership → uses
-    // the GIN indexes). The `has` clauses are added only when the normalized
-    // query is non-empty, so a punctuation-only `q` stays a pure title search.
+    // Free-text search: title contains the text, OR a stored GM/OEM number
+    // equals it exactly — as typed, or (when the text is a part number) in its
+    // canonical form (`has` → exact membership, GIN-indexed). A text with
+    // letters normalizeOem would drop ("ВАЗ 2106") is not a part number and
+    // gets no canonical lookup (search/part-relevance.ts).
     if (q.q) and.push(partTextWhere(q.q));
 
     // Listing kind + the kind-specific attribute filters (motor oils).
