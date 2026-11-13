@@ -1,5 +1,6 @@
 import { VehicleImageStatus } from '@prisma/client';
 import type { PipelineStatusResult } from './vehicle-image.pipeline-client';
+import { isApprovedCatalogAssetKey } from './vehicle-image.catalog';
 
 /**
  * Internal reasons stored on `vehicle_image_identities.reason`.
@@ -12,6 +13,9 @@ import type { PipelineStatusResult } from './vehicle-image.pipeline-client';
  *     the same identity sends the request again.
  *   awaiting_publication: approved by the pipeline but with no public HTTPS URL
  *     yet. Stays `pending`, and no URL is exposed.
+ *   not_requested: a verified identity with no approved registry image, saved while
+ *     the pipeline integration is off. Nothing was asked of the pipeline, so the
+ *     next new Garage vehicle with this identity asks once it is on.
  */
 export const IDENTITY_REASONS = {
   GENERATION_FAILED: 'generation_failed',
@@ -20,11 +24,13 @@ export const IDENTITY_REASONS = {
   REQUEST_MISSING: 'request_missing',
   AWAITING_PUBLICATION: 'awaiting_publication',
   IDENTITY_REVIEW_REQUIRED: 'identity_review_required',
+  NOT_REQUESTED: 'not_requested',
 } as const;
 
 export const REDISPATCHABLE_REASONS: ReadonlySet<string> = new Set([
   IDENTITY_REASONS.DISPATCH_FAILED,
   IDENTITY_REASONS.REQUEST_MISSING,
+  IDENTITY_REASONS.NOT_REQUESTED,
 ]);
 
 const MINUTE = 60_000;
@@ -209,7 +215,22 @@ export interface VehicleImageSourceRow {
     imageUrl: string | null;
     imageVersion: number | null;
     catalogAssetKey?: string | null;
+    /** The stored canonical identity; a publication is shown only for a market-aware one. */
+    identity?: unknown;
   } | null;
+}
+
+/**
+ * Whether the stored identity names a verified market. Identities saved before
+ * markets were resolved per vehicle carry none, so a publication made for one
+ * could show another market's car (e.g. a US-market Spark); it is not shown.
+ */
+function hasMarket(identity: unknown): boolean {
+  return (
+    !!identity &&
+    typeof identity === 'object' &&
+    typeof (identity as { marketRegion?: unknown }).marketRegion === 'string'
+  );
 }
 
 const unavailable = (reason: VehicleImagePublicReason): VehicleImageField => ({
@@ -219,24 +240,44 @@ const unavailable = (reason: VehicleImagePublicReason): VehicleImageField => ({
   reason,
 });
 
-/** The `vehicle_image` field of Garage responses, from stored state only (no I/O). */
+/**
+ * The `vehicle_image` field of Garage responses, from stored state only (no I/O).
+ *
+ * Shown, in this order: an approved registry image (`catalog_asset_key`, only
+ * while the registry still approves that key), then an approved pipeline
+ * publication of a market-aware identity. Anything else is a placeholder state.
+ */
 export function presentVehicleImage(
   row: VehicleImageSourceRow,
 ): VehicleImageField {
   const state = row.imageIdentity;
   if (state) {
-    if (
-      state.status === VehicleImageStatus.APPROVED &&
-      state.imageVersion &&
-      ((state.imageUrl && isPublishedUrl(state.imageUrl)) || state.catalogAssetKey)
-    ) {
-      return {
-        status: 'approved',
-        url: state.imageUrl,
-        version: state.imageVersion,
-        ...(state.catalogAssetKey ? { catalog_asset_key: state.catalogAssetKey } : {}),
-        reason: null,
-      };
+    if (state.status === VehicleImageStatus.APPROVED && state.imageVersion) {
+      const published =
+        state.imageUrl && isPublishedUrl(state.imageUrl) ? state.imageUrl : null;
+      if (state.catalogAssetKey) {
+        // Approval withdrawn from the registry: never show it.
+        if (!isApprovedCatalogAssetKey(state.catalogAssetKey))
+          return unavailable('needs_review');
+        return {
+          status: 'approved',
+          url: published,
+          version: state.imageVersion,
+          catalog_asset_key: state.catalogAssetKey,
+          reason: null,
+        };
+      }
+      if (published) {
+        // A legacy, market-less publication: not shown. The app keeps its own
+        // owner-approved image for the exact model, or the placeholder.
+        if (!hasMarket(state.identity)) return unavailable('not_requested');
+        return {
+          status: 'approved',
+          url: published,
+          version: state.imageVersion,
+          reason: null,
+        };
+      }
     }
     if (state.status === VehicleImageStatus.PENDING) {
       return { status: 'pending', url: null, version: null, reason: null };
@@ -248,6 +289,8 @@ export function presentVehicleImage(
         return unavailable('rejected');
       if (state.reason === IDENTITY_REASONS.IDENTITY_REVIEW_REQUIRED)
         return unavailable('needs_review');
+      if (state.reason === IDENTITY_REASONS.NOT_REQUESTED)
+        return unavailable('not_requested');
       return unavailable('request_failed');
     }
     return { status: 'pending', url: null, version: null, reason: null };

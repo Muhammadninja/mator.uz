@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import type { CatalogAssetMatch } from './vehicle-image.catalog';
 
 /**
  * Canonical vehicle identity for the Vehicle Image Pipeline.
@@ -215,6 +216,15 @@ export const IMAGE_REVIEW_REASONS = {
    * generic model would leave the generation to the pipeline to guess.
    */
   GENERATION_UNRESOLVED: 'generation_unresolved',
+  /**
+   * No identity-verified registry entry covers the vehicle's model and year, so
+   * its market (and with it the body) is unknown. Never defaulted to a market.
+   */
+  MARKET_UNVERIFIED: 'market_unverified',
+  /** Verified registry entries disagree on market, generation or facelift, or two approved images answer equally. */
+  CATALOG_AMBIGUOUS: 'catalog_ambiguous',
+  /** The owner rejected the registry image that covers the vehicle. */
+  CATALOG_IMAGE_REJECTED: 'catalog_image_rejected',
 } as const;
 export type ImageReviewReason =
   (typeof IMAGE_REVIEW_REASONS)[keyof typeof IMAGE_REVIEW_REASONS];
@@ -235,8 +245,24 @@ export interface VehicleIdentitySource {
   trim: { id: string; modelId: string; name: string } | null;
   /** Display names of the make's OTHER models. */
   siblingModelNames: string[];
-  /** Explicit server configuration; never inferred from year or model name. */
+  /**
+   * The vehicle's verified market from the vehicle image registry
+   * (vehicle-image.catalog.ts `catalogIdentityFacts`); never a global default and
+   * never inferred from a year, a name or a VIN.
+   */
   marketRegion?: string | null;
+}
+
+/**
+ * What a Garage vehicle was resolved to when it was added: saved on the vehicle
+ * (`identity_*` columns) and never recomputed on read.
+ */
+export interface ResolvedVehicleIdentity {
+  /** The catalog row the vehicle is pictured as: its own model, or the generation row (`nexia-3`). */
+  modelId: string;
+  generationId: string | null;
+  faceliftId: string | null;
+  marketRegion: string;
 }
 
 export type IdentityPlan =
@@ -245,6 +271,10 @@ export type IdentityPlan =
       identity: CanonicalVehicleIdentity;
       display: VehicleImageDisplay;
       identityKey: string;
+      /** Set by planVehicleImage (vehicle-image.resolution.ts). */
+      resolved?: ResolvedVehicleIdentity;
+      /** The approved registry image for this identity, when there is one. */
+      catalogAsset?: CatalogAssetMatch | null;
     }
   | { kind: 'review'; reason: ImageReviewReason };
 
@@ -253,9 +283,11 @@ export type IdentityPlan =
  *
  * Authoritative fields only: make, model and year from the Garage record; body
  * type from the catalog model row when set; trim only when the owner picked a
- * catalog trim. Generation and facelift are always null. The catalog has no
- * generation or facelift table, and nothing here derives them from a trim id,
- * a year or a name. Colour, engine, VIN and plate never enter the identity.
+ * catalog trim. The tuple's generation and facelift slots are always null, so
+ * existing identity keys stay stable: a generic model's generation is carried by
+ * `modelId` (the generation row, e.g. `nexia-3`), and the verified generation
+ * and facelift ids are saved on the vehicle instead (ResolvedVehicleIdentity).
+ * Colour, engine, VIN and plate never enter the identity.
  *
  * When the vehicle could not be told apart from another by these facts, or the
  * catalog contradicts it, returns `review`. The vehicle keeps the placeholder

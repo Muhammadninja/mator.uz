@@ -160,6 +160,7 @@ describe('VehiclesService + vehicle images', () => {
           imageUrl: 'https://cdn.test/h.webp',
           imageVersion: 2,
           catalogAssetKey: null,
+          identity: { makeId: 'byd', marketRegion: 'CN' },
         },
       }),
     ]);
@@ -194,7 +195,8 @@ describe('VehiclesService + vehicle images', () => {
           reason: null,
           imageUrl: 'https://cdn.test/h.webp',
           imageVersion: 1,
-        catalogAssetKey: null,
+          catalogAssetKey: null,
+          identity: { makeId: 'byd', marketRegion: 'CN' },
         },
       });
     await expect(svc.getImage('usr_1', 'veh_1')).resolves.toEqual({
@@ -235,6 +237,7 @@ describe('VehiclesService + vehicle images', () => {
     });
     const query = prisma.vehicle.findUnique.mock.calls[1][0];
     expect(query.select.imageIdentity.select.catalogAssetKey).toBe(true);
+    expect(query.select.imageIdentity.select.identity).toBe(true);
   });
 
   it("GET /:id/image hides another user's vehicle", async () => {

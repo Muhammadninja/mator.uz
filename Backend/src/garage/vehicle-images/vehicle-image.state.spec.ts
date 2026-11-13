@@ -160,6 +160,7 @@ describe('presentVehicleImage', () => {
           status: VehicleImageStatus.APPROVED,
           imageUrl: 'https://cdn.test/a.webp',
           imageVersion: 1,
+          identity: { modelId: 'cobalt', marketRegion: 'UZ' },
         }),
       }),
     ).toEqual({
@@ -184,6 +185,60 @@ describe('presentVehicleImage', () => {
         }),
       }),
     ).toMatchObject({ status: 'unavailable', reason: 'request_failed' });
+    expect(
+      presentVehicleImage({
+        imageIdentity: identity({
+          status: VehicleImageStatus.UNAVAILABLE,
+          reason: 'not_requested',
+        }),
+      }),
+    ).toMatchObject({ status: 'unavailable', reason: 'not_requested' });
+  });
+
+  it('never shows a publication of a market-less (legacy) identity, e.g. a US-market Spark', () => {
+    const legacies = [
+      undefined,
+      null,
+      { modelId: 'spark' },
+      { marketRegion: 1 },
+    ];
+    for (const legacy of legacies) {
+      expect(
+        presentVehicleImage({
+          imageIdentity: identity({
+            status: VehicleImageStatus.APPROVED,
+            imageUrl: 'https://res.cloudinary.test/spark-us.webp',
+            imageVersion: 1,
+            identity: legacy,
+          }),
+        }),
+      ).toEqual({
+        status: 'unavailable',
+        url: null,
+        version: null,
+        // Not needs_review: the app may still show its own owner-approved image.
+        reason: 'not_requested',
+      });
+    }
+  });
+
+  it('never shows a registry image whose approval was withdrawn or never given', () => {
+    for (const key of ['spark-m300', 'nexia-n150', 'tracker-gen3', 'made-up']) {
+      expect(
+        presentVehicleImage({
+          imageIdentity: identity({
+            status: VehicleImageStatus.APPROVED,
+            catalogAssetKey: key,
+            imageVersion: 1,
+          }),
+        }),
+      ).toEqual({
+        status: 'unavailable',
+        url: null,
+        version: null,
+        reason: 'needs_review',
+      });
+    }
   });
 
   it('returns the approved catalog key for the frontend bundle resolver', () => {

@@ -14,7 +14,6 @@ describe('vehicle image config', () => {
         enabled: false,
         baseUrl: null,
         requestToken: null,
-        marketRegion: null,
         requestTimeoutMs: 10_000,
       },
       errors: [],
@@ -100,17 +99,21 @@ describe('vehicle image config', () => {
     ).toBe(true);
   });
 
-  it('requires an explicit catalog market when the integration is enabled', () => {
-    expect(() => validateVehicleImageEnv({
+  it('never takes a global market: the retired VEHICLE_IMAGE_MARKET_REGION is ignored', () => {
+    const env = {
       VEHICLE_IMAGES_ENABLED: 'true',
       VEHICLE_IMAGE_PIPELINE_URL: 'http://127.0.0.1:8047',
       VEHICLE_IMAGE_REQUEST_TOKEN: TOKEN,
-    })).toThrow(/VEHICLE_IMAGE_MARKET_REGION/);
-    expect(readVehicleImageConfig(get({
-      VEHICLE_IMAGES_ENABLED: 'true',
-      VEHICLE_IMAGE_PIPELINE_URL: 'http://127.0.0.1:8047',
-      VEHICLE_IMAGE_REQUEST_TOKEN: TOKEN,
-      VEHICLE_IMAGE_MARKET_REGION: 'UZ',
-    })).enabled).toBe(true);
+    };
+    expect(() => validateVehicleImageEnv(env)).not.toThrow();
+    expect(readVehicleImageConfig(get(env)).enabled).toBe(true);
+    // A leftover value (old deployments) neither blocks boot nor reaches the config.
+    for (const leftover of ['UZ', 'uz', 'bogus']) {
+      const withLeftover = { ...env, VEHICLE_IMAGE_MARKET_REGION: leftover };
+      expect(() => validateVehicleImageEnv(withLeftover)).not.toThrow();
+      const { config } = parseVehicleImageConfig(get(withLeftover));
+      expect(config).not.toHaveProperty('marketRegion');
+      expect(config.enabled).toBe(true);
+    }
   });
 });

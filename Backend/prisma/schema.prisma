@@ -1108,6 +1108,16 @@ model Vehicle {
   /// generic-model vehicle whose year alone does not tell the generation. Visual
   /// identity only: `model_id` keeps driving fitment.
   variantModelId         String?              @map("variant_model_id") @db.VarChar(64)
+  /// Identity snapshot saved when the vehicle is added (or its generation picked):
+  /// the catalog row it is pictured as (`nexia-3` for a 2018 `nexia`), and the
+  /// verified generation, facelift and market from the vehicle image registry.
+  /// Null when unresolved (see image_review_reason) and for older vehicles. Never
+  /// recomputed on read, so a later catalog edit cannot reassign a saved vehicle.
+  /// Visual identity only: fitment never reads these.
+  identityModelId        String?              @map("identity_model_id") @db.VarChar(64)
+  identityGenerationId   String?              @map("identity_generation_id") @db.VarChar(64)
+  identityFaceliftId     String?              @map("identity_facelift_id") @db.VarChar(64)
+  identityMarket         String?              @map("identity_market") @db.VarChar(2)
   deletedAt              DateTime?            @map("deleted_at") @db.Timestamptz(3)
   createdAt              DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt              DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)

@@ -15,6 +15,7 @@ import {
   variantsForYear,
   type VariantRow,
 } from './vehicle-generation';
+import { unsupportedYear } from './vehicle-year';
 import { RealtimeGateway } from '../../realtime/realtime.gateway';
 import { NotificationsService } from '../../notifications/notifications.service';
 import { VehicleImagesService } from '../vehicle-images/vehicle-images.service';
@@ -44,9 +45,10 @@ export class VehiclesService {
 
   async create(userId: string, dto: CreateVehicleDto) {
     const catalog = await this.assertCatalogRefs(dto);
-    // Vehicle image identity from the catalog rows just read (null when the
-    // integration is off). Never blocks creation. A generic model is pictured as
-    // the generation its year resolves to; an unresolved one is not requested.
+    // Identity and image plan from the catalog rows just read and the verified
+    // vehicle image registry. Never blocks creation. A generic model is pictured
+    // as the generation its year resolves to; an unresolved one is kept for review
+    // and never requested.
     const generation = resolveGeneration({
       year: dto.year,
       trimId: catalog.trim?.id ?? null,
@@ -137,6 +139,7 @@ export class VehiclesService {
             imageUrl: true,
             imageVersion: true,
             catalogAssetKey: true,
+            identity: true,
           },
         },
       },
@@ -189,16 +192,14 @@ export class VehiclesService {
           data: { isPrimary: false },
         });
       }
-      // A generation pick re-plans the picture with the vehicle's write. With the
-      // integration off (no plan), the stored image state is left as it is.
+      // A generation pick re-plans the identity and picture with the vehicle's
+      // write. Without a plan (the catalog could not be read), the stored
+      // identity and image state are left as they are.
       let imageData = {};
       if (variant?.plan) {
         const image = await this.images.stage(tx, vehicleId, variant.plan);
         imageOutboxId = image.outboxId;
-        imageData = {
-          imageIdentityKey: image.data.imageIdentityKey ?? null,
-          imageReviewReason: image.data.imageReviewReason ?? null,
-        };
+        imageData = image.data;
       }
       return tx.vehicle.update({
         where: { id: vehicleId },
@@ -325,6 +326,15 @@ export class VehiclesService {
     });
     if (!model || model.makeId !== dto.make_id) {
       throw new BadRequestException('Unknown or mismatched make_id/model_id');
+    }
+    // `year` is the build (production) year: see vehicle-year.ts.
+    const range = unsupportedYear(model, dto.year);
+    if (range) {
+      throw new BadRequestException({
+        code: 'VEHICLE_YEAR_UNSUPPORTED',
+        message: `${model.name} is not available for ${dto.year}.`,
+        details: { year: dto.year, ...range },
+      });
     }
     let trim: { id: string; modelId: string; name: string } | null = null;
     if (dto.trim_id) {
