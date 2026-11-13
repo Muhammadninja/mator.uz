@@ -1,4 +1,5 @@
 import { displayNumbers } from '../../common/normalize-oem.util';
+import { fitModelIds } from '../compatibility/vehicle-fitment';
 import { isBuyerInStock } from '../../orders/inventory/inventory-availability';
 import {
   Prisma,
@@ -46,6 +47,9 @@ export interface VehicleCompatContext {
   /** VehicleModelRef id of the garage vehicle — matched against curated
    *  fitment. Optional so callers without a garage model keep working. */
   modelId?: string | null;
+  /** The vehicle's resolved generation row (vehicle-fitment.ts); its curated
+   *  bindings count as the vehicle's own. */
+  generationModelId?: string;
   trimId: string | null;
   engineId: string | null;
   year: number;
@@ -110,7 +114,7 @@ export function computeCompatibility(
     };
   }
 
-  if (vehicle.modelId && curatedModels.includes(vehicle.modelId)) {
+  if (fitModelIds(vehicle).some((id) => curatedModels.includes(id))) {
     return { status: 'fits', confidence: 1, notes: null };
   }
 
