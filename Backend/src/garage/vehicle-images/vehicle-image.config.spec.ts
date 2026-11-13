@@ -14,6 +14,7 @@ describe('vehicle image config', () => {
         enabled: false,
         baseUrl: null,
         requestToken: null,
+        marketRegion: null,
         requestTimeoutMs: 10_000,
       },
       errors: [],
@@ -33,6 +34,7 @@ describe('vehicle image config', () => {
     const env = {
       VEHICLE_IMAGES_ENABLED: 'true',
       VEHICLE_IMAGE_REQUEST_TOKEN: TOKEN,
+      VEHICLE_IMAGE_MARKET_REGION: 'UZ',
     };
     expect(() =>
       validateVehicleImageEnv({
@@ -68,6 +70,7 @@ describe('vehicle image config', () => {
       validateVehicleImageEnv({
         ...env,
         VEHICLE_IMAGE_REQUEST_TOKEN: TOKEN,
+        VEHICLE_IMAGE_MARKET_REGION: 'UZ',
         VEHICLE_IMAGE_PIPELINE_URL: 'https://u:p@x.test',
       }),
     ).toThrow(/credentials/);
@@ -75,6 +78,7 @@ describe('vehicle image config', () => {
       validateVehicleImageEnv({
         ...env,
         VEHICLE_IMAGE_REQUEST_TOKEN: TOKEN,
+        VEHICLE_IMAGE_MARKET_REGION: 'UZ',
         VEHICLE_IMAGE_REQUEST_TIMEOUT_MS: '50',
       }),
     ).toThrow(/TIMEOUT/);
@@ -90,8 +94,23 @@ describe('vehicle image config', () => {
           VEHICLE_IMAGES_ENABLED: 'TRUE',
           VEHICLE_IMAGE_PIPELINE_URL: 'https://x.test',
           VEHICLE_IMAGE_REQUEST_TOKEN: TOKEN,
+          VEHICLE_IMAGE_MARKET_REGION: 'UZ',
         }),
       ).enabled,
     ).toBe(true);
+  });
+
+  it('requires an explicit catalog market when the integration is enabled', () => {
+    expect(() => validateVehicleImageEnv({
+      VEHICLE_IMAGES_ENABLED: 'true',
+      VEHICLE_IMAGE_PIPELINE_URL: 'http://127.0.0.1:8047',
+      VEHICLE_IMAGE_REQUEST_TOKEN: TOKEN,
+    })).toThrow(/VEHICLE_IMAGE_MARKET_REGION/);
+    expect(readVehicleImageConfig(get({
+      VEHICLE_IMAGES_ENABLED: 'true',
+      VEHICLE_IMAGE_PIPELINE_URL: 'http://127.0.0.1:8047',
+      VEHICLE_IMAGE_REQUEST_TOKEN: TOKEN,
+      VEHICLE_IMAGE_MARKET_REGION: 'UZ',
+    })).enabled).toBe(true);
   });
 });

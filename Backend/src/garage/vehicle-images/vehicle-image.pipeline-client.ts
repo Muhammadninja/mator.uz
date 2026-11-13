@@ -35,6 +35,7 @@ export const PIPELINE_STATUSES = [
   'failed',
   'rejected',
   'approved',
+  'needs_review',
 ] as const;
 export type PipelineStatus = (typeof PIPELINE_STATUSES)[number];
 
@@ -42,7 +43,7 @@ export interface PipelineStatusResult {
   identityKey: string;
   status: PipelineStatus;
   requestId: string | null;
-  asset: { url: string; version: number } | null;
+  asset: { url: string | null; version: number; catalogAssetKey?: string } | null;
 }
 
 /**
@@ -84,6 +85,10 @@ export class VehicleImagePipelineClient {
 
   get defaultTimeoutMs(): number {
     return this.config.requestTimeoutMs;
+  }
+
+  get marketRegion(): string | null {
+    return this.config.marketRegion;
   }
 
   request(
@@ -189,13 +194,18 @@ export function parseStatusResult(
     const a = body.asset as Record<string, unknown>;
     if (
       typeof a !== 'object' ||
-      typeof a.url !== 'string' ||
-      !a.url ||
-      a.url.length > 2048
+      (a.url !== null && (typeof a.url !== 'string' || !a.url || a.url.length > 2048))
     )
       fail();
     if (!Number.isInteger(a.version) || (a.version as number) < 1) fail();
-    asset = { url: a.url as string, version: a.version as number };
+    const catalogAssetKey = a.catalogAssetKey;
+    if (catalogAssetKey != null && (typeof catalogAssetKey !== 'string' || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(catalogAssetKey))) fail();
+    if (a.url === null && !catalogAssetKey) fail();
+    asset = {
+      url: a.url as string | null,
+      version: a.version as number,
+      ...(typeof catalogAssetKey === 'string' ? { catalogAssetKey } : {}),
+    };
   }
   if (body.status === 'approved' && !asset) fail();
   return {

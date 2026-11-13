@@ -83,6 +83,7 @@ export class VehicleImagesService {
         model: input.model,
         trim: input.trim,
         siblingModelNames: siblings.map((s) => s.name),
+        marketRegion: this.delivery.marketRegion,
       });
     } catch (err) {
       this.logger.warn(

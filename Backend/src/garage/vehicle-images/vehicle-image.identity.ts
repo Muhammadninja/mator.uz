@@ -16,6 +16,7 @@ import { createHash } from 'node:crypto';
  *    generationId, faceliftId, bodyType, trimId]
  */
 export const CANONICAL_IDENTITY_VERSION = 'mator-vehicle-image-v1';
+export const MARKET_IDENTITY_VERSION = 'mator-vehicle-image-v2';
 
 export interface CanonicalVehicleIdentity {
   makeId: string;
@@ -25,6 +26,7 @@ export interface CanonicalVehicleIdentity {
   faceliftId: string | null;
   bodyType: string | null;
   trimId: string | null;
+  marketRegion?: string;
 }
 
 /** Display facts sent with a request. `trim` only together with `trimId`. */
@@ -32,6 +34,7 @@ export interface VehicleImageDisplay {
   manufacturer: string;
   model: string;
   trim?: string;
+  marketRegion?: string;
 }
 
 export class IdentityContractError extends Error {
@@ -86,7 +89,8 @@ export function validateCanonicalIdentity(
     throw new IdentityContractError('canonical identity is required');
   }
   const record = value as Record<string, unknown>;
-  const fields: readonly string[] = IDENTITY_FIELDS;
+  const hasMarket = Object.hasOwn(record, 'marketRegion');
+  const fields: readonly string[] = hasMarket ? [...IDENTITY_FIELDS, 'marketRegion'] : IDENTITY_FIELDS;
   if (Object.keys(record).some((field) => !fields.includes(field))) {
     throw new IdentityContractError(
       'canonical identity contains unsupported fields',
@@ -105,7 +109,7 @@ export function validateCanonicalIdentity(
   ) {
     throw new IdentityContractError('modelYear must be a valid model year');
   }
-  return {
+  const identity: CanonicalVehicleIdentity = {
     makeId: canonicalCatalogId(record.makeId, 'makeId'),
     modelId: canonicalCatalogId(record.modelId, 'modelId'),
     modelYear: year as number,
@@ -117,6 +121,13 @@ export function validateCanonicalIdentity(
         : canonicalText(record.bodyType, 'bodyType', 60),
     trimId: optionalCatalogId(record.trimId, 'trimId'),
   };
+  if (hasMarket) {
+    if (typeof record.marketRegion !== 'string' || !/^[A-Z]{2}$/.test(record.marketRegion)) {
+      throw new IdentityContractError('marketRegion must be a two-letter uppercase region code');
+    }
+    identity.marketRegion = record.marketRegion;
+  }
+  return identity;
 }
 
 export function canonicalIdentityTuple(
@@ -124,7 +135,7 @@ export function canonicalIdentityTuple(
 ): unknown[] {
   const v = validateCanonicalIdentity(identity);
   return [
-    CANONICAL_IDENTITY_VERSION,
+    v.marketRegion ? MARKET_IDENTITY_VERSION : CANONICAL_IDENTITY_VERSION,
     v.makeId,
     v.modelId,
     v.modelYear,
@@ -132,6 +143,7 @@ export function canonicalIdentityTuple(
     v.faceliftId,
     v.bodyType,
     v.trimId,
+    ...(v.marketRegion ? [v.marketRegion] : []),
   ];
 }
 
@@ -159,10 +171,16 @@ export function validateDisplay(
     display.trim == null
       ? null
       : canonicalText(display.trim, 'vehicle.trim', 120);
+  const marketRegion = display.marketRegion == null
+    ? null
+    : canonicalText(display.marketRegion, 'vehicle.marketRegion', 120);
   if ((identity.trimId === null) !== (trim === null)) {
     throw new IdentityContractError(
       'vehicle.trim must be supplied only with its canonical ID',
     );
+  }
+  if ((identity.marketRegion ?? null) !== marketRegion) {
+    throw new IdentityContractError('vehicle.marketRegion must match its canonical ID');
   }
   // Generation and facelift are never sent (we never have their canonical IDs).
   if (identity.generationId !== null || identity.faceliftId !== null) {
@@ -170,9 +188,7 @@ export function validateDisplay(
       'generation/facelift labels are not available',
     );
   }
-  return trim === null
-    ? { manufacturer, model }
-    : { manufacturer, model, trim };
+  return { manufacturer, model, ...(trim === null ? {} : { trim }), ...(marketRegion ? { marketRegion } : {}) };
 }
 
 /** The pipeline's name normalisation (trim, en-US lowercase, collapse spaces). */
@@ -219,6 +235,8 @@ export interface VehicleIdentitySource {
   trim: { id: string; modelId: string; name: string } | null;
   /** Display names of the make's OTHER models. */
   siblingModelNames: string[];
+  /** Explicit server configuration; never inferred from year or model name. */
+  marketRegion?: string | null;
 }
 
 export type IdentityPlan =
@@ -275,11 +293,15 @@ export function planVehicleIdentity(src: VehicleIdentitySource): IdentityPlan {
       faceliftId: null,
       bodyType,
       trimId: trim ? trim.id : null,
+      ...(src.marketRegion ? { marketRegion: src.marketRegion } : {}),
     });
     const display = validateDisplay(
-      trim
-        ? { manufacturer: make.name, model: model.name, trim: trim.name }
-        : { manufacturer: make.name, model: model.name },
+      {
+        manufacturer: make.name,
+        model: model.name,
+        ...(trim ? { trim: trim.name } : {}),
+        ...(src.marketRegion ? { marketRegion: src.marketRegion } : {}),
+      },
       identity,
     );
     return {

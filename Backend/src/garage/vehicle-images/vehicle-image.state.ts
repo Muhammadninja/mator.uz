@@ -19,6 +19,7 @@ export const IDENTITY_REASONS = {
   DISPATCH_FAILED: 'dispatch_failed',
   REQUEST_MISSING: 'request_missing',
   AWAITING_PUBLICATION: 'awaiting_publication',
+  IDENTITY_REVIEW_REQUIRED: 'identity_review_required',
 } as const;
 
 export const REDISPATCHABLE_REASONS: ReadonlySet<string> = new Set([
@@ -46,6 +47,7 @@ export interface IdentityStateUpdate {
   pipelineRequestId: string | null;
   imageUrl: string | null;
   imageVersion: number | null;
+  catalogAssetKey: string | null;
   nextSyncAt: Date | null;
 }
 
@@ -76,6 +78,7 @@ export function stateFromPipeline(
     status: VehicleImageStatus;
     imageUrl: string | null;
     imageVersion: number | null;
+    catalogAssetKey?: string | null;
   },
 ): IdentityStateUpdate {
   const at = (key: string): Date =>
@@ -84,12 +87,23 @@ export function stateFromPipeline(
     pipelineStatus: result.status,
     pipelineRequestId: result.requestId,
   };
-  const none = { imageUrl: null, imageVersion: null };
+  const none = { imageUrl: null, imageVersion: null, catalogAssetKey: null };
 
   switch (result.status) {
     case 'approved': {
       const asset = result.asset!;
-      if (!isPublishedUrl(asset.url)) {
+      if (!asset.url || !isPublishedUrl(asset.url)) {
+        if (asset.catalogAssetKey) {
+          return {
+            ...base,
+            status: VehicleImageStatus.APPROVED,
+            reason: null,
+            imageUrl: null,
+            imageVersion: asset.version,
+            catalogAssetKey: asset.catalogAssetKey,
+            nextSyncAt: at('approved'),
+          };
+        }
         return {
           ...base,
           ...none,
@@ -104,6 +118,7 @@ export function stateFromPipeline(
         reason: null,
         imageUrl: asset.url,
         imageVersion: asset.version,
+        catalogAssetKey: null,
         nextSyncAt: at('approved'),
       };
     }
@@ -135,6 +150,7 @@ export function stateFromPipeline(
           reason: null,
           imageUrl: previous.imageUrl,
           imageVersion: previous.imageVersion,
+          catalogAssetKey: previous.catalogAssetKey ?? null,
           nextSyncAt: at('approved'),
         };
       }
@@ -143,6 +159,14 @@ export function stateFromPipeline(
         ...none,
         status: VehicleImageStatus.UNAVAILABLE,
         reason: IDENTITY_REASONS.REQUEST_MISSING,
+        nextSyncAt: null,
+      };
+    case 'needs_review':
+      return {
+        ...base,
+        ...none,
+        status: VehicleImageStatus.UNAVAILABLE,
+        reason: IDENTITY_REASONS.IDENTITY_REVIEW_REQUIRED,
         nextSyncAt: null,
       };
     default:
@@ -172,6 +196,7 @@ export interface VehicleImageField {
   /** Present only once the approved image is published. */
   url: string | null;
   version: number | null;
+  catalog_asset_key?: string;
   /** Why the placeholder stays; null unless `unavailable`. */
   reason: VehicleImagePublicReason | null;
 }
@@ -183,6 +208,7 @@ export interface VehicleImageSourceRow {
     reason: string | null;
     imageUrl: string | null;
     imageVersion: number | null;
+    catalogAssetKey?: string | null;
   } | null;
 }
 
@@ -201,14 +227,14 @@ export function presentVehicleImage(
   if (state) {
     if (
       state.status === VehicleImageStatus.APPROVED &&
-      state.imageUrl &&
       state.imageVersion &&
-      isPublishedUrl(state.imageUrl)
+      ((state.imageUrl && isPublishedUrl(state.imageUrl)) || state.catalogAssetKey)
     ) {
       return {
         status: 'approved',
         url: state.imageUrl,
         version: state.imageVersion,
+        ...(state.catalogAssetKey ? { catalog_asset_key: state.catalogAssetKey } : {}),
         reason: null,
       };
     }
@@ -220,6 +246,8 @@ export function presentVehicleImage(
         return unavailable('generation_failed');
       if (state.reason === IDENTITY_REASONS.REJECTED)
         return unavailable('rejected');
+      if (state.reason === IDENTITY_REASONS.IDENTITY_REVIEW_REQUIRED)
+        return unavailable('needs_review');
       return unavailable('request_failed');
     }
     return { status: 'pending', url: null, version: null, reason: null };

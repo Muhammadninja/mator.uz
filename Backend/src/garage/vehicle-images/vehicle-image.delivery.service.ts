@@ -93,6 +93,10 @@ export class VehicleImageDeliveryService {
     return this.client.enabled;
   }
 
+  get marketRegion(): string | null {
+    return this.client.marketRegion;
+  }
+
   /** Deliver one attempt of one outbox row. */
   async dispatch({
     outboxId,

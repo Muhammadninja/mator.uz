@@ -1152,7 +1152,7 @@ enum VehicleImageOutboxStatus {
 model VehicleImageIdentity {
   /// SHA-256 hex of the canonical tuple: the pipeline's `identityKey`.
   identityKey       String               @id @map("identity_key") @db.Char(64)
-  /// The exact 7-field canonical identity sent to the pipeline.
+  /// The exact legacy 7-field or market-aware 8-field canonical identity sent to the pipeline.
   identity          Json
   /// Display facts sent with it ({manufacturer, model, trim?}).
   display           Json
@@ -1163,6 +1163,8 @@ model VehicleImageIdentity {
   /// Published (public HTTPS) URL and version; set only once approved and published.
   imageUrl          String?              @map("image_url") @db.VarChar(2048)
   imageVersion      Int?                 @map("image_version")
+  /// Key into the owner-approved bundled vehicle image catalog; null for pipeline publications.
+  catalogAssetKey   String?              @map("catalog_asset_key") @db.VarChar(96)
   lastSyncedAt      DateTime?            @map("last_synced_at") @db.Timestamptz(3)
   nextSyncAt        DateTime?            @map("next_sync_at") @db.Timestamptz(3)
   createdAt         DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)

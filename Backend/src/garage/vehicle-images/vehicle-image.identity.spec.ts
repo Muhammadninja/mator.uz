@@ -204,6 +204,23 @@ describe('planVehicleIdentity', () => {
     expect(plan.kind === 'request' && plan.identity.bodyType).toBeNull();
   });
 
+  it('includes an explicitly configured market in identity and display without inferring it', () => {
+    const legacy = planVehicleIdentity(src());
+    const marketAware = planVehicleIdentity(src({ marketRegion: 'UZ' }));
+    expect(legacy.kind === 'request' && legacy.identity.marketRegion).toBeUndefined();
+    expect(marketAware).toMatchObject({
+      kind: 'request',
+      identity: { modelId: 'cobalt', marketRegion: 'UZ' },
+      display: { manufacturer: 'Chevrolet', model: 'Cobalt', marketRegion: 'UZ' },
+    });
+    if (legacy.kind === 'request' && marketAware.kind === 'request')
+      expect(marketAware.identityKey).not.toBe(legacy.identityKey);
+    expect(() => validateCanonicalIdentity({
+      ...GOLDEN[0].identity,
+      marketRegion: 'uz',
+    })).toThrow(/marketRegion/);
+  });
+
   it('flags a model whose name another model of the make shares (tracker / tracker-2)', () => {
     const plan = planVehicleIdentity(
       src({

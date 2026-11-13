@@ -57,6 +57,26 @@ describe('stateFromPipeline', () => {
     });
   });
 
+  it('approved bundled catalog key is approved without a publication URL', () => {
+    expect(stateFromPipeline(result({
+      status: 'approved',
+      asset: { url: null, version: 1, catalogAssetKey: 'cobalt-gen2' },
+    }), NOW)).toMatchObject({
+      status: VehicleImageStatus.APPROVED,
+      imageUrl: null,
+      imageVersion: 1,
+      catalogAssetKey: 'cobalt-gen2',
+    });
+  });
+
+  it('needs_review remains unavailable and does not expose an asset', () => {
+    expect(stateFromPipeline(result({ status: 'needs_review' }), NOW)).toMatchObject({
+      status: VehicleImageStatus.UNAVAILABLE,
+      reason: 'identity_review_required',
+      imageUrl: null,
+    });
+  });
+
   it('failed and rejected are unavailable (never re-requested)', () => {
     expect(stateFromPipeline(result({ status: 'failed' }), NOW)).toMatchObject({
       status: VehicleImageStatus.UNAVAILABLE,
@@ -164,6 +184,17 @@ describe('presentVehicleImage', () => {
         }),
       }),
     ).toMatchObject({ status: 'unavailable', reason: 'request_failed' });
+  });
+
+  it('returns the approved catalog key for the frontend bundle resolver', () => {
+    expect(presentVehicleImage({ imageIdentity: identity({
+      status: VehicleImageStatus.APPROVED,
+      catalogAssetKey: 'cobalt-gen2',
+      imageVersion: 1,
+    }) })).toEqual({
+      status: 'approved', url: null, version: 1,
+      catalog_asset_key: 'cobalt-gen2', reason: null,
+    });
   });
 
   it('never exposes a non-https URL even if one was stored', () => {

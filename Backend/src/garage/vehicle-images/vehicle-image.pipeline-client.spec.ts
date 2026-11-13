@@ -26,6 +26,7 @@ function client(env: Record<string, string> = {}) {
     VEHICLE_IMAGES_ENABLED: 'true',
     VEHICLE_IMAGE_PIPELINE_URL: 'https://pipeline.test/vehicle-images',
     VEHICLE_IMAGE_REQUEST_TOKEN: TOKEN,
+    VEHICLE_IMAGE_MARKET_REGION: 'UZ',
     ...env,
   });
   const c = new VehicleImagePipelineClient(config);
@@ -110,6 +111,18 @@ describe('VehicleImagePipelineClient', () => {
     expect(fetchImpl.mock.calls[0][0]).toMatch(
       /\/internal\/v1\/vehicle-images\/resolve$/,
     );
+  });
+
+  it('accepts local approved catalog keys and review-required statuses', async () => {
+    const { c, fetchImpl } = client();
+    fetchImpl.mockResolvedValueOnce(reply(200, statusBody({
+      status: 'approved', asset: { url: null, version: 1, catalogAssetKey: 'cobalt-gen2' },
+    })));
+    await expect(c.resolve(IDENTITY)).resolves.toMatchObject({
+      status: 'approved', asset: { url: null, catalogAssetKey: 'cobalt-gen2' },
+    });
+    fetchImpl.mockResolvedValueOnce(reply(200, statusBody({ status: 'needs_review' })));
+    await expect(c.resolve(IDENTITY)).resolves.toMatchObject({ status: 'needs_review' });
   });
 
   it('classifies transport and HTTP failures', async () => {
