@@ -35,6 +35,9 @@ import { AuthModule } from '../auth/auth.module';
 import { AdminAuthModule } from './auth/admin-auth.module';
 import { AdminManagementModule } from './management/admin-management.module';
 import { FitmentStudioModule } from './fitment-studio/fitment-studio.module';
+import { GarageModule } from '../garage/garage.module';
+import { AdminVehicleImagesService } from './vehicle-images/admin-vehicle-images.service';
+import { AdminVehicleImagesController } from './vehicle-images/admin-vehicle-images.controller';
 
 @Module({
   // AdminAuthModule brings the admin-panel login stack (/v1/auth/admin/*) and
@@ -54,6 +57,9 @@ import { FitmentStudioModule } from './fitment-studio/fitment-studio.module';
     // a supply-side Product reaches the buyer catalog through the SINGLE
     // existing projection rather than a second mapping written here.
     CatalogModule,
+    // Vehicle image review drives the pipeline delivery, admin client and the
+    // reconcile job that GarageModule exports.
+    GarageModule,
   ],
   // AdminDealersService takes AdminAuditService, which AdminAuthModule exports.
   // AdminBrandsService takes CacheService from the @Global RedisModule (no
@@ -77,6 +83,7 @@ import { FitmentStudioModule } from './fitment-studio/fitment-studio.module';
     AdminPhotoCoverageService,
     AdminReservationsService,
     AdminProductsRatingService,
+    AdminVehicleImagesService,
   ],
   controllers: [
     AdminController,
@@ -92,6 +99,7 @@ import { FitmentStudioModule } from './fitment-studio/fitment-studio.module';
     AdminInventoryController,
     AdminPhotoCoverageController,
     AdminReservationsController,
+    AdminVehicleImagesController,
   ],
 })
 export class AdminModule {}

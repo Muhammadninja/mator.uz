@@ -19,9 +19,15 @@ import {
 import {
   PipelineCallError,
   VehicleImagePipelineClient,
+  type PipelineHealth,
   type PipelineStatusResult,
 } from './vehicle-image.pipeline-client';
-import { IDENTITY_REASONS, stateFromPipeline } from './vehicle-image.state';
+import {
+  IDENTITY_REASONS,
+  REDISPATCHABLE_REASONS,
+  stateFromPipeline,
+} from './vehicle-image.state';
+import { IdPrefix, prefixedId } from '../../common/ulid.util';
 
 /** Delivery attempts per outbox row before it is given up (≈1 h of backoff in total). */
 export const MAX_DISPATCH_ATTEMPTS = 8;
@@ -36,6 +42,11 @@ const RELAY_BATCH = 100;
 /** The on-demand refresh calls the pipeline at most this often per identity. */
 export const REFRESH_MIN_INTERVAL_MS = 15_000;
 const REFRESH_TIMEOUT_MS = 3_000;
+/** An identity that never reached the pipeline is asked again after this cool-down. */
+export const REVIVE_AFTER_MS = 30 * 60_000;
+const REVIVE_BATCH = 50;
+/** A readiness answer is reused this long, so an outage is not probed per job. */
+const HEALTH_TTL_MS = 60_000;
 
 export type DispatchOutcome =
   'dispatched' | 'retry_scheduled' | 'dead' | 'skipped';
@@ -137,6 +148,7 @@ export class VehicleImageDeliveryService {
       result = await this.client.request(request.identity, request.display);
     } catch (err) {
       if (!(err instanceof PipelineCallError)) throw err;
+      await this.recordError(row.identityKey, err.code);
       if (err.retryable && n < MAX_DISPATCH_ATTEMPTS) {
         await this.prisma.vehicleImageOutbox.updateMany({
           where: {
@@ -236,6 +248,7 @@ export class VehicleImageDeliveryService {
         synced += 1;
       } catch (err) {
         if (!(err instanceof PipelineCallError)) throw err;
+        await this.recordError(row.identityKey, err.code);
         this.logger.warn(
           `vehicle-image sync ${row.identityKey.slice(0, 12)}: ${err.code}`,
         );
@@ -279,10 +292,110 @@ export class VehicleImageDeliveryService {
         err instanceof PipelineCallError
           ? err.code
           : ((err as Error)?.name ?? 'error');
+      if (err instanceof PipelineCallError)
+        await this.recordError(identityKey, code).catch(() => undefined);
       this.logger.warn(
         `vehicle-image refresh ${identityKey.slice(0, 12)}: ${code}`,
       );
     }
+  }
+
+  /** Re-read one identity now (administrator action, after an approval). Never throws. */
+  async syncNow(identityKey: string): Promise<boolean> {
+    if (!this.enabled) return false;
+    try {
+      const row = await this.prisma.vehicleImageIdentity.findUnique({
+        where: { identityKey },
+      });
+      const request = row ? storedRequest(row) : null;
+      if (!row || !request) return false;
+      const result = await this.client.resolve(request.identity);
+      await this.apply(this.prisma, row, result);
+      return true;
+    } catch (err) {
+      if (err instanceof PipelineCallError)
+        await this.recordError(identityKey, err.code).catch(() => undefined);
+      return false;
+    }
+  }
+
+  /** Pipeline readiness and registry handshake, cached for a minute. */
+  async health(force = false): Promise<PipelineHealth & { error?: string; checkedAt: Date }> {
+    const now = Date.now();
+    if (!force && this.healthCache && now - this.healthCache.checkedAt.getTime() < HEALTH_TTL_MS)
+      return this.healthCache;
+    this.healthCache = { ...(await this.client.health()), checkedAt: new Date(now) };
+    return this.healthCache;
+  }
+
+  private healthCache: (PipelineHealth & { error?: string; checkedAt: Date }) | null = null;
+
+  /**
+   * Recovery after an outage or a deployment: identities whose request never
+   * reached the pipeline (dead outbox, lost by the pipeline, or saved while the
+   * integration was off) and that a live Garage vehicle still shows are asked
+   * again, at most once per REVIVE_AFTER_MS, and only while the pipeline answers
+   * ready with the same registry. Failed or rejected generations are never
+   * restarted here: only an administrator does that.
+   */
+  async reviveStalled(now = new Date()): Promise<number> {
+    if (!this.enabled) return 0;
+    const health = await this.health();
+    if (!health.ready || !health.registryMatches) return 0;
+    const stale = await this.prisma.vehicleImageIdentity.findMany({
+      where: {
+        status: VehicleImageStatus.UNAVAILABLE,
+        reason: { in: [...REDISPATCHABLE_REASONS] },
+        updatedAt: { lt: new Date(now.getTime() - REVIVE_AFTER_MS) },
+        vehicles: { some: { deletedAt: null } },
+        outbox: { none: { status: VehicleImageOutboxStatus.PENDING } },
+      },
+      orderBy: { updatedAt: 'asc' },
+      take: REVIVE_BATCH,
+      select: { identityKey: true, reason: true },
+    });
+    const jobs: ReturnType<typeof dispatchJob>[] = [];
+    for (const row of stale) {
+      const id = prefixedId(IdPrefix.VEHICLE_IMAGE_OUTBOX);
+      const revived = await this.prisma.$transaction(async (tx) => {
+        const reset = await tx.vehicleImageIdentity.updateMany({
+          where: {
+            identityKey: row.identityKey,
+            status: VehicleImageStatus.UNAVAILABLE,
+            reason: row.reason,
+          },
+          data: {
+            status: VehicleImageStatus.PENDING,
+            reason: null,
+            imageUrl: null,
+            imageVersion: null,
+            catalogAssetKey: null,
+            lastSyncedAt: null,
+            nextSyncAt: null,
+          },
+        });
+        if (reset.count === 0) return false;
+        // The partial unique index keeps one PENDING outbox row per identity.
+        const created = await tx.vehicleImageOutbox.createMany({
+          data: [{ id, identityKey: row.identityKey, availableAt: now }],
+          skipDuplicates: true,
+        });
+        return created.count === 1;
+      });
+      if (revived) jobs.push(dispatchJob(id, 0));
+    }
+    if (jobs.length) {
+      await this.queue.addBulk(jobs);
+      this.logger.log(`vehicle-image revive: ${jobs.length} identities asked again`);
+    }
+    return jobs.length;
+  }
+
+  private async recordError(identityKey: string, code: string): Promise<void> {
+    await this.prisma.vehicleImageIdentity.updateMany({
+      where: { identityKey },
+      data: { lastError: code.slice(0, 120), lastErrorAt: new Date() },
+    });
   }
 
   private async apply(
@@ -294,7 +407,7 @@ export class VehicleImageDeliveryService {
     const next = stateFromPipeline(result, now, previous);
     await db.vehicleImageIdentity.update({
       where: { identityKey: previous.identityKey },
-      data: { ...next, lastSyncedAt: now },
+      data: { ...next, lastSyncedAt: now, lastError: null, lastErrorAt: null },
     });
   }
 

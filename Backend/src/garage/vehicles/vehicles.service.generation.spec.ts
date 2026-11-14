@@ -1,5 +1,6 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { VehiclesService } from './vehicles.service';
+import { VehicleImagesService } from '../vehicle-images/vehicle-images.service';
 
 const N150 = {
   id: 'nexia-2',
@@ -113,7 +114,10 @@ function setup(stored = row()) {
     ),
     kick: jest.fn(),
     refresh: jest.fn(),
-  };
+  } as Record<string, any>;
+  // The real generation step (VehicleImagesService.planFor) over the mocked
+  // `prepare`, so these tests still see which catalog row is pictured.
+  images.planFor = VehicleImagesService.prototype.planFor.bind(images);
   const svc = new VehiclesService(
     prisma,
     { emitGarageEvent: jest.fn() } as any,

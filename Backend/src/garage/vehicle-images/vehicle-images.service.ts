@@ -16,7 +16,15 @@ import {
   type VehicleIdentitySource,
 } from './vehicle-image.identity';
 import { planVehicleImage } from './vehicle-image.resolution';
-import { isApprovedCatalogAssetKey } from './vehicle-image.catalog';
+import {
+  isApprovedCatalogAssetKey,
+  VEHICLE_IMAGE_REGISTRY_SHA256,
+} from './vehicle-image.catalog';
+import {
+  imageSubject,
+  resolveGeneration,
+  type VariantRow,
+} from '../vehicles/vehicle-generation';
 import {
   IDENTITY_REASONS,
   REDISPATCHABLE_REASONS,
@@ -26,6 +34,18 @@ import {
   VehicleImageDeliveryService,
 } from './vehicle-image.delivery.service';
 
+/**
+ * Version of the identity rules below. Bump it when they change: together with
+ * the registry fingerprint it is stamped on every resolved vehicle, and the
+ * reconcile job re-resolves vehicles stamped with an older value.
+ */
+export const IDENTITY_RESOLVER_VERSION = 'r2';
+
+/** `<resolver>:<registry sha prefix>`: what a vehicle's identity was computed with. */
+export function currentIdentityStamp(): string {
+  return `${IDENTITY_RESOLVER_VERSION}:${VEHICLE_IMAGE_REGISTRY_SHA256.slice(0, 16)}`;
+}
+
 /** The vehicle's identity snapshot and image link, spread into its row. */
 export interface StagedVehicleData {
   imageIdentityKey: string | null;
@@ -34,6 +54,7 @@ export interface StagedVehicleData {
   identityGenerationId: string | null;
   identityFaceliftId: string | null;
   identityMarket: string | null;
+  identityResolvedWith: string;
 }
 
 export interface StagedVehicleImage {
@@ -52,6 +73,7 @@ const snapshot = (
   identityGenerationId: resolved?.generationId ?? null,
   identityFaceliftId: resolved?.faceliftId ?? null,
   identityMarket: resolved?.marketRegion ?? null,
+  identityResolvedWith: currentIdentityStamp(),
 });
 
 /** An approved registry image: needs no pipeline, and the sync never touches it. */
@@ -107,22 +129,15 @@ export class VehicleImagesService {
     if (input.review) return { kind: 'review', reason: input.review };
     if (!input.model) return null;
     try {
-      const [make, siblings] = await Promise.all([
-        this.prisma.vehicleMake.findUnique({
-          where: { id: input.model.makeId },
-          select: { id: true, name: true },
-        }),
-        this.prisma.vehicleModelRef.findMany({
-          where: { makeId: input.model.makeId, id: { not: input.model.id } },
-          select: { name: true },
-        }),
-      ]);
+      const make = await this.prisma.vehicleMake.findUnique({
+        where: { id: input.model.makeId },
+        select: { id: true, name: true },
+      });
       return planVehicleImage({
         year: input.year,
         make: make ?? null,
         model: input.model,
         trim: input.trim,
-        siblingModelNames: siblings.map((s) => s.name),
       });
     } catch (err) {
       this.logger.warn(
@@ -130,6 +145,31 @@ export class VehicleImagesService {
       );
       return null;
     }
+  }
+
+  /**
+   * The plan for a Garage vehicle from its catalog rows: a generic model with
+   * generation rows is pictured as the generation its year (or the owner's
+   * stored pick) resolves to; an unresolved generation is kept for review. Used
+   * by create, by a generation pick and by the reconcile job, so all three
+   * resolve a vehicle the same way.
+   */
+  planFor(input: {
+    year: number;
+    model: VariantRow & { variants: VariantRow[] };
+    trim: VehicleIdentitySource['trim'];
+    chosenVariantId: string | null;
+  }): Promise<IdentityPlan | null> {
+    const generation = resolveGeneration({
+      year: input.year,
+      trimId: input.trim?.id ?? null,
+      variants: input.model.variants,
+      chosenVariantId: input.chosenVariantId,
+    });
+    const subject = imageSubject(input.model, generation);
+    return 'review' in subject
+      ? this.prepare({ year: input.year, model: null, trim: null, review: subject.review })
+      : this.prepare({ year: input.year, model: subject.model, trim: input.trim });
   }
 
   /**

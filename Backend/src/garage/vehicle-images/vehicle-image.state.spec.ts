@@ -13,7 +13,7 @@ const result = (over: Partial<PipelineStatusResult>): PipelineStatusResult => ({
 });
 
 describe('stateFromPipeline', () => {
-  it.each(['queued', 'running', 'awaiting_approval', 'pending'] as const)(
+  it.each(['queued', 'running', 'awaiting_approval', 'awaiting_source', 'pending'] as const)(
     '%s is pending, no URL',
     (status) => {
       expect(stateFromPipeline(result({ status }), NOW)).toMatchObject({
@@ -69,12 +69,21 @@ describe('stateFromPipeline', () => {
     });
   });
 
-  it('needs_review remains unavailable and does not expose an asset', () => {
-    expect(stateFromPipeline(result({ status: 'needs_review' }), NOW)).toMatchObject({
+  it('needs_review remains unavailable, does not expose an asset, and is re-read later', () => {
+    const next = stateFromPipeline(result({ status: 'needs_review' }), NOW);
+    expect(next).toMatchObject({
       status: VehicleImageStatus.UNAVAILABLE,
       reason: 'identity_review_required',
       imageUrl: null,
     });
+    expect(next.nextSyncAt?.getTime()).toBe(NOW.getTime() + 6 * 3_600_000);
+  });
+
+  it('awaiting a person is re-read sooner than an approved image', () => {
+    const waiting = stateFromPipeline(result({ status: 'awaiting_approval' }), NOW).nextSyncAt!;
+    const source = stateFromPipeline(result({ status: 'awaiting_source' }), NOW).nextSyncAt!;
+    expect(waiting.getTime() - NOW.getTime()).toBe(10 * 60_000);
+    expect(source.getTime() - NOW.getTime()).toBe(30 * 60_000);
   });
 
   it('failed and rejected are unavailable (never re-requested)', () => {
@@ -150,10 +159,40 @@ describe('presentVehicleImage', () => {
   it('maps stored states', () => {
     expect(presentVehicleImage({ imageIdentity: identity() })).toEqual({
       status: 'pending',
+      stage: 'processing',
       url: null,
       version: null,
       reason: null,
     });
+    for (const pipelineStatus of ['awaiting_approval', 'awaiting_source']) {
+      expect(
+        presentVehicleImage({ imageIdentity: identity({ pipelineStatus }) }),
+      ).toMatchObject({ status: 'pending', stage: 'awaiting_review', url: null });
+    }
+    expect(
+      presentVehicleImage({ imageIdentity: identity({ pipelineStatus: 'running' }) }),
+    ).toMatchObject({ status: 'pending', stage: 'processing' });
+    // A confirmed publication of an unverified identity is shown; a legacy market-less one is not.
+    expect(
+      presentVehicleImage({
+        imageIdentity: identity({
+          status: VehicleImageStatus.APPROVED,
+          imageUrl: 'https://cdn.test/u.webp',
+          imageVersion: 1,
+          identity: { modelId: 'spark', identityStatus: 'unverified' },
+        }),
+      }),
+    ).toMatchObject({ status: 'approved', url: 'https://cdn.test/u.webp' });
+    expect(
+      presentVehicleImage({
+        imageIdentity: identity({
+          status: VehicleImageStatus.APPROVED,
+          imageUrl: 'https://cdn.test/l.webp',
+          imageVersion: 1,
+          identity: { modelId: 'spark' },
+        }),
+      }),
+    ).toMatchObject({ status: 'unavailable', reason: 'not_requested', url: null });
     expect(
       presentVehicleImage({
         imageIdentity: identity({

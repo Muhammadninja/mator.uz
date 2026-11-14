@@ -31,6 +31,8 @@
     "backfill:root-buckets": "ts-node --compiler-options '{\"module\":\"commonjs\"}' prisma/backfill-root-buckets.ts",
     "backfill:part-number-search-forms": "ts-node --compiler-options '{\"module\":\"commonjs\"}' prisma/backfill-part-number-search-forms.ts",
     "backfill:fitment-priority": "ts-node --compiler-options '{\"module\":\"commonjs\"}' prisma/backfill-fitment-priority.ts",
+    "vehicle-images:reconcile": "ts-node --compiler-options '{\"module\":\"commonjs\"}' scripts/vehicle-images-reconcile.ts",
+    "vehicle-images:diagnose": "node scripts/vehicle-images/diagnose-pipeline.mjs",
     "seed": "ts-node --compiler-options '{\"module\":\"commonjs\"}' src/prisma/seed.ts",
     "seed:legal": "ts-node --compiler-options '{\"module\":\"commonjs\"}' src/prisma/seed-legal.ts",
     "seed:categories": "ts-node --compiler-options '{\"module\":\"commonjs\"}' prisma/seed-categories.ts",

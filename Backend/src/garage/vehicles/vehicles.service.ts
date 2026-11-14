@@ -9,18 +9,12 @@ import {
   VEHICLE_INCLUDE,
   presentVehicle,
 } from './vehicle.presenter';
-import {
-  imageSubject,
-  resolveGeneration,
-  variantsForYear,
-  type VariantRow,
-} from './vehicle-generation';
+import { variantsForYear } from './vehicle-generation';
 import { unsupportedYear } from './vehicle-year';
 import { RealtimeGateway } from '../../realtime/realtime.gateway';
 import { NotificationsService } from '../../notifications/notifications.service';
 import { VehicleImagesService } from '../vehicle-images/vehicle-images.service';
 import { presentVehicleImage } from '../vehicle-images/vehicle-image.state';
-import type { IdentityPlan } from '../vehicle-images/vehicle-image.identity';
 
 @Injectable()
 export class VehiclesService {
@@ -49,18 +43,12 @@ export class VehiclesService {
     // vehicle image registry. Never blocks creation. A generic model is pictured
     // as the generation its year resolves to; an unresolved one is kept for review
     // and never requested.
-    const generation = resolveGeneration({
+    const imagePlan = await this.images.planFor({
       year: dto.year,
-      trimId: catalog.trim?.id ?? null,
-      variants: catalog.model.variants,
+      model: catalog.model,
+      trim: catalog.trim,
       chosenVariantId: null,
     });
-    const imagePlan = await this.prepareImage(
-      dto.year,
-      catalog.model,
-      catalog.trim,
-      generation,
-    );
     const model3dAssetId = dto.trim_id ? await this.resolve3dAsset(dto.trim_id) : null;
 
     // First vehicle is always primary; otherwise honor the requested flag.
@@ -139,6 +127,7 @@ export class VehiclesService {
             imageUrl: true,
             imageVersion: true,
             catalogAssetKey: true,
+            pipelineStatus: true,
             identity: true,
           },
         },
@@ -291,32 +280,13 @@ export class VehiclesService {
         'variant_model_id is not a generation option for this vehicle',
       );
     }
-    const generation = resolveGeneration({
+    const plan = await this.images.planFor({
       year: vehicle.year,
-      trimId: null,
-      variants: model.variants,
+      model,
+      trim: null,
       chosenVariantId: variantModelId,
     });
-    const plan = await this.prepareImage(vehicle.year, model, null, generation);
     return { variantModelId, plan };
-  }
-
-  /** The image plan for the catalog row the vehicle is pictured as. */
-  private prepareImage(
-    year: number,
-    model: VariantRow,
-    trim: { id: string; modelId: string; name: string } | null,
-    generation: ReturnType<typeof resolveGeneration>,
-  ): Promise<IdentityPlan | null> {
-    const subject = imageSubject(model, generation);
-    return 'review' in subject
-      ? this.images.prepare({
-          year,
-          model: null,
-          trim: null,
-          review: subject.review,
-        })
-      : this.images.prepare({ year, model: subject.model, trim });
   }
 
   private async assertCatalogRefs(dto: CreateVehicleDto) {

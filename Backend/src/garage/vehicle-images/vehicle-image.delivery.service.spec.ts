@@ -135,7 +135,12 @@ describe('VehicleImageDeliveryService.dispatch', () => {
     expect(last.data.availableAt.getTime()).toBeGreaterThan(
       Date.now() + 20_000,
     );
-    expect(prisma.vehicleImageIdentity.updateMany).not.toHaveBeenCalled();
+    // Only the error is recorded on the identity; its state is untouched.
+    expect(prisma.vehicleImageIdentity.updateMany).toHaveBeenCalledTimes(1);
+    expect(prisma.vehicleImageIdentity.updateMany).toHaveBeenCalledWith({
+      where: { identityKey: KEY },
+      data: { lastError: 'timeout', lastErrorAt: expect.any(Date) },
+    });
   });
 
   it('after the last attempt, or on a permanent refusal, the row is dead and the identity unavailable', async () => {
@@ -263,5 +268,81 @@ describe('VehicleImageDeliveryService relay / sync / refresh', () => {
     await svc.refresh(KEY);
     expect(client.resolve).not.toHaveBeenCalled();
     expect(prisma.vehicleImageIdentity.updateMany).not.toHaveBeenCalled();
+  });
+});
+
+describe('VehicleImageDeliveryService recovery', () => {
+  const ready = { ready: true, registryMatches: true, registrySha256: 'x', contract: 2, capabilities: null };
+
+  function recovery(health: Record<string, unknown> = ready) {
+    const ctx = setup();
+    (ctx.client as any).health = jest.fn().mockResolvedValue(health);
+    ctx.prisma.vehicleImageOutbox.createMany = jest.fn().mockResolvedValue({ count: 1 });
+    return ctx;
+  }
+
+  it('asks nothing while the pipeline is down or on another registry', async () => {
+    for (const health of [{ ...ready, ready: false, error: 'network:ECONNREFUSED' }, { ...ready, registryMatches: false }]) {
+      const { svc, prisma, queue } = recovery(health);
+      expect(await svc.reviveStalled()).toBe(0);
+      expect(prisma.vehicleImageIdentity.findMany).not.toHaveBeenCalled();
+      expect(queue.addBulk).not.toHaveBeenCalled();
+    }
+  });
+
+  it('re-requests identities that never reached the pipeline and a live vehicle still shows', async () => {
+    const { svc, prisma, queue } = recovery();
+    const now = new Date('2026-11-14T12:00:00Z');
+    prisma.vehicleImageIdentity.findMany.mockResolvedValue([
+      { identityKey: KEY, reason: 'dispatch_failed' },
+    ]);
+    expect(await svc.reviveStalled(now)).toBe(1);
+    const query = prisma.vehicleImageIdentity.findMany.mock.calls[0][0];
+    expect(query.where).toMatchObject({
+      status: VehicleImageStatus.UNAVAILABLE,
+      reason: { in: expect.arrayContaining(['dispatch_failed', 'request_missing', 'not_requested']) },
+      vehicles: { some: { deletedAt: null } },
+      outbox: { none: { status: VehicleImageOutboxStatus.PENDING } },
+    });
+    expect(query.where.reason.in).not.toContain('generation_failed');
+    expect(query.where.reason.in).not.toContain('rejected');
+    expect(query.where.updatedAt.lt.getTime()).toBe(now.getTime() - 30 * 60_000);
+    expect(prisma.vehicleImageIdentity.updateMany).toHaveBeenCalledWith({
+      where: { identityKey: KEY, status: VehicleImageStatus.UNAVAILABLE, reason: 'dispatch_failed' },
+      data: expect.objectContaining({ status: VehicleImageStatus.PENDING, reason: null, lastSyncedAt: null }),
+    });
+    expect(prisma.vehicleImageOutbox.createMany).toHaveBeenCalledWith({
+      data: [{ id: expect.stringMatching(/./), identityKey: KEY, availableAt: now }],
+      skipDuplicates: true,
+    });
+    expect(queue.addBulk).toHaveBeenCalledWith([
+      expect.objectContaining({ name: 'dispatch', data: { outboxId: expect.any(String), attempt: 0 } }),
+    ]);
+  });
+
+  it('skips an identity that changed meanwhile', async () => {
+    const { svc, prisma, queue } = recovery();
+    prisma.vehicleImageIdentity.findMany.mockResolvedValue([{ identityKey: KEY, reason: 'request_missing' }]);
+    prisma.vehicleImageIdentity.updateMany.mockResolvedValue({ count: 0 });
+    expect(await svc.reviveStalled()).toBe(0);
+    expect(prisma.vehicleImageOutbox.createMany).not.toHaveBeenCalled();
+    expect(queue.addBulk).not.toHaveBeenCalled();
+  });
+
+  it('syncNow re-reads one identity, applies it and clears the last error', async () => {
+    const { svc, prisma, client } = recovery();
+    prisma.vehicleImageIdentity.findUnique.mockResolvedValue(identityRow({ lastSyncedAt: new Date() }));
+    client.resolve.mockResolvedValue({ identityKey: KEY, status: 'awaiting_approval', requestId: 'r-1', asset: null });
+    expect(await svc.syncNow(KEY)).toBe(true);
+    expect(prisma.vehicleImageIdentity.update).toHaveBeenCalledWith({
+      where: { identityKey: KEY },
+      data: expect.objectContaining({ pipelineStatus: 'awaiting_approval', lastError: null, lastErrorAt: null }),
+    });
+    client.resolve.mockRejectedValue(new PipelineCallError('registry_mismatch', true));
+    expect(await svc.syncNow(KEY)).toBe(false);
+    expect(prisma.vehicleImageIdentity.updateMany).toHaveBeenLastCalledWith({
+      where: { identityKey: KEY },
+      data: { lastError: 'registry_mismatch', lastErrorAt: expect.any(Date) },
+    });
   });
 });

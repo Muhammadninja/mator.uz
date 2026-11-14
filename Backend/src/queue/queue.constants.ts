@@ -40,6 +40,10 @@ export const VEHICLE_IMAGE_JOBS = {
   RELAY: 'relay',
   /** Repeatable: refresh identities whose pipeline state is due a re-check. */
   SYNC: 'sync',
+  /** Repeatable: ask again for identities that never reached the pipeline. */
+  REVIVE: 'revive',
+  /** Repeatable: re-resolve saved Garage vehicles once per resolver/registry version. */
+  RECONCILE: 'reconcile',
 } as const;
 
 /**

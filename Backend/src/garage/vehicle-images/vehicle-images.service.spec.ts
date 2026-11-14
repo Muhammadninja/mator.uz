@@ -1,5 +1,9 @@
 import { VehicleImageOutboxStatus, VehicleImageStatus } from '@prisma/client';
-import { VehicleImagesService } from './vehicle-images.service';
+import {
+  currentIdentityStamp,
+  VehicleImagesService,
+} from './vehicle-images.service';
+import { VEHICLE_IMAGE_REGISTRY_SHA256 } from './vehicle-image.catalog';
 import type { IdentityPlan } from './vehicle-image.identity';
 
 const KEY = 'a'.repeat(64);
@@ -25,6 +29,7 @@ const LINKED = {
   identityGenerationId: null,
   identityFaceliftId: null,
   identityMarket: null,
+  identityResolvedWith: currentIdentityStamp(),
 };
 const RESOLVED = {
   modelId: 'cobalt',
@@ -223,6 +228,7 @@ describe('VehicleImagesService.stage (transactional outbox)', () => {
           identityGenerationId: 'cobalt-gen2',
           identityFaceliftId: null,
           identityMarket: 'UZ',
+          identityResolvedWith: currentIdentityStamp(),
         },
         outboxId: null,
       });
@@ -259,16 +265,17 @@ describe('VehicleImagesService.stage (transactional outbox)', () => {
     const { svc, tx } = setup({ status: VehicleImageStatus.PENDING });
     const staged = await svc.stage(tx as any, 'veh_1', {
       kind: 'review',
-      reason: 'duplicate_model_name',
+      reason: 'catalog_ambiguous',
     });
     expect(staged).toEqual({
       data: {
         imageIdentityKey: null,
-        imageReviewReason: 'duplicate_model_name',
+        imageReviewReason: 'catalog_ambiguous',
         identityModelId: null,
         identityGenerationId: null,
         identityFaceliftId: null,
         identityMarket: null,
+        identityResolvedWith: currentIdentityStamp(),
       },
       outboxId: null,
     });
@@ -339,19 +346,26 @@ describe('VehicleImagesService.prepare / kick', () => {
         },
         catalogAsset: { assetKey: 'cobalt-gen2', match: 'exact' },
       });
-      expect(prisma.vehicleModelRef.findMany).toHaveBeenCalledWith({
-        where: { makeId: 'chevrolet', id: { not: 'cobalt' } },
-        select: { name: true },
-      });
+      // Sibling names are no longer a review reason: no extra catalog read.
+      expect(prisma.vehicleModelRef.findMany).not.toHaveBeenCalled();
     }
   });
 
-  it('a model no verified registry entry covers is kept for review, never requested', async () => {
+  it('a model no verified registry entry covers gets an UNVERIFIED identity: requested for review, no market guessed', async () => {
     const { svc } = setup({ status: VehicleImageStatus.PENDING });
-    expect(await svc.prepare({ year: 2024, model, trim: null })).toEqual({
-      kind: 'review',
-      reason: 'market_unverified',
+    const plan = await svc.prepare({ year: 2024, model, trim: null });
+    expect(plan).toMatchObject({
+      kind: 'request',
+      verification: 'unverified',
+      identity: { makeId: 'byd', modelId: 'byd-han', identityStatus: 'unverified' },
+      resolved: { modelId: 'byd-han', marketRegion: null },
+      catalogAsset: null,
     });
+    expect(plan && plan.kind === 'request' && plan.identity.marketRegion).toBeFalsy();
+  });
+
+  it('stamps every staged vehicle with the resolver version and registry fingerprint', () => {
+    expect(currentIdentityStamp()).toBe(`r2:${VEHICLE_IMAGE_REGISTRY_SHA256.slice(0, 16)}`);
   });
 
   it('returns null when the catalog read fails (creation goes on)', async () => {

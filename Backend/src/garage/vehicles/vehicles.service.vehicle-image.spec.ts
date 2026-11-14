@@ -1,6 +1,7 @@
 import { NotFoundException } from '@nestjs/common';
 import { VehicleImageStatus } from '@prisma/client';
 import { VehiclesService } from './vehicles.service';
+import { VehicleImagesService } from '../vehicle-images/vehicle-images.service';
 
 const MODEL = {
   id: 'byd-han',
@@ -69,7 +70,8 @@ function setup() {
     }),
     kick: jest.fn(),
     refresh: jest.fn().mockResolvedValue(undefined),
-  };
+  } as Record<string, any>;
+  images.planFor = VehicleImagesService.prototype.planFor.bind(images);
   const realtime = { emitGarageEvent: jest.fn() };
   const svc = new VehiclesService(
     prisma,
@@ -134,6 +136,7 @@ describe('VehiclesService + vehicle images', () => {
     expect(images.kick).toHaveBeenCalledWith('vio_1');
     expect(res.vehicle_image).toEqual({
       status: 'pending',
+      stage: 'processing',
       url: null,
       version: null,
       reason: null,

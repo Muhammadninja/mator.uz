@@ -32,6 +32,8 @@ export const VEHICLE_INCLUDE = {
       imageUrl: true,
       imageVersion: true,
       catalogAssetKey: true,
+      // Whether a pending image is being processed or waits for a person.
+      pipelineStatus: true,
       // Only to tell a market-aware identity from a legacy one (vehicle-image.state.ts).
       identity: true,
     },
@@ -101,9 +103,13 @@ export function presentVehicle(v: VehicleWithRelations, include3d = true) {
  *
  *   verified      catalog row, generation, facelift and market resolved from the
  *                 catalog and the verified vehicle image registry
- *   needs_review  more than one identity is possible, or none is verified; the
- *                 vehicle is kept with its make, model and year, nothing guessed
- *   unresolved    added before identities were resolved
+ *   unverified    the catalog row is known, the registry verifies nothing about
+ *                 it: no market, generation or facelift is stated, and its
+ *                 image goes through review
+ *   needs_review  more than one identity is possible or the catalog contradicts
+ *                 itself; the vehicle is kept with its make, model and year
+ *   unresolved    added before identities were resolved (the reconcile job
+ *                 resolves it)
  *
  * `year_basis` names the kind of year in `year`: always the build year.
  */
@@ -114,16 +120,21 @@ export function presentVehicleIdentity(v: {
   identityFaceliftId: string | null;
   identityMarket: string | null;
 }) {
+  // A verified identity always carries the registry's market; a catalog row
+  // without one is an unverified identity (nothing about market or generation
+  // was guessed, and its image needs a person's confirmation).
   const status = v.imageReviewReason
     ? ('needs_review' as const)
-    : v.identityModelId
+    : v.identityModelId && v.identityMarket
       ? ('verified' as const)
-      : ('unresolved' as const);
+      : v.identityModelId
+        ? ('unverified' as const)
+        : ('unresolved' as const);
   const verified = status === 'verified';
   return {
     status,
     reason: v.imageReviewReason ?? null,
-    model_id: verified ? v.identityModelId : null,
+    model_id: verified || status === 'unverified' ? v.identityModelId : null,
     generation_id: verified ? v.identityGenerationId : null,
     facelift_id: verified ? v.identityFaceliftId : null,
     market: verified ? v.identityMarket : null,

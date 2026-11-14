@@ -52,6 +52,16 @@ const VERIFIED = (modelId: string, generationId: string | null) => ({
   market: 'UZ',
   year_basis: 'production',
 });
+const UNVERIFIED = (modelId: string) => ({
+  status: 'unverified',
+  reason: null,
+  model_id: modelId,
+  generation_id: null,
+  facelift_id: null,
+  market: null,
+  year_basis: 'production',
+});
+const PENDING = { status: 'pending', stage: 'processing', url: null, version: null, reason: null };
 const REVIEW = (reason: string) => ({
   status: 'needs_review',
   reason,
@@ -121,9 +131,7 @@ describe.each([false, true])(
       // Nexia 2 has no approved image: placeholder, never the Nexia 3 picture.
       expect(n2.vehicle_image.status).not.toBe('approved');
       expect(n2.vehicle_image).toEqual(
-        pipelineEnabled
-          ? { status: 'pending', url: null, version: null, reason: null }
-          : PLACEHOLDER('not_requested'),
+        pipelineEnabled ? PENDING : PLACEHOLDER('not_requested'),
       );
       // The generation rows picked directly (the VIN flow) resolve the same way.
       const direct3 = await add(app.garage, 'chevrolet', 'nexia-3', 2018);
@@ -131,23 +139,28 @@ describe.each([false, true])(
       expect(direct3.vehicle_image).toEqual(CATALOG_IMAGE('nexia-r3'));
     });
 
-    it('Spark 2020 → no market is assumed: needs_review placeholder, never a US-market image', async () => {
+    it('Spark 2020 → no market is assumed: an unverified identity enters reviewed acquisition, never a US-market image', async () => {
       const v = await add(app.garage, 'chevrolet', 'spark', 2020);
-      expect(v.identity).toEqual(REVIEW('market_unverified'));
-      expect(v.vehicle_image).toEqual(PLACEHOLDER('needs_review'));
-      expect(db.identities.size).toBe(0);
-      expect(db.outbox.size).toBe(0);
-      expect(app.queue.add).not.toHaveBeenCalled();
+      expect(v.identity).toEqual(UNVERIFIED('spark'));
+      expect(v.vehicle_image).toEqual(pipelineEnabled ? PENDING : PLACEHOLDER('not_requested'));
+      const [stored] = [...db.identities.values()];
+      expect(stored.identity).toMatchObject({ modelId: 'spark', identityStatus: 'unverified' });
+      expect(stored.identity).not.toHaveProperty('marketRegion');
+      expect(db.outbox.size).toBe(pipelineEnabled ? 1 : 0);
+      expect(app.queue.add).toHaveBeenCalledTimes(pipelineEnabled ? 1 : 0);
     });
 
-    it('Tracker 2022 → two catalog models share the name: kept as picked, needs_review, no image guessed', async () => {
+    it('Tracker 2022 → two catalog models share the name: each keeps its own identity, no image guessed', async () => {
+      const keys = new Set<string>();
       for (const id of ['tracker', 'tracker-2']) {
         const v = await add(app.garage, 'chevrolet', id, 2022);
         expect(v.model).toEqual({ id, name: 'Tracker' });
-        expect(v.identity).toEqual(REVIEW('duplicate_model_name'));
-        expect(v.vehicle_image).toEqual(PLACEHOLDER('needs_review'));
+        expect(v.identity).toEqual(UNVERIFIED(id));
+        expect(v.vehicle_image.status).not.toBe('approved');
+        keys.add(db.vehicles.get(v.id)!.imageIdentityKey as string);
       }
-      expect(db.outbox.size).toBe(0);
+      expect(keys.size).toBe(2);
+      expect(db.outbox.size).toBe(pipelineEnabled ? 2 : 0);
     });
 
     it('Unsupported model/year → VEHICLE_YEAR_UNSUPPORTED, nothing saved', async () => {
@@ -226,10 +239,11 @@ describe.each([false, true])(
       expect(app.queue.add.mock.calls.length).toBe(kicksBefore);
     });
 
-    it('a model of another make with no verified market (VW Polo) is never requested', async () => {
+    it('a model of another make with no registry entry (VW Polo) enters the pipeline without any code change', async () => {
       const v = await add(app.garage, 'volkswagen', 'polo', 2021);
-      expect(v.identity).toEqual(REVIEW('market_unverified'));
-      expect(db.outbox.size).toBe(0);
+      expect(v.identity).toEqual(UNVERIFIED('polo'));
+      expect(v.vehicle_image).toEqual(pipelineEnabled ? PENDING : PLACEHOLDER('not_requested'));
+      expect(db.outbox.size).toBe(pipelineEnabled ? 1 : 0);
     });
 
     it('Restart / re-login → the same vehicle, identity and image; a later catalog edit reassigns nothing', async () => {
