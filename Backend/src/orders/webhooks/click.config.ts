@@ -23,6 +23,18 @@ export function enabledPaymentProviders(
     .filter(Boolean);
 }
 
+/**
+ * Whether Payme is ENABLED: listed in PAYMENT_PROVIDERS. Unset keeps the
+ * default (Payme alone), so a production env that never named the variable
+ * is unchanged; `PAYMENT_PROVIDERS=` (empty) lists nothing and disables every
+ * provider. Consulted by invoice creation and the Payme webhook.
+ */
+export function isPaymeEnabled(
+  get: (key: string) => string | undefined,
+): boolean {
+  return enabledPaymentProviders(get).includes('payme');
+}
+
 export function clickSecret(get: (key: string) => string | undefined): string {
   return (get('CLICK_SECRET_KEY') ?? '').trim();
 }
