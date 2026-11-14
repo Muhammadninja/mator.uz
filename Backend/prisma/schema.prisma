@@ -1118,6 +1118,11 @@ model Vehicle {
   identityGenerationId   String?              @map("identity_generation_id") @db.VarChar(64)
   identityFaceliftId     String?              @map("identity_facelift_id") @db.VarChar(64)
   identityMarket         String?              @map("identity_market") @db.VarChar(2)
+  /// Resolver version and registry fingerprint the identity above was computed
+  /// with (`<resolver>:<sha prefix>`). The reconcile job re-resolves a vehicle
+  /// once per registry version, so a newly verified registry entry or a new
+  /// pipeline subject reaches vehicles saved before it. Null: never stamped.
+  identityResolvedWith   String?              @map("identity_resolved_with") @db.VarChar(80)
   deletedAt              DateTime?            @map("deleted_at") @db.Timestamptz(3)
   createdAt              DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt              DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
@@ -1177,6 +1182,10 @@ model VehicleImageIdentity {
   catalogAssetKey   String?              @map("catalog_asset_key") @db.VarChar(96)
   lastSyncedAt      DateTime?            @map("last_synced_at") @db.Timestamptz(3)
   nextSyncAt        DateTime?            @map("next_sync_at") @db.Timestamptz(3)
+  /// Last failed pipeline call for this identity (`network:ECONNREFUSED`,
+  /// `registry_mismatch`, `http_502`, …) and when; cleared by the next success.
+  lastError         String?              @map("last_error") @db.VarChar(120)
+  lastErrorAt       DateTime?            @map("last_error_at") @db.Timestamptz(3)
   createdAt         DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt         DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
   vehicles          Vehicle[]
@@ -1205,6 +1214,21 @@ model VehicleImageOutbox {
   @@index([status, availableAt])
   @@index([identityKey])
   @@map("vehicle_image_outbox")
+}
+
+/// One row per vehicle the reconcile job changed: what it was and what it became.
+/// `revert <run_id>` restores `previous` on every vehicle still holding `next`.
+model VehicleImageReconcileLog {
+  id        BigInt   @id @default(autoincrement())
+  runId     String   @map("run_id") @db.VarChar(40)
+  vehicleId String   @map("vehicle_id") @db.VarChar(64)
+  previous  Json
+  next      Json
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@index([runId])
+  @@index([vehicleId])
+  @@map("vehicle_image_reconcile_log")
 }
 
 model VehicleStatusEvent {
@@ -2506,6 +2530,14 @@ enum AdminAuditAction {
   INVENTORY_RESERVATION_RECONCILED
   INVENTORY_RESERVATION_RELEASED
   INVENTORY_RESERVATION_RESTOCKED
+  // Garage vehicle images (/v1/admin/vehicle-images). The target is the image
+  // subject (targetEntityId = pipeline request id); newValues carries the
+  // identity confirmation, scope or reason the administrator gave.
+  VEHICLE_IMAGE_APPROVED
+  VEHICLE_IMAGE_REJECTED
+  VEHICLE_IMAGE_UPLOADED
+  VEHICLE_IMAGE_RETRIED
+  VEHICLE_IMAGE_RECONCILED
 }
 
 // What kind of thing an audit entry is about, for entries whose target is not
@@ -2519,6 +2551,7 @@ enum AdminAuditEntity {
   BRAND
   VEHICLE_MODEL
   SOURCING_OFFER
+  VEHICLE_IMAGE
 }
 
 model AppAdmin {
