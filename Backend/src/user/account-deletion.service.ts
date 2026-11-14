@@ -78,8 +78,7 @@ export const ACCOUNT_HAS_ACTIVE_ORDERS = 'ACCOUNT_HAS_ACTIVE_ORDERS';
  *     auth identities, MyID sessions + verifications (passport/PINFL data),
  *     email verification tokens, refresh tokens.
  *
- * Note there is no favourites/likes table in this schema — the buyer app keeps
- * them client-side — so there is nothing of that kind to delete server-side.
+ * Favorites are deleted explicitly, since app_users survives as a tombstone.
  *
  * ── Active orders block deletion (business rule) ────────────────────────────
  * While the account has an order IN PROGRESS — any status the order state
@@ -191,6 +190,8 @@ export class AccountDeletionService {
       // status events, ai sessions → messages), which the DB cascades handle once
       // the parent goes.
       const userScoped = { userId };
+      await tx.userFavorite.deleteMany({ where: userScoped });
+      await tx.favoriteImport.deleteMany({ where: userScoped });
       await tx.cart.deleteMany({ where: userScoped });
       await tx.booking.deleteMany({ where: userScoped });
       await tx.notification.deleteMany({ where: userScoped });

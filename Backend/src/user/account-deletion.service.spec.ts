@@ -59,6 +59,8 @@ describe('AccountDeletionService', () => {
     // Each of these is personal data with no retention basis. Scoped to the
     // authenticated user — never a client-supplied id.
     const scoped = { where: { userId: USER_ID } };
+    expect(prisma.userFavorite.deleteMany).toHaveBeenCalledWith(scoped);
+    expect(prisma.favoriteImport.deleteMany).toHaveBeenCalledWith(scoped);
     expect(prisma.address.deleteMany).toHaveBeenCalledWith(scoped);
     expect(prisma.vehicle.deleteMany).toHaveBeenCalledWith(scoped);
     expect(prisma.notification.deleteMany).toHaveBeenCalledWith(scoped);

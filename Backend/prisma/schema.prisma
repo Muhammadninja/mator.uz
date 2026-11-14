@@ -832,6 +832,8 @@ model AppUser {
   myIdSessions           MyIdSession[]
   myIdVerifications      MyIdVerification[]
   legalAcceptances       LegalAcceptance[]
+  favorites              UserFavorite[]
+  favoriteImports        FavoriteImport[]
 
   sourcingRequests SourcingRequest[]
   orderIdempotency OrderIdempotency[]
@@ -1709,6 +1711,7 @@ model CatalogPart {
   fits               CatalogPartFit[]
   makeFits           CatalogPartMakeFit[]
   fitmentBindings    FitmentBinding[]
+  favoritedBy        UserFavorite[]
 
   @@index([categoryId])
   @@index([brandId])
@@ -1726,6 +1729,31 @@ model CatalogPart {
   // Fitment Studio queue: the prioritized slice, in its stable display order.
   @@index([fitmentPriority])
   @@map("catalog_parts")
+}
+
+model UserFavorite {
+  userId    String      @map("user_id") @db.Uuid
+  partId    String      @map("part_id") @db.VarChar(64)
+  createdAt DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
+  user      AppUser     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  part      CatalogPart @relation(fields: [partId], references: [id], onDelete: Cascade)
+
+  @@id([userId, partId])
+  @@index([userId, createdAt, partId])
+  @@map("user_favorites")
+}
+
+model FavoriteImport {
+  userId      String   @map("user_id") @db.Uuid
+  importId    String   @map("import_id") @db.VarChar(128)
+  payloadHash String   @map("payload_hash") @db.VarChar(64)
+  acceptedIds String[] @map("accepted_ids")
+  missingIds  String[] @map("missing_ids")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  user        AppUser  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, importId])
+  @@map("favorite_imports")
 }
 
 // Denormalized make/model fitment for the buyer catalog, projected from the
