@@ -17,6 +17,7 @@ import { AdminManagementController } from './management/admin-management.control
 import { AdminPhotoCoverageController } from './photo-coverage/admin-photo-coverage.controller';
 import { AdminRefundsController } from './refunds/admin-refunds.controller';
 import { AdminReservationsController } from './reservations/admin-reservations.controller';
+import { AdminVehicleImagesController } from './vehicle-images/admin-vehicle-images.controller';
 
 const guard = new AdminRoleGuard(new Reflector());
 
@@ -52,6 +53,12 @@ const MANAGERS_ONLY: [string, { prototype: object }, string][] = [
   ['revoke a dealer API key', AdminDealersController, 'revokeApiKey'],
   ['record a refund', AdminRefundsController, 'record'],
   ['void a refund', AdminRefundsController, 'voidEntry'],
+  ['approve a vehicle image', AdminVehicleImagesController, 'approve'],
+  ['reject a vehicle image', AdminVehicleImagesController, 'reject'],
+  ['upload a vehicle image', AdminVehicleImagesController, 'upload'],
+  ['retry vehicle image acquisition', AdminVehicleImagesController, 'retry'],
+  ['re-resolve saved Garage vehicles', AdminVehicleImagesController, 'reconcile'],
+  ['revert a Garage re-resolution', AdminVehicleImagesController, 'revert'],
 ];
 
 const EVERY_ROLE: [string, { prototype: object }, string][] = [
@@ -72,6 +79,10 @@ const EVERY_ROLE: [string, { prototype: object }, string][] = [
   ['reconcile a reservation', AdminReservationsController, 'reconcile'],
   ['release a reservation', AdminReservationsController, 'release'],
   ['restock a reservation', AdminReservationsController, 'restock'],
+  ['read the vehicle image status', AdminVehicleImagesController, 'status'],
+  ['read the vehicle image queue', AdminVehicleImagesController, 'queue'],
+  ['read a vehicle image history', AdminVehicleImagesController, 'history'],
+  ['preview a vehicle image candidate', AdminVehicleImagesController, 'preview'],
 ];
 
 const SUPER_ADMIN_ONLY: [string, { prototype: object }, string][] = [
