@@ -1,4 +1,14 @@
-import { VEHICLE_IMAGE_CATALOG_SOURCE } from './vehicle-image-catalog.data';
+import {
+  VEHICLE_IMAGE_CATALOG_SHA256,
+  VEHICLE_IMAGE_CATALOG_SOURCE,
+} from './vehicle-image-catalog.data';
+
+/**
+ * SHA-256 of the registry bytes this backend embeds. The pipeline reports the
+ * fingerprint of the registry it loaded; an answer from any other registry is
+ * refused (vehicle-image.pipeline-client.ts), so the two never silently disagree.
+ */
+export const VEHICLE_IMAGE_REGISTRY_SHA256 = VEHICLE_IMAGE_CATALOG_SHA256;
 
 /**
  * Rules over the owner-approved vehicle image registry
