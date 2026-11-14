@@ -2,6 +2,8 @@ import {
   Injectable,
   Inject,
   Logger,
+  NotFoundException,
+  Optional,
   BadRequestException,
   UnauthorizedException,
   GoneException,
@@ -28,6 +30,8 @@ import type {
 import { RATE_LIMITER } from '../../redis/rate-limiter.service';
 import { RedisKeys } from '../../redis/redis.keys';
 import { resolveSmsLang, type SmsLang } from '../../sms/otp-message.i18n';
+import { OtpJobSecretStore } from '../../queue/otp-job-secret.store';
+import { StagingOtpPolicy } from './staging-otp.policy';
 
 const OTP_LENGTH = 6;
 const OTP_TTL_MS = 5 * 60 * 1000; // 5 min
@@ -114,6 +118,15 @@ export function otpCooldownPhone(phone: string): string {
   return digits.startsWith('00') ? digits.slice(2) : digits;
 }
 
+/** A code waiting for the staging tester it was issued to. */
+export interface StagingOtpInboxEntry {
+  requestId: string;
+  phoneE164: string;
+  purpose: string;
+  code: string;
+  expiresAt: Date;
+}
+
 export interface OtpIssued {
   requestId: string;
   expiresAt: Date;
@@ -170,6 +183,10 @@ export class OtpService {
     private readonly queue: QueueService,
     private readonly config: ConfigService,
     @Inject(RATE_LIMITER) private readonly rateLimiter: RateLimiter,
+    // Staging tester OTP (staging-otp.config.ts). Absent or disabled everywhere
+    // else, which leaves every path below exactly as it was.
+    @Optional() private readonly staging?: StagingOtpPolicy,
+    @Optional() private readonly secrets?: OtpJobSecretStore,
   ) {
     this.devMode = this.config.get<string>('AUTH_DEV_MODE') === 'true';
     // Defence in depth behind the boot-time guard (validateAuthEnv): even a
@@ -183,6 +200,30 @@ export class OtpService {
     if (this.devMode) {
       this.logger.warn('AUTH_DEV_MODE is ON — OTPs are returned in the API, SMS is skipped. Do NOT enable in production.');
     }
+  }
+
+  private get stagingOn(): boolean {
+    return this.staging?.enabled === true;
+  }
+
+  /**
+   * Staging only: seal the code for the tester this request comes from, instead
+   * of queueing an SMS. The ref binds the tester and the slot, and the phone is
+   * bound into the ciphertext, so no other tester's inbox can open it.
+   */
+  private async deliverToTester(record: OtpRecord, code: string): Promise<void> {
+    const tester = this.staging!.assertMayUse(record.phoneE164);
+    if (!this.secrets) throw new Error('OTP secret store unavailable');
+    const slot = slotOf(record.phoneE164, record.purpose);
+    await this.secrets.seal(
+      this.staging!.inboxRef(tester.id, slot),
+      record.phoneE164,
+      code,
+      record.expiresAt,
+    );
+    this.logger.log(
+      `[STAGING_OTP] code for ${maskPhone(record.phoneE164)} held for tester ${tester.id} (no SMS)`,
+    );
   }
 
   private hash(code: string): string {
@@ -350,6 +391,10 @@ export class OtpService {
         );
         return code;
       }
+      if (this.stagingOn) {
+        await this.deliverToTester(record, code);
+        return undefined;
+      }
       await this.deliver(
         record.phoneE164,
         code,
@@ -394,6 +439,9 @@ export class OtpService {
     purpose: OtpPurpose = OtpPurpose.LOGIN,
     lang?: string | null,
   ): Promise<OtpIssued> {
+    // Staging: only an approved tester, for one of their own numbers, before
+    // anything is generated, stored or queued.
+    if (this.stagingOn) this.staging!.assertMayUse(phoneE164);
     const slot = slotOf(phoneE164, purpose);
     const requestId = prefixedId(IdPrefix.OTP);
     // First: a refused request must not create a code or touch the live one.
@@ -442,6 +490,7 @@ export class OtpService {
     if (!record) {
       throw new BadRequestException('Invalid or already-used OTP request');
     }
+    if (this.stagingOn) this.staging!.assertMayUse(record.phoneE164);
 
     // The five attempts belong to the request_id and a resend keeps it, so a
     // spent request cannot be reopened, and an SMS for it could never be used.
@@ -534,6 +583,9 @@ export class OtpService {
     code: string,
     purpose?: OtpPurpose,
   ): Promise<OtpRecord> {
+    // Staging: checked first, so another tester cannot spend the owner's attempts,
+    // and a tester removed from the list cannot redeem a code issued before.
+    if (this.stagingOn) this.staging!.assertMayUse(phoneE164);
     const record = await this.loadByRequestId(requestId);
     if (
       !record ||
@@ -649,5 +701,40 @@ export class OtpService {
       throw new BadRequestException('No active verification request for this phone. Please request a new code.');
     }
     await this.verify(record.requestId, phoneE164, code, purpose);
+  }
+
+  /**
+   * Staging only: the codes currently pending for the tester this request comes
+   * from. 404 when staging tester OTP is off or the proxy did not vouch for a
+   * tester, so the route is indistinguishable from absent. A code is listed only
+   * while it is the live, unconsumed, unexpired one for its slot.
+   */
+  async stagingInbox(): Promise<StagingOtpInboxEntry[]> {
+    const tester = this.stagingOn ? this.staging!.currentTester() : null;
+    if (!tester || !this.secrets) throw new NotFoundException();
+    const entries: StagingOtpInboxEntry[] = [];
+    for (const phoneE164 of tester.phones) {
+      for (const purpose of Object.values(OtpPurpose)) {
+        const slot = slotOf(phoneE164, purpose);
+        const record = await this.loadByPhone(slot);
+        if (!record || record.expiresAt <= Date.now()) continue;
+        let code: string | null;
+        try {
+          code = await this.secrets.open(this.staging!.inboxRef(tester.id, slot), phoneE164);
+        } catch {
+          continue;
+        }
+        // A sealed code superseded by a newer one, or by another tester's, is never shown.
+        if (!code || this.hash(code) !== record.codeHash) continue;
+        entries.push({
+          requestId: record.requestId,
+          phoneE164,
+          purpose,
+          code,
+          expiresAt: new Date(record.expiresAt),
+        });
+      }
+    }
+    return entries;
   }
 }

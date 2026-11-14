@@ -18,6 +18,11 @@ const MAX_INBOUND_LENGTH = 64;
 export interface RequestContext {
   /** Short, human-quotable correlation id, e.g. "3AA7FC". */
   requestId: string;
+  /**
+   * The staging proxy's tester headers, exactly as received and UNVERIFIED.
+   * Only StagingOtpPolicy reads them, and only after checking the proxy secret.
+   */
+  stagingProxy?: { tester?: string; auth?: string };
 }
 
 /**

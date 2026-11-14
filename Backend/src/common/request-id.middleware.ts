@@ -5,6 +5,16 @@ import {
   requestContext,
   sanitizeRequestId,
 } from './request-context';
+import {
+  STAGING_PROXY_AUTH_HEADER,
+  STAGING_TESTER_HEADER,
+} from '../auth/phone/staging-otp.config';
+
+/** A single-valued header, length-capped; anything else reads as absent. */
+function header(req: Request, name: string, max: number): string | undefined {
+  const value = req.headers[name];
+  return typeof value === 'string' && value.length <= max ? value : undefined;
+}
 
 /**
  * Assigns every HTTP request a short correlation id and binds it to the async
@@ -37,5 +47,10 @@ export function requestIdMiddleware(
 
   // `next()` is invoked INSIDE run(), so the entire downstream chain — including
   // everything awaited by the controller — shares this store.
-  requestContext.run({ requestId }, () => next());
+  // Captured unverified; StagingOtpPolicy checks the proxy secret before use.
+  const tester = header(req, STAGING_TESTER_HEADER, 64);
+  const auth = header(req, STAGING_PROXY_AUTH_HEADER, 256);
+  const stagingProxy = tester || auth ? { tester, auth } : undefined;
+
+  requestContext.run({ requestId, stagingProxy }, () => next());
 }
