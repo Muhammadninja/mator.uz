@@ -19,7 +19,11 @@ import { buildPaymeCheckoutUrl } from './webhooks/payme-checkout.util';
 import { PaymeFiscalService } from './webhooks/payme-fiscal.service';
 import { findOpenPaymeInvoice } from './webhooks/payme-invoice.util';
 import { isPayableOrderStatus } from './order-transitions';
-import { clickMerchantIds, isClickEnabled } from './webhooks/click.config';
+import {
+  clickMerchantIds,
+  isClickEnabled,
+  isPaymeEnabled,
+} from './webhooks/click.config';
 import { assertReturnUrl, readReturnUrlPolicy } from './payment-return-url';
 import { assertAllAvailable } from './order-availability';
 import { findUnavailableForPayment } from './inventory/payment-availability';
@@ -41,6 +45,11 @@ export class PaymentsService {
   }
 
   async createPaymeInvoice(userId: string, dto: CreateInvoiceDto) {
+    // A provider not listed in PAYMENT_PROVIDERS (e.g. a staging env with
+    // `PAYMENT_PROVIDERS=`) hands out no checkout link and records no payment.
+    if (!isPaymeEnabled((k) => this.config.get<string>(k))) {
+      throw new BadRequestException('Payme payments are not enabled');
+    }
     // Refused before anything is read or written for the order.
     const returnUrl = this.returnUrl(dto);
     const order = await this.loadPayableOrder(userId, dto.order_id);

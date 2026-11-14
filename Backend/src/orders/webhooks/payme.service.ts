@@ -11,6 +11,7 @@ import {
 import { PrismaService } from '../../prisma/prisma.service';
 import { MarkCancelledOutcome, SettlementService } from './settlement.service';
 import { readPaymeConfig } from './payme.config';
+import { isPaymeEnabled } from './click.config';
 import { isPayableOrderStatus } from '../order-transitions';
 import { findUnavailableForPayment } from '../inventory/payment-availability';
 import { OFFLINE_PAYMENT_TYPES } from '../offline-order.policy';
@@ -332,6 +333,16 @@ export class PaymeService {
   }
 
   private dispatch(method: string | undefined, raw: unknown) {
+    // Fail closed, like Click: with Payme not listed in PAYMENT_PROVIDERS no
+    // callback reads or moves an order or a transaction, whatever the method.
+    // Checked after authorization, so an unauthenticated caller still gets
+    // -32504 and learns nothing about the configuration.
+    if (!isPaymeEnabled((k) => this.config.get<string>(k))) {
+      this.logger.warn(
+        'Payme callback rejected: Payme payments are not enabled',
+      );
+      throw new PaymeError(-31008, 'Payme payments are not enabled');
+    }
     const known = [
       'CheckPerformTransaction',
       'CreateTransaction',
