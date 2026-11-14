@@ -1,0 +1,12 @@
+# Separate Redis instance for mator-backend-staging. Do not point staging at production Redis.
+bind 127.0.0.1
+protected-mode yes
+port 6380
+daemonize no
+supervised no
+pidfile /run/redis-mator-staging/redis.pid
+dir /var/lib/redis-mator-staging
+dbfilename dump.rdb
+appendonly yes
+aclfile /etc/redis/users-mator-staging.acl
+logfile ""
