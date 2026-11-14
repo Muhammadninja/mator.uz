@@ -1,6 +1,6 @@
 # Garage vehicle images: lifecycle, deployment and rollback
 
-Status: implemented and tested in an isolated environment (2026-11-14). **Not deployed.** Production access was not used.
+Status: deployed 2026-11-14. Production backend `main` (PR #146) talks to its own pipeline `mator-vehicle-images` on 8047 (contract 2, registry `9ecf78141f3e…`). Staging runs the same pipeline release on 8048. Publication is still off until the Cloudinary settings are added to the pipeline environment (see "Publication storage").
 
 Three repositories change together:
 
@@ -38,13 +38,14 @@ The script prints every check (settings, DNS, TCP, redirects, TLS, readiness, re
 
 1. **Back up.** Take a PostgreSQL custom-format backup. Then stop the pipeline you will upgrade and archive its data directory (`metadata.json` plus `private/`). Pipeline rollback needs this archive: an older pipeline cannot load the new unverified identities.
 2. **Production pipeline** (MatorUI- branch): install a separate production pipeline, never the staging one.
-   - Process: `mator-vehicle-images`, port 8047, `/etc/mator/vehicle-images.env` (mode 0600).
+   - Process: `mator-vehicle-images`, port 8047, user `mator-vehicle-images-prod`, code in `/opt/mator/vehicle-image-pipeline-production`, environment `/etc/mator/vehicle-images-production.env` (mode 0600, owned by that user; the user needs `--x` on `/etc/mator`, e.g. `setfacl -m u:mator-vehicle-images-prod:--x /etc/mator`).
    - Tokens: its own admin and request tokens.
-   - `VEHICLE_IMAGE_DATA_DIR=/var/lib/mator-vehicle-images`.
+   - `VEHICLE_IMAGE_DATA_DIR=/var/lib/mator-vehicle-images-production`.
+   - `VEHICLE_IMAGE_REGISTRY_SHA256` = the backend's `VEHICLE_IMAGE_CATALOG_SHA256` (`src/garage/vehicle-images/vehicle-image-catalog.data.ts`). Unset, malformed or different: `/health/ready` answers 503 (`registry_unconfigured`, `registry_invalid`, `registry_mismatch`) and the internal routes answer 503, so a pipeline with the wrong registry never reports ready.
    - `VEHICLE_IMAGE_REPOSITORY_ARTWORK_ENABLED=true`. The checkout must contain `assets/vehicles/`.
    - `VEHICLE_IMAGE_GENERATION_ENABLED=false` and `VEHICLE_IMAGE_ALLOW_UNVERIFIED_GENERATION=false`.
-   - Publication needs Cloudinary credentials, and that needs an owner decision (see below). With `VEHICLE_IMAGE_PUBLICATION_ENABLED=false` everything else works, but approvals answer 503.
-   - Check: `curl -s http://127.0.0.1:8047/health/ready` must show `"contract":2` and the registry `9ecf78141f3e…`.
+   - Publication: `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET` (the parts account, see below) and `VEHICLE_IMAGE_PUBLICATION_ENABLED=true`. Images go to the folder `mator/vehicle-images/`. With `VEHICLE_IMAGE_PUBLICATION_ENABLED=false` everything else works, but approvals answer 503.
+   - Check: `curl -s http://127.0.0.1:8047/health/ready` must answer 200 with `"contract":2` and `"registry":{…"sha256":"9ecf78141f3e…","check":"ok"}`.
 3. **Migration**, after `20261118000000_vehicle_identity_snapshot` (which is also still pending in production): `npx prisma migrate deploy`. It is additive: new columns, a log table and new enum values. Deploy it before the code.
 4. **Backend** (the backend branch). Set in `.env`:
    - `VEHICLE_IMAGE_PIPELINE_URL=http://127.0.0.1:8047`, the production pipeline;
@@ -73,11 +74,11 @@ The script prints every check (settings, DNS, TCP, redirects, TLS, readiness, re
 | Admin console | Redeploy the previous build | Read-only for data; decisions already made stay audited. |
 | App | Previous build or OTA | The backend keeps serving the older contract fields. |
 
-An older backend with the new pipeline is safe: without the contract header, the pipeline answers in the old vocabulary. A new backend with an older pipeline refuses its answers (`pipeline_outdated`, retryable) and applies nothing. So deploy the pipeline first.
+An older backend with the new pipeline gets nothing: the internal routes require `x-mator-vehicle-image-contract: 2` (checked after the Bearer token), and a missing, malformed or unsupported version answers **428** with `supportedContracts`. The backend treats 428 as retryable, so no vehicle is marked failed, but no image state is applied until that backend is upgraded. A new backend with an older pipeline refuses its answers (`pipeline_outdated`, retryable) and applies nothing. So deploy the pipeline and the backend together, pipeline first.
 
 ## Decisions that need the owner
 
-- **Publication storage.** Cloudinary credentials and quota for the production pipeline: a separate account per the pipeline docs, or the existing one. The local filesystem store also exists, but it needs an HTTPS host.
+- **Publication storage.** Decided 2026-11-15: the production pipeline uses the same Cloudinary account as part photos (credentials already in the backend `.env`), uploading under `mator/vehicle-images/`.
 - **Approving the existing artwork.** The console proposes it, and approval stays a person's decision:
   - Nexia 2 (N150, identity verified);
   - Spark M300, Tracker 3, Malibu 2 facelift, Nexia 1, Lacetti J200, Matiz, Orlando, Tahoe, Trailblazer (all unverified).
