@@ -76,6 +76,7 @@ import { ApnsPushProvider } from '../notifications/push/providers/apns.provider'
     FcmPushProvider,
     ApnsPushProvider,
   ],
-  exports: [QueueService],
+  // OtpJobSecretStore is shared with OtpService for staging tester codes.
+  exports: [QueueService, OtpJobSecretStore],
 })
 export class QueueModule {}

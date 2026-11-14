@@ -12,6 +12,7 @@ import { EmailVerificationService } from './email-verification/email-verificatio
 import { JwtKeyService } from './tokens/jwt-key.service';
 import { TokenService } from './tokens/token.service';
 import { OtpService } from './phone/otp.service';
+import { StagingOtpPolicy } from './phone/staging-otp.policy';
 import { PhoneAuthService } from './phone/phone-auth.service';
 import { MyIdService } from './myid/myid.service';
 import { MailModule } from '../mail/mail.module';
@@ -40,6 +41,7 @@ import { LegalModule } from '../legal/legal.module';
     JwtKeyService,
     TokenService,
     OtpService,
+    StagingOtpPolicy,
     PhoneAuthService,
     MyIdService,
   ],

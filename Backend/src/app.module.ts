@@ -10,6 +10,7 @@ import { PrismaModule } from './prisma/prisma.module';
 import { RedisModule } from './redis/redis.module';
 import { QueueModule } from './queue/queue.module';
 import { AuthModule } from './auth/auth.module';
+import { StagingOtpModule } from './auth/phone/staging-otp.module';
 import { SellersModule } from './sellers/sellers.module';
 import { AdminModule } from './admin/admin.module';
 import { TelegramModule } from './telegram/telegram.module';
@@ -69,6 +70,8 @@ import { isBlueprintEnabled } from './blueprint/blueprint-auth';
     // connection exists when it re-registers the queues for read-only sampling.
     MetricsModule.forRoot(),
     AuthModule,
+    // Staging tester OTP inbox; 404 unless enabled on staging.
+    StagingOtpModule,
     SellersModule,
     AdminModule,
     // Global: the bot's polling status, read by /health and the metrics.

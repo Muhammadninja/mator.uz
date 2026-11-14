@@ -13,6 +13,7 @@
  */
 
 import { OTP_JOB_KEY_ENV, parseOtpJobKey } from '../queue/otp-job-secret.store';
+import { collectStagingOtpEnvErrors } from './phone/staging-otp.config';
 
 const isProduction = (env: Record<string, unknown>) =>
   env.NODE_ENV === 'production';
@@ -44,6 +45,8 @@ export function collectAuthEnvErrors(env: Record<string, unknown>): string[] {
         'OTP codes queued for SMS are encrypted with it.',
     );
   }
+  // Staging tester OTP: forbidden in production, and complete or not at all.
+  errors.push(...collectStagingOtpEnvErrors(env));
   return errors;
 }
 
