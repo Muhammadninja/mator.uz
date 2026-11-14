@@ -62,6 +62,33 @@ const GOLDEN = [
     },
     key: 'ee4397b81acdaeb00282ffb9373b1074c51b13e2c2cce29a3be02042a477a6ad',
   },
+  // Unverified namespace: computed by the real pipeline (MatorUI- feat/vehicle-image-lifecycle).
+  {
+    identity: {
+      makeId: 'chevrolet',
+      modelId: 'spark',
+      modelYear: 2019,
+      generationId: null,
+      faceliftId: null,
+      bodyType: null,
+      trimId: null,
+      identityStatus: 'unverified' as const,
+    },
+    key: 'c009a7ce3f192b1623a954df4062bbc675372b7970df57247ff0fc2a23616f70',
+  },
+  {
+    identity: {
+      makeId: 'chevrolet',
+      modelId: 'malibu',
+      modelYear: 2021,
+      generationId: null,
+      faceliftId: null,
+      bodyType: null,
+      trimId: 'malibu-2-premier',
+      identityStatus: 'unverified' as const,
+    },
+    key: '570f79326e211ed030082aec3ec341976150ce7eaf7991eb3f8a2ccbc7130620',
+  },
 ];
 
 describe('canonical vehicle identity (Phase 3D contract)', () => {
@@ -221,24 +248,48 @@ describe('planVehicleIdentity', () => {
     })).toThrow(/marketRegion/);
   });
 
-  it('flags a model whose name another model of the make shares (tracker / tracker-2)', () => {
-    const plan = planVehicleIdentity(
-      src({
-        model: {
-          id: 'tracker-2',
-          makeId: 'chevrolet',
-          name: 'Tracker',
-          bodyType: null,
-          yearFrom: null,
-          yearTo: null,
-        },
-        siblingModelNames: ['  tracker '],
-      }),
-    );
-    expect(plan).toEqual({
-      kind: 'review',
-      reason: IMAGE_REVIEW_REASONS.DUPLICATE_MODEL_NAME,
+  it('a display name another model shares (tracker / tracker-2) no longer blocks: the model id keeps them apart', () => {
+    const model = (id: string) => ({
+      id,
+      makeId: 'chevrolet',
+      name: 'Tracker',
+      bodyType: null,
+      yearFrom: null,
+      yearTo: null,
     });
+    const two = planVehicleIdentity(
+      src({ model: model('tracker-2'), siblingModelNames: ['  tracker '], unverified: true }),
+    );
+    const three = planVehicleIdentity(
+      src({ model: model('tracker'), siblingModelNames: ['Tracker'], unverified: true }),
+    );
+    expect(two.kind).toBe('request');
+    expect(three.kind).toBe('request');
+    if (two.kind !== 'request' || three.kind !== 'request') return;
+    expect(two.identity).toMatchObject({ modelId: 'tracker-2', identityStatus: 'unverified' });
+    expect(two.identityKey).not.toBe(three.identityKey);
+    expect(IMAGE_REVIEW_REASONS.DUPLICATE_MODEL_NAME).toBe('duplicate_model_name');
+  });
+
+  it('hashes an unverified identity in its own namespace (golden vector shared with the pipeline)', () => {
+    const identity = {
+      makeId: 'chevrolet',
+      modelId: 'spark',
+      modelYear: 2019,
+      generationId: null,
+      faceliftId: null,
+      bodyType: null,
+      trimId: null,
+      identityStatus: 'unverified' as const,
+    };
+    expect(canonicalIdentityTuple(identity)).toEqual([
+      'mator-vehicle-image-unverified-v1', 'chevrolet', 'spark', 2019, null, null, null, null,
+    ]);
+    const { identityStatus, ...legacy } = identity;
+    expect(identityStatus).toBe('unverified');
+    expect(canonicalIdentityKey(identity)).not.toBe(canonicalIdentityKey(legacy));
+    expect(() => validateCanonicalIdentity({ ...identity, marketRegion: 'UZ' })).toThrow(/both/);
+    expect(() => validateCanonicalIdentity({ ...identity, identityStatus: 'verified' })).toThrow(/identityStatus/);
   });
 
   it('flags a year outside the catalog production range', () => {

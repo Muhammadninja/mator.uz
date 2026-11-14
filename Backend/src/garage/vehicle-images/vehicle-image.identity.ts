@@ -18,6 +18,13 @@ import type { CatalogAssetMatch } from './vehicle-image.catalog';
  */
 export const CANONICAL_IDENTITY_VERSION = 'mator-vehicle-image-v1';
 export const MARKET_IDENTITY_VERSION = 'mator-vehicle-image-v2';
+/**
+ * A catalog-valid identity the registry does not verify (no market, generation
+ * unknown). It has its own hash namespace, so it never shares state with a
+ * legacy market-less identity or a verified one. The pipeline may look for
+ * candidates for it, but publishes nothing without a person confirming the car.
+ */
+export const UNVERIFIED_IDENTITY_VERSION = 'mator-vehicle-image-unverified-v1';
 
 export interface CanonicalVehicleIdentity {
   makeId: string;
@@ -28,6 +35,7 @@ export interface CanonicalVehicleIdentity {
   bodyType: string | null;
   trimId: string | null;
   marketRegion?: string;
+  identityStatus?: 'unverified';
 }
 
 /** Display facts sent with a request. `trim` only together with `trimId`. */
@@ -91,7 +99,17 @@ export function validateCanonicalIdentity(
   }
   const record = value as Record<string, unknown>;
   const hasMarket = Object.hasOwn(record, 'marketRegion');
-  const fields: readonly string[] = hasMarket ? [...IDENTITY_FIELDS, 'marketRegion'] : IDENTITY_FIELDS;
+  const unverified = Object.hasOwn(record, 'identityStatus');
+  if (hasMarket && unverified) {
+    throw new IdentityContractError(
+      'canonical identity cannot carry both a verified market and an unverified status',
+    );
+  }
+  const fields: readonly string[] = hasMarket
+    ? [...IDENTITY_FIELDS, 'marketRegion']
+    : unverified
+      ? [...IDENTITY_FIELDS, 'identityStatus']
+      : IDENTITY_FIELDS;
   if (Object.keys(record).some((field) => !fields.includes(field))) {
     throw new IdentityContractError(
       'canonical identity contains unsupported fields',
@@ -128,6 +146,12 @@ export function validateCanonicalIdentity(
     }
     identity.marketRegion = record.marketRegion;
   }
+  if (unverified) {
+    if (record.identityStatus !== 'unverified') {
+      throw new IdentityContractError('identityStatus must be unverified');
+    }
+    identity.identityStatus = 'unverified';
+  }
   return identity;
 }
 
@@ -136,7 +160,11 @@ export function canonicalIdentityTuple(
 ): unknown[] {
   const v = validateCanonicalIdentity(identity);
   return [
-    v.marketRegion ? MARKET_IDENTITY_VERSION : CANONICAL_IDENTITY_VERSION,
+    v.marketRegion
+      ? MARKET_IDENTITY_VERSION
+      : v.identityStatus
+        ? UNVERIFIED_IDENTITY_VERSION
+        : CANONICAL_IDENTITY_VERSION,
     v.makeId,
     v.modelId,
     v.modelYear,
@@ -204,7 +232,11 @@ export function normalizeName(value: string | null | undefined): string {
 
 /** Why a vehicle stays on the placeholder and is flagged for review. */
 export const IMAGE_REVIEW_REASONS = {
-  /** Another model of the same make has the same display name (e.g. `tracker` / `tracker-2`). */
+  /**
+   * Retired: another model of the same make has the same display name (e.g.
+   * `tracker` / `tracker-2`). Canonical identities carry the catalog model id,
+   * so the two never share a request; the value stays for rows written before.
+   */
   DUPLICATE_MODEL_NAME: 'duplicate_model_name',
   /** The catalog states a production range for the model and the year is outside it. */
   YEAR_OUTSIDE_MODEL_RANGE: 'year_outside_model_range',
@@ -217,8 +249,11 @@ export const IMAGE_REVIEW_REASONS = {
    */
   GENERATION_UNRESOLVED: 'generation_unresolved',
   /**
-   * No identity-verified registry entry covers the vehicle's model and year, so
-   * its market (and with it the body) is unknown. Never defaulted to a market.
+   * Retired: no identity-verified registry entry covers the vehicle's model and
+   * year, so its market (and with it the body) is unknown. Such a vehicle now
+   * gets an unverified identity and enters reviewed acquisition instead of
+   * waiting forever; the value stays for rows written before (the reconcile job
+   * re-resolves them).
    */
   MARKET_UNVERIFIED: 'market_unverified',
   /** Verified registry entries disagree on market, generation or facelift, or two approved images answer equally. */
@@ -243,31 +278,37 @@ export interface VehicleIdentitySource {
   } | null;
   /** The trim the owner picked from the catalog, already checked to belong to the model. */
   trim: { id: string; modelId: string; name: string } | null;
-  /** Display names of the make's OTHER models. */
-  siblingModelNames: string[];
+  /** Display names of the make's OTHER models (informational; no longer a review reason). */
+  siblingModelNames?: string[];
   /**
    * The vehicle's verified market from the vehicle image registry
    * (vehicle-image.catalog.ts `catalogIdentityFacts`); never a global default and
    * never inferred from a year, a name or a VIN.
    */
   marketRegion?: string | null;
+  /** No verified registry facts: build an unverified identity (review only). */
+  unverified?: boolean;
 }
 
 /**
  * What a Garage vehicle was resolved to when it was added: saved on the vehicle
- * (`identity_*` columns) and never recomputed on read.
+ * (`identity_*` columns) and never recomputed on read. `marketRegion` is null for
+ * an unverified identity (no registry facts): the vehicle keeps its catalog row,
+ * and nothing about its market, generation or facelift is guessed.
  */
 export interface ResolvedVehicleIdentity {
   /** The catalog row the vehicle is pictured as: its own model, or the generation row (`nexia-3`). */
   modelId: string;
   generationId: string | null;
   faceliftId: string | null;
-  marketRegion: string;
+  marketRegion: string | null;
 }
 
 export type IdentityPlan =
   | {
       kind: 'request';
+      /** `verified`: market and generation from the registry; `unverified`: review only. */
+      verification?: 'verified' | 'unverified';
       identity: CanonicalVehicleIdentity;
       display: VehicleImageDisplay;
       identityKey: string;
@@ -304,10 +345,9 @@ export function planVehicleIdentity(src: VehicleIdentitySource): IdentityPlan {
   if (trim && trim.modelId !== model.id)
     return review(IMAGE_REVIEW_REASONS.IDENTITY_INVALID);
 
-  const ownName = normalizeName(model.name);
-  if (src.siblingModelNames.some((name) => normalizeName(name) === ownName)) {
-    return review(IMAGE_REVIEW_REASONS.DUPLICATE_MODEL_NAME);
-  }
+  // A display name another model of the make shares (`tracker` / `tracker-2`,
+  // both "Tracker") is not a reason to wait: the identity carries the catalog
+  // model id, and nothing is published without verified facts or a person.
   if (
     (model.yearFrom != null && src.year < model.yearFrom) ||
     (model.yearTo != null && src.year > model.yearTo)
@@ -325,7 +365,11 @@ export function planVehicleIdentity(src: VehicleIdentitySource): IdentityPlan {
       faceliftId: null,
       bodyType,
       trimId: trim ? trim.id : null,
-      ...(src.marketRegion ? { marketRegion: src.marketRegion } : {}),
+      ...(src.marketRegion
+        ? { marketRegion: src.marketRegion }
+        : src.unverified
+          ? { identityStatus: 'unverified' }
+          : {}),
     });
     const display = validateDisplay(
       {

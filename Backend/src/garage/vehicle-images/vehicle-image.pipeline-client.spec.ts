@@ -4,9 +4,11 @@ import {
   type CanonicalVehicleIdentity,
 } from './vehicle-image.identity';
 import {
+  networkErrorCode,
   PipelineCallError,
   VehicleImagePipelineClient,
 } from './vehicle-image.pipeline-client';
+import { VEHICLE_IMAGE_REGISTRY_SHA256 } from './vehicle-image.catalog';
 
 const TOKEN = 'server-to-server-request-token-for-tests-0001';
 const IDENTITY: CanonicalVehicleIdentity = {
@@ -50,6 +52,8 @@ const statusBody = (over = {}) => ({
   duplicate: false,
   reused: false,
   deduplicated: false,
+  subjectKey: `identity:${KEY}`,
+  registry: { version: 1, sha256: VEHICLE_IMAGE_REGISTRY_SHA256 },
   ...over,
 });
 
@@ -77,6 +81,7 @@ describe('VehicleImagePipelineClient', () => {
       identityKey: KEY,
       status: 'queued',
       requestId: 'r-1',
+      subjectKey: `identity:${KEY}`,
       asset: null,
     });
     const [url, init] = fetchImpl.mock.calls[0];
@@ -85,6 +90,7 @@ describe('VehicleImagePipelineClient', () => {
     );
     expect(init.method).toBe('POST');
     expect(init.headers.authorization).toBe(`Bearer ${TOKEN}`);
+    expect(init.headers['x-mator-vehicle-image-contract']).toBe('2');
     expect(init.redirect).toBe('error');
     expect(JSON.parse(init.body)).toEqual({
       identity: IDENTITY,
@@ -208,5 +214,82 @@ describe('VehicleImagePipelineClient', () => {
     } catch (err) {
       expect(String((err as Error).message)).not.toContain(TOKEN);
     }
+  });
+});
+
+describe('VehicleImagePipelineClient: contract 2', () => {
+  it('refuses an answer from an older pipeline or another registry, retryably, and applies nothing', async () => {
+    const { c, fetchImpl } = client();
+    fetchImpl.mockResolvedValueOnce(reply(200, statusBody({ registry: undefined })));
+    expect(await codeOf(c.resolve(IDENTITY))).toEqual({ code: 'pipeline_outdated', retryable: true });
+    fetchImpl.mockResolvedValueOnce(reply(200, statusBody({ registry: { version: 1, sha256: 'a'.repeat(64) } })));
+    expect(await codeOf(c.resolve(IDENTITY))).toEqual({ code: 'registry_mismatch', retryable: true });
+  });
+
+  it('accepts awaiting_source and the subject key', async () => {
+    const { c, fetchImpl } = client();
+    fetchImpl.mockResolvedValueOnce(reply(202, statusBody({ status: 'awaiting_source', subjectKey: 'catalog:nexia-n150' })));
+    await expect(c.request(IDENTITY, DISPLAY)).resolves.toMatchObject({
+      status: 'awaiting_source',
+      subjectKey: 'catalog:nexia-n150',
+    });
+  });
+
+  it('never accepts a published image for an unverified identity without a person confirming it', async () => {
+    const unverified: CanonicalVehicleIdentity = { ...IDENTITY, identityStatus: 'unverified' };
+    const key = canonicalIdentityKey(unverified);
+    const { c, fetchImpl } = client();
+    const approved = (asset: Record<string, unknown>) =>
+      reply(200, statusBody({ identityKey: key, identity: unverified, status: 'approved', asset }));
+    fetchImpl.mockResolvedValueOnce(approved({ url: 'https://cdn.test/a.webp', version: 1 }));
+    expect(await codeOf(c.resolve(unverified))).toEqual({ code: 'identity_unconfirmed', retryable: false });
+    fetchImpl.mockResolvedValueOnce(approved({ url: 'https://cdn.test/a.webp', version: 1, identityConfirmed: false }));
+    expect(await codeOf(c.resolve(unverified))).toEqual({ code: 'identity_unconfirmed', retryable: false });
+    fetchImpl.mockResolvedValueOnce(approved({ url: 'https://cdn.test/a.webp', version: 1, identityConfirmed: true }));
+    await expect(c.resolve(unverified)).resolves.toMatchObject({
+      status: 'approved',
+      asset: { url: 'https://cdn.test/a.webp', identityConfirmed: true },
+    });
+  });
+
+  it('names the transport failure precisely without a host, URL or message', async () => {
+    const refused = new TypeError('fetch failed', {
+      cause: Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:8047'), { code: 'ECONNREFUSED' }),
+    });
+    expect(networkErrorCode(refused)).toBe('network:ECONNREFUSED');
+    expect(networkErrorCode(new TypeError('fetch failed', {
+      cause: Object.assign(new Error('getaddrinfo ENOTFOUND images.example'), { code: 'ENOTFOUND' }),
+    }))).toBe('network:ENOTFOUND');
+    expect(networkErrorCode(new TypeError('fetch failed', { cause: new Error('unexpected redirect') })))
+      .toBe('network:redirect');
+    expect(networkErrorCode(new TypeError('fetch failed'))).toBe('network');
+    expect(networkErrorCode({ code: 'bad code with spaces' })).toBe('network');
+    const { c, fetchImpl } = client();
+    fetchImpl.mockRejectedValueOnce(refused);
+    expect(await codeOf(c.request(IDENTITY, DISPLAY))).toEqual({ code: 'network:ECONNREFUSED', retryable: true });
+  });
+
+  it('reads readiness and the registry handshake without authentication, and never throws', async () => {
+    const { c, fetchImpl } = client();
+    fetchImpl.mockResolvedValueOnce(reply(200, {
+      status: 'ready', contract: 2, registry: { version: 1, sha256: VEHICLE_IMAGE_REGISTRY_SHA256 },
+      capabilities: { artwork: true, generation: false, publication: true },
+    }));
+    await expect(c.health()).resolves.toEqual({
+      ready: true,
+      registrySha256: VEHICLE_IMAGE_REGISTRY_SHA256,
+      registryMatches: true,
+      contract: 2,
+      capabilities: { artwork: true, generation: false, publication: true },
+    });
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe('https://pipeline.test/vehicle-images/health/ready');
+    expect(init.headers.authorization).toBeUndefined();
+    fetchImpl.mockResolvedValueOnce(reply(200, { status: 'ready' }));
+    await expect(c.health()).resolves.toMatchObject({ ready: true, registryMatches: false, registrySha256: null });
+    fetchImpl.mockRejectedValueOnce(new TypeError('fetch failed', { cause: { code: 'ECONNREFUSED' } }));
+    await expect(c.health()).resolves.toMatchObject({ ready: false, error: 'network:ECONNREFUSED' });
+    fetchImpl.mockResolvedValueOnce(reply(503, { status: 'starting' }));
+    await expect(c.health()).resolves.toMatchObject({ ready: false, error: 'http_503' });
   });
 });

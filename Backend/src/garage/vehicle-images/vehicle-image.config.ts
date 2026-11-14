@@ -18,6 +18,14 @@
  *   VEHICLE_IMAGE_REQUEST_TIMEOUT_MS    Per-call timeout for queue calls, 1000–60000
  *                                       (default 10000). The status-refresh endpoint uses
  *                                       min(this, 3000).
+ *   VEHICLE_IMAGE_ADMIN_TOKEN           The pipeline's VEHICLE_IMAGE_ADMIN_TOKEN, for the
+ *                                       admin review console (/v1/admin/vehicle-images).
+ *                                       Optional; without it review endpoints answer 503.
+ *                                       Server-side only, never sent to a client.
+ *   VEHICLE_IMAGE_RECONCILE_ENABLED     'true' lets the queue re-resolve saved Garage
+ *                                       vehicles once per resolver/registry version
+ *                                       (vehicle-image.reconcile.service.ts). Default OFF:
+ *                                       run the dry run first (npm run vehicle-images:reconcile).
  *
  * Boot refuses an enabled integration that is not fully configured; a disabled one
  * needs nothing.
@@ -27,6 +35,8 @@ export interface VehicleImageConfig {
   baseUrl: string | null;
   requestToken: string | null;
   requestTimeoutMs: number;
+  adminToken: string | null;
+  reconcileEnabled: boolean;
 }
 
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -102,8 +112,31 @@ export function parseVehicleImageConfig(get: (key: string) => unknown): {
     );
   }
 
+  let adminToken: string | null = null;
+  const rawAdminToken = text(get('VEHICLE_IMAGE_ADMIN_TOKEN'));
+  if (rawAdminToken) {
+    if (rawAdminToken.length < MIN_TOKEN_LENGTH || /\s/.test(rawAdminToken)) {
+      errors.push(
+        `VEHICLE_IMAGE_ADMIN_TOKEN must be at least ${MIN_TOKEN_LENGTH} characters with no whitespace.`,
+      );
+    } else if (rawAdminToken === requestToken) {
+      errors.push('VEHICLE_IMAGE_ADMIN_TOKEN must differ from VEHICLE_IMAGE_REQUEST_TOKEN.');
+    } else {
+      adminToken = rawAdminToken;
+    }
+  }
+  const reconcileEnabled =
+    text(get('VEHICLE_IMAGE_RECONCILE_ENABLED')).toLowerCase() === 'true';
+
   return {
-    config: { enabled, baseUrl, requestToken, requestTimeoutMs },
+    config: {
+      enabled,
+      baseUrl,
+      requestToken,
+      requestTimeoutMs,
+      adminToken,
+      reconcileEnabled,
+    },
     errors,
   };
 }

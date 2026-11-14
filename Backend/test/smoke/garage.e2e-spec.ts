@@ -15,6 +15,7 @@ describe('Garage smoke', () => {
     // Vehicle image integration off: no identity, no outbox, nothing queued.
     const images = {
       prepare: jest.fn().mockResolvedValue(null),
+      planFor: jest.fn().mockResolvedValue(null),
       stage: jest.fn().mockResolvedValue({ data: {}, outboxId: null }),
       kick: jest.fn(),
       refresh: jest.fn().mockResolvedValue(undefined),

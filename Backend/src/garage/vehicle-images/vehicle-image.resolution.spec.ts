@@ -30,6 +30,7 @@ describe('planVehicleImage', () => {
     const plan = planVehicleImage(src(row('cobalt', 'Cobalt', 'Sedan'), 2020));
     expect(plan).toEqual({
       kind: 'request',
+      verification: 'verified',
       identity: {
         makeId: 'chevrolet',
         modelId: 'cobalt',
@@ -85,24 +86,32 @@ describe('planVehicleImage', () => {
     });
   });
 
-  it('catalog checks come first: a shared model name is reviewed before the market', () => {
-    expect(
-      planVehicleImage(
-        src(row('tracker', 'Tracker'), 2022, {
-          siblingModelNames: ['Tracker'],
-        }),
-      ),
-    ).toEqual({ kind: 'review', reason: 'duplicate_model_name' });
+  it('a shared model name is no reason to wait: Tracker 2022 gets its own unverified identity', () => {
+    const plan = planVehicleImage(
+      src(row('tracker', 'Tracker'), 2022, { siblingModelNames: ['Tracker'] }),
+    );
+    expect(plan).toMatchObject({
+      kind: 'request',
+      verification: 'unverified',
+      identity: { modelId: 'tracker', identityStatus: 'unverified' },
+      display: { manufacturer: 'Chevrolet', model: 'Tracker' },
+      resolved: { modelId: 'tracker', generationId: null, faceliftId: null, marketRegion: null },
+      catalogAsset: null,
+    });
   });
 
-  it('no verified market → review, never a request', () => {
-    expect(planVehicleImage(src(row('spark', 'Spark'), 2020))).toEqual({
-      kind: 'review',
-      reason: 'market_unverified',
-    });
-    expect(planVehicleImage(src(row('cobalt', 'Cobalt'), 2012))).toEqual({
-      kind: 'review',
-      reason: 'market_unverified',
+  it('no verified market → an UNVERIFIED identity (no market guessed), never a catalog image', () => {
+    const spark = planVehicleImage(src(row('spark', 'Spark'), 2020));
+    expect(spark).toMatchObject({ kind: 'request', verification: 'unverified', catalogAsset: null });
+    if (spark.kind !== 'request') return;
+    expect(spark.identity).not.toHaveProperty('marketRegion');
+    expect(spark.display).not.toHaveProperty('marketRegion');
+    // Outside the verified Cobalt years: unverified, and never the approved Cobalt image.
+    expect(planVehicleImage(src(row('cobalt', 'Cobalt'), 2012))).toMatchObject({
+      kind: 'request',
+      verification: 'unverified',
+      catalogAsset: null,
+      resolved: { marketRegion: null },
     });
     expect(
       planVehicleImage({ ...src(row('cobalt', 'Cobalt'), 2020), make: null }),

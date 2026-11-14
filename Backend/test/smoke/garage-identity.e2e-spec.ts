@@ -191,7 +191,7 @@ describe('Garage identity over HTTP', () => {
     expect(prisma.vehicle.create).not.toHaveBeenCalled();
   });
 
-  it('Spark 2020 → 201, kept for review with the placeholder, no image guessed', async () => {
+  it('Spark 2020 → 201, an unverified identity (no market guessed), no image guessed', async () => {
     const res = await post({
       make_id: 'chevrolet',
       model_id: 'spark',
@@ -199,17 +199,23 @@ describe('Garage identity over HTTP', () => {
     });
     expect(res.status).toBe(201);
     expect(res.body.identity).toMatchObject({
-      status: 'needs_review',
-      reason: 'market_unverified',
+      status: 'unverified',
+      reason: null,
+      model_id: 'spark',
+      generation_id: null,
       market: null,
     });
+    // Pipeline integration off here: saved for later, nothing requested, no image.
     expect(res.body.vehicle_image).toEqual({
       status: 'unavailable',
       url: null,
       version: null,
-      reason: 'needs_review',
+      reason: 'not_requested',
     });
-    expect(identities.size).toBe(0);
+    expect(identities.size).toBe(1);
+    const [stored] = [...identities.values()];
+    expect(stored.identity).toMatchObject({ modelId: 'spark', identityStatus: 'unverified' });
+    expect(stored.identity).not.toHaveProperty('marketRegion');
   });
 
   it('a client cannot state the market or generation itself', async () => {

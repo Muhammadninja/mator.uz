@@ -15,10 +15,37 @@ describe('vehicle image config', () => {
         baseUrl: null,
         requestToken: null,
         requestTimeoutMs: 10_000,
+        adminToken: null,
+        reconcileEnabled: false,
       },
       errors: [],
     });
     expect(() => validateVehicleImageEnv({})).not.toThrow();
+  });
+
+  it('reads the review console token and the reconcile switch, and checks the token', () => {
+    const token = 'r'.repeat(40);
+    const admin = 'a'.repeat(40);
+    expect(
+      parseVehicleImageConfig(
+        get({
+          VEHICLE_IMAGE_ADMIN_TOKEN: admin,
+          VEHICLE_IMAGE_REQUEST_TOKEN: token,
+          VEHICLE_IMAGE_RECONCILE_ENABLED: 'true',
+        }),
+      ).config,
+    ).toMatchObject({ adminToken: admin, reconcileEnabled: true });
+    expect(
+      parseVehicleImageConfig(get({ VEHICLE_IMAGE_ADMIN_TOKEN: 'short' })).errors,
+    ).toEqual([expect.stringMatching(/VEHICLE_IMAGE_ADMIN_TOKEN must be at least 32/)]);
+    expect(
+      parseVehicleImageConfig(
+        get({ VEHICLE_IMAGE_ADMIN_TOKEN: token, VEHICLE_IMAGE_REQUEST_TOKEN: token }),
+      ).errors,
+    ).toEqual([expect.stringMatching(/must differ/)]);
+    expect(
+      parseVehicleImageConfig(get({ VEHICLE_IMAGE_RECONCILE_ENABLED: 'yes' })).config.reconcileEnabled,
+    ).toBe(false);
   });
 
   it('refuses to boot enabled without URL and token', () => {

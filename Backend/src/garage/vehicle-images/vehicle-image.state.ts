@@ -38,11 +38,15 @@ const MINUTE = 60_000;
 const RESYNC_AFTER_MS: Record<string, number> = {
   queued: 2 * MINUTE,
   running: 2 * MINUTE,
-  awaiting_approval: 15 * MINUTE,
+  awaiting_approval: 10 * MINUTE,
+  // Waiting on an administrator (upload or provider); the on-demand refresh and
+  // the approval itself pick changes up sooner.
+  awaiting_source: 30 * MINUTE,
   pending: 15 * MINUTE,
   awaiting_publication: 15 * MINUTE,
   failed: 60 * MINUTE,
   rejected: 60 * MINUTE,
+  needs_review: 6 * 60 * MINUTE,
   approved: 6 * 60 * MINUTE,
 };
 
@@ -168,15 +172,16 @@ export function stateFromPipeline(
         nextSyncAt: null,
       };
     case 'needs_review':
+      // Re-read now and then: an administrator can resolve the review.
       return {
         ...base,
         ...none,
         status: VehicleImageStatus.UNAVAILABLE,
         reason: IDENTITY_REASONS.IDENTITY_REVIEW_REQUIRED,
-        nextSyncAt: null,
+        nextSyncAt: at('needs_review'),
       };
     default:
-      // queued | running | awaiting_approval | pending
+      // queued | running | awaiting_approval | awaiting_source | pending
       return {
         ...base,
         ...none,
@@ -190,6 +195,12 @@ export function stateFromPipeline(
 // ── Response field ────────────────────────────────────────────────────────────
 
 export type VehicleImagePublicStatus = 'pending' | 'approved' | 'unavailable';
+/**
+ * Why a `pending` image is not there yet, so the app can say so honestly:
+ *   processing       a job is preparing a candidate
+ *   awaiting_review  a candidate waits for a person, or a person must supply one
+ */
+export type VehicleImagePublicStage = 'processing' | 'awaiting_review';
 export type VehicleImagePublicReason =
   | 'not_requested'
   | 'needs_review'
@@ -199,6 +210,8 @@ export type VehicleImagePublicReason =
 
 export interface VehicleImageField {
   status: VehicleImagePublicStatus;
+  /** Present only while `pending`. */
+  stage?: VehicleImagePublicStage;
   /** Present only once the approved image is published. */
   url: string | null;
   version: number | null;
@@ -215,6 +228,8 @@ export interface VehicleImageSourceRow {
     imageUrl: string | null;
     imageVersion: number | null;
     catalogAssetKey?: string | null;
+    /** The pipeline's last status, for the pending stage. */
+    pipelineStatus?: string | null;
     /** The stored canonical identity; a publication is shown only for a market-aware one. */
     identity?: unknown;
   } | null;
@@ -232,6 +247,30 @@ function hasMarket(identity: unknown): boolean {
     typeof (identity as { marketRegion?: unknown }).marketRegion === 'string'
   );
 }
+
+/**
+ * Whether a publication of this stored identity may be shown: a market-aware
+ * identity, or an unverified one (its publication is stored only once a person
+ * confirmed the car, see parseStatusResult). Legacy market-less identities never.
+ */
+function publicationShowable(identity: unknown): boolean {
+  return (
+    hasMarket(identity) ||
+    (!!identity &&
+      typeof identity === 'object' &&
+      (identity as { identityStatus?: unknown }).identityStatus === 'unverified')
+  );
+}
+
+const REVIEW_STAGES = new Set(['awaiting_approval', 'awaiting_source', 'needs_review']);
+
+const pending = (pipelineStatus: string | null | undefined): VehicleImageField => ({
+  status: 'pending',
+  stage: pipelineStatus && REVIEW_STAGES.has(pipelineStatus) ? 'awaiting_review' : 'processing',
+  url: null,
+  version: null,
+  reason: null,
+});
 
 const unavailable = (reason: VehicleImagePublicReason): VehicleImageField => ({
   status: 'unavailable',
@@ -270,7 +309,7 @@ export function presentVehicleImage(
       if (published) {
         // A legacy, market-less publication: not shown. The app keeps its own
         // owner-approved image for the exact model, or the placeholder.
-        if (!hasMarket(state.identity)) return unavailable('not_requested');
+        if (!publicationShowable(state.identity)) return unavailable('not_requested');
         return {
           status: 'approved',
           url: published,
@@ -280,7 +319,7 @@ export function presentVehicleImage(
       }
     }
     if (state.status === VehicleImageStatus.PENDING) {
-      return { status: 'pending', url: null, version: null, reason: null };
+      return pending(state.pipelineStatus);
     }
     if (state.status === VehicleImageStatus.UNAVAILABLE) {
       if (state.reason === IDENTITY_REASONS.GENERATION_FAILED)
@@ -293,7 +332,7 @@ export function presentVehicleImage(
         return unavailable('not_requested');
       return unavailable('request_failed');
     }
-    return { status: 'pending', url: null, version: null, reason: null };
+    return pending(state.pipelineStatus);
   }
   if (row.imageReviewReason) return unavailable('needs_review');
   return unavailable('not_requested');
