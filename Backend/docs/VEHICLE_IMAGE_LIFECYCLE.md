@@ -96,10 +96,10 @@ VEHICLE_IMAGE_RECONCILE_ENABLED=false
 
 Before enabling review, require `GET /health/ready` to return 200 with contract 2 and the fingerprint above, then require backend `GET /v1/admin/vehicle-images/status` to report `pipelineHealth.ready=true`, `registry.matches=true`, contract 2, and publication capability true. Publication uses signed Cloudinary uploads under `mator/vehicle-images/<identity-hash>/v<version>-<candidate-id>`; only an explicit manager approval uploads. Keep generation disabled while validating the review and delivery flow.
 
-For local integration tests, use the isolated Cloudinary-compatible stub or `VEHICLE_IMAGE_STORE=local`; never point the test adapter at an internet Cloudinary endpoint. The one-Tracker check is run against the isolated API and real Redis-backed worker with:
+For local integration tests, use the isolated Cloudinary-compatible stub or `VEHICLE_IMAGE_STORE=local`; never point the test adapter at an internet Cloudinary endpoint. Set `BACKEND_WORKTREE` to the permanent vehicle-image E2E worktree root. The one-Tracker check is run against the isolated API and real Redis-backed worker with:
 
 ```sh
-MATOR_INTEGRATION_DIR=/.local/vehicle-image-e2e-state \
+MATOR_INTEGRATION_DIR="${BACKEND_WORKTREE}/Backend/.local/vehicle-image-e2e-state" \
 MATOR_API_PORT=33301 VEHICLE_IMAGE_E2E_PROXY_PORT=38049 \
 node scripts/staging/vehicle-image-single-tracker-e2e.mjs
 ```
