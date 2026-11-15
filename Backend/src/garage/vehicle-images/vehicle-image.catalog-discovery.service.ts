@@ -18,6 +18,11 @@ import { VehicleImagesService } from './vehicle-images.service';
 import type { IdentityPlan } from './vehicle-image.identity';
 import type { VariantRow } from '../vehicles/vehicle-generation';
 import { readVehicleImageConfig } from './vehicle-image.config';
+import {
+  discoveryReviewAction,
+  discoveryYearSample,
+} from './vehicle-image.discovery-years';
+import { DISCOVERY_YEAR_SOURCE_SHA256 } from './vehicle-image.discovery-years.data';
 
 const CATALOG_SELECT = {
   id: true,
@@ -133,9 +138,7 @@ export class VehicleImageCatalogDiscoveryService {
     ).catalogDiscoveryEnabled;
   }
 
-  async run(input: {
-    trigger: VehicleImageCatalogDiscoveryTrigger;
-  }): Promise<
+  async run(input: { trigger: VehicleImageCatalogDiscoveryTrigger }): Promise<
     {
       runId: string;
       trigger: VehicleImageCatalogDiscoveryTrigger;
@@ -209,16 +212,29 @@ export class VehicleImageCatalogDiscoveryService {
             }
           } else {
             const row = variantRow(model);
+            const sample =
+              model.yearFrom === null && model.yearTo === null
+                ? discoveryYearSample(model)
+                : null;
+            // A known sample is enough to ask for a private, reviewed candidate.
+            // Do not materialize the UI's 2099 sentinel as a production boundary,
+            // or choose among multiple generations. Existing ranges still win.
+            const year =
+              sample && 'year' in sample ? sample.year : model.yearFrom;
             const reason =
               model.yearFrom === null || model.yearTo === null
-                ? 'model_year_range_missing'
+                ? sample && 'year' in sample
+                  ? null
+                  : sample && 'reason' in sample
+                    ? sample.reason
+                    : 'model_year_range_missing'
                 : invalidRange(model)
                   ? 'model_year_range_invalid'
                   : null;
             const plan: IdentityPlan | null = reason
               ? null
               : await this.images.prepare({
-                  year: model.yearFrom as number,
+                  year: year as number,
                   model: row,
                   trim: null,
                 });
@@ -234,6 +250,7 @@ export class VehicleImageCatalogDiscoveryService {
                   makeId: make.id,
                   makeName: make.name,
                   model,
+                  sample,
                 },
                 plan,
                 reason,
@@ -429,11 +446,18 @@ export class VehicleImageCatalogDiscoveryService {
     ]);
     return {
       enabled: this.enabled,
+      yearSampleSource: {
+        file: 'MatorUI-/services/uz-vehicle-catalog.ts',
+        sha256: DISCOVERY_YEAR_SOURCE_SHA256,
+      },
       counts: Object.fromEntries(
         counts.map((row) => [row.status, row._count._all]),
       ),
       latestRuns,
-      reviewRequired,
+      reviewRequired: reviewRequired.map((row) => ({
+        ...row,
+        requiredAction: discoveryReviewAction(row.reason),
+      })),
       failures,
     };
   }

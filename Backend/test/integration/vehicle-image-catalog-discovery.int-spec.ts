@@ -64,10 +64,27 @@ describeDiscovery('catalog discovery with PostgreSQL and BullMQ/Redis', () => {
   const trackerId = `tracker-${suffix}`;
   const trackerGenerationId = `tracker-gen3-${suffix}`;
   const trackerUnknownGenerationId = `tracker-gen4-${suffix}`;
+  // This exact canonical id exercises the vendored source-year fallback. The
+  // suite runs in a fresh disposable DB, never by editing an existing catalog.
+  const sampledMakeId = 'chevrolet';
+  const sampledModelId = 'tracker';
+  let sampledMakeCreated = false;
 
   beforeAll(async () => {
     await prisma.vehicleMake.create({
       data: { id: makeId, name: 'Chevrolet', isActive: true },
+    });
+    await prisma.vehicleMake.create({
+      data: { id: sampledMakeId, name: 'Chevrolet', isActive: true },
+    });
+    sampledMakeCreated = true;
+    await prisma.vehicleModelRef.create({
+      data: {
+        id: sampledModelId,
+        makeId: sampledMakeId,
+        name: 'Tracker',
+        bodyType: 'SUV',
+      },
     });
     await prisma.vehicleModelRef.create({
       data: {
@@ -118,6 +135,8 @@ describeDiscovery('catalog discovery with PostgreSQL and BullMQ/Redis', () => {
     await queue.obliterate({ force: true });
     await queue.close();
     await prisma.vehicleMake.deleteMany({ where: { id: makeId } });
+    if (sampledMakeCreated)
+      await prisma.vehicleMake.deleteMany({ where: { id: sampledMakeId } });
     await prisma.$disconnect();
   });
 
@@ -145,8 +164,38 @@ describeDiscovery('catalog discovery with PostgreSQL and BullMQ/Redis', () => {
           sourceKey: `${makeId}:${trackerId}:generation:${trackerUnknownGenerationId}`,
         },
       });
+    const sampledModel = await prisma.vehicleImageCatalogDiscovery.findUnique({
+      where: { sourceKey: `${sampledMakeId}:${sampledModelId}:model` },
+    });
+    const sampledIdentity = await prisma.vehicleImageIdentity.findUnique({
+      where: { identityKey: sampledModel!.identityKey! },
+    });
+    const sampledOutbox = await prisma.vehicleImageOutbox.findMany({
+      where: { identityKey: sampledModel!.identityKey! },
+    });
+    const untouchedModel = await prisma.vehicleModelRef.findUnique({
+      where: { id: sampledModelId },
+    });
 
-    expect(first.scheduled).toBeGreaterThanOrEqual(2);
+    expect(first.scheduled).toBeGreaterThanOrEqual(3);
+    expect(sampledModel?.status).toBe('SCHEDULED');
+    expect(sampledIdentity?.identity).toMatchObject({
+      makeId: sampledMakeId,
+      modelId: sampledModelId,
+      modelYear: 2020,
+      identityStatus: 'unverified',
+      generationId: null,
+      faceliftId: null,
+    });
+    expect(sampledIdentity?.identity).not.toHaveProperty('marketRegion');
+    expect(sampledOutbox).toHaveLength(1);
+    expect(
+      jobs.some(
+        (job) =>
+          job.name === 'dispatch' && job.data.outboxId === sampledOutbox[0].id,
+      ),
+    ).toBe(true);
+    expect(untouchedModel).toMatchObject({ yearFrom: null, yearTo: null });
     expect(onix?.identityKey).toMatch(/^[a-f0-9]{64}$/);
     expect(unknownGeneration).toMatchObject({
       status: 'REVIEW_REQUIRED',
@@ -168,6 +217,11 @@ describeDiscovery('catalog discovery with PostgreSQL and BullMQ/Redis', () => {
       'failed',
     ]);
     expect(second.scheduled).toBe(0);
+    expect(
+      await prisma.vehicleImageOutbox.count({
+        where: { identityKey: sampledModel!.identityKey! },
+      }),
+    ).toBe(1);
     expect(afterJobs.filter((job) => job.name === 'dispatch')).toHaveLength(
       jobs.filter((job) => job.name === 'dispatch').length,
     );
