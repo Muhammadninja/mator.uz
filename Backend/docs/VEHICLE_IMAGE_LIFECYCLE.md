@@ -64,6 +64,48 @@ The script prints every check (settings, DNS, TCP, redirects, TLS, readiness, re
 - With a test account, add a 2020 Cobalt (approved image at once) and a Spark. The Spark's image is `pending` / `awaiting_review`, and the Spark candidate appears in the console.
 - `vehicle_image_outbox` has no growing `PENDING` backlog. Rows marked `DEAD` before the fix are asked again automatically after 30 minutes, once the pipeline is ready.
 
+## Staging Cloudinary publication configuration
+
+Staging publication is opt-in and must use a dedicated Cloudinary staging cloud or isolated folder/account. Do not use production pipeline data, request/admin tokens, or publication credentials for staging. Set the systemd unit to `Environment=VEHICLE_IMAGE_ENV_FILE=/etc/mator/vehicle-images-staging.env`; the file must be owned by the pipeline user and mode `0600`. It contains these exact keys:
+
+```dotenv
+PORT=8048
+VEHICLE_IMAGE_DATA_DIR=/var/lib/mator-vehicle-images-staging
+VEHICLE_IMAGE_REGISTRY_SHA256=9ecf78141f3ea7c88dec6b87beea2241f09b3aaa197450b4020a66f29a8d4f1b
+VEHICLE_IMAGE_REQUEST_TOKEN=<staging-only random token, at least 32 characters>
+VEHICLE_IMAGE_ADMIN_TOKEN=<different staging-only random token, at least 32 characters>
+VEHICLE_IMAGE_REPOSITORY_ARTWORK_ENABLED=true
+VEHICLE_IMAGE_GENERATION_ENABLED=false
+VEHICLE_IMAGE_ALLOW_UNVERIFIED_GENERATION=false
+VEHICLE_IMAGE_PUBLICATION_ENABLED=true
+VEHICLE_IMAGE_STORE=cloudinary
+CLOUDINARY_CLOUD_NAME=<staging cloud name>
+CLOUDINARY_API_KEY=<staging API key>
+CLOUDINARY_API_SECRET=<staging API secret>
+```
+
+The backend staging environment must point only to that process and use the same two pipeline tokens:
+
+```dotenv
+VEHICLE_IMAGES_ENABLED=true
+VEHICLE_IMAGE_PIPELINE_URL=http://127.0.0.1:8048
+VEHICLE_IMAGE_REQUEST_TOKEN=<same staging request token as pipeline>
+VEHICLE_IMAGE_ADMIN_TOKEN=<same staging admin token as pipeline>
+VEHICLE_IMAGE_RECONCILE_ENABLED=false
+```
+
+Before enabling review, require `GET /health/ready` to return 200 with contract 2 and the fingerprint above, then require backend `GET /v1/admin/vehicle-images/status` to report `pipelineHealth.ready=true`, `registry.matches=true`, contract 2, and publication capability true. Publication uses signed Cloudinary uploads under `mator/vehicle-images/<identity-hash>/v<version>-<candidate-id>`; only an explicit manager approval uploads. Keep generation disabled while validating the review and delivery flow.
+
+For local integration tests, use the isolated Cloudinary-compatible stub or `VEHICLE_IMAGE_STORE=local`; never point the test adapter at an internet Cloudinary endpoint. The one-Tracker check is run against the isolated API and real Redis-backed worker with:
+
+```sh
+MATOR_INTEGRATION_DIR=/tmp/mator-vehicle-image-e2e-state \
+MATOR_API_PORT=33301 VEHICLE_IMAGE_E2E_PROXY_PORT=38049 \
+node scripts/staging/vehicle-image-single-tracker-e2e.mjs
+```
+
+Its companion `vehicle-image-e2e-pipeline-host.mjs` is test-only: it serves the pinned pipeline behind a loopback proxy, injects one retryable request failure and one simulated Cloudinary publication failure, and records successful upload metadata in memory. Point it at the pipeline checkout whose catalog hash matches the backend; it makes no external Cloudinary requests.
+
 ## Rollback
 
 | Component | How | Notes |
