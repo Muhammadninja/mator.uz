@@ -96,9 +96,10 @@ VEHICLE_IMAGE_RECONCILE_ENABLED=false
 
 Before enabling review, require `GET /health/ready` to return 200 with contract 2 and the fingerprint above, then require backend `GET /v1/admin/vehicle-images/status` to report `pipelineHealth.ready=true`, `registry.matches=true`, contract 2, and publication capability true. Publication uses signed Cloudinary uploads under `mator/vehicle-images/<identity-hash>/v<version>-<candidate-id>`; only an explicit manager approval uploads. Keep generation disabled while validating the review and delivery flow.
 
-For local integration tests, use the isolated Cloudinary-compatible stub; never point the test adapter at an internet Cloudinary endpoint. Keep the synthetic PostgreSQL/Redis/Backend runtime in persistent local state outside `/tmp`. Prepare `environment.json` and `pipeline-environment.json` with the local integration harness, and materialize Pipeline commit `5614403e237219ba5a5f7c3bf1ade95ecfbcdf7c` at `$HOME/.mator/vehicle-image-e2e-state/pipeline-source`. Run from the permanent Backend checkout:
+For local integration tests, use the isolated Cloudinary-compatible stub; never point the test adapter at an internet Cloudinary endpoint. Keep the synthetic PostgreSQL/Redis/Backend runtime in persistent local state outside `/tmp`. Prepare `environment.json` and `pipeline-environment.json` with the local integration harness, and materialize Pipeline commit `5614403e237219ba5a5f7c3bf1ade95ecfbcdf7c` at `$HOME/.mator/vehicle-image-e2e-state/pipeline-source`. From the permanent worktree root, run:
 
 ```sh
+cd Backend
 export MATOR_INTEGRATION_DIR="$HOME/.mator/vehicle-image-e2e-state"
 export MATOR_API_PORT=33301
 export VEHICLE_IMAGE_PIPELINE_SOURCE="$MATOR_INTEGRATION_DIR/pipeline-source"
