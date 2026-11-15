@@ -34,6 +34,7 @@ model, generation, facelift, market). Each goes before the code that reads it.
 | `VEHICLE_IMAGE_REQUEST_TOKEN` | The pipeline's `VEHICLE_IMAGE_REQUEST_TOKEN` (≥32 chars). Never the admin token. |
 | `VEHICLE_IMAGE_REQUEST_TIMEOUT_MS` | Queue call timeout, 1000–60000 (default 10000). |
 | `VEHICLE_IMAGE_MARKET_REGION` | Retired and ignored (a leftover value does not stop boot). The market is resolved per vehicle; there is no global default. |
+| `VEHICLE_IMAGE_CATALOG_DISCOVERY_ENABLED` | `true` runs a full catalog backfill on the `vehicle-images` BullMQ queue every 30 minutes and enables authenticated `POST /v1/admin/vehicle-images/catalog-discovery`. Requires `VEHICLE_IMAGES_ENABLED=true`; default off. Ambiguous or incomplete catalog identities are recorded for review. |
 
 Boot refuses an enabled but incomplete configuration. **Enabling it against a pipeline
 that has a provider key requests generation, which may be paid, for every new identity.**

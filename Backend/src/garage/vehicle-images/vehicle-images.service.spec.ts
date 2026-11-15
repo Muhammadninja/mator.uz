@@ -133,6 +133,19 @@ describe('VehicleImagesService.stage (transactional outbox)', () => {
     expect(staged).toEqual({ data: LINKED, outboxId: null });
   });
 
+  it('does not replace an already-approved image when a registry catalog asset is present', async () => {
+    const { svc, tx } = setup({ status: VehicleImageStatus.APPROVED });
+    const staged = await svc.stage(tx as any, 'veh_1', CATALOG_PLAN);
+    expect(staged.outboxId).toBeNull();
+    expect(tx.vehicleImageIdentity.updateMany).toHaveBeenCalledWith({
+      where: { identityKey: KEY, status: { not: VehicleImageStatus.APPROVED } },
+      data: expect.objectContaining({
+        status: VehicleImageStatus.APPROVED,
+        catalogAssetKey: 'cobalt-gen2',
+      }),
+    });
+  });
+
   it.each(['generation_failed', 'rejected'])(
     'a %s identity is never re-requested (no automatic regeneration)',
     async (reason) => {
@@ -216,8 +229,11 @@ describe('VehicleImagesService.stage (transactional outbox)', () => {
         [{ data: unknown[] }],
       ];
       expect(created.data[0]).toMatchObject(catalog);
-      expect(tx.vehicleImageIdentity.update).toHaveBeenCalledWith({
-        where: { identityKey: KEY },
+      expect(tx.vehicleImageIdentity.updateMany).toHaveBeenCalledWith({
+        where: {
+          identityKey: KEY,
+          status: { not: VehicleImageStatus.APPROVED },
+        },
         data: catalog,
       });
       expect(staged).toEqual({
@@ -357,15 +373,23 @@ describe('VehicleImagesService.prepare / kick', () => {
     expect(plan).toMatchObject({
       kind: 'request',
       verification: 'unverified',
-      identity: { makeId: 'byd', modelId: 'byd-han', identityStatus: 'unverified' },
+      identity: {
+        makeId: 'byd',
+        modelId: 'byd-han',
+        identityStatus: 'unverified',
+      },
       resolved: { modelId: 'byd-han', marketRegion: null },
       catalogAsset: null,
     });
-    expect(plan && plan.kind === 'request' && plan.identity.marketRegion).toBeFalsy();
+    expect(
+      plan && plan.kind === 'request' && plan.identity.marketRegion,
+    ).toBeFalsy();
   });
 
   it('stamps every staged vehicle with the resolver version and registry fingerprint', () => {
-    expect(currentIdentityStamp()).toBe(`r2:${VEHICLE_IMAGE_REGISTRY_SHA256.slice(0, 16)}`);
+    expect(currentIdentityStamp()).toBe(
+      `r2:${VEHICLE_IMAGE_REGISTRY_SHA256.slice(0, 16)}`,
+    );
   });
 
   it('returns null when the catalog read fails (creation goes on)', async () => {

@@ -18,6 +18,7 @@ import { VehicleImagesService } from './vehicle-images/vehicle-images.service';
 import { VehicleImagesProcessor } from './vehicle-images/vehicle-images.processor';
 import { VehicleImageReconcileService } from './vehicle-images/vehicle-image.reconcile.service';
 import { VehicleImagePipelineAdminClient } from './vehicle-images/vehicle-image.pipeline-admin-client';
+import { VehicleImageCatalogDiscoveryService } from './vehicle-images/vehicle-image.catalog-discovery.service';
 
 async function build(env: Record<string, string> = {}) {
   const queue = {
@@ -36,6 +37,7 @@ async function build(env: Record<string, string> = {}) {
       VehicleImagesProcessor,
       VehicleImageReconcileService,
       VehicleImagePipelineAdminClient,
+      VehicleImageCatalogDiscoveryService,
       { provide: ConfigService, useValue: new ConfigService(env) },
       { provide: PrismaService, useValue: {} },
       { provide: RealtimeGateway, useValue: { emitGarageEvent: jest.fn() } },
@@ -72,6 +74,7 @@ describe('GarageModule DI wiring (vehicle images)', () => {
       'vehicle-images-sync',
       'vehicle-images-revive',
       'vehicle-images-reconcile',
+      'vehicle-images-catalog-discovery',
     ]);
     expect(queue.upsertJobScheduler).not.toHaveBeenCalled();
     await moduleRef.close();
@@ -84,9 +87,11 @@ describe('GarageModule DI wiring (vehicle images)', () => {
       VEHICLE_IMAGE_REQUEST_TOKEN: 't'.repeat(40),
     });
     const client = moduleRef.get(VehicleImagePipelineClient);
-    client.fetchImpl = jest.fn().mockRejectedValue(
-      new TypeError('fetch failed', { cause: { code: 'ECONNREFUSED' } }),
-    );
+    client.fetchImpl = jest
+      .fn()
+      .mockRejectedValue(
+        new TypeError('fetch failed', { cause: { code: 'ECONNREFUSED' } }),
+      );
     await moduleRef.get(VehicleImagesProcessor).onModuleInit();
     expect(queue.upsertJobScheduler.mock.calls.map((c) => c[0])).toEqual([
       'vehicle-images-relay',
@@ -94,12 +99,16 @@ describe('GarageModule DI wiring (vehicle images)', () => {
       'vehicle-images-revive',
     ]);
     expect(client.fetchImpl).toHaveBeenCalledTimes(1);
-    expect((client.fetchImpl as jest.Mock).mock.calls[0][0]).toBe('http://127.0.0.1:8047/health/ready');
+    expect((client.fetchImpl as jest.Mock).mock.calls[0][0]).toBe(
+      'http://127.0.0.1:8047/health/ready',
+    );
     await moduleRef.close();
   });
 
   it('the reconcile schedule follows its own switch, even with the pipeline off', async () => {
-    const { moduleRef, queue } = await build({ VEHICLE_IMAGE_RECONCILE_ENABLED: 'true' });
+    const { moduleRef, queue } = await build({
+      VEHICLE_IMAGE_RECONCILE_ENABLED: 'true',
+    });
     await moduleRef.get(VehicleImagesProcessor).onModuleInit();
     expect(queue.upsertJobScheduler.mock.calls.map((c) => c[0])).toEqual([
       'vehicle-images-reconcile',

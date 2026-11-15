@@ -57,7 +57,16 @@ const MANAGERS_ONLY: [string, { prototype: object }, string][] = [
   ['reject a vehicle image', AdminVehicleImagesController, 'reject'],
   ['upload a vehicle image', AdminVehicleImagesController, 'upload'],
   ['retry vehicle image acquisition', AdminVehicleImagesController, 'retry'],
-  ['re-resolve saved Garage vehicles', AdminVehicleImagesController, 'reconcile'],
+  [
+    'run vehicle catalog image discovery',
+    AdminVehicleImagesController,
+    'catalogDiscovery',
+  ],
+  [
+    're-resolve saved Garage vehicles',
+    AdminVehicleImagesController,
+    'reconcile',
+  ],
   ['revert a Garage re-resolution', AdminVehicleImagesController, 'revert'],
 ];
 
@@ -82,7 +91,11 @@ const EVERY_ROLE: [string, { prototype: object }, string][] = [
   ['read the vehicle image status', AdminVehicleImagesController, 'status'],
   ['read the vehicle image queue', AdminVehicleImagesController, 'queue'],
   ['read a vehicle image history', AdminVehicleImagesController, 'history'],
-  ['preview a vehicle image candidate', AdminVehicleImagesController, 'preview'],
+  [
+    'preview a vehicle image candidate',
+    AdminVehicleImagesController,
+    'preview',
+  ],
 ];
 
 const SUPER_ADMIN_ONLY: [string, { prototype: object }, string][] = [

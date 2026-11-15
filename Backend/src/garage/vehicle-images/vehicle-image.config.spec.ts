@@ -17,6 +17,7 @@ describe('vehicle image config', () => {
         requestTimeoutMs: 10_000,
         adminToken: null,
         reconcileEnabled: false,
+        catalogDiscoveryEnabled: false,
       },
       errors: [],
     });
@@ -36,15 +37,22 @@ describe('vehicle image config', () => {
       ).config,
     ).toMatchObject({ adminToken: admin, reconcileEnabled: true });
     expect(
-      parseVehicleImageConfig(get({ VEHICLE_IMAGE_ADMIN_TOKEN: 'short' })).errors,
-    ).toEqual([expect.stringMatching(/VEHICLE_IMAGE_ADMIN_TOKEN must be at least 32/)]);
+      parseVehicleImageConfig(get({ VEHICLE_IMAGE_ADMIN_TOKEN: 'short' }))
+        .errors,
+    ).toEqual([
+      expect.stringMatching(/VEHICLE_IMAGE_ADMIN_TOKEN must be at least 32/),
+    ]);
     expect(
       parseVehicleImageConfig(
-        get({ VEHICLE_IMAGE_ADMIN_TOKEN: token, VEHICLE_IMAGE_REQUEST_TOKEN: token }),
+        get({
+          VEHICLE_IMAGE_ADMIN_TOKEN: token,
+          VEHICLE_IMAGE_REQUEST_TOKEN: token,
+        }),
       ).errors,
     ).toEqual([expect.stringMatching(/must differ/)]);
     expect(
-      parseVehicleImageConfig(get({ VEHICLE_IMAGE_RECONCILE_ENABLED: 'yes' })).config.reconcileEnabled,
+      parseVehicleImageConfig(get({ VEHICLE_IMAGE_RECONCILE_ENABLED: 'yes' }))
+        .config.reconcileEnabled,
     ).toBe(false);
   });
 
@@ -54,6 +62,29 @@ describe('vehicle image config', () => {
     ).toThrow(
       /VEHICLE_IMAGE_PIPELINE_URL is required[\s\S]*VEHICLE_IMAGE_REQUEST_TOKEN is required/,
     );
+  });
+
+  it('requires the pipeline to be enabled before catalog discovery', () => {
+    expect(
+      parseVehicleImageConfig(
+        get({ VEHICLE_IMAGE_CATALOG_DISCOVERY_ENABLED: 'true' }),
+      ).errors,
+    ).toEqual([expect.stringMatching(/requires VEHICLE_IMAGES_ENABLED=true/)]);
+    expect(
+      parseVehicleImageConfig(
+        get({
+          VEHICLE_IMAGES_ENABLED: 'true',
+          VEHICLE_IMAGE_PIPELINE_URL: 'https://pipeline.test',
+          VEHICLE_IMAGE_REQUEST_TOKEN: TOKEN,
+          VEHICLE_IMAGE_CATALOG_DISCOVERY_ENABLED: 'true',
+        }),
+      ).config.catalogDiscoveryEnabled,
+    ).toBe(true);
+    expect(() =>
+      validateVehicleImageEnv({
+        VEHICLE_IMAGE_CATALOG_DISCOVERY_ENABLED: 'true',
+      }),
+    ).toThrow(/requires VEHICLE_IMAGES_ENABLED=true/);
   });
 
   it('allows http only to loopback, and https anywhere', () => {

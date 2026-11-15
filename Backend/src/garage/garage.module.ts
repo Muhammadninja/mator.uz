@@ -13,6 +13,7 @@ import { VehicleImagesService } from './vehicle-images/vehicle-images.service';
 import { VehicleImagesProcessor } from './vehicle-images/vehicle-images.processor';
 import { VehicleImageReconcileService } from './vehicle-images/vehicle-image.reconcile.service';
 import { VehicleImagePipelineAdminClient } from './vehicle-images/vehicle-image.pipeline-admin-client';
+import { VehicleImageCatalogDiscoveryService } from './vehicle-images/vehicle-image.catalog-discovery.service';
 
 @Module({
   imports: [
@@ -32,6 +33,7 @@ import { VehicleImagePipelineAdminClient } from './vehicle-images/vehicle-image.
     VehicleImagesProcessor,
     VehicleImageReconcileService,
     VehicleImagePipelineAdminClient,
+    VehicleImageCatalogDiscoveryService,
   ],
   controllers: [VehiclesController],
   // The admin review console (src/admin/vehicle-images) drives these.
@@ -39,6 +41,7 @@ import { VehicleImagePipelineAdminClient } from './vehicle-images/vehicle-image.
     VehicleImageDeliveryService,
     VehicleImageReconcileService,
     VehicleImagePipelineAdminClient,
+    VehicleImageCatalogDiscoveryService,
   ],
 })
 export class GarageModule {}

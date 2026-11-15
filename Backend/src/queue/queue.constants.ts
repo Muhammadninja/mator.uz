@@ -44,6 +44,8 @@ export const VEHICLE_IMAGE_JOBS = {
   REVIVE: 'revive',
   /** Repeatable: re-resolve saved Garage vehicles once per resolver/registry version. */
   RECONCILE: 'reconcile',
+  /** Periodically backfill catalog identities without approved images. */
+  CATALOG_DISCOVERY: 'catalog-discovery',
 } as const;
 
 /**

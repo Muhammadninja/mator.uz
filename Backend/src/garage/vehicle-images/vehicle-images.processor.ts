@@ -9,16 +9,20 @@ import {
 } from './vehicle-image.delivery.service';
 import { VehicleImageReconcileService } from './vehicle-image.reconcile.service';
 import { readVehicleImageConfig } from './vehicle-image.config';
+import { VehicleImageCatalogDiscoveryService } from './vehicle-image.catalog-discovery.service';
+import { VehicleImageCatalogDiscoveryTrigger } from '@prisma/client';
 
 export const VEHICLE_IMAGE_RELAY_EVERY_MS = 30_000;
 export const VEHICLE_IMAGE_SYNC_EVERY_MS = 60_000;
 export const VEHICLE_IMAGE_REVIVE_EVERY_MS = 10 * 60_000;
 export const VEHICLE_IMAGE_RECONCILE_EVERY_MS = 15 * 60_000;
+export const VEHICLE_IMAGE_CATALOG_DISCOVERY_EVERY_MS = 30 * 60_000;
 const SCHEDULER_IDS = {
   relay: 'vehicle-images-relay',
   sync: 'vehicle-images-sync',
   revive: 'vehicle-images-revive',
   reconcile: 'vehicle-images-reconcile',
+  catalogDiscovery: 'vehicle-images-catalog-discovery',
 } as const;
 /** One scheduled reconcile pass touches at most this many vehicles. */
 const RECONCILE_BATCH = 200;
@@ -39,36 +43,76 @@ const RECONCILE_MAX_BATCHES = 5;
 export class VehicleImagesProcessor extends WorkerHost implements OnModuleInit {
   private readonly logger = new Logger(VehicleImagesProcessor.name);
   private readonly reconcileEnabled: boolean;
+  private readonly catalogDiscoveryEnabled: boolean;
 
   constructor(
     private readonly delivery: VehicleImageDeliveryService,
     private readonly reconcile: VehicleImageReconcileService,
+    private readonly catalogDiscovery: VehicleImageCatalogDiscoveryService,
     @InjectQueue(QUEUE_NAMES.VEHICLE_IMAGES) private readonly queue: Queue,
     config: ConfigService,
   ) {
     super();
-    this.reconcileEnabled = readVehicleImageConfig((key) => config.get(key)).reconcileEnabled;
+    this.reconcileEnabled = readVehicleImageConfig((key) =>
+      config.get(key),
+    ).reconcileEnabled;
+    this.catalogDiscoveryEnabled = readVehicleImageConfig((key) =>
+      config.get(key),
+    ).catalogDiscoveryEnabled;
   }
 
   async onModuleInit(): Promise<void> {
     try {
       const template = { opts: { removeOnComplete: true, removeOnFail: 100 } };
-      const schedule = async (id: string, every: number, name: string, on: boolean) => {
+      const schedule = async (
+        id: string,
+        every: number,
+        name: string,
+        on: boolean,
+      ) => {
         if (!on) return this.queue.removeJobScheduler(id);
-        await this.queue.upsertJobScheduler(id, { every }, { name, data: {}, ...template });
+        await this.queue.upsertJobScheduler(
+          id,
+          { every },
+          { name, data: {}, ...template },
+        );
       };
       const on = this.delivery.enabled;
-      await schedule(SCHEDULER_IDS.relay, VEHICLE_IMAGE_RELAY_EVERY_MS, VEHICLE_IMAGE_JOBS.RELAY, on);
-      await schedule(SCHEDULER_IDS.sync, VEHICLE_IMAGE_SYNC_EVERY_MS, VEHICLE_IMAGE_JOBS.SYNC, on);
-      await schedule(SCHEDULER_IDS.revive, VEHICLE_IMAGE_REVIVE_EVERY_MS, VEHICLE_IMAGE_JOBS.REVIVE, on);
+      await schedule(
+        SCHEDULER_IDS.relay,
+        VEHICLE_IMAGE_RELAY_EVERY_MS,
+        VEHICLE_IMAGE_JOBS.RELAY,
+        on,
+      );
+      await schedule(
+        SCHEDULER_IDS.sync,
+        VEHICLE_IMAGE_SYNC_EVERY_MS,
+        VEHICLE_IMAGE_JOBS.SYNC,
+        on,
+      );
+      await schedule(
+        SCHEDULER_IDS.revive,
+        VEHICLE_IMAGE_REVIVE_EVERY_MS,
+        VEHICLE_IMAGE_JOBS.REVIVE,
+        on,
+      );
       await schedule(
         SCHEDULER_IDS.reconcile,
         VEHICLE_IMAGE_RECONCILE_EVERY_MS,
         VEHICLE_IMAGE_JOBS.RECONCILE,
         this.reconcileEnabled,
       );
+      await schedule(
+        SCHEDULER_IDS.catalogDiscovery,
+        VEHICLE_IMAGE_CATALOG_DISCOVERY_EVERY_MS,
+        VEHICLE_IMAGE_JOBS.CATALOG_DISCOVERY,
+        this.catalogDiscoveryEnabled,
+      );
       if (on) this.logger.log('Vehicle image relay, sync and revive scheduled');
-      if (this.reconcileEnabled) this.logger.log('Vehicle image reconcile scheduled');
+      if (this.reconcileEnabled)
+        this.logger.log('Vehicle image reconcile scheduled');
+      if (this.catalogDiscoveryEnabled)
+        this.logger.log('Vehicle image catalog discovery scheduled');
       if (on) await this.logPipelineReadiness();
     } catch (err) {
       this.logger.error(
@@ -81,7 +125,9 @@ export class VehicleImagesProcessor extends WorkerHost implements OnModuleInit {
   private async logPipelineReadiness(): Promise<void> {
     const health = await this.delivery.health(true);
     if (health.ready && health.registryMatches) {
-      this.logger.log('Vehicle image pipeline ready; registry fingerprints match');
+      this.logger.log(
+        'Vehicle image pipeline ready; registry fingerprints match',
+      );
     } else {
       this.logger.error(
         `Vehicle image pipeline NOT usable: ${health.error ?? (health.ready ? 'registry_mismatch' : 'not_ready')} ` +
@@ -98,7 +144,18 @@ export class VehicleImagesProcessor extends WorkerHost implements OnModuleInit {
         batchSize: RECONCILE_BATCH,
         maxBatches: RECONCILE_MAX_BATCHES,
       });
-      return { runId: report.runId, scanned: report.scanned, upgraded: report.upgraded, conflicts: report.conflicts };
+      return {
+        runId: report.runId,
+        scanned: report.scanned,
+        upgraded: report.upgraded,
+        conflicts: report.conflicts,
+      };
+    }
+    if (job.name === VEHICLE_IMAGE_JOBS.CATALOG_DISCOVERY) {
+      if (!this.catalogDiscoveryEnabled) return { skipped: 'disabled' };
+      return this.catalogDiscovery.run({
+        trigger: VehicleImageCatalogDiscoveryTrigger.SCHEDULED,
+      });
     }
     if (!this.delivery.enabled) return { skipped: 'disabled' };
     switch (job.name) {

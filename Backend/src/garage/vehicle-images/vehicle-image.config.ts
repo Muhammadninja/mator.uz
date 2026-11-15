@@ -26,6 +26,9 @@
  *                                       vehicles once per resolver/registry version
  *                                       (vehicle-image.reconcile.service.ts). Default OFF:
  *                                       run the dry run first (npm run vehicle-images:reconcile).
+ *   VEHICLE_IMAGE_CATALOG_DISCOVERY_ENABLED 'true' schedules a full catalog scan every 30m
+ *                                       and enables the authenticated initial-backfill endpoint.
+ *                                       Requires VEHICLE_IMAGES_ENABLED=true; default OFF.
  *
  * Boot refuses an enabled integration that is not fully configured; a disabled one
  * needs nothing.
@@ -37,6 +40,7 @@ export interface VehicleImageConfig {
   requestTimeoutMs: number;
   adminToken: string | null;
   reconcileEnabled: boolean;
+  catalogDiscoveryEnabled: boolean;
 }
 
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -120,13 +124,25 @@ export function parseVehicleImageConfig(get: (key: string) => unknown): {
         `VEHICLE_IMAGE_ADMIN_TOKEN must be at least ${MIN_TOKEN_LENGTH} characters with no whitespace.`,
       );
     } else if (rawAdminToken === requestToken) {
-      errors.push('VEHICLE_IMAGE_ADMIN_TOKEN must differ from VEHICLE_IMAGE_REQUEST_TOKEN.');
+      errors.push(
+        'VEHICLE_IMAGE_ADMIN_TOKEN must differ from VEHICLE_IMAGE_REQUEST_TOKEN.',
+      );
     } else {
       adminToken = rawAdminToken;
     }
   }
   const reconcileEnabled =
     text(get('VEHICLE_IMAGE_RECONCILE_ENABLED')).toLowerCase() === 'true';
+  const catalogDiscoveryRequested =
+    text(get('VEHICLE_IMAGE_CATALOG_DISCOVERY_ENABLED')).toLowerCase() ===
+    'true';
+  if (catalogDiscoveryRequested && !enabled) {
+    errors.push(
+      'VEHICLE_IMAGE_CATALOG_DISCOVERY_ENABLED requires VEHICLE_IMAGES_ENABLED=true.',
+    );
+  }
+  const catalogDiscoveryEnabled =
+    catalogDiscoveryRequested && enabled && errors.length === 0;
 
   return {
     config: {
@@ -136,6 +152,7 @@ export function parseVehicleImageConfig(get: (key: string) => unknown): {
       requestTimeoutMs,
       adminToken,
       reconcileEnabled,
+      catalogDiscoveryEnabled,
     },
     errors,
   };
@@ -146,7 +163,9 @@ export function validateVehicleImageEnv(
   env: Record<string, unknown>,
 ): Record<string, unknown> {
   const { config, errors } = parseVehicleImageConfig((key) => env[key]);
-  if (config.enabled && errors.length > 0) {
+  const discoveryRequested =
+    text(env.VEHICLE_IMAGE_CATALOG_DISCOVERY_ENABLED).toLowerCase() === 'true';
+  if ((config.enabled || discoveryRequested) && errors.length > 0) {
     throw new Error(
       `Vehicle image integration misconfigured:\n  - ${errors.join('\n  - ')}`,
     );

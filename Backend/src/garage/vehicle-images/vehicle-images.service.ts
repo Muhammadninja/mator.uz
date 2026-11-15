@@ -168,8 +168,17 @@ export class VehicleImagesService {
     });
     const subject = imageSubject(input.model, generation);
     return 'review' in subject
-      ? this.prepare({ year: input.year, model: null, trim: null, review: subject.review })
-      : this.prepare({ year: input.year, model: subject.model, trim: input.trim });
+      ? this.prepare({
+          year: input.year,
+          model: null,
+          trim: null,
+          review: subject.review,
+        })
+      : this.prepare({
+          year: input.year,
+          model: subject.model,
+          trim: input.trim,
+        });
   }
 
   /**
@@ -234,8 +243,8 @@ export class VehicleImagesService {
       skipDuplicates: true,
     });
     if (assetKey) {
-      await tx.vehicleImageIdentity.update({
-        where: { identityKey },
+      await tx.vehicleImageIdentity.updateMany({
+        where: { identityKey, status: { not: VehicleImageStatus.APPROVED } },
         data: catalogState(assetKey),
       });
       return { data, outboxId: null };

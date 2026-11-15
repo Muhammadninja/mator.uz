@@ -60,6 +60,7 @@ test('staging launcher sanitizes inherited environment and fixes pipeline endpoi
   const envExample = readFileSync(path.join(root, 'deploy/staging/backend-staging.env.example'), 'utf8');
   assert.match(envExample, /^VEHICLE_IMAGE_PIPELINE_URL=http:\/\/127\.0\.0\.1:8048$/m);
   assert.match(envExample, /^VEHICLE_IMAGES_ENABLED=true$/m);
+  assert.match(envExample, /^VEHICLE_IMAGE_CATALOG_DISCOVERY_ENABLED=false$/m);
   const redis = readFileSync(path.join(root, 'deploy/staging/redis-mator-staging.conf.example'), 'utf8');
   assert.match(redis, /^bind 127\.0\.0\.1$/m);
   assert.match(redis, /^port 6380$/m);
