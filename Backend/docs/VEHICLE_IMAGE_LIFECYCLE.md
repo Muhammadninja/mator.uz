@@ -96,15 +96,16 @@ VEHICLE_IMAGE_RECONCILE_ENABLED=false
 
 Before enabling review, require `GET /health/ready` to return 200 with contract 2 and the fingerprint above, then require backend `GET /v1/admin/vehicle-images/status` to report `pipelineHealth.ready=true`, `registry.matches=true`, contract 2, and publication capability true. Publication uses signed Cloudinary uploads under `mator/vehicle-images/<identity-hash>/v<version>-<candidate-id>`; only an explicit manager approval uploads. Keep generation disabled while validating the review and delivery flow.
 
-For local integration tests, use the isolated Cloudinary-compatible stub or `VEHICLE_IMAGE_STORE=local`; never point the test adapter at an internet Cloudinary endpoint. Set `BACKEND_WORKTREE` to the permanent vehicle-image E2E worktree root. The one-Tracker check is run against the isolated API and real Redis-backed worker with:
+For local integration tests, use the isolated Cloudinary-compatible stub; never point the test adapter at an internet Cloudinary endpoint. Keep the synthetic PostgreSQL/Redis/Backend runtime in persistent local state outside `/tmp`. Prepare `environment.json` and `pipeline-environment.json` with the local integration harness, and materialize Pipeline commit `5614403e237219ba5a5f7c3bf1ade95ecfbcdf7c` at `$HOME/.mator/vehicle-image-e2e-state/pipeline-source`. Run from the permanent Backend checkout:
 
 ```sh
-MATOR_INTEGRATION_DIR="${BACKEND_WORKTREE}/Backend/.local/vehicle-image-e2e-state" \
-MATOR_API_PORT=33301 VEHICLE_IMAGE_E2E_PROXY_PORT=38049 \
-node scripts/staging/vehicle-image-single-tracker-e2e.mjs
+export MATOR_INTEGRATION_DIR="$HOME/.mator/vehicle-image-e2e-state"
+export MATOR_API_PORT=33301
+export VEHICLE_IMAGE_PIPELINE_SOURCE="$MATOR_INTEGRATION_DIR/pipeline-source"
+node scripts/staging/vehicle-image-e2e-run.mjs
 ```
 
-Its companion `vehicle-image-e2e-pipeline-host.mjs` is test-only: it serves the pinned pipeline behind a loopback proxy, injects one retryable request failure and one simulated Cloudinary publication failure, and records successful upload metadata in memory. Point it at the pipeline checkout whose catalog hash matches the backend; it makes no external Cloudinary requests.
+The runner checks that Backend and Pipeline tokens match, reads the registry fingerprint from the built Backend, creates fresh per-run Pipeline state under the persistent directory, starts the loopback contract-2 simulator, injects a retryable request failure and a simulated publication failure, runs the E2E, and stops the simulator. The adapter stores upload metadata in memory and makes no external Cloudinary requests.
 
 ## Rollback
 
