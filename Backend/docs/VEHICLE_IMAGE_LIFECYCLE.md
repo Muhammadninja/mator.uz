@@ -99,7 +99,7 @@ Before enabling review, require `GET /health/ready` to return 200 with contract 
 For local integration tests, use the isolated Cloudinary-compatible stub or `VEHICLE_IMAGE_STORE=local`; never point the test adapter at an internet Cloudinary endpoint. The one-Tracker check is run against the isolated API and real Redis-backed worker with:
 
 ```sh
-MATOR_INTEGRATION_DIR=/tmp/mator-vehicle-image-e2e-state \
+MATOR_INTEGRATION_DIR=/.local/vehicle-image-e2e-state \
 MATOR_API_PORT=33301 VEHICLE_IMAGE_E2E_PROXY_PORT=38049 \
 node scripts/staging/vehicle-image-single-tracker-e2e.mjs
 ```
