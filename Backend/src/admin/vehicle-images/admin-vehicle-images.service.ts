@@ -314,6 +314,10 @@ export class AdminVehicleImagesService {
     return this.pipeline.preview(candidateId);
   }
 
+  original(candidateId: string) {
+    return this.pipeline.original(candidateId);
+  }
+
   async approve(
     candidateId: string,
     dto: ApproveCandidateDto,
@@ -328,6 +332,9 @@ export class AdminVehicleImagesService {
       ...(dto.rightsConfirmation
         ? { rightsConfirmation: dto.rightsConfirmation }
         : {}),
+      ...(dto.imageQualityConfirmation
+        ? { imageQualityConfirmation: dto.imageQualityConfirmation }
+        : {}),
       ...(dto.scope ? { scope: dto.scope } : {}),
     });
     await this.record(AdminAuditAction.VEHICLE_IMAGE_APPROVED, entry, ctx, {
@@ -340,6 +347,9 @@ export class AdminVehicleImagesService {
         : null,
       rightsConfirmation: dto.rightsConfirmation
         ? { ...dto.rightsConfirmation }
+        : null,
+      imageQualityConfirmation: dto.imageQualityConfirmation
+        ? { ...dto.imageQualityConfirmation }
         : null,
       scope: dto.scope ? { ...dto.scope } : null,
     });

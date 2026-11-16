@@ -48,6 +48,11 @@ export class ApproveCandidateDto {
 
   @IsOptional()
   @ValidateNested()
+  @Type(() => IdentityConfirmationDto)
+  imageQualityConfirmation?: IdentityConfirmationDto;
+
+  @IsOptional()
+  @ValidateNested()
   @Type(() => ApprovalScopeDto)
   scope?: ApprovalScopeDto;
 }

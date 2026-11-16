@@ -114,6 +114,21 @@ export class AdminVehicleImagesController {
     return new StreamableFile(image.bytes);
   }
 
+  @Get('candidates/:id/original')
+  @ApiOperation({ summary: 'The private, unmodified source image for comparison' })
+  async original(
+    @Param('id') id: string,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const image = await this.images.original(id);
+    res.set({
+      'content-type': image.contentType,
+      'cache-control': 'private, no-store',
+      'x-content-type-options': 'nosniff',
+    });
+    return new StreamableFile(image.bytes);
+  }
+
   @Post('candidates/:id/approve')
   @HttpCode(HttpStatus.OK)
   @Roles(AdminRole.SUPER_ADMIN, AdminRole.MANAGER)

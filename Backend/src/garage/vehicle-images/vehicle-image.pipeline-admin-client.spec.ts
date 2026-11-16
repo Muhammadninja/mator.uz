@@ -29,12 +29,12 @@ describe('VehicleImagePipelineAdminClient', () => {
   it('sends the admin token server-side and the actor in the body', async () => {
     const { c, fetchImpl } = client();
     fetchImpl.mockResolvedValue(json(200, { id: ID, status: 'approved' }));
-    await c.approve(ID, { actor: { id: 'adm', email: 'a@b.c', name: 'A' } });
+    await c.approve(ID, { actor: { id: 'adm', email: 'a@b.c', name: 'A' }, imageQualityConfirmation: { confirmed: true, reference: 'edges checked' } });
     const [url, init] = fetchImpl.mock.calls[0];
     expect(url).toBe(`https://pipeline.test/vi/admin/candidates/${ID}/approve`);
     expect(init.headers.authorization).toBe(`Bearer ${ADMIN}`);
     expect(init.redirect).toBe('error');
-    expect(JSON.parse(init.body)).toEqual({ actor: { id: 'adm', email: 'a@b.c', name: 'A' } });
+    expect(JSON.parse(init.body)).toEqual({ actor: { id: 'adm', email: 'a@b.c', name: 'A' }, imageQualityConfirmation: { confirmed: true, reference: 'edges checked' } });
   });
 
   it('never builds a URL from anything but a pipeline id', async () => {
@@ -65,5 +65,12 @@ describe('VehicleImagePipelineAdminClient', () => {
     await expect(c.preview(ID)).rejects.toMatchObject({ status: 502 });
     fetchImpl.mockResolvedValueOnce(new Response(Buffer.from([1, 2, 3]), { status: 200, headers: { 'content-type': 'image/webp' } }));
     await expect(c.preview(ID)).resolves.toEqual({ bytes: Buffer.from([1, 2, 3]), contentType: 'image/webp' });
+  });
+
+  it('serves the original source only as a bounded private image', async () => {
+    const { c, fetchImpl } = client();
+    fetchImpl.mockResolvedValueOnce(new Response(Buffer.from([1, 2, 3]), { status: 200, headers: { 'content-type': 'image/jpeg' } }));
+    await expect(c.original(ID)).resolves.toEqual({ bytes: Buffer.from([1, 2, 3]), contentType: 'image/jpeg' });
+    expect(fetchImpl.mock.calls[0][0]).toBe(`https://pipeline.test/vi/admin/candidates/${ID}/original`);
   });
 });
