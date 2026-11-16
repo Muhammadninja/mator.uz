@@ -86,3 +86,26 @@ Teramont Pro, Tiguan L Pro; Hyundai Santa Fe, Sonata, Tucson; Kia K5, Sportage.
 Held: Chevrolet Damas Move & Max (variant or own model?), Leapmotor (no official
 model list; the dealer site redirects elsewhere), Tank 300/500/700 (would need a
 Tank make), Genesis and Skoda beyond the existing rows (no current official source).
+
+## Years for the Uzbekistan lineup models (2026-11-16, migration `20261126000000`)
+
+Same rule (built anywhere; open end = still produced). Only empty rows change.
+
+| Model row | Range | Evidence |
+| --- | --- | --- |
+| Kia `kia-k9` / `kia-k8` / `kia-seltos` / `kia-sonet` | 2012– / 2021– / 2019– / 2020– | [List of Kia vehicles](https://wiki.krisyotam.com/content/wikipedia_en_all_nopic_2026-03/List_of_Kia_vehicles); Seltos launched August 2019 |
+| Hyundai `hyundai-palisade` | 2018– | [Hyundai Palisade](https://en.wikipedia.org/wiki/Hyundai_Palisade): built since late 2018, Korean launch 2018-12-11 |
+| Hyundai `hyundai-mufasa` | 2023– | [Motor1: Mufasa debut, Auto Shanghai 2023](https://www.motor1.com/news/662300/2023-hyundai-mufasa-debut-china/) |
+| Hyundai `hyundai-staria` | 2021– | [Hyundai newsroom: Staria debut 2021-04-13](https://www.hyundai.com/worldwide/en/newsroom/detail/0000000538) |
+| Haval `haval-h6` / `h7` / `h9` / `jolion` / `m6` | 2011– / 2015– / 2014– / 2020– / 2017– | [Haval (marque)](https://www.wikipedia.org/wiki/Haval_(marque)); [GWM: 3rd-gen H6 and Jolion global launch](https://prnewswire.com/in/news-releases/the-3rd-gen-haval-h6-and-jolion-will-launch-in-global-market-862825149.html) |
+| Toyota `toyota-land-cruiser-300` | 2021– | [Land Cruiser 300 deliveries begin](https://www.carexpert.com.au/car-news/2022-toyota-landcruiser-300-series-customer-deliveries-begin) (premiere 2021-06-09) |
+| Chery `chery-tiggo-4-pro` / `chery-arrizo-6-pro` / `chery-arrizo-8` | 2021– / 2021– / 2022– | [List of Chery vehicles](https://www.wikipedia.org/wiki/List_of_Chery_vehicles); [Chery: Arrizo 6 Pro launched October 2021](https://www.chery.my/?p=514) |
+| BYD `byd-ti-7` | 2025– | [Tai 7 mass production from 2025-08-11](https://carnewschina.com/2025/08/11/byds-fang-cheng-bao-ti7-rolled-off-the-production-line-ahead-of-launch-in-china/) |
+| Volkswagen `teramont-x` | 2019– | [Motor1: Teramont X China debut 2019](https://www.motor1.com/news/344701/vw-teramont-x-china-debut/) |
+| Lada `lada-vesta` / `lada-largus` | 2015– / 2012– | [List of AvtoVAZ vehicles](https://en.wikipedia.com/wiki/List_of_AvtoVAZ_vehicles): Vesta 2015-09-25, Largus 2012-04-04 |
+| Lada `lada-xray` | 2015–2022 | [Lada XRAY](https://en.wikipedia.com/wiki/Lada_Xray): December 2015 to 2022 |
+| SsangYong `tivoli` / `xlv` | 2015– / 2016– | [Tivoli 2015](https://www.autocarpro.in/news-national/ssangyong-motor-launches-updated-tivoli-10782); [Tivoli Air (XLV) 2016](https://www.autocarpro.in/news-international/ssangyong-launches-tivoli-air-south-korea-11009) |
+
+Not set: nameplates older than the picker's window (Camry, RAV4, Land Cruiser Prado,
+Elantra, Sorento, Carens, Carnival, Bongo, Patrol) and rows without a reliable
+source (Kia K3, Chery Tiggo 2 Pro).
