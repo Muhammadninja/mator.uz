@@ -41,6 +41,26 @@ describe('stateFromPipeline', () => {
     expect(s.nextSyncAt!.getTime()).toBeGreaterThan(NOW.getTime());
   });
 
+  it('preserves Commons attribution and license evidence in the Garage API image field', () => {
+    const state = stateFromPipeline(result({
+      status: 'approved',
+      asset: { url: 'https://res.cloudinary.com/x/licensed.webp', version: 1,
+        license: 'CC-BY-4.0', licenseUrl: 'https://creativecommons.org/licenses/by/4.0/',
+        author: 'Photographer', attribution: 'Photographer / Commons',
+        sourcePage: 'https://commons.wikimedia.org/wiki/File:Car.jpg' },
+    }), NOW);
+    expect(presentVehicleImage({ imageIdentity: { status: state.status, reason: state.reason,
+      imageUrl: state.imageUrl, imageVersion: state.imageVersion, imageLicense: state.imageLicense,
+      imageLicenseUrl: state.imageLicenseUrl, imageAuthor: state.imageAuthor,
+      imageAttribution: state.imageAttribution, imageSourcePage: state.imageSourcePage,
+      identity: { marketRegion: 'UZ' } } })).toMatchObject({
+      status: 'approved', url: 'https://res.cloudinary.com/x/licensed.webp',
+      attribution: 'Photographer / Commons', author: 'Photographer', license: 'CC-BY-4.0',
+      license_url: 'https://creativecommons.org/licenses/by/4.0/',
+      source_page: 'https://commons.wikimedia.org/wiki/File:Car.jpg',
+    });
+  });
+
   it('approved but unpublished (pipeline-local path) stays pending without a URL', () => {
     expect(
       stateFromPipeline(

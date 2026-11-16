@@ -31,6 +31,13 @@ export const VEHICLE_INCLUDE = {
       reason: true,
       imageUrl: true,
       imageVersion: true,
+      imageLicense: true,
+      imageLicenseUrl: true,
+      imageAuthor: true,
+      imageAttribution: true,
+      imageSourcePage: true,
+      imageSourceTitle: true,
+      imageModifications: true,
       catalogAssetKey: true,
       // Whether a pending image is being processed or waits for a person.
       pipelineStatus: true,

@@ -58,6 +58,13 @@ export interface IdentityStateUpdate {
   imageUrl: string | null;
   imageVersion: number | null;
   catalogAssetKey: string | null;
+  imageLicense: string | null;
+  imageLicenseUrl: string | null;
+  imageAuthor: string | null;
+  imageAttribution: string | null;
+  imageSourcePage: string | null;
+  imageSourceTitle: string | null;
+  imageModifications: string | null;
   nextSyncAt: Date | null;
 }
 
@@ -89,6 +96,13 @@ export function stateFromPipeline(
     imageUrl: string | null;
     imageVersion: number | null;
     catalogAssetKey?: string | null;
+    imageLicense?: string | null;
+    imageLicenseUrl?: string | null;
+    imageAuthor?: string | null;
+    imageAttribution?: string | null;
+    imageSourcePage?: string | null;
+    imageSourceTitle?: string | null;
+    imageModifications?: string | null;
   },
 ): IdentityStateUpdate {
   const at = (key: string): Date =>
@@ -97,7 +111,9 @@ export function stateFromPipeline(
     pipelineStatus: result.status,
     pipelineRequestId: result.requestId,
   };
-  const none = { imageUrl: null, imageVersion: null, catalogAssetKey: null };
+  const none = { imageUrl: null, imageVersion: null, catalogAssetKey: null, imageLicense: null,
+    imageLicenseUrl: null, imageAuthor: null, imageAttribution: null, imageSourcePage: null,
+    imageSourceTitle: null, imageModifications: null };
 
   switch (result.status) {
     case 'approved': {
@@ -106,9 +122,9 @@ export function stateFromPipeline(
         if (asset.catalogAssetKey) {
           return {
             ...base,
+            ...none,
             status: VehicleImageStatus.APPROVED,
             reason: null,
-            imageUrl: null,
             imageVersion: asset.version,
             catalogAssetKey: asset.catalogAssetKey,
             nextSyncAt: at('approved'),
@@ -129,6 +145,13 @@ export function stateFromPipeline(
         imageUrl: asset.url,
         imageVersion: asset.version,
         catalogAssetKey: null,
+        imageLicense: asset.license ?? null,
+        imageLicenseUrl: asset.licenseUrl ?? null,
+        imageAuthor: asset.author ?? null,
+        imageAttribution: asset.attribution ?? null,
+        imageSourcePage: asset.sourcePage ?? null,
+        imageSourceTitle: asset.sourceTitle ?? null,
+        imageModifications: asset.modifications ?? null,
         nextSyncAt: at('approved'),
       };
     }
@@ -161,6 +184,13 @@ export function stateFromPipeline(
           imageUrl: previous.imageUrl,
           imageVersion: previous.imageVersion,
           catalogAssetKey: previous.catalogAssetKey ?? null,
+          imageLicense: previous.imageLicense ?? null,
+          imageLicenseUrl: previous.imageLicenseUrl ?? null,
+          imageAuthor: previous.imageAuthor ?? null,
+          imageAttribution: previous.imageAttribution ?? null,
+          imageSourcePage: previous.imageSourcePage ?? null,
+          imageSourceTitle: previous.imageSourceTitle ?? null,
+          imageModifications: previous.imageModifications ?? null,
           nextSyncAt: at('approved'),
         };
       }
@@ -216,6 +246,13 @@ export interface VehicleImageField {
   url: string | null;
   version: number | null;
   catalog_asset_key?: string;
+  attribution?: string | null;
+  author?: string | null;
+  license?: string | null;
+  license_url?: string | null;
+  source_page?: string | null;
+  source_title?: string | null;
+  modifications?: string | null;
   /** Why the placeholder stays; null unless `unavailable`. */
   reason: VehicleImagePublicReason | null;
 }
@@ -228,6 +265,13 @@ export interface VehicleImageSourceRow {
     imageUrl: string | null;
     imageVersion: number | null;
     catalogAssetKey?: string | null;
+    imageLicense?: string | null;
+    imageLicenseUrl?: string | null;
+    imageAuthor?: string | null;
+    imageAttribution?: string | null;
+    imageSourcePage?: string | null;
+    imageSourceTitle?: string | null;
+    imageModifications?: string | null;
     /** The pipeline's last status, for the pending stage. */
     pipelineStatus?: string | null;
     /** The stored canonical identity; a publication is shown only for a market-aware one. */
@@ -314,6 +358,13 @@ export function presentVehicleImage(
           status: 'approved',
           url: published,
           version: state.imageVersion,
+          ...(state.imageAttribution ? { attribution: state.imageAttribution } : {}),
+          ...(state.imageAuthor ? { author: state.imageAuthor } : {}),
+          ...(state.imageLicense ? { license: state.imageLicense } : {}),
+          ...(state.imageLicenseUrl ? { license_url: state.imageLicenseUrl } : {}),
+          ...(state.imageSourcePage ? { source_page: state.imageSourcePage } : {}),
+          ...(state.imageSourceTitle ? { source_title: state.imageSourceTitle } : {}),
+          ...(state.imageModifications ? { modifications: state.imageModifications } : {}),
           reason: null,
         };
       }

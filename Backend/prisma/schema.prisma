@@ -1200,6 +1200,13 @@ model VehicleImageIdentity {
   /// Published (public HTTPS) URL and version; set only once approved and published.
   imageUrl          String?              @map("image_url") @db.VarChar(2048)
   imageVersion      Int?                 @map("image_version")
+  imageLicense      String?              @map("image_license") @db.VarChar(80)
+  imageLicenseUrl   String?              @map("image_license_url") @db.VarChar(2048)
+  imageAuthor       String?              @map("image_author") @db.VarChar(500)
+  imageAttribution  String?              @map("image_attribution") @db.VarChar(1000)
+  imageSourcePage   String?              @map("image_source_page") @db.VarChar(2048)
+  imageSourceTitle  String?              @map("image_source_title") @db.VarChar(500)
+  imageModifications String?             @map("image_modifications") @db.VarChar(500)
   /// Key into the owner-approved bundled vehicle image catalog; null for pipeline publications.
   catalogAssetKey   String?              @map("catalog_asset_key") @db.VarChar(96)
   lastSyncedAt      DateTime?            @map("last_synced_at") @db.Timestamptz(3)

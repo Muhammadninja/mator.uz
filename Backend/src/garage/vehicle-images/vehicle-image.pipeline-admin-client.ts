@@ -80,7 +80,7 @@ export class VehicleImagePipelineAdminClient {
 
   async approve(
     candidateId: string,
-    body: { actor: PipelineActor; identityConfirmation?: unknown; scope?: unknown },
+    body: { actor: PipelineActor; identityConfirmation?: unknown; rightsConfirmation?: unknown; scope?: unknown },
   ): Promise<Record<string, unknown>> {
     return this.json('POST', `admin/candidates/${checkedId(candidateId)}/approve`, body);
   }

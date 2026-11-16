@@ -325,6 +325,9 @@ export class AdminVehicleImagesService {
       ...(dto.identityConfirmation
         ? { identityConfirmation: dto.identityConfirmation }
         : {}),
+      ...(dto.rightsConfirmation
+        ? { rightsConfirmation: dto.rightsConfirmation }
+        : {}),
       ...(dto.scope ? { scope: dto.scope } : {}),
     });
     await this.record(AdminAuditAction.VEHICLE_IMAGE_APPROVED, entry, ctx, {
@@ -334,6 +337,9 @@ export class AdminVehicleImagesService {
       verification: entry.verification,
       identityConfirmation: dto.identityConfirmation
         ? { ...dto.identityConfirmation }
+        : null,
+      rightsConfirmation: dto.rightsConfirmation
+        ? { ...dto.rightsConfirmation }
         : null,
       scope: dto.scope ? { ...dto.scope } : null,
     });
