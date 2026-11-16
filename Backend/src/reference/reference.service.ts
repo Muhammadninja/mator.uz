@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { loadCategoryTreeScope } from '../catalog/categories/category-tree-scope';
+import { supportedYearRange } from '../garage/vehicles/vehicle-year';
 import { PartCategoryService } from '../catalog/categories/part-category.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { CacheService } from '../redis/cache.service';
@@ -92,13 +93,22 @@ export class ReferenceService {
             variantOfModelId: null,
           },
           orderBy: { sortOrder: 'asc' },
-          select: { id: true, makeId: true, name: true },
+          select: {
+            id: true,
+            makeId: true,
+            name: true,
+            yearFrom: true,
+            yearTo: true,
+            variants: { select: { id: true, makeId: true, name: true, bodyType: true, yearFrom: true, yearTo: true } },
+          },
         });
         return {
           items: models.map((m) => ({
             id: m.id,
             make_id: m.makeId,
             name: m.name,
+            // The build years Garage accepts for this model, as vehicle creation checks them.
+            ...supportedYearRange(m),
           })),
           total: models.length,
         };
