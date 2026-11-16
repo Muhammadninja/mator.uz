@@ -43,7 +43,7 @@ export class ReferenceController {
     description: 'Models for the make.',
     schema: {
       example: {
-        items: [{ id: 'cobalt', make_id: 'chevrolet', name: 'Cobalt' }],
+        items: [{ id: 'cobalt', make_id: 'chevrolet', name: 'Cobalt', year_from: 2004, year_to: 2027 }],
         total: 10,
       },
     },

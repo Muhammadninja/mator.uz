@@ -32,6 +32,35 @@ export interface YearRangeModel {
   variants: VariantRow[];
 }
 
+/**
+ * The build years a model accepts: its catalog range, else the span of its
+ * ranged generations, capped at next year. `year_from` is null when the catalog
+ * states no start. Inside this span a generic model may still have gaps (a year
+ * no generation covers), which `unsupportedYear` rejects.
+ */
+export function supportedYearRange(
+  model: YearRangeModel,
+  now: Date = new Date(),
+): { year_from: number | null; year_to: number } {
+  const latest = currentYearInUzbekistan(now) + 1;
+  const ranged =
+    model.variants.length > 0 &&
+    model.variants.every((v) => v.yearFrom != null && v.yearTo != null);
+  const from =
+    model.yearFrom ??
+    (ranged
+      ? Math.min(...model.variants.map((v) => v.yearFrom as number))
+      : null);
+  const to = Math.min(
+    model.yearTo ??
+      (ranged
+        ? Math.max(...model.variants.map((v) => v.yearTo as number))
+        : latest),
+    latest,
+  );
+  return { year_from: from, year_to: to };
+}
+
 /** The supported range when `year` is outside it; null when the year is supported. */
 export function unsupportedYear(
   model: YearRangeModel,
@@ -47,19 +76,5 @@ export function unsupportedYear(
     (model.yearFrom == null || year >= model.yearFrom) &&
     (model.yearTo == null || year <= model.yearTo) &&
     (!ranged || variantsForYear(model.variants, year).length > 0);
-  if (ok) return null;
-
-  const from =
-    model.yearFrom ??
-    (ranged
-      ? Math.min(...model.variants.map((v) => v.yearFrom as number))
-      : null);
-  const to = Math.min(
-    model.yearTo ??
-      (ranged
-        ? Math.max(...model.variants.map((v) => v.yearTo as number))
-        : latest),
-    latest,
-  );
-  return { year_from: from, year_to: to };
+  return ok ? null : supportedYearRange(model, now);
 }

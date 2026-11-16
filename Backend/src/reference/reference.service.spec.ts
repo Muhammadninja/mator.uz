@@ -8,6 +8,7 @@
 //   • response field shapes stay snake_case + fuel_type lowercased
 
 import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { currentYearInUzbekistan } from '../garage/vehicles/vehicle-year';
 import { ReferenceService } from './reference.service';
 
 function makePrismaMock() {
@@ -110,7 +111,7 @@ describe('ReferenceService', () => {
     it('returns models for the make ordered by sortOrder', async () => {
       prisma.vehicleMake.findUnique.mockResolvedValue({ id: 'chevrolet' });
       prisma.vehicleModelRef.findMany.mockResolvedValue([
-        { id: 'cobalt', makeId: 'chevrolet', name: 'Cobalt' },
+        { id: 'cobalt', makeId: 'chevrolet', name: 'Cobalt', yearFrom: 2004, yearTo: null, variants: [] },
       ]);
       const res = await service.listModels('chevrolet');
       expect(prisma.vehicleModelRef.findMany).toHaveBeenCalledWith(
@@ -123,9 +124,31 @@ describe('ReferenceService', () => {
         }),
       );
       expect(res).toEqual({
-        items: [{ id: 'cobalt', make_id: 'chevrolet', name: 'Cobalt' }],
+        items: [{
+          id: 'cobalt', make_id: 'chevrolet', name: 'Cobalt',
+          // Still produced: open up to next year, as vehicle creation accepts.
+          year_from: 2004, year_to: currentYearInUzbekistan() + 1,
+        }],
         total: 1,
       });
+    });
+
+    it('returns the build years Garage accepts: catalog range, else the generations span', async () => {
+      prisma.vehicleMake.findUnique.mockResolvedValue({ id: 'chevrolet' });
+      const variant = (id: string, yearFrom: number, yearTo: number) =>
+        ({ id, makeId: 'chevrolet', name: id, bodyType: 'sedan', yearFrom, yearTo });
+      prisma.vehicleModelRef.findMany.mockResolvedValue([
+        { id: 'lacetti', makeId: 'chevrolet', name: 'Lacetti', yearFrom: 2002, yearTo: 2024, variants: [] },
+        { id: 'nexia', makeId: 'chevrolet', name: 'Nexia', yearFrom: null, yearTo: null,
+          variants: [variant('nexia-1', 1996, 2008), variant('nexia-2', 2008, 2016), variant('nexia-3', 2016, 2022)] },
+        { id: 'damas', makeId: 'chevrolet', name: 'Damas', yearFrom: null, yearTo: null, variants: [] },
+      ]);
+      const res = await service.listModels('chevrolet');
+      expect(res.items.map(({ id, year_from, year_to }) => ({ id, year_from, year_to }))).toEqual([
+        { id: 'lacetti', year_from: 2002, year_to: 2024 },
+        { id: 'nexia', year_from: 1996, year_to: 2022 },
+        { id: 'damas', year_from: null, year_to: currentYearInUzbekistan() + 1 },
+      ]);
     });
 
     it('hides models whose parent make is inactive', async () => {
