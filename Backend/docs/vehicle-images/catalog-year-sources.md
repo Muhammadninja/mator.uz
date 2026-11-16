@@ -59,3 +59,30 @@ year. The migration fills only rows whose two bounds are both empty.
 - `damas` and `labo`: [still produced](https://m.kun.uz/en/news/2025/05/15/new-budget-minivan-introduction-wont-affect-damas-and-labo-production-uzauto-motors), and the start year is unsourced.
 - `suburban`, `polo`, `jetta`, `passat`, `golf` and `caddy`: still produced, and their nameplates predate the app's year range.
 - `nexia`, `chevrolet-matiz` and `orlando`: already ranged; Matiz and Orlando keep their Uzbekistan years.
+
+## Uzbekistan lineup models (2026-11-16, migration `20261125000000`)
+
+Owner request: every brand carries every model available in Uzbekistan. 34 models
+are added, after each make's existing models, only where the make exists, the id
+is free and the make has no model of that name. Inactive makes stay inactive.
+
+| Make | Added | Source |
+| --- | --- | --- |
+| Kia | K9, K8, K3, Seltos, Sonet, Sorento, Carens, Carnival, Bongo | [kia.uz](https://kia.uz) official lineup |
+| Hyundai | Elantra, Palisade, Mufasa, Staria | [hyundai.uz](https://hyundai.uz) official lineup |
+| Haval | H6, H7, H9, Jolion, M6 | [gwm.com.uz](https://gwm.com.uz/) official GWM/Haval Uzbekistan |
+| Toyota | Camry, RAV4, Land Cruiser Prado, Land Cruiser 300 | [Toyota Uzbekistan](https://uzbekistan.toyota-centralasia.com/ru) official lineup |
+| Chery | Tiggo 2 Pro, Tiggo 4 Pro, Arrizo 6 Pro, Arrizo 8 | ADM Global (official distributor): [Kun.uz 2026-03-05](https://kun.uz/ru/news/2026/03/05/semeynyye-modeli-chery-v-mesyats-ramadan-dostupny-pod-0-godovyx), [2022 launch](https://kun.uz/en/news/2022/07/01/test-batch-of-chery-cars-arriving-in-uzbekistan-in-july) |
+| BYD | Ti 7 | [CnEVPost 2026-10-08](https://cnevpost.com/2026/10/08/byd-launches-fang-cheng-bao-tai-7-uzbekistan/): Fang Cheng Bao Tai 7 on sale as BYD Ti 7 |
+| Volkswagen | Teramont X | [volkswagen.uz](https://volkswagen.uz/ru/models.html) official lineup |
+| Lada | Vesta, Largus, XRay | [AvtoVAZ: serial assembly at ADM Jizzakh from 2021](https://kun.uz/en/news/2021/10/16/avtovaz-announces-start-of-serial-assembly-of-lada-cars-in-uzbekistan) |
+| SsangYong | Tivoli, XLV | [Spot.uz 2023-02-15](https://www.spot.uz/ru/2023/02/15/ssangyong): Uzbekistan lineup |
+| Nissan | Patrol | [Spot.uz 2024-07-27](https://www.spot.uz/ru/2024/07/27/nissan-patrol/): Nissan Uzbekistan showroom |
+
+Already covered by an existing row (not added): Chevrolet Equinox PHEV Activ,
+Traverse Z71, Tahoe High Country, Suburban High Country, Cobalt MCM; VW Passat Pro,
+Teramont Pro, Tiguan L Pro; Hyundai Santa Fe, Sonata, Tucson; Kia K5, Sportage.
+
+Held: Chevrolet Damas Move & Max (variant or own model?), Leapmotor (no official
+model list; the dealer site redirects elsewhere), Tank 300/500/700 (would need a
+Tank make), Genesis and Skoda beyond the existing rows (no current official source).
