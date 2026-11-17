@@ -157,14 +157,44 @@ describe('OtpService — AUTH_DEV_MODE', () => {
       expect(opts.jobId).toBe(`sms_otp_${issued.requestId}_0`);
     });
 
-    it('has no per-hour ceiling on sending', async () => {
+    it('caps sends per number at 5 an hour, releasing the cooldown slot', async () => {
       const { service, redis } = build(false);
       const phone = '+998905555555';
-      for (let i = 0; i < 8; i++) {
+      for (let i = 0; i < 5; i++) {
         await service.request(phone);
         elapseCooldown(redis, phone);
       }
-      expect(redis.incr).not.toHaveBeenCalled();
+      await expect(service.request(phone)).rejects.toMatchObject({
+        status: 429,
+        response: { code: 'OTP_SEND_LIMIT_REACHED' },
+      });
+      const cooldown = RedisKeys.otpSendCooldown(otpCooldownPhone(phone));
+      expect(redis.store.has(cooldown)).toBe(false);
+    });
+
+    it('caps sends per number at 10 a day', async () => {
+      const { service, redis } = build(false);
+      const phone = '+998905555556';
+      const hourly = RedisKeys.rateSms(`hour:${otpCooldownPhone(phone)}`);
+      for (let i = 0; i < 10; i++) {
+        await service.request(phone);
+        elapseCooldown(redis, phone);
+        redis.store.delete(hourly);
+      }
+      await expect(service.request(phone)).rejects.toMatchObject({
+        response: { code: 'OTP_SEND_LIMIT_REACHED' },
+      });
+    });
+
+    it('does not count requests refused by the cooldown', async () => {
+      const { service } = build(false);
+      const phone = '+998905555557';
+      await service.request(phone);
+      for (let i = 0; i < 10; i++) {
+        await expect(service.request(phone)).rejects.toMatchObject({
+          response: { code: 'OTP_COOLDOWN_ACTIVE' },
+        });
+      }
     });
   });
 

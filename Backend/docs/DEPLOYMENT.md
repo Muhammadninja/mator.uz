@@ -330,7 +330,7 @@ than 32 characters, the API ignores the headers and falls back to the account lo
 
 These are two separate things.
 
-**Sending.** The only limit is one SMS per phone number per 60 seconds, for first requests
+**Sending.** One SMS per phone number per 60 seconds, for first requests
 and resends alike, shared by every OTP flow on that number. It is one atomic Redis
 `SET NX EX 60` on `otp:cooldown:<digits>`, so it holds across instances. While it runs the
 API answers 429 with `Retry-After` and `details.retry_after_seconds`, and no code is
@@ -338,8 +338,11 @@ created or replaced. If the SMS cannot be queued the API answers 503, the previo
 stays valid and the phone can retry at once; a queue that only timed out keeps the
 cooldown, since the job may still be delivered. With Redis down, requests get a 503.
 
-There is no hourly, daily, global or per-network limit on SMS, and no CAPTCHA. The
-endpoints sit under the platform-wide 100 requests per minute per client only.
+On top of the cooldown, each number may receive at most 5 SMS per hour and 10 per day
+(fixed windows on `rate:sms:hour:<digits>` / `rate:sms:day:<digits>`); past either the API
+answers 429 `OTP_SEND_LIMIT_REACHED` with `details.retry_after_seconds`. There is no
+global or per-network limit and no CAPTCHA; the endpoints also sit under the
+platform-wide 100 requests per minute per client.
 
 **Verification.** Five attempts per request and ten per phone per hour, counted
 atomically before the code is compared. With Redis down, verification answers 503.

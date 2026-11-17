@@ -35,8 +35,16 @@ import { StagingOtpPolicy } from './staging-otp.policy';
 
 const OTP_LENGTH = 6;
 const OTP_TTL_MS = 5 * 60 * 1000; // 5 min
-/** One OTP SMS per phone number in this many seconds; the only limit on sending. */
+/** One OTP SMS per phone number in this many seconds. */
 const SEND_COOLDOWN_S = 60;
+/**
+ * SMS per phone number per hour and per day, across purposes and resends. The
+ * cooldown alone still let one number receive 60 SMS an hour (SMS bombing, and
+ * every one billed); a person signing in needs one or two.
+ */
+const MAX_SENDS_PER_HOUR = 5;
+const MAX_SENDS_PER_DAY = 10;
+const DAILY_WINDOW_S = 24 * 60 * 60;
 const MAX_ATTEMPTS = 5; // code comparisons per request_id, ever
 /**
  * Code comparisons per phone per hour, across every request_id. Two codes' worth
@@ -274,13 +282,59 @@ export class OtpService {
     claim: string,
   ): Promise<void> {
     const key = RedisKeys.otpSendCooldown(otpCooldownPhone(phoneE164));
-    if (await this.redis.setNxEx(key, SEND_COOLDOWN_S, claim)) return;
+    if (await this.redis.setNxEx(key, SEND_COOLDOWN_S, claim)) {
+      await this.consumeSendQuota(phoneE164, claim);
+      return;
+    }
     const remaining = await this.redis.ttl(key);
     const retryAfter = remaining > 0 ? remaining : 1;
     throw new HttpException(
       {
         code: 'OTP_COOLDOWN_ACTIVE',
         message: `Please wait ${retryAfter}s before requesting a new code.`,
+        details: { retry_after_seconds: retryAfter },
+      },
+      HttpStatus.TOO_MANY_REQUESTS,
+    );
+  }
+
+  /**
+   * Count this send against the number's hourly and daily ceilings; refuse with
+   * 429 once either is spent. Runs only for the request that won the cooldown
+   * slot, so concurrent refusals never count. A Redis failure releases the slot
+   * and propagates (503): no quota check, no SMS.
+   */
+  private async consumeSendQuota(
+    phoneE164: string,
+    claim: string,
+  ): Promise<void> {
+    const phone = otpCooldownPhone(phoneE164);
+    const windows = [
+      ['hour', MAX_SENDS_PER_HOUR, HOURLY_WINDOW_S],
+      ['day', MAX_SENDS_PER_DAY, DAILY_WINDOW_S],
+    ] as const;
+    let retryAfter = 0;
+    try {
+      for (const [window, limit, seconds] of windows) {
+        const key = RedisKeys.rateSms(`${window}:${phone}`);
+        const result = await this.rateLimiter.consume(key, limit, seconds);
+        if (!result.allowed) {
+          retryAfter = (await this.rateLimiter.retryAfter(key)) || seconds;
+          break;
+        }
+      }
+    } catch (err) {
+      await this.releaseSendCooldown(phoneE164, claim);
+      throw err;
+    }
+    if (retryAfter === 0) return;
+    await this.releaseSendCooldown(phoneE164, claim);
+    this.logger.warn(`OTP send limit reached for ${maskPhone(phoneE164)}`);
+    throw new HttpException(
+      {
+        code: 'OTP_SEND_LIMIT_REACHED',
+        message:
+          'Too many codes were sent to this number. Please try again later.',
         details: { retry_after_seconds: retryAfter },
       },
       HttpStatus.TOO_MANY_REQUESTS,

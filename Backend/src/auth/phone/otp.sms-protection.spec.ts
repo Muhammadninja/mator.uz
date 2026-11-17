@@ -257,11 +257,12 @@ describe('OTP send cooldown (SEC-006)', () => {
     });
   });
 
-  it('leaves no sending counter and no budget key in Redis', async () => {
+  it('counts sends per number only, with no global budget key', async () => {
     const { service, redis } = build();
     await service.request(PHONE);
-    expect(redis.incr).not.toHaveBeenCalled();
-    expect([...redis.store.keys()].filter((k) => /budget|rate:otp:request/.test(k))).toEqual([]);
+    const keys = [...redis.store.keys()];
+    expect(keys.filter((k) => /budget|rate:otp:request/.test(k))).toEqual([]);
+    expect(keys.filter((k) => k.startsWith('rate:sms:'))).toHaveLength(2);
   });
 
   it('a duplicate delivery of one issue keeps the same job id', async () => {
