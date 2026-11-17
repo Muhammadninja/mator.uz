@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { BadRequestException } from '@nestjs/common';
 
 /** Longest make or model name an owner may type (the column is VARCHAR(60)). */
@@ -97,3 +98,20 @@ export function parseVehicleSource(dto: VehicleSourceInput): VehicleSource {
 
 /** Case- and space-insensitive key for comparing a typed name with the catalog. */
 export const nameKey = (name: string) => name.normalize('NFC').replace(/\s+/g, ' ').trim().toLocaleLowerCase('en');
+
+const shortHash = (text: string) => createHash('sha256').update(text).digest('hex').slice(0, 16);
+
+/**
+ * Stable image-identity ids for a manual vehicle: `custom:<hash>` of the
+ * normalised typed names (Cyrillic and Latin alike), so every owner who types
+ * the same car shares one image request and one approved picture. A catalog
+ * make keeps its own id. Never stored as vehicles.make_id/model_id.
+ */
+export function manualIdentityIds(input: {
+  makeId: string | null;
+  makeName: string;
+  modelName: string;
+}): { makeId: string; modelId: string } {
+  const makeId = input.makeId ?? `custom:${shortHash(nameKey(input.makeName))}`;
+  return { makeId, modelId: `custom:${shortHash(`${makeId}|${nameKey(input.modelName)}`)}` };
+}

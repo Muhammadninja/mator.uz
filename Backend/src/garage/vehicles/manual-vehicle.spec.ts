@@ -4,6 +4,8 @@ import { VehiclesService } from './vehicles.service';
 import { presentVehicle } from './vehicle.presenter';
 import { currentYearInUzbekistan } from './vehicle-year';
 import { toVehicleFitContext, vehicleFitWhere } from '../../catalog/compatibility/vehicle-fitment';
+import { VehicleImagesService } from '../vehicle-images/vehicle-images.service';
+import { manualIdentityIds } from './manual-vehicle';
 
 const code = (fn: () => unknown) => {
   try {
@@ -97,10 +99,13 @@ function setup(stored: Record<string, unknown> = manualRow()) {
   };
   prisma.$transaction = jest.fn(async (fn: any) => fn(prisma));
   const images: any = {
+    logger: { warn: jest.fn() },
     planFor: jest.fn(),
     stage: jest.fn(async (_tx: any, _id: string, plan: any) => ({ data: {}, outboxId: plan ? 'x' : null })),
     kick: jest.fn(),
   };
+  // The real manual plan, so these tests see the identity the pipeline gets.
+  images.planManual = VehicleImagesService.prototype.planManual.bind(images);
   const service = new VehiclesService(
     prisma,
     { emitGarageEvent: jest.fn() } as any,
@@ -114,14 +119,20 @@ const errorCode = async (p: Promise<unknown>) =>
   p.then(() => null, (e: BadRequestException) => (e.getResponse() as { code?: string }).code ?? (e.getResponse() as any).message);
 
 describe('VehiclesService manual vehicles', () => {
-  it('saves a listed make with a typed model: no catalog model id, no picture request', async () => {
+  it('saves a listed make with a typed model: no catalog model id, an unverified picture request', async () => {
     const { service, prisma, images } = setup();
     const v = await service.create('usr_1', { make_id: 'kia', custom_model_name: 'EV9', year: 2024 } as any);
     expect(prisma.vehicle.create.mock.calls[0][0].data).toMatchObject({
       makeId: 'kia', modelId: null, customMakeName: null, customModelName: 'EV9',
     });
     expect(images.planFor).not.toHaveBeenCalled();
-    expect(images.stage).toHaveBeenCalledWith(expect.anything(), expect.any(String), null);
+    const plan = images.stage.mock.calls[0][2];
+    expect(plan).toMatchObject({
+      kind: 'request',
+      verification: 'unverified',
+      identity: { makeId: 'kia', modelId: expect.stringMatching(/^custom:[0-9a-f]{16}$/), identityStatus: 'unverified' },
+      display: { manufacturer: 'Kia', model: 'EV9' },
+    });
     expect(v).toMatchObject({ make: { id: 'kia', name: 'Kia' }, model: { id: null, name: 'EV9' }, is_custom: true });
   });
 
@@ -165,6 +176,24 @@ describe('VehiclesService manual vehicles', () => {
     const catalog = setup(manualRow({ makeId: 'kia', modelId: 'kia-k5', customMakeName: null, customModelName: null }));
     expect(await errorCode(catalog.service.update('usr_1', 'veh_m', { custom_model_name: 'K5' } as any)))
       .toBe('VEHICLE_SOURCE_INVALID');
+  });
+});
+
+describe('manual vehicle image identity', () => {
+  it('is stable across case and spacing, so owners of the same typed car share one picture', () => {
+    const a = manualIdentityIds({ makeId: null, makeName: 'Zeekr', modelName: '001 FR' });
+    expect(manualIdentityIds({ makeId: null, makeName: ' ZEEKR', modelName: '001  fr' })).toEqual(a);
+    expect(a.makeId).toMatch(/^custom:[0-9a-f]{16}$/);
+    expect(manualIdentityIds({ makeId: null, makeName: 'Zeekr', modelName: '007' }).modelId).not.toBe(a.modelId);
+    // Cyrillic names get ASCII ids the pipeline accepts.
+    expect(manualIdentityIds({ makeId: null, makeName: 'Москвич', modelName: '3' }).modelId).toMatch(/^custom:[0-9a-f]{16}$/);
+  });
+
+  it('a rename re-plans the picture under the new name', async () => {
+    const { service, images } = setup();
+    await service.update('usr_1', 'veh_m', { custom_model_name: '007' } as any);
+    const plan = images.stage.mock.calls[0][2];
+    expect(plan).toMatchObject({ kind: 'request', display: { manufacturer: 'Zeekr', model: '007' } });
   });
 });
 

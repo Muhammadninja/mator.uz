@@ -64,8 +64,15 @@ export class VehiclesService {
       model3dAssetId = dto.trim_id ? await this.resolve3dAsset(dto.trim_id) : null;
       sourceData = { makeId: source.makeId, modelId: source.modelId, customMakeName: null, customModelName: null };
     } else {
-      // No catalog row: no identity, no picture request, no trim/engine/3D.
-      await this.assertManualRefs(source, dto.year);
+      // No catalog row: no trim/engine/3D. The picture comes from an unverified
+      // identity under custom: ids, generated from the typed names and reviewed.
+      const makeName = await this.assertManualRefs(source, dto.year);
+      imagePlan = this.images.planManual({
+        year: dto.year,
+        makeId: source.makeId,
+        makeName,
+        modelName: source.customModelName,
+      });
       sourceData = {
         makeId: source.makeId,
         modelId: null,
@@ -198,6 +205,18 @@ export class VehiclesService {
   async update(userId: string, vehicleId: string, dto: UpdateVehicleDto) {
     const owned = await this.assertOwned(userId, vehicleId);
     const renamed = this.planManualRename(owned, dto);
+    // A renamed manual vehicle is a different car to picture: re-plan its image.
+    const renamePlan =
+      renamed.customMakeName !== undefined || renamed.customModelName !== undefined
+        ? this.images.planManual({
+            year: owned.year,
+            makeId: owned.makeId,
+            makeName: owned.makeId
+              ? (await this.prisma.vehicleMake.findUnique({ where: { id: owned.makeId } }))?.name ?? ''
+              : renamed.customMakeName ?? owned.customMakeName ?? '',
+            modelName: renamed.customModelName ?? owned.customModelName ?? '',
+          })
+        : null;
     const variant =
       dto.variant_model_id !== undefined
         ? await this.planVariantPick(owned, dto.variant_model_id)
@@ -215,8 +234,9 @@ export class VehiclesService {
       // write. Without a plan (the catalog could not be read), the stored
       // identity and image state are left as they are.
       let imageData = {};
-      if (variant?.plan) {
-        const image = await this.images.stage(tx, vehicleId, variant.plan);
+      const plan = variant?.plan ?? renamePlan;
+      if (plan) {
+        const image = await this.images.stage(tx, vehicleId, plan);
         imageOutboxId = image.outboxId;
         imageData = image.data;
       }
@@ -327,7 +347,7 @@ export class VehiclesService {
    * is not in the future, and the typed names do not duplicate an offered
    * catalog row (the owner should pick that row instead, with its exact fit).
    * Only active makes count: a hidden make cannot be picked, so typing it is
-   * the owner's only way to add such a car.
+   * the owner's only way to add such a car. Returns the make's display name.
    */
   private async assertManualRefs(
     source: Extract<VehicleSource, { kind: 'manual' }>,
@@ -342,9 +362,11 @@ export class VehiclesService {
       });
     }
     const makeId = source.makeId;
+    let makeName = source.customMakeName ?? '';
     if (makeId) {
       const make = await this.prisma.vehicleMake.findUnique({ where: { id: makeId } });
       if (!make || !make.isActive) throw new BadRequestException('Unknown make_id');
+      makeName = make.name;
     } else {
       const makes = await this.prisma.vehicleMake.findMany({
         where: { isActive: true },
@@ -361,7 +383,7 @@ export class VehiclesService {
           details: { make_id: match.id, model_id: model?.id ?? null },
         });
       }
-      return;
+      return makeName;
     }
     const model = await this.findCatalogModel(makeId, source.customModelName);
     if (model) {
@@ -371,6 +393,7 @@ export class VehiclesService {
         details: { make_id: makeId, model_id: model.id },
       });
     }
+    return makeName;
   }
 
   /** The make's offered catalog model with this name (case/space-insensitive), if any. */
