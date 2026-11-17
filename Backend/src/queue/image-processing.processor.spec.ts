@@ -10,14 +10,19 @@
 //     (UnrecoverableError), and onFailed treats that as the final attempt.
 
 import { ImageProcessingStage } from '@prisma/client';
-import axios from 'axios';
+import { downloadImage } from './image-download';
 import { UnrecoverableError } from 'bullmq';
 import { ImageEnhanceError } from '../ai/image-enhance.service';
 import { tagImageRunOwner } from './image-job.outcome';
 import { ImageProcessingProcessor } from './queue.processors';
 
-jest.mock('axios');
-const mockedAxios = axios as jest.Mocked<typeof axios>;
+jest.mock('./image-download', () => ({
+  ...jest.requireActual<typeof import('./image-download')>('./image-download'),
+  downloadImage: jest.fn(),
+}));
+const mockedDownload = downloadImage as jest.MockedFunction<
+  typeof downloadImage
+>;
 
 function build() {
   const drafts = {
@@ -52,7 +57,10 @@ function build() {
   // functions (not `unknown`) so `spyOn` can resolve an overload — with
   // `unknown` there is no call signature to spy on and the call has no match.
   const withLogger = proc as never as {
-    logger: { error: (...args: unknown[]) => void; log: (...args: unknown[]) => void };
+    logger: {
+      error: (...args: unknown[]) => void;
+      log: (...args: unknown[]) => void;
+    };
   };
   jest.spyOn(withLogger.logger, 'error').mockImplementation(() => undefined);
   jest.spyOn(withLogger.logger, 'log').mockImplementation(() => undefined);
@@ -80,7 +88,7 @@ describe('ImageProcessingProcessor (two-phase)', () => {
       originalUrl: null,
     });
     ctx.telegramFiles.getFileUrl.mockResolvedValue('https://tg/file');
-    mockedAxios.get.mockResolvedValue({ data: new ArrayBuffer(8) });
+    mockedDownload.mockResolvedValue(Buffer.alloc(8));
     ctx.cloudinary.uploadBuffer
       .mockResolvedValueOnce({
         url: 'https://cdn/original.jpg',
@@ -131,7 +139,7 @@ describe('ImageProcessingProcessor (two-phase)', () => {
       tgFileId: 'tgfile',
       originalUrl: 'https://cdn/original.jpg', // already ingested
     });
-    mockedAxios.get.mockResolvedValue({ data: new ArrayBuffer(8) });
+    mockedDownload.mockResolvedValue(Buffer.alloc(8));
     ctx.cloudinary.uploadBuffer.mockResolvedValue({
       url: 'https://cdn/processed.png',
       publicId: 'proc_1',
@@ -225,7 +233,7 @@ describe('ImageProcessingProcessor (two-phase)', () => {
       tgFileId: 'tgfile',
       originalUrl: 'https://cdn/original.jpg',
     });
-    mockedAxios.get.mockResolvedValue({ data: new ArrayBuffer(8) });
+    mockedDownload.mockResolvedValue(Buffer.alloc(8));
     ctx.imageEnhance.removeBackground.mockRejectedValue(err);
     const run = ctx.proc.process({
       id: 'j1',

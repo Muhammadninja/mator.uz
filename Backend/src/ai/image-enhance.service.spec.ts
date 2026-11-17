@@ -21,6 +21,17 @@ const KEY = 'bfl-test-key';
 const POLL = 'https://api.us1.bfl.ai/v1/get_result?id=job-1';
 const SAMPLE = 'https://delivery.bfl.ai/results/out.png?sig=abc';
 
+// A PNG header (signature + 1000×1000 IHDR): the download now checks the bytes.
+const TEST_PNG = (() => {
+  const b = Buffer.alloc(33);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(b, 0);
+  b.writeUInt32BE(13, 8);
+  b.write('IHDR', 12, 'latin1');
+  b.writeUInt32BE(1000, 16);
+  b.writeUInt32BE(1000, 20);
+  return b;
+})();
+
 const OLD_ENV = process.env;
 
 beforeEach(() => {
@@ -98,7 +109,7 @@ describe('ImageEnhanceService configuration', () => {
 describe('ImageEnhanceService.removeBackground', () => {
   it('submits the base64 image to FLUX.2 Pro, polls until Ready, and returns the PNG unchanged', async () => {
     const source = Buffer.from('source-png');
-    const png = Buffer.from('WHITE_BG_PNG_BYTES');
+    const png = TEST_PNG;
 
     mockedAxios.post.mockResolvedValueOnce(submitted());
     // Every "still working" status keeps it polling — proves it actually polls.
@@ -156,7 +167,7 @@ describe('ImageEnhanceService.removeBackground', () => {
       mockedAxios.post.mockResolvedValueOnce(submitted());
       mockedAxios.get
         .mockResolvedValueOnce(ready())
-        .mockResolvedValueOnce({ data: Buffer.from('png') });
+        .mockResolvedValueOnce({ data: TEST_PNG });
       await enhance();
       return submittedBody().prompt as string;
     }
@@ -537,11 +548,11 @@ describe('ImageEnhanceService.removeBackground', () => {
       .mockRejectedValueOnce(httpError(502))
       .mockRejectedValueOnce(noResponseError('ECONNRESET'))
       .mockResolvedValueOnce(ready())
-      .mockResolvedValueOnce({ data: Buffer.from('png') });
+      .mockResolvedValueOnce({ data: TEST_PNG });
 
     const out = await enhance();
 
-    expect(out.toString()).toBe('png');
+    expect(out.equals(TEST_PNG)).toBe(true);
     expect(mockedAxios.post.mock.calls).toHaveLength(1);
   });
 
@@ -653,11 +664,11 @@ describe('ImageEnhanceService.removeBackground', () => {
         )
         .mockResolvedValueOnce(answer503({ status: 'Service Unavailable' }))
         .mockResolvedValueOnce(ready())
-        .mockResolvedValueOnce({ data: Buffer.from('png') });
+        .mockResolvedValueOnce({ data: TEST_PNG });
 
       const out = await enhance();
 
-      expect(out.toString()).toBe('png');
+      expect(out.equals(TEST_PNG)).toBe(true);
       expect(mockedAxios.post.mock.calls).toHaveLength(1);
     });
 
@@ -666,11 +677,11 @@ describe('ImageEnhanceService.removeBackground', () => {
       mockedAxios.get
         .mockResolvedValueOnce(answer503({ status: 'Pending' }))
         .mockResolvedValueOnce(ready())
-        .mockResolvedValueOnce({ data: Buffer.from('png') });
+        .mockResolvedValueOnce({ data: TEST_PNG });
 
       const out = await enhance();
 
-      expect(out.toString()).toBe('png');
+      expect(out.equals(TEST_PNG)).toBe(true);
       expect(mockedAxios.get.mock.calls.map(([u]) => u)).toEqual([
         POLL,
         POLL,
@@ -683,11 +694,11 @@ describe('ImageEnhanceService.removeBackground', () => {
       mockedAxios.get
         .mockResolvedValueOnce({ status: 200, data: { status: 'Pending' } })
         .mockResolvedValueOnce({ status: 200, ...ready() })
-        .mockResolvedValueOnce({ status: 200, data: Buffer.from('png') });
+        .mockResolvedValueOnce({ status: 200, data: TEST_PNG });
 
       const out = await enhance();
 
-      expect(out.toString()).toBe('png');
+      expect(out.equals(TEST_PNG)).toBe(true);
       expect(mockedAxios.get.mock.calls.map(([u]) => u)).toEqual([
         POLL,
         POLL,
@@ -711,5 +722,30 @@ describe('ImageEnhanceService.removeBackground', () => {
       // The result download keeps axios' default (2xx only).
       expect(mockedAxios.get.mock.calls[2][1]?.validateStatus).toBeUndefined();
     });
+  });
+});
+
+// SEC-04: the FLUX result is published to Cloudinary, so it must be a bounded image.
+describe('ImageEnhanceService result validation', () => {
+  it('caps the result download size', async () => {
+    mockedAxios.post.mockResolvedValueOnce(submitted());
+    mockedAxios.get
+      .mockResolvedValueOnce({ status: 200, ...ready() })
+      .mockResolvedValueOnce({ status: 200, data: TEST_PNG });
+    await enhance();
+    const config = mockedAxios.get.mock.calls.at(-1)![1]!;
+    expect(config.maxContentLength).toBeGreaterThan(0);
+    expect(config.maxContentLength).toBeLessThanOrEqual(20 * 1024 * 1024);
+  });
+
+  it('refuses a non-image result without retrying', async () => {
+    mockedAxios.post.mockResolvedValueOnce(submitted());
+    mockedAxios.get
+      .mockResolvedValueOnce({ status: 200, ...ready() })
+      .mockResolvedValueOnce({
+        status: 200,
+        data: Buffer.from('<html>not an image</html>'),
+      });
+    await expect(enhance()).rejects.toMatchObject({ retryable: false });
   });
 });

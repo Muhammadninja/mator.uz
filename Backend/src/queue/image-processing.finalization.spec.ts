@@ -9,14 +9,19 @@
 // are genuinely in flight together, not one after the other. No DB, Redis,
 // Cloudinary, FLUX or Telegram is reached.
 
-import axios from 'axios';
+import { downloadImage } from './image-download';
 import { UnrecoverableError, type Job } from 'bullmq';
 import { DraftImageStatus, ImageProcessingStage, Prisma } from '@prisma/client';
 import { ProductDraftService } from '../telegram/product-draft.service';
 import { ImageProcessingProcessor } from './queue.processors';
 
-jest.mock('axios');
-const mockedAxios = axios as jest.Mocked<typeof axios>;
+jest.mock('./image-download', () => ({
+  ...jest.requireActual<typeof import('./image-download')>('./image-download'),
+  downloadImage: jest.fn(),
+}));
+const mockedDownload = downloadImage as jest.MockedFunction<
+  typeof downloadImage
+>;
 
 type Row = {
   id: string;
@@ -221,7 +226,7 @@ const deleted = (c: { deleteAssets: jest.Mock }) =>
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockedAxios.get.mockResolvedValue({ data: new ArrayBuffer(4) });
+  mockedDownload.mockResolvedValue(Buffer.alloc(4));
 });
 
 describe('image finalization with one worker', () => {
@@ -287,7 +292,7 @@ describe('two workers on one image at once', () => {
   it('both runs enhance the ONE stored original, not their own', async () => {
     const t = setup();
     await Promise.all([t.worker().process(job), t.worker().process(job)]);
-    const enhancedFrom = mockedAxios.get.mock.calls
+    const enhancedFrom = mockedDownload.mock.calls
       .map((c) => c[0])
       .filter((url) => url !== 'https://tg.example/file');
     expect(enhancedFrom).toEqual([t.row.originalUrl, t.row.originalUrl]);

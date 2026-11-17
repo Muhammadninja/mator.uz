@@ -5,6 +5,11 @@ import {
   pollingUrlProblem,
   providerUrlAgent,
 } from './bfl-url-policy';
+import {
+  assertSafeImage,
+  ImageDownloadRejected,
+  MAX_IMAGE_BYTES,
+} from '../queue/image-download';
 
 // Black Forest Labs FLUX.2 Pro — the production model in the FLUX.2 family.
 // The API is asynchronous: POST the edit request, receive a polling_url, then GET
@@ -375,12 +380,18 @@ export class ImageEnhanceService {
       axios.get<ArrayBuffer>(imageUrl, {
         responseType: 'arraybuffer',
         timeout: DOWNLOAD_TIMEOUT_MS,
+        // The transfer is aborted once the result outgrows any real PNG.
+        maxContentLength: MAX_IMAGE_BYTES,
+        maxBodyLength: MAX_IMAGE_BYTES,
         maxRedirects: 3,
         httpsAgent: providerUrlAgent,
         // Each redirect hop is held to the same rule as the first URL.
         beforeRedirect: (options: { protocol?: string }) => {
           if (options.protocol !== 'https:') {
-            throw new ImageEnhanceError('result URL redirected off https', false);
+            throw new ImageEnhanceError(
+              'result URL redirected off https',
+              false,
+            );
           }
         },
       }),
@@ -388,6 +399,15 @@ export class ImageEnhanceService {
     const image = Buffer.from(response.data);
     if (image.length === 0) {
       throw new ImageEnhanceError('downloaded result image is empty', true);
+    }
+    // It is published to Cloudinary next: only a real, bounded image may go.
+    try {
+      assertSafeImage(image);
+    } catch (err) {
+      if (err instanceof ImageDownloadRejected) {
+        throw new ImageEnhanceError(`result ${err.message}`, false);
+      }
+      throw err;
     }
     return image;
   }
