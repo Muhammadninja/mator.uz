@@ -54,9 +54,6 @@ year. The migration fills only rows whose two bounds are both empty.
 
 **Not set, on purpose:**
 
-- `spark`: [Uzbek production ended in 2022](https://kun.uz/en/news/2022/08/20/uzauto-motors-chevrolet-tracker-and-onix-will-replace-spark-and-nexia-this-year), but whether the nameplate continues elsewhere is unverified.
-- `tracker` / `tracker-2`: the two rows' generations are ambiguous in the catalog.
-- `damas` and `labo`: [still produced](https://m.kun.uz/en/news/2025/05/15/new-budget-minivan-introduction-wont-affect-damas-and-labo-production-uzauto-motors), and the start year is unsourced.
 - `suburban`, `polo`, `jetta`, `passat`, `golf` and `caddy`: still produced, and their nameplates predate the app's year range.
 - `nexia`, `chevrolet-matiz` and `orlando`: already ranged; Matiz and Orlando keep their Uzbekistan years.
 
@@ -109,3 +106,11 @@ Same rule (built anywhere; open end = still produced). Only empty rows change.
 Not set: nameplates older than the picker's window (Camry, RAV4, Land Cruiser Prado,
 Elantra, Sorento, Carens, Carnival, Bongo, Patrol) and rows without a reliable
 source (Kia K3, Chery Tiggo 2 Pro).
+
+## Filled 2026-11-17 (migration 20261130000000)
+
+Owner decision: give the held Chevrolet rows a start year; ends stay open.
+
+- `damas`, `labo`: from 1991. Daewoo launched both together at Changwon in August 1991 ([Seoulz: Daewoo Damas history](https://www.seoulz.com/daewoo-damas-history/), [Wards: Changwon plant](https://www.wardsauto.com/news/archive-wards-gm-korea-s-changwon-plant-firing-on-all-cylinders/785878/)); UzAuto [still builds them](https://m.kun.uz/en/news/2025/05/15/new-budget-minivan-introduction-wont-affect-damas-and-labo-production-uzauto-motors).
+- `spark`: from 2005, when the M200 Matiz was sold as the Chevrolet Spark ([Wikipedia: Chevrolet Spark](https://www.wikipedia.org/wiki/Chevy_Spark)). The 1998-2004 Matiz is its own row. Uzbek production [ended in 2022](https://kun.uz/en/news/2022/08/20/uzauto-motors-chevrolet-tracker-and-onix-will-replace-spark-and-nexia-this-year); whether the name continues elsewhere is unverified, so the end stays open.
+- `tracker`, `tracker-2`: from 2013, when the Trax went on sale as the Tracker in Russia and South America ([Wards](https://www.wardsauto.com/general-motors/gm-revives-tracker-nameplate-for-compact-cuv-in-russia), [Wikipedia: Chevrolet Trax](https://en.wikipedia.org/wiki/Chevrolet_Trax)); its 2019 successor shares the rows. The Suzuki-based Geo/Chevrolet Tracker (1989-2008) is a different car and is not in the catalog. The two rows still share the display name "Tracker" (open question: which generation each row is).
