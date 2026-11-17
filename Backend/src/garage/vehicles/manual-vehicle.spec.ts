@@ -76,8 +76,9 @@ function manualRow(over: Record<string, unknown> = {}) {
   };
 }
 
-function setup(stored: Record<string, unknown> = manualRow()) {
+function setup(stored: Record<string, unknown> = manualRow(), budget?: any) {
   const prisma: any = {
+    vehicleImageIdentity: { findUnique: jest.fn().mockResolvedValue(null) },
     vehicleMake: {
       findUnique: jest.fn(async ({ where }: any) =>
         ({ kia: { id: 'kia', name: 'Kia', isActive: true }, lada: { id: 'lada', name: 'Lada', isActive: false } } as any)[where.id] ?? null),
@@ -111,6 +112,7 @@ function setup(stored: Record<string, unknown> = manualRow()) {
     { emitGarageEvent: jest.fn() } as any,
     { emit: jest.fn() } as any,
     images,
+    budget,
   );
   return { service, prisma, images };
 }
@@ -194,6 +196,42 @@ describe('manual vehicle image identity', () => {
     await service.update('usr_1', 'veh_m', { custom_model_name: '007' } as any);
     const plan = images.stage.mock.calls[0][2];
     expect(plan).toMatchObject({ kind: 'request', display: { manufacturer: 'Zeekr', model: '007' } });
+  });
+});
+
+describe('manual vehicle image budget', () => {
+  const zeekr = { custom_make_name: 'Zeekr', custom_model_name: '001', year: 2024 } as any;
+
+  it('a new typed name takes one unit of the owner\'s and everyone\'s daily allowance', async () => {
+    const budget = { reserve: jest.fn().mockResolvedValue({ allowed: true }) };
+    const { service, images } = setup(manualRow(), budget);
+    await service.create('usr_1', zeekr);
+    expect(budget.reserve.mock.calls[0][0]).toEqual([
+      expect.objectContaining({ key: 'vehicle-image:manual:user:usr_1', limit: 3, windowSeconds: 86400 }),
+      expect.objectContaining({ key: 'vehicle-image:manual:all', limit: 100, windowSeconds: 86400 }),
+    ]);
+    expect(images.stage.mock.calls[0][2]).toMatchObject({ kind: 'request' });
+  });
+
+  it('past the allowance, or when Redis is down, the car saves on the placeholder with no generation', async () => {
+    for (const reserve of [
+      jest.fn().mockResolvedValue({ allowed: false, refusedBy: 'vehicle-image:manual:user:usr_1' }),
+      jest.fn().mockRejectedValue(new Error('redis down')),
+    ]) {
+      const { service, prisma, images } = setup(manualRow(), { reserve });
+      await service.create('usr_1', zeekr);
+      expect(prisma.vehicle.create).toHaveBeenCalled();
+      expect(images.stage.mock.calls[0][2]).toEqual({ kind: 'review', reason: 'manual_image_budget' });
+    }
+  });
+
+  it('a typed name someone already pictured or requested costs nothing', async () => {
+    const budget = { reserve: jest.fn() };
+    const { service, prisma, images } = setup(manualRow(), budget);
+    prisma.vehicleImageIdentity.findUnique.mockResolvedValue({ identityKey: 'k' });
+    await service.create('usr_1', zeekr);
+    expect(budget.reserve).not.toHaveBeenCalled();
+    expect(images.stage.mock.calls[0][2]).toMatchObject({ kind: 'request' });
   });
 });
 

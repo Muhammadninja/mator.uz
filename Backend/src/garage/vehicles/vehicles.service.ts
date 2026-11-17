@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, BadRequestException, Optional } from '@nestjs/common';
 import { Drivetrain, FuelType, NotificationType, Vehicle, VehicleTransmission } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { prefixedId, IdPrefix } from '../../common/ulid.util';
@@ -16,15 +16,26 @@ import { nameKey, normalizeVehicleName, parseVehicleSource, type VehicleSource }
 import { RealtimeGateway } from '../../realtime/realtime.gateway';
 import { NotificationsService } from '../../notifications/notifications.service';
 import { VehicleImagesService } from '../vehicle-images/vehicle-images.service';
+import { IMAGE_REVIEW_REASONS, type IdentityPlan } from '../vehicle-images/vehicle-image.identity';
+import { AtomicBudget } from '../../redis/atomic-budget.service';
 import { presentVehicleImage } from '../vehicle-images/vehicle-image.state';
+
+/** New hand-entered car pictures one owner may start per day. */
+const MANUAL_IMAGES_PER_USER_DAY = 3;
+/** New hand-entered car pictures everyone together may start per day. */
+const MANUAL_IMAGES_ALL_DAY = 100;
+const DAY_SECONDS = 24 * 60 * 60;
 
 @Injectable()
 export class VehiclesService {
+  private readonly logger = new Logger(VehiclesService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly realtime: RealtimeGateway,
     private readonly notifications: NotificationsService,
     private readonly images: VehicleImagesService,
+    @Optional() private readonly budget?: AtomicBudget,
   ) {}
 
   async list(userId: string, opts: { includeDeleted: boolean; include3d: boolean }) {
@@ -67,7 +78,7 @@ export class VehiclesService {
       // No catalog row: no trim/engine/3D. The picture comes from an unverified
       // identity under custom: ids, generated from the typed names and reviewed.
       const makeName = await this.assertManualRefs(source, dto.year);
-      imagePlan = this.images.planManual({
+      imagePlan = await this.manualImagePlan(userId, {
         year: dto.year,
         makeId: source.makeId,
         makeName,
@@ -208,7 +219,7 @@ export class VehiclesService {
     // A renamed manual vehicle is a different car to picture: re-plan its image.
     const renamePlan =
       renamed.customMakeName !== undefined || renamed.customModelName !== undefined
-        ? this.images.planManual({
+        ? await this.manualImagePlan(userId, {
             year: owned.year,
             makeId: owned.makeId,
             makeName: owned.makeId
@@ -410,6 +421,37 @@ export class VehiclesService {
    * A catalog vehicle (or a manual one with a catalog make, for the make name)
    * refuses them, so a row never mixes catalog ids with typed names.
    */
+  /**
+   * The picture plan for a hand-entered vehicle. Typed names are open text, and
+   * with generation first every new one is a paid image generation, so a name no
+   * owner has typed before takes one unit of the owner's daily allowance and of
+   * everyone's. Past either (or when Redis can't say) the vehicle still saves,
+   * on the placeholder. A name already pictured or requested costs nothing.
+   */
+  private async manualImagePlan(
+    userId: string,
+    input: Parameters<VehicleImagesService['planManual']>[0],
+  ): Promise<IdentityPlan | null> {
+    const plan = this.images.planManual(input);
+    if (!plan || plan.kind !== 'request' || !this.budget) return plan;
+    const known = await this.prisma.vehicleImageIdentity.findUnique({
+      where: { identityKey: plan.identityKey },
+      select: { identityKey: true },
+    });
+    if (known) return plan;
+    try {
+      const decision = await this.budget.reserve([
+        { key: `vehicle-image:manual:user:${userId}`, limit: MANUAL_IMAGES_PER_USER_DAY, windowSeconds: DAY_SECONDS },
+        { key: 'vehicle-image:manual:all', limit: MANUAL_IMAGES_ALL_DAY, windowSeconds: DAY_SECONDS },
+      ]);
+      if (decision.allowed) return plan;
+      this.logger.warn(`vehicle-image manual budget spent (${decision.refusedBy.startsWith('vehicle-image:manual:user') ? 'owner' : 'all'})`);
+    } catch (err) {
+      this.logger.warn(`vehicle-image manual budget unreadable: ${(err as Error)?.name ?? 'error'}`);
+    }
+    return { kind: 'review', reason: IMAGE_REVIEW_REASONS.MANUAL_IMAGE_BUDGET };
+  }
+
   private planManualRename(vehicle: Vehicle, dto: UpdateVehicleDto) {
     const data: { customMakeName?: string; customModelName?: string } = {};
     if (dto.custom_model_name !== undefined) {
