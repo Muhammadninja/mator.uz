@@ -16,11 +16,29 @@ export const FUEL_TYPES = ['petrol', 'diesel', 'hybrid', 'electric', 'gas'];
 const HEX = /^#[0-9A-Fa-f]{6,8}$/;
 
 export class CreateVehicleDto {
+  /** Catalog make. Optional only for a manual vehicle that names its make in custom_make_name. */
+  @IsOptional()
   @IsString()
-  make_id: string;
+  @MaxLength(64)
+  make_id?: string;
 
+  /** Catalog model. Absent for a manual vehicle (custom_model_name). */
+  @IsOptional()
   @IsString()
-  model_id: string;
+  @MaxLength(64)
+  model_id?: string;
+
+  /** Owner-typed make when the catalog has none; never with make_id. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  custom_make_name?: string;
+
+  /** Owner-typed model when the catalog has none; never with model_id. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  custom_model_name?: string;
 
   @IsInt()
   @Min(1950)

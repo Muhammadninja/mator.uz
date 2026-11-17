@@ -51,6 +51,23 @@ export type VehicleWithRelations = Prisma.VehicleGetPayload<{ include: typeof VE
 
 const lower = (v: string | null): string | null => (v ? v.toLowerCase() : null);
 
+/**
+ * The make and model a vehicle is shown and talked about as: the catalog names,
+ * or the owner's typed names for a manual vehicle (custom_make_name /
+ * custom_model_name). Never used for fitment, which reads catalog rows only.
+ */
+export function vehicleNames(v: {
+  make?: { name: string } | null;
+  model?: { name: string } | null;
+  customMakeName?: string | null;
+  customModelName?: string | null;
+}): { make: string; model: string } {
+  return {
+    make: v.make?.name ?? v.customMakeName ?? '',
+    model: v.model?.name ?? v.customModelName ?? '',
+  };
+}
+
 /** Map a Vehicle row (with relations) to the contract's nested response shape. */
 export function presentVehicle(v: VehicleWithRelations, include3d = true) {
   return {
@@ -58,8 +75,20 @@ export function presentVehicle(v: VehicleWithRelations, include3d = true) {
     user_id: v.userId,
     is_primary: v.isPrimary,
     nickname: v.nickname,
-    make: v.make ? { id: v.make.id, name: v.make.name, logo_url: v.make.logoUrl } : null,
-    model: v.model ? { id: v.model.id, name: v.model.name } : null,
+    // A manual vehicle keeps the same shape with a null id: older apps read
+    // `name` and keep working, and `is_custom` tells newer ones there is no
+    // catalog row behind it (no exact-fit promise, no catalog picture).
+    make: v.make
+      ? { id: v.make.id, name: v.make.name, logo_url: v.make.logoUrl }
+      : v.customMakeName
+        ? { id: null, name: v.customMakeName, logo_url: null }
+        : null,
+    model: v.model
+      ? { id: v.model.id, name: v.model.name }
+      : v.customModelName
+        ? { id: null, name: v.customModelName }
+        : null,
+    is_custom: v.modelId === null,
     year: v.year,
     trim: v.trim ? { id: v.trim.id, name: v.trim.name } : null,
     engine: v.engine

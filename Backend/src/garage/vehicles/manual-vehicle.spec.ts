@@ -1,0 +1,260 @@
+import { BadRequestException } from '@nestjs/common';
+import { normalizeVehicleName, parseVehicleSource } from './manual-vehicle';
+import { VehiclesService } from './vehicles.service';
+import { presentVehicle } from './vehicle.presenter';
+import { currentYearInUzbekistan } from './vehicle-year';
+import { toVehicleFitContext, vehicleFitWhere } from '../../catalog/compatibility/vehicle-fitment';
+import { VehicleImagesService } from '../vehicle-images/vehicle-images.service';
+import { manualIdentityIds } from './manual-vehicle';
+
+const code = (fn: () => unknown) => {
+  try {
+    fn();
+  } catch (e) {
+    return ((e as BadRequestException).getResponse() as { code?: string }).code;
+  }
+  return null;
+};
+
+describe('normalizeVehicleName', () => {
+  it('trims, collapses whitespace and keeps Cyrillic or Latin names', () => {
+    expect(normalizeVehicleName('  Great   Wall  ', 'f')).toBe('Great Wall');
+    expect(normalizeVehicleName('Москвич 3', 'f')).toBe('Москвич 3');
+  });
+
+  it('refuses blank, symbol-only, control-character and over-long names', () => {
+    for (const bad of ['', '   ', '---', 'Ok\u0000', 'A‮B', 'x'.repeat(61), 42]) {
+      expect(code(() => normalizeVehicleName(bad, 'f'))).toBe('VEHICLE_MANUAL_NAME_INVALID');
+    }
+    expect(normalizeVehicleName('x'.repeat(60), 'f')).toHaveLength(60);
+  });
+});
+
+describe('parseVehicleSource', () => {
+  it('keeps the catalog flow unchanged', () => {
+    expect(parseVehicleSource({ make_id: 'chevrolet', model_id: 'cobalt' })).toEqual({
+      kind: 'catalog', makeId: 'chevrolet', modelId: 'cobalt',
+    });
+  });
+
+  it('accepts a listed make with a typed model, or a typed make and model', () => {
+    expect(parseVehicleSource({ make_id: 'kia', custom_model_name: ' EV9 ' })).toEqual({
+      kind: 'manual', makeId: 'kia', customMakeName: null, customModelName: 'EV9',
+    });
+    expect(parseVehicleSource({ custom_make_name: 'Zeekr', custom_model_name: '001' })).toEqual({
+      kind: 'manual', makeId: null, customMakeName: 'Zeekr', customModelName: '001',
+    });
+  });
+
+  it('refuses mixed or incomplete requests instead of guessing', () => {
+    for (const dto of [
+      {},
+      { make_id: 'kia' },
+      { make_id: 'kia', model_id: 'kia-k5', custom_model_name: 'K5' },
+      { make_id: 'kia', custom_make_name: 'Kia', custom_model_name: 'EV9' },
+      { custom_make_name: 'Zeekr' },
+      { custom_model_name: '001' },
+      { make_id: 'kia', custom_model_name: 'EV9', trim_id: 'x' },
+    ]) {
+      expect(code(() => parseVehicleSource(dto))).toBe('VEHICLE_SOURCE_INVALID');
+    }
+  });
+});
+
+function manualRow(over: Record<string, unknown> = {}) {
+  return {
+    id: 'veh_m', userId: 'usr_1', isPrimary: true, nickname: null,
+    makeId: null, modelId: null, customMakeName: 'Zeekr', customModelName: '001',
+    year: 2024, trimId: null, variantModelId: null, engineId: null, transmission: null,
+    drivetrain: null, colorHex: null, vin: null, licensePlate: null, registrationRegionCode: null,
+    mileageKm: null, fuelType: null, model3dAssetId: null, imageIdentityKey: null,
+    imageReviewReason: null, identityModelId: null, identityGenerationId: null,
+    identityFaceliftId: null, identityMarket: null, identityResolvedWith: null, deletedAt: null,
+    createdAt: new Date('2026-11-17T00:00:00Z'), updatedAt: new Date('2026-11-17T00:00:00Z'),
+    make: null, model: null, trim: null, engine: null, model3dAsset: null, imageIdentity: null,
+    ...over,
+  };
+}
+
+function setup(stored: Record<string, unknown> = manualRow(), budget?: any) {
+  const prisma: any = {
+    vehicleImageIdentity: { findUnique: jest.fn().mockResolvedValue(null) },
+    vehicleMake: {
+      findUnique: jest.fn(async ({ where }: any) =>
+        ({ kia: { id: 'kia', name: 'Kia', isActive: true }, lada: { id: 'lada', name: 'Lada', isActive: false } } as any)[where.id] ?? null),
+      findMany: jest.fn().mockResolvedValue([{ id: 'kia', name: 'Kia' }, { id: 'chevrolet', name: 'Chevrolet' }]),
+    },
+    vehicleModelRef: {
+      findMany: jest.fn(async ({ where }: any) => (where.makeId === 'kia' ? [{ id: 'kia-k5', name: 'K5' }] : [])),
+    },
+    vehicle: {
+      count: jest.fn().mockResolvedValue(0),
+      updateMany: jest.fn(),
+      create: jest.fn(async ({ data }: any) => manualRow({
+        ...data,
+        make: data.makeId === 'kia' ? { id: 'kia', name: 'Kia', logoUrl: null } : null,
+      })),
+      update: jest.fn(async ({ data }: any) => ({ ...stored, ...data })),
+      findUnique: jest.fn().mockResolvedValue(stored),
+    },
+  };
+  prisma.$transaction = jest.fn(async (fn: any) => fn(prisma));
+  const images: any = {
+    logger: { warn: jest.fn() },
+    planFor: jest.fn(),
+    stage: jest.fn(async (_tx: any, _id: string, plan: any) => ({ data: {}, outboxId: plan ? 'x' : null })),
+    kick: jest.fn(),
+  };
+  // The real manual plan, so these tests see the identity the pipeline gets.
+  images.planManual = VehicleImagesService.prototype.planManual.bind(images);
+  const service = new VehiclesService(
+    prisma,
+    { emitGarageEvent: jest.fn() } as any,
+    { emit: jest.fn() } as any,
+    images,
+    budget,
+  );
+  return { service, prisma, images };
+}
+
+const errorCode = async (p: Promise<unknown>) =>
+  p.then(() => null, (e: BadRequestException) => (e.getResponse() as { code?: string }).code ?? (e.getResponse() as any).message);
+
+describe('VehiclesService manual vehicles', () => {
+  it('saves a listed make with a typed model: no catalog model id, an unverified picture request', async () => {
+    const { service, prisma, images } = setup();
+    const v = await service.create('usr_1', { make_id: 'kia', custom_model_name: 'EV9', year: 2024 } as any);
+    expect(prisma.vehicle.create.mock.calls[0][0].data).toMatchObject({
+      makeId: 'kia', modelId: null, customMakeName: null, customModelName: 'EV9',
+    });
+    expect(images.planFor).not.toHaveBeenCalled();
+    const plan = images.stage.mock.calls[0][2];
+    expect(plan).toMatchObject({
+      kind: 'request',
+      verification: 'unverified',
+      identity: { makeId: 'kia', modelId: expect.stringMatching(/^custom:[0-9a-f]{16}$/), identityStatus: 'unverified' },
+      display: { manufacturer: 'Kia', model: 'EV9' },
+    });
+    expect(v).toMatchObject({ make: { id: 'kia', name: 'Kia' }, model: { id: null, name: 'EV9' }, is_custom: true });
+  });
+
+  it('saves a typed make and model with null catalog ids', async () => {
+    const { service, prisma } = setup();
+    const v = await service.create('usr_1', { custom_make_name: 'Zeekr', custom_model_name: '001', year: 2024 } as any);
+    expect(prisma.vehicle.create.mock.calls[0][0].data).toMatchObject({
+      makeId: null, modelId: null, customMakeName: 'Zeekr', customModelName: '001',
+    });
+    expect(v).toMatchObject({ make: { id: null, name: 'Zeekr', logo_url: null }, model: { id: null, name: '001' } });
+  });
+
+  it('refuses a year after this year for a manual vehicle', async () => {
+    const { service } = setup();
+    expect(await errorCode(service.create('usr_1', {
+      custom_make_name: 'Zeekr', custom_model_name: '001', year: currentYearInUzbekistan() + 1,
+    } as any))).toBe('VEHICLE_YEAR_IN_FUTURE');
+  });
+
+  it('points the owner to the catalog when the typed name is listed', async () => {
+    const { service } = setup();
+    expect(await errorCode(service.create('usr_1', { make_id: 'kia', custom_model_name: ' k5 ', year: 2022 } as any)))
+      .toBe('VEHICLE_IN_CATALOG');
+    expect(await errorCode(service.create('usr_1', { custom_make_name: 'KIA', custom_model_name: 'EV9', year: 2022 } as any)))
+      .toBe('VEHICLE_IN_CATALOG');
+  });
+
+  it('refuses an unknown or hidden catalog make', async () => {
+    const { service } = setup();
+    expect(await errorCode(service.create('usr_1', { make_id: 'nope', custom_model_name: 'X', year: 2020 } as any)))
+      .toBe('Unknown make_id');
+    expect(await errorCode(service.create('usr_1', { make_id: 'lada', custom_model_name: 'Iskra', year: 2025 } as any)))
+      .toBe('Unknown make_id');
+  });
+
+  it('renames a manual vehicle and refuses typed names on a catalog vehicle', async () => {
+    const manual = setup();
+    await manual.service.update('usr_1', 'veh_m', { custom_model_name: ' 001 FR ' } as any);
+    expect(manual.prisma.vehicle.update.mock.calls[0][0].data).toMatchObject({ customModelName: '001 FR' });
+
+    const catalog = setup(manualRow({ makeId: 'kia', modelId: 'kia-k5', customMakeName: null, customModelName: null }));
+    expect(await errorCode(catalog.service.update('usr_1', 'veh_m', { custom_model_name: 'K5' } as any)))
+      .toBe('VEHICLE_SOURCE_INVALID');
+  });
+});
+
+describe('manual vehicle image identity', () => {
+  it('is stable across case and spacing, so owners of the same typed car share one picture', () => {
+    const a = manualIdentityIds({ makeId: null, makeName: 'Zeekr', modelName: '001 FR' });
+    expect(manualIdentityIds({ makeId: null, makeName: ' ZEEKR', modelName: '001  fr' })).toEqual(a);
+    expect(a.makeId).toMatch(/^custom:[0-9a-f]{16}$/);
+    expect(manualIdentityIds({ makeId: null, makeName: 'Zeekr', modelName: '007' }).modelId).not.toBe(a.modelId);
+    // Cyrillic names get ASCII ids the pipeline accepts.
+    expect(manualIdentityIds({ makeId: null, makeName: 'Москвич', modelName: '3' }).modelId).toMatch(/^custom:[0-9a-f]{16}$/);
+  });
+
+  it('a rename re-plans the picture under the new name', async () => {
+    const { service, images } = setup();
+    await service.update('usr_1', 'veh_m', { custom_model_name: '007' } as any);
+    const plan = images.stage.mock.calls[0][2];
+    expect(plan).toMatchObject({ kind: 'request', display: { manufacturer: 'Zeekr', model: '007' } });
+  });
+});
+
+describe('manual vehicle image budget', () => {
+  const zeekr = { custom_make_name: 'Zeekr', custom_model_name: '001', year: 2024 } as any;
+
+  it('a new typed name takes one unit of the owner\'s and everyone\'s daily allowance', async () => {
+    const budget = { reserve: jest.fn().mockResolvedValue({ allowed: true }) };
+    const { service, images } = setup(manualRow(), budget);
+    await service.create('usr_1', zeekr);
+    expect(budget.reserve.mock.calls[0][0]).toEqual([
+      expect.objectContaining({ key: 'vehicle-image:manual:user:usr_1', limit: 3, windowSeconds: 86400 }),
+      expect.objectContaining({ key: 'vehicle-image:manual:all', limit: 100, windowSeconds: 86400 }),
+    ]);
+    expect(images.stage.mock.calls[0][2]).toMatchObject({ kind: 'request' });
+  });
+
+  it('past the allowance, or when Redis is down, the car saves on the placeholder with no generation', async () => {
+    for (const reserve of [
+      jest.fn().mockResolvedValue({ allowed: false, refusedBy: 'vehicle-image:manual:user:usr_1' }),
+      jest.fn().mockRejectedValue(new Error('redis down')),
+    ]) {
+      const { service, prisma, images } = setup(manualRow(), { reserve });
+      await service.create('usr_1', zeekr);
+      expect(prisma.vehicle.create).toHaveBeenCalled();
+      expect(images.stage.mock.calls[0][2]).toEqual({ kind: 'review', reason: 'manual_image_budget' });
+    }
+  });
+
+  it('a typed name someone already pictured or requested costs nothing', async () => {
+    const budget = { reserve: jest.fn() };
+    const { service, prisma, images } = setup(manualRow(), budget);
+    prisma.vehicleImageIdentity.findUnique.mockResolvedValue({ identityKey: 'k' });
+    await service.create('usr_1', zeekr);
+    expect(budget.reserve).not.toHaveBeenCalled();
+    expect(images.stage.mock.calls[0][2]).toMatchObject({ kind: 'request' });
+  });
+});
+
+describe('manual vehicles in reads and fitment', () => {
+  it('a catalog vehicle reads exactly as before, with is_custom false', () => {
+    const v = presentVehicle(manualRow({
+      makeId: 'kia', modelId: 'kia-k5', customMakeName: null, customModelName: null,
+      make: { id: 'kia', name: 'Kia', logoUrl: null }, model: { id: 'kia-k5', name: 'K5', variants: [] },
+    }) as any);
+    expect(v).toMatchObject({ make: { id: 'kia', name: 'Kia' }, model: { id: 'kia-k5', name: 'K5' }, is_custom: false });
+  });
+
+  it('never matches a part on the typed model name: no curated or per-model row, so no exact fit', () => {
+    const typedMakeAndModel = toVehicleFitContext(manualRow() as any);
+    expect(typedMakeAndModel).toMatchObject({ modelId: null, makeName: null, modelName: null });
+    // Only universal parts are listed for a typed make.
+    expect(vehicleFitWhere(typedMakeAndModel)).toEqual({ OR: [{ isUniversal: true }] });
+
+    const listedMake = toVehicleFitContext(manualRow({ makeId: 'kia', make: { name: 'Kia' } }) as any);
+    expect(listedMake).toMatchObject({ modelId: null, makeName: 'Kia', modelName: null });
+    // Universal plus make-wide rows; no per-model legacy row (they need a model name).
+    const where = vehicleFitWhere(listedMake) as any;
+    expect(JSON.stringify(where)).not.toContain('modelName');
+    expect(JSON.stringify(where)).toContain('makeFits');
+  });
+});

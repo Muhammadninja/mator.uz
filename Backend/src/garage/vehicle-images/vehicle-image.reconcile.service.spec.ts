@@ -44,11 +44,13 @@ function setup(rows: Record<string, unknown>[], plan: unknown) {
 }
 
 describe('VehicleImageReconcileService', () => {
-  it('only looks at live vehicles resolved with another version', async () => {
+  it('only looks at live catalog vehicles resolved with another version', async () => {
     const { svc, prisma } = setup([], null);
     await svc.run({ apply: false });
     expect(prisma.vehicle.findMany.mock.calls[0][0].where).toEqual({
       deletedAt: null,
+      // Manual vehicles have no catalog row to picture.
+      modelId: { not: null },
       id: { gt: '' },
       OR: [{ identityResolvedWith: null }, { identityResolvedWith: { not: currentIdentityStamp() } }],
     });
