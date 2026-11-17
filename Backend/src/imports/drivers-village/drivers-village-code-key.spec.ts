@@ -4,6 +4,7 @@
  * drivers-village-code-key-import.spec.ts.
  */
 import {
+  code1cAdvisory,
   code1cIssue,
   eightDigitKey,
   keyProvesSamePart,
@@ -49,30 +50,70 @@ describe('code1cIssue — the one code_1c rule (importer and Telegram captions)'
       expect([code, code1cIssue(code)]).toEqual([code, null]);
   });
 
-  it('names why a code is refused', () => {
+  it('refuses only what cannot be stored: an empty code or one over 64 characters', () => {
     const reason = (code: string | null) => code1cIssue(code)?.code;
     expect(reason(null)).toBe('empty_code_1c');
     expect(reason('')).toBe('empty_code_1c');
-    // Irregular whitespace is never collapsed into another code.
-    expect(reason('96273708  GMB')).toBe('invalid_code_1c');
-    expect(reason('847GPUMPT   90231')).toBe('invalid_code_1c');
-    expect(reason('SCT\tSB 061-0868')).toBe('invalid_code_1c');
-    expect(reason('SCT\u00a0SB 061-0868')).toBe('invalid_code_1c');
-    // Other punctuation and unbalanced parentheses.
-    expect(reason('RXA06820 ,')).toBe('invalid_code_1c');
-    expect(reason('Шина 195\\60 R14')).toBe('invalid_code_1c');
-    expect(reason('96273708PMC(EU')).toBe('invalid_code_1c');
     expect(reason('9'.repeat(65))).toBe('invalid_code_1c');
-    // A product name in the code column is no article.
+    expect(reason('9'.repeat(64))).toBeUndefined();
+  });
+
+  it('accepts ANY other code — short, Cyrillic, symbols, irregular spacing, names, placeholders (owner decision 2026-11-17)', () => {
+    for (const code of [
+      '1',
+      'B',
+      '3333',
+      '2353',
+      'Б',
+      '96273708  GMB',
+      'SCT\tSB 061-0868',
+      'SCT\u00a0SB 061-0868',
+      'RXA06820 ,',
+      'Шина 195\\60 R14',
+      '96273708PMC(EU',
+      'Фильтр топливного насоса',
+      'Castrol EDGE',
+      '???',
+    ])
+      expect([code, code1cIssue(code)]).toEqual([code, null]);
+  });
+});
+
+describe('code1cAdvisory — what is imported but reported for review', () => {
+  it('names why a code does not look like an article', () => {
+    const reason = (code: string) => code1cAdvisory(code)?.code;
+    // Irregular whitespace is never collapsed into another code.
+    expect(reason('96273708  GMB')).toBe('unusual_code_1c');
+    expect(reason('847GPUMPT   90231')).toBe('unusual_code_1c');
+    expect(reason('SCT\tSB 061-0868')).toBe('unusual_code_1c');
+    expect(reason('SCT\u00a0SB 061-0868')).toBe('unusual_code_1c');
+    // Other punctuation and unbalanced parentheses.
+    expect(reason('RXA06820 ,')).toBe('unusual_code_1c');
+    expect(reason('Шина 195\\60 R14')).toBe('unusual_code_1c');
+    expect(reason('96273708PMC(EU')).toBe('unusual_code_1c');
+    // A product name in the code column.
     expect(reason('Фильтр топливного насоса')).toBe('name_as_code_1c');
     expect(reason('Аккумуляторные батареи марки KLAS N')).toBe(
       'name_as_code_1c',
     );
     expect(reason('Шина 235/55/R19')).toBe('name_as_code_1c');
     expect(reason('Castrol EDGE')).toBe('name_as_code_1c');
-    // Placeholders: one character repeated — a rule of its own.
+    // Placeholders: one character repeated.
+    expect(reason('1')).toBe('placeholder_code_1c');
     expect(reason('3333')).toBe('placeholder_code_1c');
     expect(reason('3333333')).toBe('placeholder_code_1c');
+  });
+
+  it('has nothing to say about an ordinary article', () => {
+    for (const code of [
+      '96273708',
+      '96273708 GMB',
+      'PFA 235-',
+      '2353',
+      '_БП-01074259',
+      '94583379S&T',
+    ])
+      expect([code, code1cAdvisory(code)]).toEqual([code, null]);
   });
 });
 

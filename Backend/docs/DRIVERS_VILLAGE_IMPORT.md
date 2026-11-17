@@ -141,7 +141,7 @@ the way numbers are written follows from it:
 | `name` | yes | `products.title`, whitespace collapsed, text unchanged. |
 | `gm_number` | no | One all-digit value → `products.gm_numbers`. |
 | `manufacturer_part_number`, `oem_numbers` | no | **Never imported**, whatever they hold — the part number is `code_1c`. These cells carry unreliable values (brand and model names such as `SKODA`, `Onix`). Listed under `headers.notImported`; a file may carry both. |
-| `quantity` | no | The on-hand count: whole number → `stocks.quantity` (integer), read in the file's number format: `2,268` in the `;` export is 2268. A fractional (`12.5`, `1,234.5`) or negative (`-3`) value is rejected, never rounded. **No column or an empty cell** = not given: a new stock gets the column default `stocks.quantity DEFAULT 1`, an existing stock keeps its count. A repeated `code_1c` whose rows state different quantities gives no confirmed count either (see "Repeated `code_1c`"). |
+| `quantity` | no | The on-hand count: whole number → `stocks.quantity` (integer), read in the file's number format: `2,268` in the `;` export is 2268. A fractional value (`12.5`, `124,65` л) is **rounded down** to whole units and reported (`quantity_rounded_down`, owner decision 2026-11-17) — never up; a negative (`-3`) or malformed one rejects the row. **No column or an empty cell** = not given: a new stock gets the column default `stocks.quantity DEFAULT 1`, an existing stock keeps its count. A repeated `code_1c` whose rows state different quantities gives no confirmed count either (see "Repeated `code_1c`"). |
 | `unit` | yes | `шт.`/`шт`/`штук` → `PCS`, `л`/`литр` → `L` → `stocks.unit`. Anything else (`1`, `комп.`) is rejected. |
 | `price` | yes | Price for one unit, **цена с учётом НДС** (the price the buyer pays, VAT included) → `stocks.price_uzs` through the price rule (see Price below). |
 | `vehicle_make`, `vehicle_model` | — | See §4. |
@@ -154,33 +154,32 @@ read.
 
 ### Is `code_1c` an article?
 
-Profiled on the three real exports (2026-09-19 … 2026-10-18, ~4 300 rows each),
-`code_1c` holds 8-digit GM-style numbers, 10- and 13-digit numbers,
-dash-separated articles (`5Q0-615-301-F`), 1C codes (`_00-00001431`,
-`_БП-01068170`; a trailing `-`/`--` marks a separate 1C position) and numbers
-with suffixes. Numeric codes are valid as such, and so are articles of
-letters, digits, hyphens and **single spaces** (`SCT SB 061-0868`,
-`K0000049 H6`, `PFA 235`), with `&`, `+` and balanced parentheses inside a
-token (`94583379S&T`, `96273708PMC(EU)`, `4260360943454 12+`) — rule
-`code1cIssue` in `drivers-village-code-key.ts`, shared with the Telegram
-photo captions. Every code accepted before 2026-10-19 stays accepted. Rejected,
-never altered (so two different codes never become one):
+**Any code 1C holds is imported** (owner decision 2026-11-17): short (`2353`,
+`1`), numeric, Latin, Cyrillic (`_БП-01068170`, `АФГ94580136`), with any
+symbol or spacing — stored verbatim, trimmed only, never case-folded or
+collapsed, so two different codes never become one. Rule `code1cIssue` in
+`drivers-village-code-key.ts`, shared with the Telegram photo captions,
+refuses only what cannot be stored: an **empty** code (`empty_code_1c`) or one
+**longer than 64 characters** (`invalid_code_1c`, the `stocks.source_code`
+column).
+
+What the rule refused until 2026-11-17 is now a **warning** in the report
+(`code1cAdvisory`), for review in 1C:
 
 - irregular whitespace — two spaces, a tab, a no-break space
-  (`847GPUMPT   90231`) — and any other symbol (`RXA06820 ,`, `Шина 195\60`):
-  `invalid_code_1c`;
+  (`847GPUMPT   90231`) — or a symbol outside `- . / _ & + ( )`
+  (`RXA06820 ,`, `Шина 195\60`): `unusual_code_1c`;
 - a product **name** in the code column — several words with a Russian word
-  (`Фильтр топливного насоса`, `Аккумуляторные батареи марки KLAS N`) or
-  without any digit (`Castrol EDGE`): `name_as_code_1c`. Trade names with a
-  digit (`Mobil Super 3000`, `Gentra R3`) cannot be told from articles and are
-  accepted — review them in 1C.
+  (`Фильтр топливного насоса`) or without any digit (`Castrol EDGE`):
+  `name_as_code_1c`;
+- one character repeated (`1`, `B`, `3333`): `placeholder_code_1c`. In the
+  exports such codes are shared by unrelated goods (`1`: 22 rows, 22 different
+  names). All rows of one code are **one** position (see "Repeated
+  `code_1c`"): it takes the name of the row at the highest price — fix such
+  codes in 1C.
 
-Two more rules guard against values that are not articles:
+One file-level guard stays:
 
-- **Placeholders** — a code that is one character repeated (`1`, `B`, `3333`,
-  `222222`) is rejected (`placeholder_code_1c`). In the exports these codes are
-  shared by unrelated goods (`1`: 22 rows, 22 different names; `3333`: 10 rows,
-  7 names); importing them would merge different parts into one position.
 - **Row numbers** — if at least half of the rows (and at least 10) carry
   distinct whole numbers no larger than the number of rows (`1…1515` in any
   order), the column holds row numbers and the **whole file is refused**:
@@ -302,7 +301,7 @@ the vehicles of a stored position; the classification import adds to them,
 | make + model(s) | specific models | `part_models` rows |
 | make, no model | every model of that make | one `part_makes` row, `is_universal = false` |
 | neither | **no information** | no links; `is_universal` stays false — an empty cell never makes a part universal |
-| model without make | invalid | row rejected |
+| model without make | invalid | no links; reported (`invalid_vehicle_combination`), the row is imported |
 
 `vehicle_model` lists every model the part fits: it is split on `,` (the
 export's separator) or `;`, trimmed, blanks dropped, duplicates removed. The
@@ -314,9 +313,15 @@ Codes resolve to the canonical names the app filters on, deterministically:
 first the explicit table in `drivers-village-vehicle.mapper.ts` (a space and a
 `-` are the same separator there: `CAPTIVA 5` = `CAPTIVA-5`), then an exact
 alias in `src/ai/vehicle-catalog.ts`, as written (`H-1`) or after `-` → space
-(`NEXIA-3` → `Nexia 3`). Unknown codes are rejected, never guessed — e.g.
-`TICO` under `CHEVROLET` (Tico is Daewoo's: set `vehicle_make` to `DAEWOO`) or
-a bare `NEXIA` (no generation). **Review the table:** generation codes
+(`NEXIA-3` → `Nexia 3`). Unknown codes are never guessed — e.g. `TICO` under
+`CHEVROLET` (Tico is Daewoo's: set `vehicle_make` to `DAEWOO`) or a bare
+`NEXIA` (no generation) — but they **never reject the row** (owner decision
+2026-11-17): an unknown make (1C often puts the model there: `COBALT`,
+`EQUINOX`) links no vehicle (`unknown_vehicle_make`), an unknown model is left
+out while the models that resolved are kept (`unknown_vehicle_model`; all
+unknown → no link, never widened to the whole make). The price and quantity
+still sync, and a new position is created; it stays invisible to buyers until
+it has a photo, and is classified as usual. **Review the table:** generation codes
 (`DAMAS-2`, `DAMAS-3-MOVE`, `MALIBU-2`, `CAPTIVA-5`, `TRACKER-1`, `TRACKER-2`,
 `TAHOE-2`) collapse into the base model because the buyer catalog has no
 generation level, and `Epica`, `Tacuma`, `Nexia 1`, `Monza` (Chevrolet),

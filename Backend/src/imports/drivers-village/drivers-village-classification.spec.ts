@@ -533,16 +533,18 @@ describe('Driver’s Village classification — safety', () => {
       file({ code: 'NO-SUCH-1' }, { code: '3333' }, { code: '' }),
     );
 
+    // Any non-empty code is a code (owner decision 2026-11-17): "3333" is
+    // looked up like any other, only the empty one is unusable.
     expect(report.positions).toEqual([
       expect.objectContaining({ code1c: 'NO-SUCH-1', outcome: 'not_found' }),
+      expect.objectContaining({ code1c: '3333', outcome: 'not_found' }),
     ]);
     expect(report.rejected.map((r) => r.issues[0].code)).toEqual([
-      'placeholder_code_1c',
       'empty_code_1c',
     ]);
     expect(report.summary).toMatchObject({
-      positionsNotFound: 1,
-      rejectedRows: 2,
+      positionsNotFound: 2,
+      rejectedRows: 1,
     });
     expect(h.db.state.stocks).toHaveLength(1);
   });

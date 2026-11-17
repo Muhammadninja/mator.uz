@@ -183,7 +183,7 @@ describe('Driver’s Village sync — codes identify positions exactly', () => {
     expect(h.db.state.stocks).toHaveLength(1);
   });
 
-  it('placeholders and an empty code are refused by their own rules; nothing is written', async () => {
+  it('only an empty code is refused; a placeholder-looking code is imported and reported (owner decision 2026-11-17)', async () => {
     const h = importHarness();
     const report = await h.run([
       { code: '3333' },
@@ -194,17 +194,23 @@ describe('Driver’s Village sync — codes identify positions exactly', () => {
     const reasons = report.rows.map((r) =>
       r.issues.filter((i) => i.severity === 'error').map((i) => i.code),
     );
-    expect(reasons).toEqual([
-      ['placeholder_code_1c'],
-      ['placeholder_code_1c'],
-      ['empty_code_1c'],
-      ['empty_code_1c'],
+    expect(reasons).toEqual([[], [], ['empty_code_1c'], ['empty_code_1c']]);
+    expect(
+      report.rows
+        .slice(0, 2)
+        .map(
+          (r) =>
+            r.issues.find((i) => i.code === 'placeholder_code_1c')?.severity,
+        ),
+    ).toEqual(['warning', 'warning']);
+    expect(report.summary.rejectedRows).toBe(2);
+    expect(h.db.state.stocks.map((s) => s.sourceCode).sort()).toEqual([
+      '3333',
+      '3333333',
     ]);
-    expect(report.summary.rejectedRows).toBe(4);
-    expect(h.db.state.stocks).toHaveLength(0);
   });
 
-  it('a product name or a malformed code is refused with its reason', async () => {
+  it('a product name or an unusual code is imported verbatim, with its reason as a warning', async () => {
     const h = importHarness();
     const report = await h.run([
       { code: 'Фильтр топливного насоса' },
@@ -212,11 +218,18 @@ describe('Driver’s Village sync — codes identify positions exactly', () => {
       { code: 'RXA06820 ,' },
     ]);
     expect(
-      report.rows.map(
-        (r) => r.issues.find((i) => i.severity === 'error')!.code,
-      ),
-    ).toEqual(['name_as_code_1c', 'invalid_code_1c', 'invalid_code_1c']);
-    expect(h.db.state.stocks).toHaveLength(0);
+      report.rows.map((r) => [
+        r.issues.some((i) => i.severity === 'error'),
+        r.issues.find((i) => /code_1c$/.test(i.code))?.code,
+      ]),
+    ).toEqual([
+      [false, 'name_as_code_1c'],
+      [false, 'unusual_code_1c'],
+      [false, 'unusual_code_1c'],
+    ]);
+    expect(h.db.state.stocks.map((s) => s.sourceCode).sort()).toEqual(
+      ['847GPUMPT   90231', 'RXA06820 ,', 'Фильтр топливного насоса'].sort(),
+    );
   });
 
   it('codes that normalize alike never merge: "PFA 235", "PFA 235-", "PFA-235" are three positions, the shared search number reported', async () => {

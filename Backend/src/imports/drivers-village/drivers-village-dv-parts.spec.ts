@@ -125,9 +125,9 @@ describe('Driver’s Village — the 1C ";" export (anonymized dv_parts_2026_10_
     );
     expect(report.summary).toMatchObject({
       totalRows: 31,
-      rowsToCreate: 15,
-      rowsMerged: 4,
-      rejectedRows: 12,
+      rowsToCreate: 18,
+      rowsMerged: 5,
+      rejectedRows: 8,
     });
     expect(written()).toEqual({
       '96273708': ['123456', 12],
@@ -147,6 +147,12 @@ describe('Driver’s Village — the 1C ";" export (anonymized dv_parts_2026_10_
       '96182221': ['98000', 24],
       '96328215': ['2500', 1234],
       '96399999': ['1234567', 3],
+      // Owner decision 2026-11-17: a fractional count is rounded down (12.5 л
+      // → 12, 1,234.5 → 1234) and any code is imported — "3333" is one
+      // position at its highest price, its differing quantities give none.
+      '4607012345678': ['95000', 12],
+      '96328214': ['1500', 1234],
+      '3333': ['75000', 1],
     });
   });
 
@@ -159,16 +165,27 @@ describe('Driver’s Village — the 1C ";" export (anonymized dv_parts_2026_10_
         .issues.filter((i) => i.severity === 'error')
         .map((i) => i.code);
 
-    expect(errors(8)).toEqual(['invalid_quantity']); // 12.5 л
+    const codes = (line: number) =>
+      report.rows.find((r) => r.line === line)!.issues.map((i) => i.code);
+
+    expect(errors(8)).toEqual([]); // 12.5 л → 12, reported
+    expect(codes(8)).toContain('quantity_rounded_down');
     expect(errors(9)).toEqual(['invalid_quantity']); // -3
     expect(errors(10)).toEqual(['invalid_price']); // 0
     expect(errors(13)).toEqual([]); // "96810038S&T" is an article: accepted
+    // "1" and "3333" are imported (owner decision 2026-11-17), reported as
+    // possible placeholders; "1" has no valid price on any row.
     for (const line of [14, 15, 16, 17, 18])
-      expect(errors(line)).toContain('placeholder_code_1c'); // "1", "3333"
+      expect(codes(line)).toContain('placeholder_code_1c');
+    for (const line of [14, 15, 16])
+      expect(errors(line)).toEqual(['invalid_price', 'no_valid_price']);
+    expect(errors(17)).toEqual([]);
+    expect(errors(18)).toEqual([]);
     expect(errors(26)).toEqual(['unknown_unit']); // unit "1"
     expect(errors(27)).toEqual(['unknown_unit']); // "комп."
     expect(errors(29)).toEqual(['invalid_price']); // "12,34" — not read as 12.34 or 1234
-    expect(errors(30)).toEqual(['invalid_quantity']); // 1,234.5
+    expect(errors(30)).toEqual([]); // 1,234.5 → 1234, reported
+    expect(codes(30)).toContain('quantity_rounded_down');
   });
 
   it('"96273708 GMB" next to "96273708": two positions sharing the 8-digit key, reported, never merged', async () => {
@@ -259,7 +276,7 @@ describe('Driver’s Village — the 1C ";" export (anonymized dv_parts_2026_10_
     expect(again.summary).toMatchObject({
       rowsToCreate: 0,
       rowsToUpdate: 0,
-      rowsUnchanged: 15,
+      rowsUnchanged: 18,
     });
     expect(again.summary.written).toMatchObject({ created: 0, updated: 0 });
     expect(JSON.stringify(db.state)).toBe(before);
@@ -303,7 +320,7 @@ describe('Driver’s Village — a repeated code_1c, in both source formats', ()
       ...GROUP,
       { code: '95015324', price: '1100000', qty: '2268' },
       { code: '96535102', price: '140', qty: '100' },
-      { code: '96328214', price: '1500', qty: '12.5' }, // fractional: rejected in both
+      { code: '96328214', price: '1500', qty: '12.5' }, // fractional: rounded down in both
     ];
     const semicolon = setup();
     const tab = setup();
@@ -313,6 +330,7 @@ describe('Driver’s Village — a repeated code_1c, in both source formats', ()
       'D-200': ['900000', 1],
       '95015324': ['1100000', 2268],
       '96535102': ['140000', 100],
+      '96328214': ['1500', 12],
     });
     expect(tab.written()).toEqual(semicolon.written());
   });
