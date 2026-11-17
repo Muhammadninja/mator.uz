@@ -1086,8 +1086,16 @@ model Vehicle {
   userId                 String               @map("user_id") @db.Uuid
   isPrimary              Boolean              @default(false) @map("is_primary")
   nickname               String?              @db.VarChar(120)
-  makeId                 String               @map("make_id") @db.VarChar(64)
-  modelId                String               @map("model_id") @db.VarChar(64)
+  /// Catalog make; null only when the owner typed a make the catalog lacks.
+  makeId                 String?              @map("make_id") @db.VarChar(64)
+  /// Catalog model; null only for a manually entered vehicle (custom_model_name).
+  modelId                String?              @map("model_id") @db.VarChar(64)
+  /// Owner-typed names when the catalog has no such make/model. A row is either
+  /// fully catalog (make_id + model_id) or manual: custom_model_name with a
+  /// catalog make_id or a custom_make_name (CHECK vehicles_make_model_source).
+  /// Manual vehicles never get an exact-fit promise or a vehicle image.
+  customMakeName         String?              @map("custom_make_name") @db.VarChar(60)
+  customModelName        String?              @map("custom_model_name") @db.VarChar(60)
   year                   Int
   trimId                 String?              @map("trim_id") @db.VarChar(64)
   engineId               String?              @map("engine_id") @db.VarChar(64)
@@ -1130,8 +1138,8 @@ model Vehicle {
   updatedAt              DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   user          AppUser               @relation(fields: [userId], references: [id], onDelete: Cascade)
-  make          VehicleMake           @relation(fields: [makeId], references: [id], onDelete: Restrict)
-  model         VehicleModelRef       @relation("VehicleModel", fields: [modelId], references: [id], onDelete: Restrict)
+  make          VehicleMake?          @relation(fields: [makeId], references: [id], onDelete: Restrict)
+  model         VehicleModelRef?      @relation("VehicleModel", fields: [modelId], references: [id], onDelete: Restrict)
   variantModel  VehicleModelRef?      @relation("VehicleVariantModel", fields: [variantModelId], references: [id], onDelete: SetNull)
   trim          VehicleTrim?          @relation(fields: [trimId], references: [id], onDelete: SetNull)
   engine        VehicleEngine?        @relation(fields: [engineId], references: [id], onDelete: SetNull)

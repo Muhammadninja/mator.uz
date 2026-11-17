@@ -179,10 +179,18 @@ export function presentAdminVehicle(v: VehicleWithRelations) {
     userId: v.userId,
     isPrimary: v.isPrimary,
     nickname: v.nickname,
+    // Manual vehicles: the owner's typed names with a null id.
     make: v.make
       ? { id: v.make.id, name: v.make.name, logoUrl: v.make.logoUrl }
-      : null,
-    model: v.model ? { id: v.model.id, name: v.model.name } : null,
+      : v.customMakeName
+        ? { id: null, name: v.customMakeName, logoUrl: null }
+        : null,
+    model: v.model
+      ? { id: v.model.id, name: v.model.name }
+      : v.customModelName
+        ? { id: null, name: v.customModelName }
+        : null,
+    isCustom: v.modelId === null,
     year: v.year,
     trim: v.trim ? { id: v.trim.id, name: v.trim.name } : null,
     engine: v.engine

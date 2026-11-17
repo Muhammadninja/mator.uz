@@ -45,4 +45,16 @@ export class UpdateVehicleDto {
   @IsString()
   @MaxLength(64)
   variant_model_id?: string | null;
+
+  /** Rename a manual vehicle's typed make (only when it has no catalog make). */
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  custom_make_name?: string;
+
+  /** Rename a manual vehicle's typed model (manual vehicles only). */
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  custom_model_name?: string;
 }

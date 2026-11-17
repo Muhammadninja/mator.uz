@@ -208,11 +208,12 @@ export class AiChatService {
     if (!context.userId || !context.selectedVehicleId) return null;
     const row = await this.prisma.vehicle.findFirst({
       where: { id: context.selectedVehicleId, userId: context.userId, deletedAt: null },
-      select: { ...VEHICLE_FIT_SELECT, id: true, vin: true },
+      select: { ...VEHICLE_FIT_SELECT, id: true, vin: true, customMakeName: true, customModelName: true },
     });
     if (!row) return null;
-    const make = row.make?.name ?? null;
-    const model = row.model?.name ?? null;
+    // A manual vehicle has the owner's typed names; fitment still reads catalog rows only.
+    const make = row.make?.name ?? row.customMakeName ?? null;
+    const model = row.model?.name ?? row.customModelName ?? null;
     return {
       id: row.id,
       label: [make, model, row.year].filter(Boolean).join(' '),

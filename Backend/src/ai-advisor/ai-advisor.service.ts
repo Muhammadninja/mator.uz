@@ -279,10 +279,10 @@ export class AiAdvisorService {
   ): Promise<VehicleContext | null> {
     if (!vehicle) return null;
     const [make, model, engine] = await Promise.all([
-      this.prisma.vehicleMake.findUnique({ where: { id: vehicle.makeId } }),
-      this.prisma.vehicleModelRef.findUnique({
-        where: { id: vehicle.modelId },
-      }),
+      vehicle.makeId ? this.prisma.vehicleMake.findUnique({ where: { id: vehicle.makeId } }) : null,
+      vehicle.modelId
+        ? this.prisma.vehicleModelRef.findUnique({ where: { id: vehicle.modelId } })
+        : null,
       vehicle.engineId
         ? this.prisma.vehicleEngine.findUnique({
             where: { id: vehicle.engineId },
@@ -291,8 +291,9 @@ export class AiAdvisorService {
     ]);
     return {
       vehicle_id: vehicle.id,
-      make: make?.name ?? '',
-      model: model?.name ?? '',
+      // A manual vehicle has the owner's typed names instead of catalog rows.
+      make: make?.name ?? vehicle.customMakeName ?? '',
+      model: model?.name ?? vehicle.customModelName ?? '',
       year: vehicle.year,
       engine: engine?.name ?? null,
     };
