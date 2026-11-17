@@ -14,13 +14,13 @@ import {
 describe('OTP SMS templates', () => {
   it('renders the approved body verbatim in every language', () => {
     expect(renderOtpMessage('123456', 'en')).toBe(
-      'Mator app: verification code for login 123456. Do not share it with anyone. Valid for 5 minutes.',
+      'Mator app: verification code for login 123456. Do not share it with anyone. Valid for 5 minutes.\n\n@mator.uz #123456',
     );
     expect(renderOtpMessage('123456', 'ru')).toBe(
-      'Prilojeniye Mator: kod podtverzhdeniya dlya vhoda 123456. Nikomu ne peredavayte. Srok deystviya 5 minut.',
+      'Prilojeniye Mator: kod podtverzhdeniya dlya vhoda 123456. Nikomu ne peredavayte. Srok deystviya 5 minut.\n\n@mator.uz #123456',
     );
     expect(renderOtpMessage('123456', 'uz')).toBe(
-      'Mator ilovasi: tasdiqlash kodingiz 123456. Hech kimga bermang. Amal qilish muddati 5 daqiqa.',
+      'Mator ilovasi: tasdiqlash kodingiz 123456. Hech kimga bermang. Amal qilish muddati 5 daqiqa.\n\n@mator.uz #123456',
     );
   });
 
@@ -36,8 +36,15 @@ describe('OTP SMS templates', () => {
     // doubles the billed parts. This is the regression guard for that decision.
     for (const lang of SMS_LANGS) {
       const body = renderOtpMessage('123456', lang);
-      expect(body).toMatch(/^[\x20-\x7E]+$/);
+      expect(body).toMatch(/^[\x20-\x7E\n]+$/);
       expect(body.length).toBeLessThanOrEqual(160);
+    }
+  });
+
+  it('ends with the domain-bound line iOS reads for AutoFill', () => {
+    for (const lang of SMS_LANGS) {
+      const lines = renderOtpMessage('483917', lang).split('\n');
+      expect(lines.at(-1)).toBe('@mator.uz #483917');
     }
   });
 });
