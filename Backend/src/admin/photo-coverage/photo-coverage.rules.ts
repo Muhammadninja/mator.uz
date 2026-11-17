@@ -99,6 +99,17 @@ export function displayablePhotos(
   return (images ?? []).filter(isDisplayablePhotoUrl);
 }
 
+/**
+ * The Stock id behind a projected catalog part (`part_stock_<stocks.id>`), or
+ * null for a part that has no such id (a seeded part) or an id out of INT range.
+ */
+export function stockIdOfPartId(partId: string): number | null {
+  const m = /^part_stock_(\d+)$/.exec(partId);
+  if (!m) return null;
+  const id = Number(m[1]);
+  return Number.isSafeInteger(id) && id <= 2_147_483_647 ? id : null;
+}
+
 /** Share of `withPhotos` in `total`, in percent with one decimal; null for 0 parts. */
 export function coveragePct(withPhotos: number, total: number): number | null {
   if (total <= 0) return null;

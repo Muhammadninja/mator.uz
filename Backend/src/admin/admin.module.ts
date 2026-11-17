@@ -24,6 +24,7 @@ import { AdminCategoriesController } from './categories/admin-categories.control
 import { AdminProductsController } from './categories/admin-products.controller';
 import { AdminInventoryService } from './inventory/admin-inventory.service';
 import { AdminInventoryController } from './inventory/admin-inventory.controller';
+import { AdminPartPhotosService } from './photo-coverage/admin-part-photos.service';
 import { AdminPhotoCoverageService } from './photo-coverage/admin-photo-coverage.service';
 import { AdminReservationsService } from './reservations/admin-reservations.service';
 import { AdminReservationsController } from './reservations/admin-reservations.controller';
@@ -81,6 +82,7 @@ import { AdminVehicleImagesController } from './vehicle-images/admin-vehicle-ima
     AdminCategoryTransferService,
     AdminInventoryService,
     AdminPhotoCoverageService,
+    AdminPartPhotosService,
     AdminReservationsService,
     AdminProductsRatingService,
     AdminVehicleImagesService,

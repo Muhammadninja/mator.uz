@@ -23,10 +23,19 @@ export class CloudinaryService implements OnModuleInit {
     });
   }
 
-  async uploadBuffer(buffer: Buffer, folder: string = CloudinaryFolder.PRODUCTS): Promise<UploadedImage> {
+  /**
+   * Upload an image. `format` is what Cloudinary stores and serves: PNG by default
+   * (every existing caller), JPEG for a photograph, where PNG would only make the
+   * file several times larger.
+   */
+  async uploadBuffer(
+    buffer: Buffer,
+    folder: string = CloudinaryFolder.PRODUCTS,
+    format: 'png' | 'jpg' = 'png',
+  ): Promise<UploadedImage> {
     return new Promise((resolve, reject) => {
       cloudinary.uploader
-        .upload_stream({ folder, resource_type: 'image', format: 'png' }, (err, result: UploadApiResponse) => {
+        .upload_stream({ folder, resource_type: 'image', format }, (err, result: UploadApiResponse) => {
           if (err) return reject(new Error(`Cloudinary: ${err.message ?? JSON.stringify(err)}`));
           if (!result) return reject(new Error('Cloudinary: no result returned'));
           resolve({ url: result.secure_url, publicId: result.public_id });
