@@ -10,7 +10,8 @@
  * it (possibly a code renamed in 1C — an operator decides, the import never
  * merges) and the OEM search index of a new position. Pure: no I/O.
  *
- * Also home of the one validity rule of a code_1c (code1cIssue) and of the key
+ * Also home of the one validity rule of a code_1c (code1cIssue), its advisory
+ * warnings (code1cAdvisory) and of the key
  * evidence rule (keyProvesSamePart), both shared with the Telegram photo flow.
  */
 import { normalizeOem } from '../../common/normalize-oem.util';
@@ -46,55 +47,60 @@ export function keyProvesSamePart(a: string, b: string): boolean {
 
 /** Why a code_1c cannot identify a position (see code1cIssue). */
 export interface Code1cIssue {
-  code:
-    | 'empty_code_1c'
-    | 'invalid_code_1c'
-    | 'name_as_code_1c'
-    | 'placeholder_code_1c';
+  code: 'empty_code_1c' | 'invalid_code_1c';
   message: string;
 }
 
-const invalid = (message: string): Code1cIssue => ({
-  code: 'invalid_code_1c',
-  message,
-});
+/**
+ * Something unusual about a code_1c that is still imported (see
+ * code1cAdvisory): reported so it can be reviewed in 1C, never a block.
+ */
+export interface Code1cAdvisory {
+  code: 'unusual_code_1c' | 'name_as_code_1c' | 'placeholder_code_1c';
+  message: string;
+}
 
 /**
  * The one validity rule of a code_1c, or null when the code is valid. The code
  * is the position's identity and is stored verbatim (trimmed only): nothing is
  * case-folded, collapsed or stripped, so two different codes never become one.
- * Valid:
- *   • every code accepted before: one token of letters, digits and `._/-`
- *     (`00-00067316`, `_БП-01074259`, `93186310-` — a trailing dash marks a
- *     separate 1C position), or an 8-digit article and a marker split by
- *     single spaces (`96273708 GMB`);
- *   • an article of tokens split by single spaces — `SCT SB 061-0868`,
- *     `K0000049 H6`, `PFA 235` — that holds a digit and no Russian word (a
- *     value like `Фильтр топливного насоса` or `Castrol EDGE` is a product
- *     name in the code column, not an article);
- *   • `&`, `+` and balanced parentheses inside a token: `94583379S&T`,
- *     `96273708PMC(EU)`, `4260360943454 12+`.
- * Never: empty; over 64 characters; irregular whitespace (two spaces, a tab,
- * a no-break space) or any other punctuation (`RXA06820 ,`); one character
- * repeated (a placeholder: `3333`, `3333333`), checked separately.
+ *
+ * Owner decision 2026-11-17: EVERY code 1C holds is imported — short, numeric,
+ * Latin, Cyrillic, with any symbol or spacing. Only what cannot be stored at
+ * all is refused: an empty code, or one longer than the stocks.source_code
+ * column (64 characters). What the earlier rule refused is now only reported
+ * (code1cAdvisory).
  * The importer checks a row's code with it and the Telegram photo flow a
  * caption's code, so a caption can name exactly the codes an import stores.
  */
 export function code1cIssue(code1c: string | null): Code1cIssue | null {
   if (!code1c) return { code: 'empty_code_1c', message: 'code_1c is empty' };
   if (code1c.length > FIELD_LIMITS.code1c)
-    return invalid(`code_1c longer than ${FIELD_LIMITS.code1c} characters`);
+    return {
+      code: 'invalid_code_1c',
+      message: `code_1c longer than ${FIELD_LIMITS.code1c} characters`,
+    };
+  return null;
+}
+
+/**
+ * Why a valid code_1c looks unlike an article, or null. Imported all the same
+ * (owner decision 2026-11-17); the warning lets an operator review it in 1C:
+ *   • irregular spacing or a symbol outside `- . / _ & + ( )` (`RXA06820 ,`);
+ *   • a product name in the code column — several words with a Russian word
+ *     (`Фильтр топливного насоса`) or without any digit (`Castrol EDGE`);
+ *   • one character repeated (`1`, `3333`): in the exports such codes are
+ *     shared by unrelated goods, and all rows of one code are ONE position.
+ */
+export function code1cAdvisory(code1c: string): Code1cAdvisory | null {
   if (!isAcceptedBefore(code1c)) {
     const reason = articleIssue(code1c);
     if (reason) return reason;
   }
-  // "1", "B", "3333", "222222": in the dv_parts exports such codes are shared
-  // by unrelated goods (code "1": 22 rows, 22 different names), so they are
-  // placeholders — importing them would merge different parts into one.
   if (/^(.)\1*$/u.test(code1c))
     return {
       code: 'placeholder_code_1c',
-      message: `code_1c "${code1c}" is one character repeated — a placeholder, not a part number`,
+      message: `code_1c "${code1c}" is one character repeated — possibly a placeholder shared by different goods; all its rows are one position`,
     };
   return null;
 }
@@ -116,20 +122,22 @@ function isAcceptedBefore(code: string): boolean {
 const ARTICLE_TOKEN = /^[\p{L}\p{N}._/&+()-]+$/u;
 
 /** Why a code accepted only by the article rule fails it, or null. */
-function articleIssue(code: string): Code1cIssue | null {
+function articleIssue(code: string): Code1cAdvisory | null {
   if (!/^\S+(?: \S+)*$/u.test(code))
-    return invalid(
-      `code_1c "${code}" has irregular spacing — the parts of an article are split by single spaces`,
-    );
+    return {
+      code: 'unusual_code_1c',
+      message: `code_1c "${code}" has irregular spacing — imported verbatim`,
+    };
   const tokens = code.split(' ');
   const bad = tokens.find(
     (t) =>
       !ARTICLE_TOKEN.test(t) || !/[\p{L}\p{N}]/u.test(t) || !balancedParens(t),
   );
   if (bad)
-    return invalid(
-      `code_1c "${code}": "${bad}" is not part of an article — only letters, digits and - . / _ & + ( ) are accepted`,
-    );
+    return {
+      code: 'unusual_code_1c',
+      message: `code_1c "${code}": "${bad}" is not usual in an article — imported verbatim`,
+    };
   if (tokens.length > 1 && /[а-яё]{3}/u.test(code))
     return {
       code: 'name_as_code_1c',

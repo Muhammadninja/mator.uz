@@ -254,10 +254,12 @@ import*.
      `meta.numberFormat` is `thousands-comma`;
    - `environment.issues` is empty (migrations, catalog seller, BUSINESS seller);
    - `summary.totalRows` matches the export; the rejected rows in the CSV have
-     the expected reasons only (`invalid_code_1c` for irregular spacing or
-     other symbols, `name_as_code_1c` for a product name in the code column,
-     `placeholder_code_1c`, `invalid_quantity` for fractional/negative counts,
-     `invalid_price` for 0, `unknown_unit` for `1` / `комп.`);
+     the expected reasons only (`empty_code_1c`, `invalid_price` for 0,
+     `invalid_quantity` for negative counts, `unknown_unit` for `1` /
+     `комп.`); since 2026-11-17 unusual codes, unknown vehicles and fractional
+     counts are imported with warnings (`unusual_code_1c`, `name_as_code_1c`,
+     `placeholder_code_1c`, `unknown_vehicle_make`, `unknown_vehicle_model`,
+     `quantity_rounded_down`);
    - `prices.examples`: `1,100,000` → 1100000, a price below 1000 → ×1000;
    - `duplicates` and the `duplicate_quantities_differ` /
      `duplicate_names_differ` warnings: the chosen line and its price are the
@@ -382,12 +384,12 @@ The locks prevent overlapping passes either way.
 
 - The importer reads both 1C's `;` export and Excel's tab text
   (DRIVERS_VILLAGE_IMPORT.md §2). Rows it cannot trust are rejected and listed
-  in the report — on the 2026-10-18 export mainly codes with spaces or `&`
-  (`96273708 GMB`), placeholder codes (`1`, `3333`), fractional or negative
-  quantities, price `0` and units `1` / `комп.`. Rejected rows write nothing;
-  the stored values of those positions stay as they were.
-- `stocks.quantity` is an integer: a fractional quantity (`12.5` л) rejects the
-  row rather than being rounded.
+  in the report — since 2026-11-17 only an empty or over-long code, negative
+  quantities, a price `0` or unreadable number, units `1` / `комп.` and shifted
+  columns. Rejected rows write nothing; the stored values of those positions
+  stay as they were.
+- `stocks.quantity` is an integer: a fractional quantity (`12.5` л) is rounded
+  down (12) and reported.
 - The TDLib adapter is tested against a scripted client; the first contact
   with the real Telegram is the operator's login and dry run (Phases B–C).
 

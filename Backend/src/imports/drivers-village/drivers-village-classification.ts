@@ -133,19 +133,23 @@ export function parseClassificationRow(
   let vehicles: VehicleSpec | null = null;
   if (usable && headers.index.vehicleMake !== undefined) {
     // An invalid vehicle cell keeps the row's category usable: it only means
-    // no vehicle of this row is applied.
+    // no vehicle of this row is applied — not even the models of the cell
+    // that did resolve (parseVehicle keeps those for the price/stock import).
+    let vehicleProblem = false;
     const parsed = parseVehicle(
       get('vehicleMake'),
       get('vehicleModel'),
-      (code, field, message) =>
+      (code, field, message) => {
+        vehicleProblem = true;
         add(
           'warning',
           code,
           field,
           `${message} — no vehicle of this row is applied`,
-        ),
+        );
+      },
     );
-    vehicles = parsed?.spec ?? null;
+    vehicles = vehicleProblem ? null : parsed.spec;
   }
   return {
     line,

@@ -165,11 +165,12 @@ describe('row checks that guard the source', () => {
   });
 
   it.each(['1', 'B', '0000', '3333', '222222', '1111111'])(
-    'code_1c %p — one character repeated — is a placeholder, not a part number',
+    'code_1c %p — one character repeated — is imported and reported as a possible placeholder',
     (code) => {
       const r = row({ code_1c: code });
-      expect(r.row).toBeNull();
-      expect(errors(r)).toEqual(['placeholder_code_1c']);
+      expect(r.row?.code1c).toBe(code);
+      expect(errors(r)).toEqual([]);
+      expect(r.issues.map((i) => i.code)).toContain('placeholder_code_1c');
     },
   );
 
@@ -200,9 +201,10 @@ describe('row checks that guard the source', () => {
     expect(errors(row({ unit: 'комп.' }))).toEqual(['unknown_unit']);
   });
 
-  it('fractional and negative quantities are rejected, never rounded or read as thousands', () => {
-    expect(errors(row({ quantity: '12.5' }))).toEqual(['invalid_quantity']);
-    expect(errors(row({ quantity: '1,234.5' }))).toEqual(['invalid_quantity']);
+  it('a fractional quantity is rounded down; a negative or malformed one is rejected, never read as thousands', () => {
+    expect(row({ quantity: '12.5' }).row?.quantity).toBe(12);
+    expect(row({ quantity: '1,234.5' }).row?.quantity).toBe(1234);
+    expect(errors(row({ quantity: '12.5' }))).toEqual([]);
     expect(errors(row({ quantity: '-3' }))).toEqual(['invalid_quantity']);
     expect(errors(row({ quantity: '2,26' }))).toEqual(['invalid_quantity']);
   });

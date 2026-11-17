@@ -163,12 +163,22 @@ describe('parseRow', () => {
     ]);
   });
 
-  it('quantity: whole numbers only, for every unit — a fraction is rejected, never rounded', () => {
+  it('quantity: whole units — a fraction is rounded DOWN and reported, for every unit (owner decision 2026-11-17)', () => {
     expect(parse({ quantity: '8' }).row?.quantity).toBe(8);
     expect(parse({ quantity: '1 743' }).row?.quantity).toBe(1743);
     expect(parse({ quantity: '0' }).row?.quantity).toBe(0);
-    expect(codes({ quantity: '2,5' })).toEqual(['invalid_quantity']);
-    expect(codes({ unit: 'л', quantity: '2,5' })).toEqual(['invalid_quantity']);
+    for (const [over, qty] of [
+      [{ quantity: '2,5' }, 2],
+      [{ unit: 'л', quantity: '124,65' }, 124],
+      [{ unit: 'л', quantity: '872,999' }, 872],
+      [{ unit: 'л', quantity: '0,4' }, 0],
+    ] as const) {
+      const r = parse(over);
+      expect(r.row?.quantity).toBe(qty);
+      expect(r.issues.map((i) => [i.code, i.severity])).toEqual([
+        ['quantity_rounded_down', 'warning'],
+      ]);
+    }
     expect(codes({ quantity: '-1' })).toEqual(['invalid_quantity']);
   });
 
@@ -324,21 +334,38 @@ describe('parseRow', () => {
     expect(empty.row?.vehicle).toEqual({ kind: 'none' });
   });
 
-  it('vehicles: model without make and unknown make/model are errors — one unknown model rejects the row', () => {
-    expect(codes({ vehicle_make: '' })).toEqual([
-      'invalid_vehicle_combination',
-    ]);
-    expect(codes({ vehicle_make: 'COBALT', vehicle_model: 'COBALT' })).toEqual([
-      'unknown_vehicle_make',
-    ]);
-    expect(codes({ vehicle_make: 'SKODA', vehicle_model: 'SKODA' })).toEqual([
-      'unknown_vehicle_model',
-    ]);
-    // Never guessed: Tico is Daewoo's, a bare "NEXIA" names no generation.
-    expect(codes({ vehicle_model: 'SPARK, NEXIA' })).toEqual([
-      'unknown_vehicle_model',
-    ]);
-    expect(codes({ vehicle_model: 'TICO' })).toEqual(['unknown_vehicle_model']);
+  it('vehicles: a model without make or an unknown make/model is reported, never rejects the row (owner decision 2026-11-17)', () => {
+    const imported = (over: Cells) => {
+      const r = parse(over);
+      expect(r.issues.every((i) => i.severity === 'warning')).toBe(true);
+      expect(r.row).not.toBeNull();
+      return { codes: r.issues.map((i) => i.code), vehicle: r.row!.vehicle };
+    };
+    expect(imported({ vehicle_make: '' })).toEqual({
+      codes: ['invalid_vehicle_combination'],
+      vehicle: { kind: 'none' },
+    });
+    // 1C put the model in the make column (rows 2353, 55512101).
+    expect(
+      imported({ vehicle_make: 'COBALT', vehicle_model: 'COBALT' }),
+    ).toEqual({ codes: ['unknown_vehicle_make'], vehicle: { kind: 'none' } });
+    expect(
+      imported({ vehicle_make: 'EQUINOX', vehicle_model: 'EQUINOX' }),
+    ).toEqual({ codes: ['unknown_vehicle_make'], vehicle: { kind: 'none' } });
+    // An unknown model is never widened to the whole make.
+    expect(imported({ vehicle_make: 'SKODA', vehicle_model: 'SKODA' })).toEqual(
+      { codes: ['unknown_vehicle_model'], vehicle: { kind: 'none' } },
+    );
+    // Never guessed: Tico is Daewoo's, a bare "NEXIA" names no generation —
+    // the models that did resolve are kept.
+    expect(imported({ vehicle_model: 'SPARK, NEXIA' })).toEqual({
+      codes: ['unknown_vehicle_model'],
+      vehicle: { kind: 'models', make: 'Chevrolet', models: ['Spark'] },
+    });
+    expect(imported({ vehicle_model: 'TICO' })).toEqual({
+      codes: ['unknown_vehicle_model'],
+      vehicle: { kind: 'none' },
+    });
   });
 
   it('category cells are never read: blank or odd values cannot reject a row', () => {
@@ -354,10 +381,32 @@ describe('parseRow', () => {
 
   it('code_1c and name: required, trimmed, whitespace-normalized', () => {
     expect(codes({ code_1c: '  ' })).toEqual(['empty_code_1c']);
-    // Rejected, never altered into a different number: irregular whitespace
-    // (two spaces, a no-break space) is never collapsed into another code.
-    for (const code_1c of ['95015324  OEM', '95015324\u00a0OEM'])
-      expect(codes({ code_1c })).toEqual(['invalid_code_1c']);
+    // Imported verbatim and reported, never altered into a different number:
+    // irregular whitespace (two spaces, a no-break space) is never collapsed.
+    for (const code_1c of ['95015324  OEM', '95015324\u00a0OEM']) {
+      const r = parse({ code_1c });
+      expect(r.row).toMatchObject({
+        code1c: code_1c,
+        sourcePartNumber: code_1c,
+      });
+      expect(r.issues.map((i) => [i.code, i.severity])).toEqual([
+        ['unusual_code_1c', 'warning'],
+        ['oem_not_indexed', 'warning'],
+      ]);
+    }
+    // Any code 1C holds is imported (owner decision 2026-11-17).
+    for (const code_1c of [
+      '1',
+      '3333',
+      '2353',
+      'Б',
+      'Фильтр масляный',
+      'RXA06820 ,',
+    ])
+      expect([code_1c, parse({ code_1c }).row?.code1c]).toEqual([
+        code_1c,
+        code_1c,
+      ]);
     // Articles of letters, digits, single spaces and hyphens are accepted,
     // verbatim — not only numbers.
     for (const code_1c of [
