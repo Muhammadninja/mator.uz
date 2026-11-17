@@ -2650,6 +2650,11 @@ enum AdminAuditAction {
   // previousValues/newValues hold the ordered photo URLs before and after, so a
   // removed photo can be put back from the entry.
   CATALOG_PART_PHOTOS_UPDATED
+  // A part deleted for good from the inventory console (POST
+  // /v1/admin/inventory/batch-delete). The target is the catalog part; previousValues
+  // holds what it was (title, seller, prices, numbers, photos) and the supply-side
+  // Stock/Product removed with it, so the entry is the only record left of it.
+  CATALOG_PART_DELETED
 }
 
 // What kind of thing an audit entry is about, for entries whose target is not
