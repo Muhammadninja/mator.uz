@@ -2645,6 +2645,11 @@ enum AdminAuditAction {
   VEHICLE_IMAGE_RETRIED
   VEHICLE_IMAGE_RECONCILED
   VEHICLE_IMAGE_CATALOG_DISCOVERY_RUN
+  // A part's photo gallery edited from the photo-coverage console
+  // (/v1/admin/photo-coverage/parts/:id/photos). The target is the catalog part;
+  // previousValues/newValues hold the ordered photo URLs before and after, so a
+  // removed photo can be put back from the entry.
+  CATALOG_PART_PHOTOS_UPDATED
 }
 
 // What kind of thing an audit entry is about, for entries whose target is not
