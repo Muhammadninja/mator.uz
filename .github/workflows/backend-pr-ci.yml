@@ -71,11 +71,16 @@ jobs:
         working-directory: Backend
         run: |
           set -euo pipefail
-          test -f prisma/migrations/20261113000000_vehicle_image_integration/migration.sql
-          test -f prisma/migrations/20261115000000_vehicle_model_variants/migration.sql
-          test -f prisma/migrations/20261117000000_nexia_generation_catalog_rows/migration.sql
-          test "$(find prisma/migrations -mindepth 1 -maxdepth 1 -type d -name '202611*vehicle*' -printf '%f\n' | sort | paste -sd ' ' -)" = \
-            "20261113000000_vehicle_image_integration 20261115000000_vehicle_model_variants 20261116000000_vehicle_image_catalog_key 20261118000000_vehicle_identity_snapshot 20261119000000_vehicle_image_lifecycle 20261121000000_vehicle_image_catalog_discovery"
+          for migration in \
+            20261113000000_vehicle_image_integration \
+            20261115000000_vehicle_model_variants \
+            20261116000000_vehicle_image_catalog_key \
+            20261117000000_nexia_generation_catalog_rows \
+            20261118000000_vehicle_identity_snapshot \
+            20261119000000_vehicle_image_lifecycle \
+            20261121000000_vehicle_image_catalog_discovery; do
+            test -f "prisma/migrations/$migration/migration.sql"
+          done
           npx prisma migrate deploy --schema prisma/schema.prisma
           npx prisma migrate status --schema prisma/schema.prisma
           applied=$(psql 'postgresql://postgres:postgres@localhost:5432/mator_ci' -v ON_ERROR_STOP=1 -Atc "SELECT count(*) FROM \"_prisma_migrations\" WHERE migration_name IN ('20261113000000_vehicle_image_integration', '20261115000000_vehicle_model_variants', '20261116000000_vehicle_image_catalog_key', '20261117000000_nexia_generation_catalog_rows', '20261118000000_vehicle_identity_snapshot', '20261119000000_vehicle_image_lifecycle', '20261121000000_vehicle_image_catalog_discovery') AND finished_at IS NOT NULL AND rolled_back_at IS NULL")
