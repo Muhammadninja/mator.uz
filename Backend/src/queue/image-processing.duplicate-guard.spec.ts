@@ -4,12 +4,12 @@
 // existing processing path (a FAILED row's retry included). All collaborators
 // are mocked: no Telegram, no Cloudinary, no FLUX, no DB, no Redis.
 
-import axios from 'axios';
+import { downloadSourceImage } from './safe-image-download';
 import type { Job } from 'bullmq';
 import { ImageProcessingProcessor } from './queue.processors';
 
-jest.mock('axios');
-const mockedAxios = axios as jest.Mocked<typeof axios>;
+jest.mock('./safe-image-download');
+const mockedAxios = { get: jest.mocked(downloadSourceImage) };
 
 function build(state: { status: string; processedUrl: string | null } | null) {
   const drafts = {
@@ -77,7 +77,7 @@ const job = (id = 'image_draft_1_img_1') =>
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockedAxios.get.mockResolvedValue({ data: new ArrayBuffer(4) });
+  mockedAxios.get.mockResolvedValue(Buffer.alloc(4));
 });
 
 describe('ImageProcessingProcessor duplicate guard', () => {

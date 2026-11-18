@@ -20,6 +20,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { backendRegistrySha, registryFingerprintsMatch } from './registry-fingerprint.mjs';
 
 const backendDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const args = process.argv.slice(2);
@@ -48,20 +49,6 @@ const bad = (label, detail, fix) => {
   findings.push({ label, detail, fix });
 };
 const info = (label, detail) => console.log(`  info  ${label}: ${detail}`);
-
-/** The registry fingerprint this backend checkout embeds (built or source). */
-function backendRegistrySha() {
-  for (const candidate of [
-    'dist/src/garage/vehicle-images/vehicle-image-catalog.data.js',
-    'src/garage/vehicle-images/vehicle-image-catalog.data.ts',
-  ]) {
-    const file = path.join(backendDir, candidate);
-    if (!existsSync(file)) continue;
-    const match = /VEHICLE_IMAGE_CATALOG_SHA256\s*=\s*['"]([0-9a-f]{64})['"]/.exec(readFileSync(file, 'utf8'));
-    if (match) return match[1];
-  }
-  return null;
-}
 
 function causeCode(err) {
   let current = err;
@@ -114,8 +101,10 @@ if (token.length >= 32 && !/\s/.test(token)) ok('VEHICLE_IMAGE_REQUEST_TOKEN', `
 else bad('VEHICLE_IMAGE_REQUEST_TOKEN', token ? 'shorter than 32 characters or contains whitespace' : 'not set',
   'Use the exact VEHICLE_IMAGE_REQUEST_TOKEN from the pipeline env file');
 info('VEHICLE_IMAGE_ADMIN_TOKEN', adminToken ? `set (${adminToken.length} characters)` : 'not set (the admin review console stays off)');
-const backendSha = backendRegistrySha();
+const backendSha = backendRegistrySha(backendDir);
 info('backend registry', backendSha ?? 'not found in this checkout');
+if (!backendSha) bad('backend registry', 'cannot derive the embedded registry fingerprint',
+  'Restore the generated registry source or rebuild the backend before trusting the handshake');
 
 if (base) {
   console.log('\nNetwork');
@@ -158,7 +147,8 @@ if (base) {
     if (body.status === 'ready') ok('GET /health/ready', `contract ${body.contract ?? 1}, capabilities ${JSON.stringify(body.capabilities ?? null)}`);
     else bad('GET /health/ready', JSON.stringify(body).slice(0, 120), 'The pipeline is not initialised; check its pm2 logs');
     if (!sha) bad('registry handshake', 'the pipeline reports no registry fingerprint', 'Deploy the pipeline release with the registry handshake (contract 2) before this backend');
-    else if (backendSha && sha !== backendSha) bad('registry handshake', `pipeline ${sha.slice(0, 12)}… ≠ backend ${backendSha.slice(0, 12)}…`, 'Deploy the same MatorUI- registry commit to the pipeline and the backend');
+    else if (!backendSha) bad('registry handshake', 'backend fingerprint unknown; matching cannot be verified', 'Restore the generated registry source or rebuild the backend');
+    else if (!registryFingerprintsMatch(backendSha, sha)) bad('registry handshake', `pipeline ${String(sha).slice(0, 12)}… ≠ backend ${backendSha.slice(0, 12)}…`, 'Deploy the same MatorUI- registry commit to the pipeline and the backend');
     else ok('registry handshake', `${sha.slice(0, 12)}… matches`);
   } else if (!ready.error) {
     bad('GET /health/ready', `HTTP ${ready.status}`, 'The pipeline is starting or unhealthy; check its pm2 logs');

@@ -8,7 +8,7 @@
  */
 import { Prisma } from '@prisma/client';
 import { normalizeOem } from '../../common/normalize-oem.util';
-import { code1cIssue } from './drivers-village-code-key';
+import { code1cAdvisory, code1cIssue } from './drivers-village-code-key';
 import {
   FIELD_LIMITS,
   MAX_QUANTITY,
@@ -187,11 +187,14 @@ export function parseRow(
 
   // code_1c — the position's identity in 1C and its manufacturer part number,
   // stored verbatim (trimmed) as both. The rule is shared with the Telegram
-  // photo flow, so a caption can name exactly the codes stored here.
+  // photo flow, so a caption can name exactly the codes stored here. Any code
+  // that can be stored is imported (owner decision 2026-11-17); one that does
+  // not look like an article is only reported.
   const codeIssue = code1cIssue(code1c);
   if (codeIssue) err(codeIssue.code, 'code1c', codeIssue.message);
-  // These are the row's first checks, so any issue so far is about code_1c.
-  const codeValid = issues.length === 0;
+  const codeValid = codeIssue === null;
+  const codeAdvisory = codeValid ? code1cAdvisory(code1c!) : null;
+  if (codeAdvisory) warn(codeAdvisory.code, 'code1c', codeAdvisory.message);
 
   // A row with more non-empty cells than the header: a delimiter inside an
   // unquoted value moved every later cell, so no cell can be trusted.
@@ -251,9 +254,10 @@ export function parseRow(
 
   // Optional. No `quantity` column or an empty cell means "not given" (null):
   // the write then omits it, so a new stock gets the schema default (1) and an
-  // existing stock keeps the count it has. A given value must be a whole
-  // number: Stock.quantity is an integer count, so a fraction is rejected,
-  // never rounded.
+  // existing stock keeps the count it has. Stock.quantity is an integer count:
+  // a fraction (litres sold by the glass, `124,65`) is rounded DOWN to whole
+  // units and reported (owner decision 2026-11-17) — never up, so Mator never
+  // offers a unit the stock does not hold.
   let quantity: number | null = null;
   if (get('quantity').trim()) {
     const qty = parseDecimal(get('quantity'), 3, numberFormat);
@@ -267,13 +271,16 @@ export function parseRow(
       err('invalid_quantity', 'quantity', 'quantity must not be negative');
     else if (qty.value.gt(MAX_QUANTITY))
       err('invalid_quantity', 'quantity', `quantity exceeds ${MAX_QUANTITY}`);
-    else if (!qty.value.isInteger())
-      err(
-        'invalid_quantity',
-        'quantity',
-        `fractional quantity ${qty.value.toString()} — quantities must be whole numbers`,
-      );
-    else quantity = qty.value.toNumber();
+    else {
+      const whole = qty.value.floor();
+      if (!whole.eq(qty.value))
+        warn(
+          'quantity_rounded_down',
+          'quantity',
+          `fractional quantity ${qty.value.toString()} rounded down to ${whole.toString()}`,
+        );
+      quantity = whole.toNumber();
+    }
   }
 
   const gmNumber = parseGm(get('gmNumber'), err);
@@ -282,7 +289,17 @@ export function parseRow(
   // search form to the oem_numbers index. The export's manufacturer_part_number
   // and oem_numbers cells are never read (NOT_IMPORTED).
   const oemNumbers = codeValid ? indexOem(code1c!, warn) : [];
-  const vehicle = parseVehicle(get('vehicleMake'), get('vehicleModel'), err);
+  // A vehicle cell 1C got wrong (a model in the make column, an unknown model)
+  // never blocks the row (owner decision 2026-11-17): the price and quantity
+  // still sync, and a new position is created with the vehicles that did
+  // resolve (none at all → no link, never universal). A stored position's
+  // vehicles are never written by the sync anyway. Each problem is reported.
+  const vehicle = parseVehicle(
+    get('vehicleMake'),
+    get('vehicleModel'),
+    (code, field, message) =>
+      warn(code, field, `${message} — imported without this vehicle`),
+  );
 
   if (!price.ok || issues.some((i) => i.severity === 'error')) {
     return { row: null, code1c, issues };
@@ -303,8 +320,8 @@ export function parseRow(
       gmNumber,
       sourcePartNumber: code1c!,
       oemNumbers,
-      vehicle: vehicle!.spec,
-      vehicleMappings: vehicle!.mappings,
+      vehicle: vehicle.spec,
+      vehicleMappings: vehicle.mappings,
     },
   };
 }
@@ -381,33 +398,37 @@ function indexOem(code: string, warn: Report): string[] {
 /**
  * The vehicle cells of one row, with every model resolved to canonical. Both
  * cells empty → 'none': the row says nothing about fitment (it never makes a
- * part universal). Null when the cells are invalid; `err` names the problem.
+ * part universal). Cells that do not resolve are reported through `report`
+ * and left out: an unknown make or a model without a make → 'none'; an
+ * unknown model is dropped and the models that resolved are kept (all
+ * unknown → 'none', never widened to the whole make).
  */
 export function parseVehicle(
   rawMake: string,
   rawModel: string,
-  err: Report,
-): { spec: VehicleSpec; mappings: VehicleMapping[] } | null {
+  report: Report,
+): { spec: VehicleSpec; mappings: VehicleMapping[] } {
+  const none = { spec: { kind: 'none' as const }, mappings: [] };
   const makeCode = normalizeVehicleCode(rawMake);
   const modelField = rawModel.trim();
 
-  if (!makeCode && !modelField) return { spec: { kind: 'none' }, mappings: [] };
+  if (!makeCode && !modelField) return none;
   if (!makeCode) {
-    err(
+    report(
       'invalid_vehicle_combination',
       'vehicleModel',
       `vehicle_model "${modelField}" without a vehicle_make`,
     );
-    return null;
+    return none;
   }
   const make = resolveMake(makeCode);
   if (!make) {
-    err(
+    report(
       'unknown_vehicle_make',
       'vehicleMake',
       `vehicle_make "${makeCode}" is not a known make`,
     );
-    return null;
+    return none;
   }
   const base = { sourceMake: makeCode, make: make.make };
   if (!modelField) {
@@ -436,12 +457,10 @@ export function parseVehicle(
   ];
   const models: string[] = [];
   const mappings: VehicleMapping[] = [];
-  let failed = false;
   for (const code of codes) {
     const resolved = resolveModel(make.make, code);
     if (!resolved) {
-      failed = true;
-      err(
+      report(
         'unknown_vehicle_model',
         'vehicleModel',
         `vehicle_model "${code}" is not a known ${make.make} model`,
@@ -458,6 +477,6 @@ export function parseVehicle(
     });
     if (!models.includes(resolved.model)) models.push(resolved.model);
   }
-  if (failed) return null;
+  if (models.length === 0) return none;
   return { spec: { kind: 'models', make: make.make, models }, mappings };
 }

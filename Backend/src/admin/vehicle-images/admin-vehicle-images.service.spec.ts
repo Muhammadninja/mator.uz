@@ -163,14 +163,16 @@ describe('AdminVehicleImagesService', () => {
       confirmed: true as const,
       reference: 'chevrolet.uz Spark page',
     };
+    const rightsConfirmation = { confirmed: true as const, reference: 'Commons CC BY license and attribution checked' };
     const result = await svc.approve(
       CANDIDATE,
-      { identityConfirmation: confirmation },
+      { identityConfirmation: confirmation, rightsConfirmation },
       ctx,
     );
     expect(pipeline.approve).toHaveBeenCalledWith(CANDIDATE, {
       actor,
       identityConfirmation: confirmation,
+      rightsConfirmation,
     });
     expect(audit.record).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -184,6 +186,7 @@ describe('AdminVehicleImagesService', () => {
         newValues: expect.objectContaining({
           candidateId: CANDIDATE,
           identityConfirmation: confirmation,
+          rightsConfirmation,
           verification: 'unverified',
         }),
       }),
@@ -200,6 +203,7 @@ describe('AdminVehicleImagesService', () => {
       CANDIDATE,
       {
         identityConfirmation: { confirmed: true, reference: 'checked' },
+        rightsConfirmation: { confirmed: true, reference: 'CC BY license checked' },
         scope: { yearFrom: 2016, yearTo: 2022 },
       },
       ctx,

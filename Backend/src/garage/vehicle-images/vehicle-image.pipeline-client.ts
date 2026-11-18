@@ -56,6 +56,13 @@ export interface PipelineStatusResult {
     catalogAssetKey?: string;
     /** True when the published image's identity is verified or a person confirmed it. */
     identityConfirmed?: boolean;
+    license?: string;
+    licenseUrl?: string;
+    author?: string;
+    attribution?: string;
+    sourcePage?: string;
+    sourceTitle?: string;
+    modifications?: string;
   } | null;
 }
 
@@ -64,7 +71,7 @@ export interface PipelineHealth {
   registrySha256: string | null;
   registryMatches: boolean;
   contract: number | null;
-  capabilities: { artwork: boolean; generation: boolean; publication: boolean } | null;
+  capabilities: { artwork: boolean; wikimedia?: boolean; generation: boolean; publication: boolean } | null;
 }
 
 /**
@@ -326,6 +333,13 @@ export function parseStatusResult(
       ...(typeof a.identityConfirmed === 'boolean'
         ? { identityConfirmed: a.identityConfirmed }
         : {}),
+      ...(typeof a.license === 'string' ? { license: a.license } : {}),
+      ...(typeof a.licenseUrl === 'string' && isHttpsUrl(a.licenseUrl) ? { licenseUrl: a.licenseUrl } : {}),
+      ...(typeof a.author === 'string' ? { author: a.author } : {}),
+      ...(typeof a.attribution === 'string' ? { attribution: a.attribution } : {}),
+      ...(typeof a.sourcePage === 'string' && isHttpsUrl(a.sourcePage) ? { sourcePage: a.sourcePage } : {}),
+      ...(typeof a.sourceTitle === 'string' ? { sourceTitle: a.sourceTitle } : {}),
+      ...(typeof a.modifications === 'string' ? { modifications: a.modifications } : {}),
     };
   }
   if (body.status === 'approved' && !asset) fail();

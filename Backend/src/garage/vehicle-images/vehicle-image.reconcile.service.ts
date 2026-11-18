@@ -142,6 +142,8 @@ export class VehicleImageReconcileService {
       const vehicles = await this.prisma.vehicle.findMany({
         where: {
           deletedAt: null,
+          // Manual vehicles have no catalog row to picture.
+          modelId: { not: null },
           id: { gt: cursor },
           OR: [{ identityResolvedWith: null }, { identityResolvedWith: { not: stamp } }],
         },
@@ -165,6 +167,7 @@ export class VehicleImageReconcileService {
   }
 
   private async reconcileOne(v: Candidate, report: ReconcileReport): Promise<void> {
+    if (!v.model) return;
     const plan = await this.images.planFor({
       year: v.year,
       model: v.model,

@@ -5,6 +5,7 @@ import {
   HttpCode,
   HttpStatus,
   Patch,
+  Post,
   Query,
   UseGuards,
   Req,
@@ -24,7 +25,9 @@ import { AuthenticatedAdmin } from '../auth/strategies/admin-jwt.strategy';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { AdminJwtGuard } from '../auth/guards/admin-jwt.guard';
 import { AdminRoleGuard } from '../auth/guards/admin-role.guard';
+import { AdminInventoryDeleteService } from './admin-inventory-delete.service';
 import { AdminInventoryService } from './admin-inventory.service';
+import { BatchDeleteInventoryDto } from './dto/batch-delete-inventory.dto';
 import { BatchUpdateInventoryDto } from './dto/batch-update-inventory.dto';
 import { ListInventoryQueryDto } from './dto/list-inventory.query.dto';
 
@@ -46,7 +49,10 @@ import { ListInventoryQueryDto } from './dto/list-inventory.query.dto';
 @ApiUnauthorizedResponse({ description: 'Missing or invalid admin access token.' })
 @ApiForbiddenResponse({ description: 'Insufficient role for this operation.' })
 export class AdminInventoryController {
-  constructor(private readonly inventory: AdminInventoryService) {}
+  constructor(
+    private readonly inventory: AdminInventoryService,
+    private readonly deletion: AdminInventoryDeleteService,
+  ) {}
 
   @Get()
   @HttpCode(HttpStatus.OK)
@@ -79,6 +85,33 @@ export class AdminInventoryController {
     @Req() req: Request & { user: AuthenticatedAdmin },
   ) {
     return this.inventory.batchUpdate(dto, {
+      actor: { id: req.user.id, email: req.user.email, name: req.user.name },
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+    });
+  }
+
+  @Post('batch-delete')
+  @HttpCode(HttpStatus.OK)
+  @Roles(AdminRole.SUPER_ADMIN, AdminRole.MANAGER)
+  @ApiOperation({
+    summary: 'Delete parts for good (transactional)',
+    description:
+      'Deletes the listed parts from the catalog together with the seller Stock ' +
+      'row each was projected from, and that Product when no other seller lists ' +
+      'it, so the part does not come back on re-projection. Cart lines and ' +
+      'per-product sale targets naming a part go too; orders keep their copy. ' +
+      'A part with units reserved for an open order is skipped and returned in ' +
+      '`reserved`; ids that do not exist are returned in `missing`. Each deleted ' +
+      'part is audited with what it was. SUPER_ADMIN and MANAGER only.',
+  })
+  @ApiOkResponse({ description: '{ deleted, reserved[], missing[] }.' })
+  @ApiBadRequestResponse({ description: 'Invalid body.' })
+  batchDelete(
+    @Body() dto: BatchDeleteInventoryDto,
+    @Req() req: Request & { user: AuthenticatedAdmin },
+  ) {
+    return this.deletion.batchDelete(dto, {
       actor: { id: req.user.id, email: req.user.email, name: req.user.name },
       ip: req.ip,
       userAgent: req.get('user-agent'),

@@ -80,7 +80,7 @@ export class VehicleImagePipelineAdminClient {
 
   async approve(
     candidateId: string,
-    body: { actor: PipelineActor; identityConfirmation?: unknown; scope?: unknown },
+    body: { actor: PipelineActor; identityConfirmation?: unknown; rightsConfirmation?: unknown; imageQualityConfirmation?: unknown; scope?: unknown },
   ): Promise<Record<string, unknown>> {
     return this.json('POST', `admin/candidates/${checkedId(candidateId)}/approve`, body);
   }
@@ -105,13 +105,21 @@ export class VehicleImagePipelineAdminClient {
 
   /** A private candidate's bytes, for the reviewer only. */
   async preview(candidateId: string): Promise<{ bytes: Buffer; contentType: string }> {
-    const response = await this.send('GET', `admin/candidates/${checkedId(candidateId)}/preview`);
+    return this.image(candidateId, 'preview');
+  }
+
+  async original(candidateId: string): Promise<{ bytes: Buffer; contentType: string }> {
+    return this.image(candidateId, 'original');
+  }
+
+  private async image(candidateId: string, variant: 'preview' | 'original'): Promise<{ bytes: Buffer; contentType: string }> {
+    const response = await this.send('GET', `admin/candidates/${checkedId(candidateId)}/${variant}`);
     const contentType = response.headers.get('content-type') ?? '';
     if (!['image/png', 'image/jpeg', 'image/webp'].includes(contentType))
-      throw new BadGatewayException('vehicle image pipeline returned an unexpected preview');
+      throw new BadGatewayException('vehicle image pipeline returned an unexpected image');
     const bytes = Buffer.from(await response.arrayBuffer());
     if (bytes.length > MAX_IMAGE_BYTES)
-      throw new BadGatewayException('vehicle image pipeline preview is too large');
+      throw new BadGatewayException('vehicle image pipeline image is too large');
     return { bytes, contentType };
   }
 

@@ -71,6 +71,9 @@ for (const [net, prefix] of [
   ['172.16.0.0', 12],
   ['192.0.0.0', 24],
   ['192.168.0.0', 16],
+  ['192.0.2.0', 24],
+  ['198.51.100.0', 24],
+  ['203.0.113.0', 24],
   ['198.18.0.0', 15],
   ['224.0.0.0', 3],
 ] as const) {
@@ -79,6 +82,14 @@ for (const [net, prefix] of [
 for (const [net, prefix] of [
   ['::', 128],
   ['::1', 128],
+  // Do not add the IPv4-mapped IPv6 range here: Node's BlockList treats that
+  // subnet as matching ordinary IPv4 addresses too. The explicit mapped
+  // address check below rejects mapped private addresses without denying all
+  // public IPv4 destinations.
+  ['64:ff9b::', 96],
+  ['2001::', 32],
+  ['2001:db8::', 32],
+  ['2002::', 16],
   ['fc00::', 7],
   ['fe80::', 10],
   ['ff00::', 8],
@@ -92,6 +103,7 @@ export function isPublicAddress(raw: string): boolean {
   const address = mapped ? mapped[1] : raw;
   const kind = isIP(address);
   if (kind === 0) return false;
+  if (kind === 6 && !/^[23][0-9a-f]{3}:/i.test(address)) return false;
   return !NON_PUBLIC.check(address, kind === 6 ? 'ipv6' : 'ipv4');
 }
 

@@ -16,6 +16,7 @@ import {
   type VehicleIdentitySource,
 } from './vehicle-image.identity';
 import { planVehicleImage } from './vehicle-image.resolution';
+import { manualIdentityIds } from '../vehicles/manual-vehicle';
 import {
   isApprovedCatalogAssetKey,
   VEHICLE_IMAGE_REGISTRY_SHA256,
@@ -143,6 +144,28 @@ export class VehicleImagesService {
       this.logger.warn(
         `vehicle-image prepare skipped: ${(err as Error)?.name ?? 'error'}`,
       );
+      return null;
+    }
+  }
+
+  /**
+   * The plan for a manual vehicle (typed model, catalog or typed make): an
+   * unverified identity under `custom:` ids (manualIdentityIds), so the pipeline
+   * generates from the typed names and a person reviews the candidate like any
+   * other. Never a registry image, never verified. Null when it cannot be built;
+   * the vehicle is still created.
+   */
+  planManual(input: { year: number; makeId: string | null; makeName: string; modelName: string }): IdentityPlan | null {
+    try {
+      const ids = manualIdentityIds(input);
+      return planVehicleImage({
+        year: input.year,
+        make: { id: ids.makeId, name: input.makeName },
+        model: { id: ids.modelId, makeId: ids.makeId, name: input.modelName, bodyType: null, yearFrom: null, yearTo: null },
+        trim: null,
+      });
+    } catch (err) {
+      this.logger.warn(`vehicle-image manual plan skipped: ${(err as Error)?.name ?? 'error'}`);
       return null;
     }
   }

@@ -8,6 +8,13 @@
 /** Max avatar image size: 5 MB (matches the frontend profile spec §3). */
 export const MAX_AVATAR_BYTES = 5 * 1024 * 1024;
 
+/**
+ * Max size of one product photo uploaded from the admin panel: 10 MB, the
+ * Cloudinary image limit. The panel shrinks photos before sending them, so this
+ * only stops an unshrunk original sent by another client.
+ */
+export const MAX_PRODUCT_PHOTO_BYTES = 10 * 1024 * 1024;
+
 /** Accepted avatar image MIME types (matches the frontend profile spec §3). */
 export const ALLOWED_IMAGE_MIME = [
   'image/jpeg',
@@ -23,5 +30,6 @@ export const CloudinaryFolder = {
   PRODUCTS: 'mator/products',
   AVATARS: 'mator/avatars',
   DEALER_LOGOS: 'mator/dealers',
+  MAKE_LOGOS: 'mator/brands',
   SOURCING_OFFERS: 'mator/sourcing',
 } as const;

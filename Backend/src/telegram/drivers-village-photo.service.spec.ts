@@ -82,13 +82,24 @@ describe('parseDvCaption', () => {
     '1C',
     '1C:',
     '1С ',
-    '1C Фильтр масляный', // a product name, no article
-    '1C 1', // a placeholder, never imported
-    '1C 3333',
-    '1C ???',
     `1C ${'9'.repeat(65)}`, // longer than any stored code_1c
-  ])('%p is refused: the marker without a valid code', (caption) => {
-    expect(parseDvCaption(caption)).toEqual({ kind: 'invalid' });
+  ])(
+    '%p is refused: the marker without a code that can be stored',
+    (caption) => {
+      expect(parseDvCaption(caption)).toEqual({ kind: 'invalid' });
+    },
+  );
+
+  // Any code the importer stores can be named (owner decision 2026-11-17):
+  // these are looked up exactly and get "не найдена" when no position has them.
+  it.each([
+    ['1C Фильтр масляный', 'Фильтр масляный'],
+    ['1C 1', '1'],
+    ['1C 3333', '3333'],
+    ['1C ???', '???'],
+    ['1С 2353', '2353'],
+  ])('%p names the code %p', (caption, code1c) => {
+    expect(parseDvCaption(caption)).toEqual({ kind: 'code', code1c });
   });
 
   it('escapes legacy-Markdown characters in dynamic preview values', () => {

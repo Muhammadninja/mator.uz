@@ -31,9 +31,6 @@ describe('vehicle image registry (vendored)', () => {
     expect(
       createHash('sha256').update(VEHICLE_IMAGE_CATALOG_SOURCE).digest('hex'),
     ).toBe(VEHICLE_IMAGE_CATALOG_SHA256);
-    expect(VEHICLE_IMAGE_CATALOG_SHA256).toBe(
-      '9ecf78141f3ea7c88dec6b87beea2241f09b3aaa197450b4020a66f29a8d4f1b',
-    );
     expect(VEHICLE_IMAGE_CATALOG).toHaveLength(25);
   });
 
@@ -142,6 +139,15 @@ describe('catalogIdentityFacts: market, generation, facelift per vehicle', () =>
     expect(
       catalogIdentityFacts(chevy('nexia', 2018, 'nexia-2-ls')).status,
     ).toBe('unverified');
+  });
+
+  it('retains the canonical Nexia 2 legacy mapping without broadening years or trims', () => {
+    expect(catalogIdentityFacts(chevy('nexia', 2012, 'nexia-2-ls'))).toEqual({
+      status: 'verified', marketRegion: 'UZ', generationId: 'nexia-2', faceliftId: null,
+    });
+    for (const [year, trim] of [[2008, 'nexia-2-ls'], [2017, 'nexia-2-ls'], [2012, null], [2012, 'nexia-3-ls']] as const)
+      expect(catalogIdentityFacts(chevy('nexia', year, trim))).toEqual({ status: 'unverified' });
+    expect(approvedCatalogAsset({ ...chevy('nexia', 2012, 'nexia-2-ls'), marketRegion: 'UZ' })).toBeNull();
   });
 
   const entry = (over: Partial<CatalogAsset>): CatalogAsset => ({

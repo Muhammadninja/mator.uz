@@ -1,7 +1,7 @@
 import { Logger, Optional } from '@nestjs/common';
 import { OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq';
 import { type Job, UnrecoverableError } from 'bullmq';
-import axios from 'axios';
+import { downloadSourceImage } from './safe-image-download';
 import { DraftImageStatus, ImageProcessingStage } from '@prisma/client';
 import { QUEUE_NAMES, resolveImageWorkerConcurrency } from './queue.constants';
 import type { ImageJobData } from './queue.service';
@@ -27,8 +27,6 @@ import {
   type SurplusAssetDeps,
 } from './image-job.outcome';
 
-/** How long to wait when downloading a source/original image. */
-const DOWNLOAD_TIMEOUT_MS = 20_000;
 
 /**
  * ImageProcessingProcessor — the two-phase draft image pipeline (the moved FLUX
@@ -227,13 +225,8 @@ export class ImageProcessingProcessor extends WorkerHost {
     }
   }
 
-  /** Download bytes to a Buffer with a bounded timeout. */
-  private async download(url: string): Promise<ArrayBuffer> {
-    const res = await axios.get<ArrayBuffer>(url, {
-      responseType: 'arraybuffer',
-      timeout: DOWNLOAD_TIMEOUT_MS,
-    });
-    return res.data;
+  private download(url: string): Promise<Buffer> {
+    return downloadSourceImage(url);
   }
 
   @OnWorkerEvent('completed')

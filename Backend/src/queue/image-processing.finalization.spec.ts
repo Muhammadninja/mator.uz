@@ -9,14 +9,14 @@
 // are genuinely in flight together, not one after the other. No DB, Redis,
 // Cloudinary, FLUX or Telegram is reached.
 
-import axios from 'axios';
+import { downloadSourceImage } from './safe-image-download';
 import { UnrecoverableError, type Job } from 'bullmq';
 import { DraftImageStatus, ImageProcessingStage, Prisma } from '@prisma/client';
 import { ProductDraftService } from '../telegram/product-draft.service';
 import { ImageProcessingProcessor } from './queue.processors';
 
-jest.mock('axios');
-const mockedAxios = axios as jest.Mocked<typeof axios>;
+jest.mock('./safe-image-download');
+const mockedAxios = { get: jest.mocked(downloadSourceImage) };
 
 type Row = {
   id: string;
@@ -221,7 +221,7 @@ const deleted = (c: { deleteAssets: jest.Mock }) =>
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockedAxios.get.mockResolvedValue({ data: new ArrayBuffer(4) });
+  mockedAxios.get.mockResolvedValue(Buffer.alloc(4));
 });
 
 describe('image finalization with one worker', () => {

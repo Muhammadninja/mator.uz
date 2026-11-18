@@ -14,14 +14,12 @@ import {
   HAS_DISPLAYABLE_PHOTO_SQL,
   primaryPhoto,
   likeContains,
+  stockIdOfPartId,
   subtreeIds,
 } from './photo-coverage.rules';
 
 const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 100;
-
-/** CatalogPart ids the projection derives from a supply-side Stock row. */
-const STOCK_PART_ID = /^part_stock_(\d+)$/;
 
 /** The part fields one coverage row shows. No relation beyond its category. */
 export const PHOTO_COVERAGE_ROW_SELECT = {
@@ -78,7 +76,7 @@ export function presentPhotoCoverageRow(
 /**
  * Admin photo-coverage console: how many buyer-catalog parts (CatalogPart) have
  * a photo the app can display, overall and per category, and the parts behind
- * each number. Read-only; it never touches a photo, a part or the buyer rules.
+ * each number. Read-only; photo edits live in AdminPartPhotosService.
  *
  * Deliberately NOT built on the buyer API, which lists only parts that already
  * have a photo (BUYER_LISTED_PART). Every part counts here, whatever its dealer
@@ -196,10 +194,8 @@ export class AdminPhotoCoverageService {
     partIds: string[],
   ): Promise<Map<string, string>> {
     const stockIds = partIds
-      .map((id) => STOCK_PART_ID.exec(id)?.[1])
-      .filter((s): s is string => s !== undefined)
-      .map(Number)
-      .filter((n) => Number.isSafeInteger(n) && n <= 2_147_483_647);
+      .map(stockIdOfPartId)
+      .filter((n): n is number => n !== null);
     if (stockIds.length === 0) return new Map();
     const stocks = await this.prisma.stock.findMany({
       where: {

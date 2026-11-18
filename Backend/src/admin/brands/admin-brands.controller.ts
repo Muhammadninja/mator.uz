@@ -2,6 +2,10 @@ import {
   Body,
   Controller,
   Delete,
+  PayloadTooLargeException,
+  UnsupportedMediaTypeException,
+  UploadedFiles,
+  UseInterceptors,
   Get,
   HttpCode,
   HttpStatus,
@@ -15,6 +19,8 @@ import {
 } from '@nestjs/common';
 import {
   ApiBadRequestResponse,
+  ApiBody,
+  ApiConsumes,
   ApiBearerAuth,
   ApiConflictResponse,
   ApiForbiddenResponse,
@@ -25,6 +31,7 @@ import {
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 import { AdminRole } from '@prisma/client';
+import { AnyFilesInterceptor } from '@nestjs/platform-express';
 import type { Request } from 'express';
 import { AuthenticatedAdmin } from '../auth/strategies/admin-jwt.strategy';
 import { Roles } from '../auth/decorators/roles.decorator';
@@ -35,6 +42,8 @@ import { CreateAdminBrandDto } from './dto/create-admin-brand.dto';
 import { CreateAdminModelDto } from './dto/create-admin-model.dto';
 import { ListAdminBrandsQueryDto } from './dto/list-admin-brands.query.dto';
 import { UpdateAdminBrandDto } from './dto/update-admin-brand.dto';
+import { CloudinaryService } from '../../cloudinary/cloudinary.service';
+import { ALLOWED_IMAGE_MIME, CloudinaryFolder, MAX_AVATAR_BYTES } from '../../common/image.constants';
 
 /**
  * Admin/operator vehicle-brands console. Admin-panel bearer token
@@ -54,7 +63,48 @@ import { UpdateAdminBrandDto } from './dto/update-admin-brand.dto';
 @ApiUnauthorizedResponse({ description: 'Missing or invalid admin access token.' })
 @ApiForbiddenResponse({ description: 'Insufficient role for this operation.' })
 export class AdminBrandsController {
-  constructor(private readonly brands: AdminBrandsService) {}
+  constructor(
+    private readonly brands: AdminBrandsService,
+    private readonly cloudinary: CloudinaryService,
+  ) {}
+
+  @Post('logo')
+  @HttpCode(HttpStatus.OK)
+  @UseInterceptors(
+    AnyFilesInterceptor({ limits: { fileSize: MAX_AVATAR_BYTES, files: 1 } }),
+  )
+  @ApiOperation({ summary: 'Upload a vehicle make logo to the brand catalog' })
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: { logo: { type: 'string', format: 'binary' } },
+      required: ['logo'],
+    },
+  })
+  @ApiOkResponse({ description: 'Uploaded logo URL for PATCH /v1/admin/brands/:id.' })
+  async uploadLogo(
+    @UploadedFiles()
+    files?: Array<{ fieldname: string; buffer: Buffer; mimetype: string; size: number }>,
+  ) {
+    const file = files?.find((item) => item.fieldname === 'logo') ?? files?.[0];
+    if (!file?.buffer?.length) {
+      throw new UnsupportedMediaTypeException('An image file is required.');
+    }
+    if (!(ALLOWED_IMAGE_MIME as readonly string[]).includes(file.mimetype)) {
+      throw new UnsupportedMediaTypeException(
+        'Unsupported image type. Allowed: JPEG, PNG, WebP.',
+      );
+    }
+    if (file.size > MAX_AVATAR_BYTES) {
+      throw new PayloadTooLargeException('Image exceeds the 5 MB size limit.');
+    }
+    const uploaded = await this.cloudinary.uploadBuffer(
+      file.buffer,
+      CloudinaryFolder.MAKE_LOGOS,
+    );
+    return { logoUrl: uploaded.url };
+  }
 
   @Get()
   @HttpCode(HttpStatus.OK)

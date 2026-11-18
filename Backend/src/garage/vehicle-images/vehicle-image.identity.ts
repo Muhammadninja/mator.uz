@@ -260,6 +260,12 @@ export const IMAGE_REVIEW_REASONS = {
   CATALOG_AMBIGUOUS: 'catalog_ambiguous',
   /** The owner rejected the registry image that covers the vehicle. */
   CATALOG_IMAGE_REJECTED: 'catalog_image_rejected',
+  /**
+   * A hand-entered vehicle's typed names would start a new paid generation, and
+   * the owner's or everyone's daily allowance for those is spent (or Redis could
+   * not say). The vehicle keeps the placeholder; renaming it tries again.
+   */
+  MANUAL_IMAGE_BUDGET: 'manual_image_budget',
 } as const;
 export type ImageReviewReason =
   (typeof IMAGE_REVIEW_REASONS)[keyof typeof IMAGE_REVIEW_REASONS];

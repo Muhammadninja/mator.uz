@@ -5,6 +5,7 @@ import {
 } from '@prisma/client';
 import { VehicleImageCatalogDiscoveryService } from './vehicle-image.catalog-discovery.service';
 import type { IdentityPlan } from './vehicle-image.identity';
+import type { VariantRow } from '../vehicles/vehicle-generation';
 
 const plan = (modelId: string): IdentityPlan => ({
   kind: 'request',
@@ -31,7 +32,7 @@ function setup() {
     yearFrom: 2019,
     yearTo: 2022,
     bodyType: 'Hatchback',
-    variants: [],
+    variants: [] as VariantRow[],
   };
   const tracker = {
     id: 'tracker-auto',
@@ -40,7 +41,7 @@ function setup() {
     yearFrom: 2020,
     yearTo: 2024,
     bodyType: 'SUV',
-    variants: [],
+    variants: [] as VariantRow[],
   };
   const make = { id: 'chevrolet', name: 'Chevrolet', models: [onix, tracker] };
   const prisma: any = {
@@ -142,6 +143,130 @@ describe('VehicleImageCatalogDiscoveryService', () => {
         }),
       }),
     );
+  });
+
+  it('uses an existing single-generation catalog year without manufacturing a production range', async () => {
+    const { service, images, make } = setup();
+    Object.assign(make.models[1], {
+      id: 'tracker',
+      yearFrom: null,
+      yearTo: null,
+    });
+    images.stage.mockResolvedValue({ outboxId: 'tracker-private-candidate' });
+    const result = await service.run({
+      trigger: VehicleImageCatalogDiscoveryTrigger.SCHEDULED,
+    });
+    expect(result.scheduled).toBe(2);
+    expect(images.prepare).toHaveBeenCalledWith({
+      year: 2020,
+      model: expect.objectContaining({
+        id: 'tracker',
+        yearFrom: null,
+        yearTo: null,
+      }),
+      trim: null,
+    });
+    expect(make.models[1]).toMatchObject({ yearFrom: null, yearTo: null });
+    expect(images.planFor).not.toHaveBeenCalled();
+  });
+
+  it('does not pick a generation or invent years for multi-generation and unknown models', async () => {
+    const { service, images, prisma, make } = setup();
+    Object.assign(make.models[0], {
+      id: 'malibu',
+      yearFrom: null,
+      yearTo: null,
+    });
+    Object.assign(make.models[1], {
+      id: 'unknown-model',
+      yearFrom: null,
+      yearTo: null,
+    });
+    const result = await service.run({
+      trigger: VehicleImageCatalogDiscoveryTrigger.SCHEDULED,
+    });
+    expect(result.reviewRequired).toBe(2);
+    expect(images.prepare).not.toHaveBeenCalled();
+    expect(images.stage).not.toHaveBeenCalled();
+    const reasons = prisma.vehicleImageCatalogDiscovery.upsert.mock.calls.map(
+      ([input]: any[]) => input.create.reason,
+    );
+    expect(reasons).toEqual([
+      'model_generation_selection_required',
+      'model_year_range_missing',
+    ]);
+  });
+
+  it('routes every overlapping generation to review, including inclusive boundary years', async () => {
+    const { service, images, prisma, make } = setup();
+    Object.assign(make.models[1], {
+      variants: [
+        {
+          id: 'nexia-1',
+          makeId: 'chevrolet',
+          name: 'Nexia 1',
+          yearFrom: 1996,
+          yearTo: 2008,
+          bodyType: null,
+        },
+        {
+          id: 'nexia-2',
+          makeId: 'chevrolet',
+          name: 'Nexia 2',
+          yearFrom: 2008,
+          yearTo: 2016,
+          bodyType: null,
+        },
+        {
+          id: 'nexia-3',
+          makeId: 'chevrolet',
+          name: 'Nexia 3',
+          yearFrom: 2016,
+          yearTo: 2022,
+          bodyType: null,
+        },
+      ],
+    });
+    const result = await service.run({
+      trigger: VehicleImageCatalogDiscoveryTrigger.SCHEDULED,
+    });
+    expect(result.reviewRequired).toBe(3);
+    expect(images.planFor).not.toHaveBeenCalled();
+    expect(
+      prisma.vehicleImageCatalogDiscovery.upsert.mock.calls.filter(
+        ([input]: any[]) =>
+          input.create.reason === 'generation_year_ranges_overlap',
+      ),
+    ).toHaveLength(3);
+  });
+
+  it('returns explicit operator actions with durable review records', async () => {
+    const { service, prisma } = setup();
+    prisma.vehicleImageCatalogDiscovery.findMany
+      .mockResolvedValueOnce([
+        {
+          sourceKey: 'known:missing:model',
+          reason: 'model_year_range_missing',
+        },
+        {
+          sourceKey: 'known:overlap:generation',
+          reason: 'generation_year_ranges_overlap',
+        },
+      ])
+      .mockResolvedValueOnce([]);
+    const status = await service.status();
+    expect(status.reviewRequired).toEqual([
+      {
+        sourceKey: 'known:missing:model',
+        reason: 'model_year_range_missing',
+        requiredAction: 'supply_sourced_production_years',
+      },
+      {
+        sourceKey: 'known:overlap:generation',
+        reason: 'generation_year_ranges_overlap',
+        requiredAction: 'review_generation_selection',
+      },
+    ]);
   });
 
   it('records a per-identity failure and recovers on the next scan', async () => {

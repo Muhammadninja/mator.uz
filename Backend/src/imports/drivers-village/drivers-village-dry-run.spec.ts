@@ -122,7 +122,7 @@ const FILE = Buffer.from(
     '95015324;Колодки тормозные;2,268;шт.;1,100,000;CHEVROLET;COBALT', // create
     '96350526;Амортизатор;5;шт.;450,000;CHEVROLET;COBALT', // repeated code
     '96350526;Амортизатор;7;шт.;520,000;CHEVROLET;COBALT',
-    '3333;Коврик;1;шт.;50,000;;', // rejected
+    '96328211;Пыльник ШРУСа;1;комп.;20,000;;', // rejected: unknown unit
   ].join('\r\n'),
   'utf-8',
 );

@@ -89,6 +89,7 @@ describeE2E(
       prisma as never,
       images,
       delivery,
+      config,
     );
     const processor = new VehicleImagesProcessor(
       delivery,

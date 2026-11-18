@@ -541,8 +541,8 @@ describe("Driver's Village photo update over Telegram", () => {
       expect(t.world.writes).toEqual([]);
     });
 
-    it.each(['1C', '1C Фильтр масляный', '1C 1'])(
-      '%p (the marker without a valid code) is refused, never the wizard',
+    it.each(['1C', '1C:', `1C ${'9'.repeat(65)}`])(
+      '%p (the marker without a code that can be stored) is refused, never the wizard',
       async (caption) => {
         const t = setup();
         t.svc.wizard.start(USER, 'ru');
@@ -553,6 +553,20 @@ describe("Driver's Village photo update over Telegram", () => {
         ]);
         expect(t.drafts.createWithImages).not.toHaveBeenCalled();
         expect(t.svc.wizard.get(USER).step).toBe(WizardStep.PHOTOS_FIRST);
+      },
+    );
+
+    it.each(['1C Фильтр масляный', '1C 1'])(
+      '%p names a code (any code can be stored): unknown → "не найдена", never the wizard',
+      async (caption) => {
+        const t = setup();
+        t.svc.wizard.start(USER, 'ru');
+        await t.sendPhoto('p1', caption);
+
+        expect(t.replies.at(-1)).toContain('не найдена');
+        expect(t.drafts.createWithImages).not.toHaveBeenCalled();
+        expect(t.svc.wizard.get(USER).step).toBe(WizardStep.PHOTOS_FIRST);
+        expect(t.world.writes).toEqual([]);
       },
     );
 
