@@ -248,7 +248,7 @@ export const REFERENCE_MAKE_STATE_CHANGES: SeedMakeStateChange[] = [
  * visible.
  */
 export const REFERENCE_KNOWN_ISSUES: string[] = [
-  'chevrolet: `tracker` and `tracker-2` are both named "Tracker". Both ids stay, and so does the name, because seller-bot fitment matches "Tracker" (G-2 decision 1).',
+  'chevrolet: `tracker-2` is shown as "Tracker 2" (migration 20261201000000); both ids stay, and legacy fit rows naming "Tracker" still reach it through LEGACY_FIT_NAME_ALIASES (G-2 decision 1).',
   'chevrolet: `genrta-lacetti` "Genrta" is a legacy admin row that garage vehicles reference. It needs its own cleanup migration and is not merged with `gentra` (G-2 decision 2).',
   'Nexia 1: the dealer import files it under Chevrolet and the seller bot under Daewoo. Only Chevrolet `nexia-1` is added; a Daewoo row would need its own id.',
   'Matiz: Daewoo `matiz` (inactive make) and Chevrolet `chevrolet-matiz` are separate rows. Ravon "Matiz" has no production parts and is not added.',

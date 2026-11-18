@@ -226,12 +226,45 @@ const sameName = (value: string) => ({
   mode: 'insensitive' as const,
 });
 
+/**
+ * Older names a legacy per-model row may still carry for a reference model,
+ * keyed by lower-case `make|model`. Chevrolet `tracker-2` is shown as
+ * "Tracker 2" (migration 20261201000000), while every legacy row files both
+ * Trackers under "Tracker": the dealer import collapses TRACKER-1 and
+ * TRACKER-2 into it, and the owner decided (2026-11-13) that the two share
+ * parts. One way only: a row naming "Tracker 2" never reaches the first
+ * Tracker, so a part stated for one Tracker stays that car's.
+ */
+const LEGACY_FIT_NAME_ALIASES: Readonly<Record<string, readonly string[]>> = {
+  'chevrolet|tracker 2': ['Tracker'],
+};
+
+const aliasKey = (value: string): string =>
+  value.trim().toLowerCase().replace(/\s+/g, ' ');
+
+/**
+ * The model names a legacy per-model row may carry for this make and model
+ * name: the name itself, plus its older names. Without a make there is no
+ * alias, since a legacy row only matches together with its make.
+ */
+export function legacyFitModelNames(
+  makeName: string | null | undefined,
+  modelName: string,
+): string[] {
+  if (!makeName) return [modelName];
+  const key = `${aliasKey(makeName)}|${aliasKey(modelName)}`;
+  return [modelName, ...(LEGACY_FIT_NAME_ALIASES[key] ?? [])];
+}
+
 /** The model names a legacy per-model row may carry for this vehicle. */
 function legacyModelNames(v: {
+  makeName?: string | null;
   modelName?: string | null;
   generationModelName?: string;
 }): string[] {
-  return [v.modelName, v.generationModelName].filter((n): n is string => !!n);
+  return [v.modelName, v.generationModelName]
+    .filter((n): n is string => !!n)
+    .flatMap((n) => legacyFitModelNames(v.makeName, n));
 }
 
 /** One per-model legacy row naming this make and one of its model names. */
