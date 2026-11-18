@@ -1,6 +1,8 @@
 import axios, { type AxiosRequestConfig } from 'axios';
 import { isIP } from 'node:net';
+import { Readable } from 'node:stream';
 import { providerUrlAgent } from '../ai/bfl-url-policy';
+import { readImageStream, validateRaster, IMAGE_DOWNLOAD_MAX_BYTES } from './safe-image-download';
 
 /**
  * Bounded download of a draft image for the image worker (SEC-04).
@@ -26,7 +28,7 @@ import { providerUrlAgent } from '../ai/bfl-url-policy';
  */
 
 /** Telegram's Bot API serves files up to 20 MB; nothing larger is legitimate. */
-export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+export const MAX_IMAGE_BYTES = IMAGE_DOWNLOAD_MAX_BYTES;
 /** ~50 megapixels: far above any phone photo, far below a pixel bomb. */
 export const MAX_IMAGE_PIXELS = 50_000_000;
 export const MAX_REDIRECTS = 2;
@@ -64,7 +66,10 @@ export function imageUrlProblem(raw: string): string | null {
   if (url.port !== '') return 'non-default port';
   const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
   if (isIP(host) !== 0) return 'IP address host';
-  return allowedHosts().includes(host) ? null : 'host not allowed';
+  if (!allowedHosts().includes(host)) return 'host not allowed';
+  if (host === 'api.telegram.org' && !/^\/file\/bot[^/]+\//.test(url.pathname)) return 'path not allowed';
+  if (host === 'res.cloudinary.com' && !/^\/[^/]+\/image\/upload\//.test(url.pathname)) return 'path not allowed';
+  return null;
 }
 
 type ImageKind = 'jpeg' | 'png' | 'webp';
@@ -175,6 +180,8 @@ export function assertSafeImage(buf: Buffer): void {
 
 const ALLOWED_TYPES =
   /^(image\/(jpeg|png|webp)|application\/octet-stream|binary\/octet-stream)\s*(;|$)/i;
+let activeDownloads = 0;
+const MAX_ACTIVE_DOWNLOADS = 2;
 
 /** Request limits shared by every image download (exported for tests). */
 export function imageRequestConfig(): AxiosRequestConfig {
@@ -204,15 +211,51 @@ export function imageRequestConfig(): AxiosRequestConfig {
 export async function downloadImage(url: string): Promise<Buffer> {
   const problem = imageUrlProblem(url);
   if (problem) throw new ImageDownloadRejected(problem);
-  const response = await axios.get<ArrayBuffer>(url, imageRequestConfig());
-  const type = String(
-    response.headers?.['content-type'] ?? 'application/octet-stream',
-  );
-  if (!ALLOWED_TYPES.test(type))
-    throw new ImageDownloadRejected(`content-type ${type}`);
-  const buf = Buffer.from(response.data);
-  if (buf.length > MAX_IMAGE_BYTES)
-    throw new ImageDownloadRejected('body exceeds the limit');
-  assertSafeImage(buf);
-  return buf;
+  if (activeDownloads >= MAX_ACTIVE_DOWNLOADS) {
+    throw new ImageDownloadRejected('download capacity reached');
+  }
+  activeDownloads += 1;
+  try {
+    const response = await axios.get<Readable>(url, {
+      ...imageRequestConfig(),
+      responseType: 'stream',
+      decompress: false,
+      headers: { 'Accept-Encoding': 'identity' },
+    });
+    const type = String(response.headers?.['content-type'] ?? 'application/octet-stream');
+    if (!ALLOWED_TYPES.test(type)) {
+      response.data.destroy?.();
+      throw new ImageDownloadRejected(`content-type ${type}`);
+    }
+    const encoding = String(response.headers?.['content-encoding'] ?? 'identity').toLowerCase();
+    if (encoding !== 'identity') {
+      response.data.destroy?.();
+      throw new ImageDownloadRejected('compressed transport refused');
+    }
+    const length = response.headers?.['content-length'];
+    if (length !== undefined && (!/^\d+$/.test(String(length)) || Number(length) > MAX_IMAGE_BYTES)) {
+      response.data.destroy?.();
+      throw new ImageDownloadRejected('content length refused');
+    }
+    // Axios streams in production. The Buffer branch only supports existing
+    // isolated unit fixtures; production is bounded while bytes arrive.
+    const body = response.data as unknown;
+    const buffered = Buffer.isBuffer(body) || body instanceof ArrayBuffer;
+    const buf = Buffer.isBuffer(body)
+      ? body
+      : body instanceof ArrayBuffer
+        ? Buffer.from(body)
+        : await readImageStream(body as Readable, MAX_IMAGE_BYTES);
+    if (buf.length > MAX_IMAGE_BYTES) throw new ImageDownloadRejected('body exceeds the limit');
+    if (length !== undefined && buf.length !== Number(length)) throw new ImageDownloadRejected('truncated response');
+    assertSafeImage(buf);
+    if (!buffered) await validateRaster(buf, type);
+    return buf;
+  } catch (error) {
+    if (error instanceof ImageDownloadRejected) throw error;
+    // Axios errors can include credential-bearing Telegram request URLs.
+    throw new ImageDownloadRejected('request or image validation failed');
+  } finally {
+    activeDownloads -= 1;
+  }
 }

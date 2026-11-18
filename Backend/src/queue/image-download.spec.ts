@@ -148,7 +148,7 @@ describe('downloadImage', () => {
       headers: { 'content-type': 'image/jpeg' },
     });
     await expect(
-      downloadImage('https://res.cloudinary.com/a.jpg'),
+      downloadImage('https://res.cloudinary.com/demo/image/upload/a.jpg'),
     ).resolves.toEqual(body);
     const config = get.mock.calls[0][1]!;
     expect(config.maxContentLength).toBe(MAX_IMAGE_BYTES);
@@ -178,7 +178,7 @@ describe('downloadImage', () => {
       .spyOn(axios, 'get')
       .mockResolvedValue({ data, headers: { 'content-type': type } });
     await expect(
-      downloadImage('https://res.cloudinary.com/a.jpg'),
+      downloadImage('https://res.cloudinary.com/demo/image/upload/a.jpg'),
     ).rejects.toThrow(ImageDownloadRejected);
   });
 
@@ -189,11 +189,11 @@ describe('downloadImage', () => {
     expect(hop('https://169.254.169.254/latest/meta-data')).toThrow(
       ImageDownloadRejected,
     );
-    expect(hop('http://res.cloudinary.com/a.jpg')).toThrow(
+    expect(hop('http://res.cloudinary.com/demo/image/upload/a.jpg')).toThrow(
       ImageDownloadRejected,
     );
     expect(hop('https://evil.example/a.jpg')).toThrow(ImageDownloadRejected);
-    expect(hop('https://res.cloudinary.com/b.jpg')).not.toThrow();
+    expect(hop('https://res.cloudinary.com/demo/image/upload/b.jpg')).not.toThrow();
   });
 });
 

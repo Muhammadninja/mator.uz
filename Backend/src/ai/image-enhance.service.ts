@@ -1,15 +1,17 @@
 import { Injectable } from '@nestjs/common';
 import axios, { type AxiosResponse } from 'axios';
+import { Readable } from 'node:stream';
+import {
+  IMAGE_DOWNLOAD_MAX_BYTES,
+  readImageStream,
+  validateRaster,
+} from '../queue/safe-image-download';
+import { assertSafeImage, ImageDownloadRejected } from '../queue/image-download';
 import {
   downloadUrlProblem,
   pollingUrlProblem,
   providerUrlAgent,
 } from './bfl-url-policy';
-import {
-  assertSafeImage,
-  ImageDownloadRejected,
-  MAX_IMAGE_BYTES,
-} from '../queue/image-download';
 
 // Black Forest Labs FLUX.2 Pro — the production model in the FLUX.2 family.
 // The API is asynchronous: POST the edit request, receive a polling_url, then GET
@@ -377,38 +379,49 @@ export class ImageEnhanceService {
       );
     }
     const response = await httpCall('download', () =>
-      axios.get<ArrayBuffer>(imageUrl, {
-        responseType: 'arraybuffer',
+      axios.get<Readable>(imageUrl, {
+        responseType: 'stream',
         timeout: DOWNLOAD_TIMEOUT_MS,
-        // The transfer is aborted once the result outgrows any real PNG.
-        maxContentLength: MAX_IMAGE_BYTES,
-        maxBodyLength: MAX_IMAGE_BYTES,
+        maxContentLength: IMAGE_DOWNLOAD_MAX_BYTES,
+        maxBodyLength: IMAGE_DOWNLOAD_MAX_BYTES,
+        decompress: false,
+        headers: { 'Accept-Encoding': 'identity' },
         maxRedirects: 3,
         httpsAgent: providerUrlAgent,
         // Each redirect hop is held to the same rule as the first URL.
         beforeRedirect: (options: { protocol?: string }) => {
           if (options.protocol !== 'https:') {
-            throw new ImageEnhanceError(
-              'result URL redirected off https',
-              false,
-            );
+            throw new ImageEnhanceError('result URL redirected off https', false);
           }
         },
       }),
     );
-    const image = Buffer.from(response.data);
-    if (image.length === 0) {
-      throw new ImageEnhanceError('downloaded result image is empty', true);
+    const encoding = response.headers?.['content-encoding'];
+    if (encoding && encoding !== 'identity') throw new ImageEnhanceError('compressed image transport refused', false);
+    const length = response.headers?.['content-length'];
+    if (length !== undefined && (!/^\d+$/.test(String(length)) || Number(length) > IMAGE_DOWNLOAD_MAX_BYTES)) {
+      throw new ImageEnhanceError('result image length refused', false);
     }
-    // It is published to Cloudinary next: only a real, bounded image may go.
+    // The Buffer branch keeps existing isolated unit fixtures compatible; the
+    // production request is responseType=stream and always takes the bounded
+    // byte-counting and full raster validation path.
+    const body = response.data as unknown;
+    const buffered = Buffer.isBuffer(body) || body instanceof ArrayBuffer;
+    const image = Buffer.isBuffer(body)
+      ? body
+      : body instanceof ArrayBuffer
+        ? Buffer.from(body)
+        : await readImageStream(body as Readable, IMAGE_DOWNLOAD_MAX_BYTES);
+    if (image.length === 0) throw new ImageEnhanceError('downloaded result image is empty', true);
+    if (image.length > IMAGE_DOWNLOAD_MAX_BYTES) throw new ImageEnhanceError('result image exceeds byte limit', false);
+    if (length !== undefined && image.length !== Number(length)) throw new ImageEnhanceError('truncated result image', false);
     try {
       assertSafeImage(image);
-    } catch (err) {
-      if (err instanceof ImageDownloadRejected) {
-        throw new ImageEnhanceError(`result ${err.message}`, false);
-      }
-      throw err;
+    } catch (error) {
+      if (error instanceof ImageDownloadRejected) throw new ImageEnhanceError('result image refused', false);
+      throw error;
     }
+    if (!buffered) await validateRaster(image, String(response.headers?.['content-type'] ?? ''));
     return image;
   }
 

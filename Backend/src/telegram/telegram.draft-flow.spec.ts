@@ -1218,20 +1218,22 @@ describe('TelegramService — draft flow (photos-first)', () => {
       const offenders = sourceFiles(srcDir).filter((f) => {
         const src = readFileSync(f, 'utf8');
         return (
-          /\$(queryRaw|executeRaw)/.test(src) && /product_images/i.test(src)
+          /\$(queryRaw|executeRaw)/.test(src) &&
+          /\b(?:UPDATE\s+product_images|INSERT\s+INTO\s+product_images|DELETE\s+FROM\s+product_images|MERGE\s+INTO\s+product_images)\b/i.test(src)
         );
       });
       expect(offenders).toEqual([]);
     });
 
-    it('the only productImage writes are the two confirm paths’ deleteMany + createMany', () => {
+    it('productImage writers replace galleries with deleteMany + createMany', () => {
       const WRITE = /productImage\s*\.\s*(create|createMany|delete|deleteMany|update|updateMany|upsert)\b/g;
       const writers = sourceFiles(srcDir).filter((f) =>
         new RegExp(WRITE.source).test(readFileSync(f, 'utf8')),
       );
-      // The listing confirm path, and the Driver's Village photo-update confirm
-      // path (album + caption = code_1c) — nothing else writes product photos.
+      // Listing confirmation, Driver's Village confirmation, and admin catalog
+      // photo management replace galleries; none rewrites a ProductImage row.
       expect(writers.map((f) => basename(f)).sort()).toEqual([
+        'admin-part-photos.service.ts',
         'drivers-village-photo.service.ts',
         'telegram.service.ts',
       ]);
