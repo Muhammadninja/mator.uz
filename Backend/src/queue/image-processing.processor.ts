@@ -1,10 +1,10 @@
 import { Logger, Optional } from '@nestjs/common';
 import { OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq';
 import { type Job, UnrecoverableError } from 'bullmq';
-import { downloadSourceImage } from './safe-image-download';
 import { DraftImageStatus, ImageProcessingStage } from '@prisma/client';
 import { QUEUE_NAMES, resolveImageWorkerConcurrency } from './queue.constants';
 import type { ImageJobData } from './queue.service';
+import { downloadImage, ImageDownloadRejected } from './image-download';
 import { CloudinaryService } from '../cloudinary/cloudinary.service';
 import {
   ImageEnhanceError,
@@ -26,7 +26,6 @@ import {
   type ImageJobResult,
   type SurplusAssetDeps,
 } from './image-job.outcome';
-
 
 /**
  * ImageProcessingProcessor — the two-phase draft image pipeline (the moved FLUX
@@ -146,7 +145,7 @@ export class ImageProcessingProcessor extends WorkerHost {
       );
       const fileUrl = await this.telegramFiles.getFileUrl(row.tgFileId);
       const buf = await this.download(fileUrl);
-      const original = await this.cloudinary.uploadBuffer(Buffer.from(buf));
+      const original = await this.cloudinary.uploadBuffer(buf);
       const stored = await this.drafts.setImageOriginal(
         imageId,
         original.url,
@@ -184,7 +183,7 @@ export class ImageProcessingProcessor extends WorkerHost {
     );
     const originalBuf = await this.download(originalUrl);
     this.telemetry.event('image.flux_started', ids);
-    const cleaned = await this.enhance(Buffer.from(originalBuf));
+    const cleaned = await this.enhance(originalBuf);
     this.telemetry.event('image.flux_finished', ids);
     await this.drafts.setImageStage(
       imageId,
@@ -225,8 +224,19 @@ export class ImageProcessingProcessor extends WorkerHost {
     }
   }
 
-  private download(url: string): Promise<Buffer> {
-    return downloadSourceImage(url);
+  /**
+   * Bounded, allowlisted download (see image-download.ts). A refused URL or an
+   * unsafe body fails the job at once: a retry would only fetch it again.
+   */
+  private async download(url: string): Promise<Buffer> {
+    try {
+      return await downloadImage(url);
+    } catch (err) {
+      if (err instanceof ImageDownloadRejected) {
+        throw new UnrecoverableError(err.message);
+      }
+      throw err;
+    }
   }
 
   @OnWorkerEvent('completed')

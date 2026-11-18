@@ -153,7 +153,11 @@ describe('ImageEnhanceService never forwards the key to an untrusted destination
         })
         .mockResolvedValueOnce({
           status: 200,
-          data: new Uint8Array([1, 2, 3]).buffer,
+          // A PNG signature + 1×1 IHDR: the download now checks the bytes.
+          data: Buffer.from(
+            '89504e470d0a1a0a0000000d494844520000000100000001',
+            'hex',
+          ),
         });
 
       const run = new ImageEnhanceService().removeBackground(Buffer.from('x'));

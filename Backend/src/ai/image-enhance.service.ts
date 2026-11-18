@@ -6,6 +6,7 @@ import {
   readImageStream,
   validateRaster,
 } from '../queue/safe-image-download';
+import { assertSafeImage, ImageDownloadRejected } from '../queue/image-download';
 import {
   downloadUrlProblem,
   pollingUrlProblem,
@@ -411,10 +412,16 @@ export class ImageEnhanceService {
       : body instanceof ArrayBuffer
         ? Buffer.from(body)
         : await readImageStream(body as Readable, IMAGE_DOWNLOAD_MAX_BYTES);
+    if (image.length === 0) throw new ImageEnhanceError('downloaded result image is empty', true);
     if (image.length > IMAGE_DOWNLOAD_MAX_BYTES) throw new ImageEnhanceError('result image exceeds byte limit', false);
     if (length !== undefined && image.length !== Number(length)) throw new ImageEnhanceError('truncated result image', false);
+    try {
+      assertSafeImage(image);
+    } catch (error) {
+      if (error instanceof ImageDownloadRejected) throw new ImageEnhanceError('result image refused', false);
+      throw error;
+    }
     if (!buffered) await validateRaster(image, String(response.headers?.['content-type'] ?? ''));
-    if (image.length === 0) throw new ImageEnhanceError('downloaded result image is empty', true);
     return image;
   }
 

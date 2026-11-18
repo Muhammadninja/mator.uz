@@ -4,12 +4,17 @@
 // existing processing path (a FAILED row's retry included). All collaborators
 // are mocked: no Telegram, no Cloudinary, no FLUX, no DB, no Redis.
 
-import { downloadSourceImage } from './safe-image-download';
+import { downloadImage } from './image-download';
 import type { Job } from 'bullmq';
 import { ImageProcessingProcessor } from './queue.processors';
 
-jest.mock('./safe-image-download');
-const mockedAxios = { get: jest.mocked(downloadSourceImage) };
+jest.mock('./image-download', () => ({
+  ...jest.requireActual<typeof import('./image-download')>('./image-download'),
+  downloadImage: jest.fn(),
+}));
+const mockedDownload = downloadImage as jest.MockedFunction<
+  typeof downloadImage
+>;
 
 function build(state: { status: string; processedUrl: string | null } | null) {
   const drafts = {
@@ -77,7 +82,7 @@ const job = (id = 'image_draft_1_img_1') =>
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockedAxios.get.mockResolvedValue(Buffer.alloc(4));
+  mockedDownload.mockResolvedValue(Buffer.alloc(4));
 });
 
 describe('ImageProcessingProcessor duplicate guard', () => {
@@ -104,7 +109,7 @@ describe('ImageProcessingProcessor duplicate guard', () => {
     expect(ctx.imageEnhance.removeBackground).not.toHaveBeenCalled();
     expect(ctx.cloudinary.uploadBuffer).not.toHaveBeenCalled();
     expect(ctx.telegramFiles.getFileUrl).not.toHaveBeenCalled();
-    expect(mockedAxios.get.mock.calls).toHaveLength(0); // no download
+    expect(mockedDownload.mock.calls).toHaveLength(0); // no download
     expect(ctx.coordinator.onImageSettled).not.toHaveBeenCalled();
     // A clear log line and a telemetry event.
     expect(ctx.logs).toContain(
