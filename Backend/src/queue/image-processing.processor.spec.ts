@@ -10,14 +10,14 @@
 //     (UnrecoverableError), and onFailed treats that as the final attempt.
 
 import { ImageProcessingStage } from '@prisma/client';
-import axios from 'axios';
+import { downloadSourceImage } from './safe-image-download';
 import { UnrecoverableError } from 'bullmq';
 import { ImageEnhanceError } from '../ai/image-enhance.service';
 import { tagImageRunOwner } from './image-job.outcome';
 import { ImageProcessingProcessor } from './queue.processors';
 
-jest.mock('axios');
-const mockedAxios = axios as jest.Mocked<typeof axios>;
+jest.mock('./safe-image-download');
+const mockedAxios = { get: jest.mocked(downloadSourceImage) };
 
 function build() {
   const drafts = {
@@ -80,7 +80,7 @@ describe('ImageProcessingProcessor (two-phase)', () => {
       originalUrl: null,
     });
     ctx.telegramFiles.getFileUrl.mockResolvedValue('https://tg/file');
-    mockedAxios.get.mockResolvedValue({ data: new ArrayBuffer(8) });
+    mockedAxios.get.mockResolvedValue(Buffer.alloc(8));
     ctx.cloudinary.uploadBuffer
       .mockResolvedValueOnce({
         url: 'https://cdn/original.jpg',
@@ -131,7 +131,7 @@ describe('ImageProcessingProcessor (two-phase)', () => {
       tgFileId: 'tgfile',
       originalUrl: 'https://cdn/original.jpg', // already ingested
     });
-    mockedAxios.get.mockResolvedValue({ data: new ArrayBuffer(8) });
+    mockedAxios.get.mockResolvedValue(Buffer.alloc(8));
     ctx.cloudinary.uploadBuffer.mockResolvedValue({
       url: 'https://cdn/processed.png',
       publicId: 'proc_1',
@@ -225,7 +225,7 @@ describe('ImageProcessingProcessor (two-phase)', () => {
       tgFileId: 'tgfile',
       originalUrl: 'https://cdn/original.jpg',
     });
-    mockedAxios.get.mockResolvedValue({ data: new ArrayBuffer(8) });
+    mockedAxios.get.mockResolvedValue(Buffer.alloc(8));
     ctx.imageEnhance.removeBackground.mockRejectedValue(err);
     const run = ctx.proc.process({
       id: 'j1',

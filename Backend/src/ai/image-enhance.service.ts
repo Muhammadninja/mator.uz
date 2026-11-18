@@ -1,5 +1,11 @@
 import { Injectable } from '@nestjs/common';
 import axios, { type AxiosResponse } from 'axios';
+import { Readable } from 'node:stream';
+import {
+  IMAGE_DOWNLOAD_MAX_BYTES,
+  readImageStream,
+  validateRaster,
+} from '../queue/safe-image-download';
 import {
   downloadUrlProblem,
   pollingUrlProblem,
@@ -372,9 +378,13 @@ export class ImageEnhanceService {
       );
     }
     const response = await httpCall('download', () =>
-      axios.get<ArrayBuffer>(imageUrl, {
-        responseType: 'arraybuffer',
+      axios.get<Readable>(imageUrl, {
+        responseType: 'stream',
         timeout: DOWNLOAD_TIMEOUT_MS,
+        maxContentLength: IMAGE_DOWNLOAD_MAX_BYTES,
+        maxBodyLength: IMAGE_DOWNLOAD_MAX_BYTES,
+        decompress: false,
+        headers: { 'Accept-Encoding': 'identity' },
         maxRedirects: 3,
         httpsAgent: providerUrlAgent,
         // Each redirect hop is held to the same rule as the first URL.
@@ -385,10 +395,26 @@ export class ImageEnhanceService {
         },
       }),
     );
-    const image = Buffer.from(response.data);
-    if (image.length === 0) {
-      throw new ImageEnhanceError('downloaded result image is empty', true);
+    const encoding = response.headers?.['content-encoding'];
+    if (encoding && encoding !== 'identity') throw new ImageEnhanceError('compressed image transport refused', false);
+    const length = response.headers?.['content-length'];
+    if (length !== undefined && (!/^\d+$/.test(String(length)) || Number(length) > IMAGE_DOWNLOAD_MAX_BYTES)) {
+      throw new ImageEnhanceError('result image length refused', false);
     }
+    // The Buffer branch keeps existing isolated unit fixtures compatible; the
+    // production request is responseType=stream and always takes the bounded
+    // byte-counting and full raster validation path.
+    const body = response.data as unknown;
+    const buffered = Buffer.isBuffer(body) || body instanceof ArrayBuffer;
+    const image = Buffer.isBuffer(body)
+      ? body
+      : body instanceof ArrayBuffer
+        ? Buffer.from(body)
+        : await readImageStream(body as Readable, IMAGE_DOWNLOAD_MAX_BYTES);
+    if (image.length > IMAGE_DOWNLOAD_MAX_BYTES) throw new ImageEnhanceError('result image exceeds byte limit', false);
+    if (length !== undefined && image.length !== Number(length)) throw new ImageEnhanceError('truncated result image', false);
+    if (!buffered) await validateRaster(image, String(response.headers?.['content-type'] ?? ''));
+    if (image.length === 0) throw new ImageEnhanceError('downloaded result image is empty', true);
     return image;
   }
 

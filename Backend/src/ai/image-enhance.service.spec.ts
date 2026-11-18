@@ -141,7 +141,7 @@ describe('ImageEnhanceService.removeBackground', () => {
     expect(gets.map(([u]) => u)).toEqual([POLL, POLL, POLL, POLL, SAMPLE]);
     expect(xKey(gets[0][1])).toBe(KEY);
     expect(xKey(gets[4][1])).toBeUndefined();
-    expect(gets[4][1]?.responseType).toBe('arraybuffer');
+    expect(gets[4][1]?.responseType).toBe('stream');
   });
 
   // What FLUX may change is decided by the prompt alone. These tests pin its
