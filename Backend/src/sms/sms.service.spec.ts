@@ -440,14 +440,14 @@ describe('SmsService.sendOtp — language selection', () => {
   it('renders the requested language', async () => {
     await service.sendOtp('+998901234567', '123456', 'ru');
     expect(sentText()).toBe(
-      'Prilojeniye Mator: kod podtverzhdeniya dlya vhoda 123456. Nikomu ne peredavayte. Srok deystviya 5 minut.',
+      'Prilojeniye Mator: kod podtverzhdeniya dlya vhoda 123456. Nikomu ne peredavayte. Srok deystviya 5 minut.\n\n@mator.uz #123456',
     );
   });
 
   it('falls back to uz when no language is given', async () => {
     await service.sendOtp('+998901234567', '654321');
     expect(sentText()).toBe(
-      'Mator ilovasi: tasdiqlash kodingiz 654321. Hech kimga bermang. Amal qilish muddati 5 daqiqa.',
+      'Mator ilovasi: tasdiqlash kodingiz 654321. Hech kimga bermang. Amal qilish muddati 5 daqiqa.\n\n@mator.uz #654321',
     );
   });
 

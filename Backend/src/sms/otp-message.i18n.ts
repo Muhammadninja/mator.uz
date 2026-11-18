@@ -31,6 +31,16 @@ export const DEFAULT_SMS_LANG: SmsLang = 'uz';
 const CODE_PLACEHOLDER = '{code}';
 
 /**
+ * The last line iOS reads to offer the code above the keyboard, bound to
+ * mator.uz (Apple: "Enabling AutoFill for domain-bound SMS codes", iOS 14+).
+ * iOS then offers it ONLY in an app that lists mator.uz among its associated
+ * domains, so this goes out only once mator.uz serves an
+ * apple-app-site-association naming the app AND that app build is installed.
+ */
+export const OTP_SMS_DOMAIN = 'mator.uz';
+const DOMAIN_BOUND_LINE = `\n\n@${OTP_SMS_DOMAIN} #${CODE_PLACEHOLDER}`;
+
+/**
  * Approved OTP bodies, one per language.
  *
  * The Russian variant is deliberately Latin transliteration, not Cyrillic: a
@@ -40,9 +50,12 @@ const CODE_PLACEHOLDER = '{code}';
  */
 export const OTP_SMS_TEMPLATES: Readonly<Record<SmsLang, string>> =
   Object.freeze({
-    en: `Mator app: verification code for login ${CODE_PLACEHOLDER}. Do not share it with anyone. Valid for 5 minutes.`,
-    ru: `Prilojeniye Mator: kod podtverzhdeniya dlya vhoda ${CODE_PLACEHOLDER}. Nikomu ne peredavayte. Srok deystviya 5 minut.`,
-    uz: `Mator ilovasi: tasdiqlash kodingiz ${CODE_PLACEHOLDER}. Hech kimga bermang. Amal qilish muddati 5 daqiqa.`,
+    en: `Mator app: verification code for login ${CODE_PLACEHOLDER}. Do not share it with anyone. Valid for 5 minutes.` +
+      DOMAIN_BOUND_LINE,
+    ru: `Prilojeniye Mator: kod podtverzhdeniya dlya vhoda ${CODE_PLACEHOLDER}. Nikomu ne peredavayte. Srok deystviya 5 minut.` +
+      DOMAIN_BOUND_LINE,
+    uz: `Mator ilovasi: tasdiqlash kodingiz ${CODE_PLACEHOLDER}. Hech kimga bermang. Amal qilish muddati 5 daqiqa.` +
+      DOMAIN_BOUND_LINE,
   });
 
 /** Type guard over the supported set — the single membership test. */
