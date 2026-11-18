@@ -8,6 +8,8 @@
 // between GETs, so every run is driven by fake timers.
 
 import axios from 'axios';
+import { Readable } from 'node:stream';
+import sharp from 'sharp';
 import {
   ImageEnhanceError,
   ImageEnhanceService,
@@ -583,6 +585,31 @@ describe('ImageEnhanceService.removeBackground', () => {
     );
     // The signed URL is not BFL's API: no misleading key hint.
     expect(error.message).not.toContain('BFL_API_KEY');
+  });
+
+  it('streams and validates the BFL raster under the response byte cap', async () => {
+    const png = await sharp({
+      create: { width: 2, height: 2, channels: 3, background: '#fff' },
+    }).png().toBuffer();
+    mockedAxios.post.mockResolvedValueOnce(submitted());
+    mockedAxios.get
+      .mockResolvedValueOnce(ready())
+      .mockResolvedValueOnce({
+        status: 200,
+        data: Readable.from([png]),
+        headers: { 'content-type': 'image/png', 'content-length': String(png.length) },
+      });
+
+    const out = await enhance();
+
+    expect(out).toEqual(png);
+    const options = mockedAxios.get.mock.calls[1][1] as Record<string, unknown>;
+    expect(options).toMatchObject({
+      responseType: 'stream',
+      maxRedirects: 3,
+      maxContentLength: expect.any(Number),
+      decompress: false,
+    });
   });
 
   it('an empty result download is a retryable failure', async () => {
