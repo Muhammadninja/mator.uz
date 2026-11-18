@@ -52,6 +52,7 @@ import {
   VehicleFitContext,
   compatibilityFacetWhere,
   fitModelIds,
+  legacyFitModelNames,
   toVehicleFitContext,
   vehicleFitWhere,
 } from '../compatibility/vehicle-fitment';
@@ -781,10 +782,14 @@ export class PartsService {
       ? { AND: [{ OR: modelRef }, { make: { OR: this.makeRefs(makeValue) } }] }
       : { OR: modelRef };
 
+    // A legacy row may carry an older name of the model ("Tracker" for
+    // "Tracker 2"); it still has to name the same make (fitMake below).
     const fitModel: Prisma.CatalogPartFitWhereInput = {
       OR: [
         { modelSlug: value },
-        { modelName: { equals: value, mode: 'insensitive' } },
+        ...legacyFitModelNames(makeValue, value).map((name) => ({
+          modelName: { equals: name, mode: 'insensitive' as const },
+        })),
       ],
     };
     const fitMake: Prisma.CatalogPartFitWhereInput | null = makeValue

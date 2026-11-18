@@ -4,10 +4,11 @@
 // (VERIFIED_FITMENT_SELLER_IDS); every other source keeps its old meaning.
 //
 // Production facts these fixtures mirror (2026-11-13): `tracker` and
-// `tracker-2` are two Chevrolet models both named "Tracker", with no years and
-// no generation rows; the import stores TRACKER-1 / TRACKER-2 as "Tracker"
-// (a part for one fits both, per the owner); prod has no curated bindings or
-// trim rows for either id.
+// `tracker-2` are two Chevrolet models with no generation rows; the import
+// stores TRACKER-1 / TRACKER-2 as "Tracker" (a part for one fits both, per the
+// owner); prod has no curated bindings or trim rows for either id. Since
+// migration 20261201000000 `tracker-2` is named "Tracker 2" and still reads
+// the "Tracker" rows (LEGACY_FIT_NAME_ALIASES); a "Tracker 2" row is its own.
 //
 // Tracker and Tracker 2 share parts: a part proven for both (a dealer "Tracker"
 // row, or curated bindings to both ids) is listed and EXACT_MATCH for both
@@ -173,6 +174,12 @@ const CATALOG = [
       ['tracker-2', 'MAYBE'],
     ],
   }),
+  // A row naming the renamed car: Tracker 2's own, never the first Tracker's.
+  dealerPart({
+    id: 'dv_tracker2_only',
+    sellerId: DV,
+    fits: [['Chevrolet', 'Tracker 2']],
+  }),
   // Generation rows: the dealer filed it under the resolved generation's name.
   dealerPart({
     id: 'dv_nexia3',
@@ -227,7 +234,7 @@ const V = {
   tracker2018Premier: toVehicleFitContext(
     garageRow('tracker', 'Tracker', 2018, 'tracker-3-premier'),
   ),
-  tracker2_2023: toVehicleFitContext(garageRow('tracker-2', 'Tracker', 2023)),
+  tracker2_2023: toVehicleFitContext(garageRow('tracker-2', 'Tracker 2', 2023)),
   nexia2019: toVehicleFitContext(
     garageRow('nexia', 'Nexia', 2019, null, NEXIA_VARIANTS),
   ),
@@ -283,6 +290,16 @@ describe("Tracker compatibility (verified Driver's Village fitment)", () => {
     for (const v of [V.tracker2016, V.tracker2018Premier, V.tracker2_2023]) {
       expect(badge('dv_tracker', v)).toBe('fits');
     }
+  });
+
+  it('"Tracker 2" reads the "Tracker" rows, but a "Tracker 2" row never reaches the first Tracker', () => {
+    expect(listed(V.tracker2_2023)).toEqual(
+      expect.arrayContaining(['dv_tracker', 'dv_tracker_upper', 'tg_tracker']),
+    );
+    expect(badge('dv_tracker2_only', V.tracker2_2023)).toBe('fits');
+    expect(listed(V.tracker2_2023)).toContain('dv_tracker2_only');
+    expect(badge('dv_tracker2_only', V.tracker2016)).toBe('maybe');
+    expect(listed(V.tracker2016)).not.toContain('dv_tracker2_only');
   });
 
   it('the same row from an unverified Telegram seller is listed but stays unknown', () => {
