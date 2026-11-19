@@ -784,15 +784,15 @@ export class AdminCategoriesService {
    * time): a body that only adds `packageCodeSet` is perfectly valid for an
    * already-configured category and invalid for an empty one.
    *
-   * The three legal end states:
+   * The legal end states:
    *   • nothing set        — unconfigured; products of this category simply
    *                          cannot be paid for online until an admin fills it in;
-   *   • mxik + single      — configured, sold in one form ("Штука"); the seller
-   *                          is never asked how the item is sold;
-   *   • mxik + single + set and/or box — configured, sold in several forms; the seller
+   *   • mxik + ONE package code (single, set or box) — configured, sold in that one
+   *     form; the seller is never asked how the item is sold;
+   *   • mxik + several package codes — configured, sold in several forms; the seller
    *     bot asks which.
-   * Anything else (a set or box code with no single code, an MXIK with no package
-   * code, a package code with no MXIK) is a 400 — never a silently-stored partial.
+   * Anything else (an MXIK with no package code, a package code with no MXIK) is a
+   * 400 — never a silently-stored partial.
    *
    * Returns ONLY the columns the body actually names, so an update that touches
    * no fiscal field writes none of them.
@@ -849,8 +849,8 @@ export class AdminCategoriesService {
       (mxik || packageCodeSingle || packageCodeSet || packageCodeBox)
     ) {
       throw new BadRequestException(
-        'Fiscal configuration is incomplete: a category needs BOTH mxik and ' +
-          'packageCodeSingle (packageCodeSet and packageCodeBox are optional). ' +
+        'Fiscal configuration is incomplete: a category needs mxik and at least ' +
+          'one package code (packageCodeSingle, packageCodeSet or packageCodeBox). ' +
           'Clear them all to leave the category unconfigured.',
       );
     }

@@ -146,7 +146,7 @@ export class UpdateCategoryDto {
   // ── Фискальные данные ─────────────────────────────────────────────────────
   // `null` clears a field. The SERVICE checks the resulting combination, not
   // this class: validity here is per-field (shape), while "a configured category
-  // has both an MXIK and a single package code" is a property of the row AFTER
+  // has an MXIK and at least one package code" is a property of the row AFTER
   // the patch is applied, and only the service can see that.
   @ApiPropertyOptional({
     description: 'MXIK / ИКПУ — exactly 17 digits, or null to clear.',

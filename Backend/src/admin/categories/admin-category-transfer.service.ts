@@ -395,7 +395,9 @@ export class AdminCategoryTransferService {
       });
     } else if (
       source.mxik !== target.mxik ||
-      source.packageCodeSingle !== target.packageCodeSingle
+      source.packageCodeSingle !== target.packageCodeSingle ||
+      source.packageCodeSet !== target.packageCodeSet ||
+      source.packageCodeBox !== target.packageCodeBox
     ) {
       warnings.push({
         code: 'FISCAL_CODES_CHANGE',
