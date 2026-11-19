@@ -132,6 +132,7 @@ import {
   choosePartNumberType,
   inputPartNumber,
   inputPrice,
+  inputQuantity,
   beginQuestionnaire,
   goBack,
   stepPrompt,
@@ -332,6 +333,9 @@ interface PendingProduct {
    *  cancel/expiry/replacement (kept on successful confirmation). */
   publicIds: string[];
   price: Decimal;
+  /** How many items the seller has (QUANTITY step) — written to Stock.quantity
+   *  and projected as the part's stock count. */
+  quantity: number;
   /** The backing draft. On confirm it is marked PUBLISHED and its STORED-ORIGINAL
    *  assets are cleaned up (the processed URLs become the product's, so they are
    *  kept). Always present — every preview comes from a draft. */
@@ -420,6 +424,7 @@ export function buildSessionFromDraft(
     oilVolumeMl: number | null;
     antifreezeWeightG: number | null;
     priceUzs: Decimal | null;
+    quantity: number | null;
   },
   step: WizardStep,
   lang: AppLang = DEFAULT_APP_LANG,
@@ -491,6 +496,7 @@ export function buildSessionFromDraft(
     // Decimal → number: the wizard collects price as an integer sum, so the
     // draft's Decimal has no fractional part.
     price: draft.priceUzs ? draft.priceUzs.toNumber() : null,
+    quantity: draft.quantity,
   };
 }
 
@@ -1038,7 +1044,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       await this.answerStaleCallback(ctx);
     });
 
-    // ── Wizard text steps (title / description / part number / price) ───────
+    // ── Wizard text steps (title / description / part number / price / quantity)
     this.bot.on(message('text'), async (ctx) => {
       const msg = ctx.message;
       const from = msg.from;
@@ -1075,6 +1081,9 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
           break;
         case WizardStep.PRICE:
           result = inputPrice(session, msg.text);
+          break;
+        case WizardStep.QUANTITY:
+          result = inputQuantity(session, msg.text);
           break;
         default:
           // Button/photo steps don't take text — re-show what's expected.
@@ -1562,6 +1571,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       // reads `undefined` as "leave alone", so nothing caught the omission.
       antifreezeWeightG: session.antifreezeWeightG,
       priceUzs: session.price ?? undefined,
+      // Required by the completeness gate like the price. `null` (not yet
+      // answered) is written as is, which leaves a column that is already null
+      // unchanged.
+      quantity: session.quantity,
     };
     await this.drafts.updateForm(session.draftId, snapshot);
 
@@ -1815,9 +1828,9 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
    * different record from the same row — the reason a rebuilt pending is as good
    * as the original.
    *
-   * The non-null assertions on title/priceUzs are discharged by the caller's
-   * completeness check; every kind requires both, so no flow can reach here
-   * without them.
+   * The non-null assertions on title/priceUzs/quantity are discharged by the
+   * caller's completeness check; every kind requires all three, so no flow can
+   * reach here without them.
    */
   private buildPendingFromDraft(
     draft: DraftWithImages,
@@ -1846,6 +1859,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       processedUrls: delivery.processedUrls,
       publicIds: delivery.publicIds,
       price: new Decimal(draft.priceUzs as Decimal),
+      quantity: draft.quantity as number,
       draftId: draft.id,
       draftVersion: delivery.draftVersion,
     };
@@ -2185,9 +2199,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * "⬅️ Назад" on the preview — edit text/price. Moves the backing draft from
-   * READY_FOR_PREVIEW back to CREATING (versioned) and restores the dialogue at the
-   * PRICE step. The draft's images stay READY and their assets are UNTOUCHED, so
+   * "⬅️ Назад" on the preview — edit text/price/quantity. Moves the backing draft
+   * from READY_FOR_PREVIEW back to CREATING (versioned) and restores the dialogue
+   * at the QUANTITY step, the last question; "⬅️ Назад" there walks on to PRICE.
+   * The draft's images stay READY and their assets are UNTOUCHED, so
    * re-submitting the form rebuilds the preview with NO image re-processing: the
    * coordinator's rendezvous simply passes again on the image axis.
    *
@@ -2220,7 +2235,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         this.drafts.reopenForEdit(
           pending.draftId,
           pending.draftVersion,
-          WizardStep.PRICE,
+          WizardStep.QUANTITY,
         ),
     );
     if (!reopened) {
@@ -2234,7 +2249,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       await ctx.reply(t(lang, 'edit.notEditable'));
       return;
     }
-    const session = buildSessionFromDraft(draft, WizardStep.PRICE, lang);
+    const session = buildSessionFromDraft(draft, WizardStep.QUANTITY, lang);
     this.wizard.restore(tgUserId, session);
     await this.sendStepPrompt(ctx, session);
   }
@@ -3887,7 +3902,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     caption: string;
     buttons: ReturnType<typeof Markup.inlineKeyboard>;
   } {
-    const { metadata, price } = listing;
+    const { metadata, price, quantity } = listing;
     // Label the number by how the seller marked it — never guess. An unlabeled
     // number shows the neutral "OEM/GM №" so we don't claim a type we don't know.
     const numberLabel =
@@ -3933,6 +3948,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       `📝 *${t(lang, 'preview.description')}:* ${escapeMarkdown(metadata.description ?? '—')}`,
       ...kindLines,
       `💰 *${t(lang, 'preview.price')}:* ${price.toFixed(0)} UZS`,
+      `📦 *${t(lang, 'preview.quantity')}:* ${quantity}`,
     ].join('\n');
 
     const buttons = Markup.inlineKeyboard([
@@ -3940,7 +3956,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         Markup.button.callback(t(lang, 'btn.addProduct'), CONFIRM_ADD),
         Markup.button.callback(t(lang, 'btn.cancelProduct'), CONFIRM_CANCEL),
       ],
-      // Back edits text/price reusing these photos (no re-processing);
+      // Back edits text/price/quantity reusing these photos (no re-processing);
       // "change photos" replaces them (re-runs the image pipeline).
       [
         Markup.button.callback(t(lang, 'btn.back'), CONFIRM_BACK),
@@ -4050,6 +4066,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       categoryId,
       processedUrls,
       price,
+      quantity,
     } = session;
 
     // Re-validate the category lineage against the DB before it becomes a
@@ -4214,10 +4231,12 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       // Replace the product gallery with the new ordered set (first = primary).
       await this.replaceProductGallery(product.id, processedUrls);
 
+      // The seller's count replaces the previous one, as the price does: going
+      // through the wizard again is how a seller states what they have now.
       const stock = await this.prisma.stock.upsert({
         where: { sellerId_productId: { sellerId, productId: product.id } },
-        update: { priceUzs: price },
-        create: { sellerId, productId: product.id, priceUzs: price },
+        update: { priceUzs: price, quantity },
+        create: { sellerId, productId: product.id, priceUzs: price, quantity },
       });
 
       // Live projection into the buyer catalog: this confirmed listing becomes a
@@ -4226,12 +4245,16 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       // failure must not fail the seller's confirmation; it is logged and the
       // next update (or a backfill) will reconcile. A new part is classified whatever
       // this says: keepClassification only speaks for a part that already exists.
+      //
+      // The seller has just stated the count, so this projection carries it to
+      // the part as its stock (quantityIsCount): a buyer cannot order more.
       await this.projectToCatalog(stock.id, {
         keepClassification:
           previous !== null &&
           previous.categoryId === validatedCategoryId &&
           previous.kind === kindFields.kind &&
           previous.oilType === kindFields.oilType,
+        quantityIsCount: true,
       });
 
       // The product write succeeded, so close the claim: COMMITTING → PUBLISHED (so

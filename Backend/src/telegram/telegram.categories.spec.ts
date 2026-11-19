@@ -485,6 +485,7 @@ describe('commit: draft category IDs → Product', () => {
     oilType: null,
     oilVolumeMl: null,
     priceUzs: new Decimal(250000),
+    quantity: 3,
     formStep: 'QUESTIONNAIRE_DONE',
     images: [
       {

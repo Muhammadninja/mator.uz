@@ -96,6 +96,7 @@ export const UZ: BotStrings = {
   'preview.title': 'Nomi',
   'preview.description': 'Tavsifi',
   'preview.price': 'Narxi (QQS bilan)',
+  'preview.quantity': 'Soni',
   'preview.vehicle': 'Avtomobil',
   'preview.category': 'Turkum',
   'preview.viscosity': 'Qovushqoqlik',
@@ -171,6 +172,8 @@ export const UZ: BotStrings = {
   'step.partNumber': '🔢 {type} detal raqamini kiriting.\nMasalan: 96535062',
   'step.price':
     '💰 Narxini so‘mda QQS bilan kiriting, agar uni to‘lasangiz: bu xaridor uchun yakuniy narx, unga QQS qo‘shilmaydi.\nMasalan: 250 000',
+  'step.quantity':
+    '📦 Sizda nechta dona mahsulot bor? Butun son kiriting.\nMasalan: 5',
   'step.questionnaireDone': '⏳ Suratlarni qayta ishlashni yakunlayapmiz…',
 
   'invalid.viscosity':
@@ -195,6 +198,8 @@ export const UZ: BotStrings = {
     '❌ Narxni aniqlab bo‘lmadi. So‘mda son kiriting, masalan: 250 000',
   'invalid.priceTooLarge':
     '❌ Narx juda katta. Qiymatni tekshirib, yana kiriting.',
+  'invalid.quantity':
+    '❌ Sonni tushunib bo‘lmadi. {min} dan {max} gacha butun son kiriting, masalan: 5',
 
   'stale.catalog':
     'Katalog yangilandi.\n' +

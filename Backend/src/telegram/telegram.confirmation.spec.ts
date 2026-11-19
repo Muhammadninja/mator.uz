@@ -104,6 +104,8 @@ function draft(
     processedUrls: publicIds.map((_, i) => `https://cdn/img${i}.webp`),
     publicIds,
     price: new Decimal(450000),
+    // The item count answered at the QUANTITY step.
+    quantity: 3,
     // Every preview is backed by a draft (the source of truth).
     draftId: `draft_${tgUserId}`,
     draftVersion: 3,
@@ -187,6 +189,7 @@ function draftRow(over: Record<string, unknown> = {}) {
     // code and the seller was never asked.
     packageForm: null,
     priceUzs: new Decimal(450000),
+    quantity: 3,
     previewSentAt: new Date(),
     images: [
       { id: 'img_1', jobId: 'job_1', status: 'READY', sortOrder: 0 },
@@ -650,6 +653,25 @@ describe('TelegramService — confirmation session', () => {
     expect(projection.projected).toEqual([500]);
   });
 
+  it('commit writes the seller’s item count to the stock and projects it as a count', async () => {
+    const prisma = makePrisma();
+    const projection = makeProjection();
+    const svc = makeService(prisma, makeCloudinary(), projection);
+    svc.storePending(draft(1, undefined, { quantity: 12 }));
+
+    await svc.commitPending(makeCtx(), 1);
+
+    // Both branches: a new listing is created with the count, and a re-listing
+    // replaces the previous one (the schema default 1 was every bot listing's
+    // quantity before the question existed).
+    expect(prisma.args.stock).toMatchObject({
+      update: { quantity: 12 },
+      create: { quantity: 12 },
+    });
+    // The count reaches the buyer catalog as the part's stock.
+    expect(projection.options[0]).toMatchObject({ quantityIsCount: true });
+  });
+
   // Going through the wizard again is the only way a seller can change a price, and
   // bulk-move writes the part alone. So this must not put a part back where the
   // product says it was, undoing an operator's filing onto a subcategory.
@@ -682,27 +704,37 @@ describe('TelegramService — confirmation session', () => {
       oilType: null,
     };
 
+    // Every commit carries the seller's count (quantityIsCount), whatever the
+    // classification decision.
     it('answering as before keeps it: only the price or photos changed', async () => {
-      expect(await commit(SAME, {})).toEqual({ keepClassification: true });
+      expect(await commit(SAME, {})).toEqual({
+        keepClassification: true,
+        quantityIsCount: true,
+      });
     });
 
     it('a different category is the seller reclassifying, and carries', async () => {
       expect(await commit({ ...SAME, categoryId: 'batteries' }, {})).toEqual({
         keepClassification: false,
+        quantityIsCount: true,
       });
     });
 
     it('a different kind or oil type carries too', async () => {
       expect(
         await commit({ ...SAME, kind: ProductKind.MOTOR_OIL }, {}),
-      ).toEqual({ keepClassification: false });
+      ).toEqual({ keepClassification: false, quantityIsCount: true });
       expect(await commit({ ...SAME, oilType: 'MINERAL' }, {})).toEqual({
         keepClassification: false,
+        quantityIsCount: true,
       });
     });
 
     it('a product listed for the first time has nothing to keep', async () => {
-      expect(await commit(null, {})).toEqual({ keepClassification: false });
+      expect(await commit(null, {})).toEqual({
+        keepClassification: false,
+        quantityIsCount: true,
+      });
     });
   });
 
@@ -1028,6 +1060,17 @@ describe('isDraftComplete (per-kind completeness)', () => {
     expect(isDraftComplete(oilDraft({ title: null }))).toBe(false);
     expect(isDraftComplete(oilDraft({ priceUzs: null }))).toBe(false);
   });
+
+  it('requires the item count from every kind — the last question', () => {
+    // Without it, the last image settling after the price would show the
+    // preview while the seller is still being asked how many items they have.
+    expect(isDraftComplete(draftRow({ quantity: null }) as never)).toBe(false);
+    expect(isDraftComplete(oilDraft({ quantity: null }))).toBe(false);
+    // A row read without the column counts as unanswered too.
+    expect(isDraftComplete(draftRow({ quantity: undefined }) as never)).toBe(
+      false,
+    );
+  });
 });
 
 describe('buildSessionFromDraft', () => {
@@ -1079,6 +1122,8 @@ describe('buildSessionFromDraft', () => {
       antifreezeWeightG: undefined,
       weightIsCustom: false,
       price: 450000,
+      // The item count answered at the QUANTITY step.
+      quantity: 3,
     });
     // The session carries NO image state — the draft's rows own that.
     expect(session).not.toHaveProperty('processedUrls');
@@ -1145,7 +1190,7 @@ describe('buildSessionFromDraft', () => {
 });
 
 describe('TelegramService — "⬅️ Назад" (draft-backed text/price edit)', () => {
-  it('reopens the draft to CREATING at PRICE and REUSES the photos (no deletion, no re-processing)', async () => {
+  it('reopens the draft to CREATING at QUANTITY and REUSES the photos (no deletion, no re-processing)', async () => {
     const cloudinary = makeCloudinary();
     const drafts = makeDrafts();
     const queue = makeQueue();
@@ -1158,16 +1203,17 @@ describe('TelegramService — "⬅️ Назад" (draft-backed text/price edit)
 
     await svc.reopenDraftForEdit(ctx, 1);
 
-    // The draft moved back to CREATING under the optimistic lock, at PRICE.
+    // The draft moved back to CREATING under the optimistic lock, at the last
+    // question — the item count; "⬅️ Назад" there walks on to the price.
     expect(drafts.reopenForEdit).toHaveBeenCalledWith(
       'draft_1',
       3,
-      WizardStep.PRICE,
+      WizardStep.QUANTITY,
     );
-    // Pending consumed; the dialogue is restored at PRICE from the DRAFT.
+    // Pending consumed; the dialogue is restored at QUANTITY from the DRAFT.
     expect(svc.pending.has(1)).toBe(false);
     const session = svc.wizard.get(1);
-    expect(session?.step).toBe(WizardStep.PRICE);
+    expect(session?.step).toBe(WizardStep.QUANTITY);
     expect(session?.draftId).toBe('draft_1');
     expect(session?.title).toBe('Магнитола для Nexia 3');
     // Critically: NO assets deleted and the QUEUE IS NOT INVOLVED AT ALL — the
@@ -1177,7 +1223,9 @@ describe('TelegramService — "⬅️ Назад" (draft-backed text/price edit)
     expect(queue.enqueueImage).not.toHaveBeenCalled();
     expect(queue.reenqueueImage).not.toHaveBeenCalled();
     expect(queue.removeImageJob).not.toHaveBeenCalled();
-    expect(ctx.replies.some((r) => r.includes('цену'))).toBe(true);
+    expect(ctx.replies.some((r) => r.includes('Сколько единиц товара'))).toBe(
+      true,
+    );
   });
 
   it('reports and no-ops when there is no pending record to reopen', async () => {
@@ -1560,6 +1608,14 @@ describe('buildPreview — the confirmation caption', () => {
 
   it('shows a 10 кг antifreeze weight', () => {
     expect(captionFor(antifreezePending(1, 10_000))).toContain('10 кг');
+  });
+
+  it('shows the item count the seller entered, after the price', () => {
+    const caption = captionFor(draft(1, undefined, { quantity: 12 }));
+    expect(caption).toContain('📦 *Количество:* 12');
+    expect(caption.indexOf('Количество')).toBeGreaterThan(
+      caption.indexOf('Цена'),
+    );
   });
 
   it('shows a fractional 2.5 кг weight', () => {

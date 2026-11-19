@@ -6,14 +6,17 @@
 //
 //   PHOTOS_FIRST → BRAND ─┬─ (a car brand)  → MODEL → CATEGORY → TITLE
 //                         │                    → DESCRIPTION → PART_NUMBER_TYPE
-//                         │                    → [PART_NUMBER] → PRICE → DONE
+//                         │                    → [PART_NUMBER] → PRICE
+//                         │                    → QUANTITY → DONE
 //                         │
 //                         └─ ("Другое")     → OTHER_KIND ("Что продаёте?")
 //                              ├─ (Моторное масло) → OTHER_CATEGORY
 //                              │      → OIL_TYPE → OIL_VISCOSITY → OIL_VOLUME
-//                              │      → TITLE → DESCRIPTION → PRICE → DONE
+//                              │      → TITLE → DESCRIPTION → PRICE → QUANTITY
+//                              │      → DONE
 //                              └─ (Антифриз)       → ANTIFREEZE_WEIGHT
-//                                     → TITLE → DESCRIPTION → PRICE → DONE
+//                                     → TITLE → DESCRIPTION → PRICE → QUANTITY
+//                                     → DONE
 //
 // The oil questions ask the TYPE first and the viscosity second: the type is
 // what the tax registry classifies an oil by (one MXIK / package code per base
@@ -125,6 +128,11 @@ export enum WizardStep {
   PART_NUMBER_TYPE = 'PART_NUMBER_TYPE',
   PART_NUMBER = 'PART_NUMBER',
   PRICE = 'PRICE',
+  /** "Сколько единиц товара в наличии?" — how many items the seller has, as a
+   *  whole number. The LAST question of every flow. Written to Stock.quantity on
+   *  commit. Not the package size: an oil's volume and an antifreeze's weight
+   *  are asked by their own steps, and this counts the packages. */
+  QUANTITY = 'QUANTITY',
   /** Questionnaire finished: every form field is collected. The wizard's work is
    *  done; the draft coordinator now owns the rendezvous with image processing and
    *  decides when to show the preview. Terminal for the FSM. */
@@ -148,6 +156,7 @@ const FLOWS: Record<ProductKind, WizardStep[]> = {
     WizardStep.DESCRIPTION,
     WizardStep.PART_NUMBER_TYPE,
     WizardStep.PRICE,
+    WizardStep.QUANTITY,
   ],
   [ProductKind.MOTOR_OIL]: [
     // NO OIL_TYPE STEP. The base composition IS the category the seller picked
@@ -160,6 +169,7 @@ const FLOWS: Record<ProductKind, WizardStep[]> = {
     WizardStep.TITLE,
     WizardStep.DESCRIPTION,
     WizardStep.PRICE,
+    WizardStep.QUANTITY,
   ],
   [ProductKind.ANTIFREEZE]: [
     // The quantity question, in KILOGRAMS. Antifreeze has no viscosity, no
@@ -168,6 +178,7 @@ const FLOWS: Record<ProductKind, WizardStep[]> = {
     WizardStep.TITLE,
     WizardStep.DESCRIPTION,
     WizardStep.PRICE,
+    WizardStep.QUANTITY,
   ],
 };
 
@@ -203,6 +214,7 @@ const MOTOR_OIL_FOR_VEHICLE_FLOW: WizardStep[] = [
   WizardStep.TITLE,
   WizardStep.DESCRIPTION,
   WizardStep.PRICE,
+  WizardStep.QUANTITY,
 ];
 
 /**
@@ -475,6 +487,8 @@ export interface WizardSession {
    *  of their path (it must be re-visited when walking back). */
   weightIsCustom: boolean;
   price: number | null;
+  /** How many items the seller has (QUANTITY step); null until answered. */
+  quantity: number | null;
 }
 
 /**
@@ -599,7 +613,11 @@ export interface CategoryPackageCodes {
 // Bumped to 7 for the consumer-box sale form. The SESSION SHAPE gained
 // `packageFormOptions` and the `pf:` payload a third value, so a version-6 keyboard
 // is routed to the same notice.
-export const CATALOG_VERSION = 7;
+//
+// Bumped to 8 for the QUANTITY step. The SESSION SHAPE gained `quantity` and
+// PRICE is no longer the last question, so a version-7 keyboard belongs to a
+// dialogue whose shape it predates and is routed to the same notice.
+export const CATALOG_VERSION = 8;
 
 /** Build a versioned callback payload, e.g. buildAction('b', 5) → "wiz:1:b:5". */
 export function buildAction(kind: string, arg: string | number): string {
@@ -727,6 +745,11 @@ const PART_NUMBER_RE = /^[A-Za-z0-9][A-Za-z0-9\-./ ]{1,48}[A-Za-z0-9]$/;
 const PART_NUMBER_MAX = 50;
 // Stock.priceUzs is Decimal(14,2) → the integer part fits 12 digits.
 const MAX_PRICE_UZS = 999_999_999_999;
+// Stock.quantity is a whole number of items. At least one: a listing with
+// nothing to sell is not a listing. The upper bound only catches a mistyped
+// value (a price typed into the count); Stock.quantity is int4.
+const MIN_QUANTITY = 1;
+const MAX_QUANTITY = 100_000;
 
 // ── Session store ───────────────────────────────────────────────────────────
 export class WizardSessionStore {
@@ -768,6 +791,7 @@ export class WizardSessionStore {
       antifreezeWeightG: null,
       weightIsCustom: false,
       price: null,
+      quantity: null,
     };
     this.sessions.set(tgUserId, session);
     return session;
@@ -1425,7 +1449,43 @@ export function inputPrice(session: WizardSession, raw: string): WizardResult {
     return invalid(t(session.lang, 'invalid.priceTooLarge'));
   }
   session.price = price;
-  // PRICE is the last QUESTION of every flow, so `advance` lands on
+  return advance(session);
+}
+
+/**
+ * The item count: a whole number from {@link MIN_QUANTITY} to
+ * {@link MAX_QUANTITY}. Spaces are ignored ("1 000") and a trailing piece word
+ * is accepted ("5 шт", "5 dona", "5 pcs"); anything else — a fraction, a
+ * negative, words — is re-asked.
+ */
+export function parseQuantity(raw: string): number | null {
+  const m = /^(\d+)(?:\s*(?:шт|штук[аи]?|dona|ta|pcs)\.?)?$/iu.exec(
+    raw.replace(/[\s\u00a0]+(?=\d)/g, '').trim(),
+  );
+  if (!m) return null;
+  const n = Number(m[1]);
+  if (!Number.isSafeInteger(n) || n < MIN_QUANTITY || n > MAX_QUANTITY) {
+    return null;
+  }
+  return n;
+}
+
+export function inputQuantity(
+  session: WizardSession,
+  raw: string,
+): WizardResult {
+  if (session.step !== WizardStep.QUANTITY) return STALE;
+  const quantity = parseQuantity(raw);
+  if (quantity === null) {
+    return invalid(
+      t(session.lang, 'invalid.quantity', {
+        min: MIN_QUANTITY,
+        max: MAX_QUANTITY,
+      }),
+    );
+  }
+  session.quantity = quantity;
+  // QUANTITY is the last QUESTION of every flow, so `advance` lands on
   // QUESTIONNAIRE_DONE: the form is complete. Photos were uploaded first and are
   // already processing — the coordinator handles the rendezvous and decides when
   // the preview appears.
@@ -1887,6 +1947,11 @@ export function stepPrompt(session: WizardSession): StepPrompt {
     case WizardStep.PRICE:
       return {
         text: t(lang, 'step.price'),
+        keyboard: backOnlyKeyboard(session),
+      };
+    case WizardStep.QUANTITY:
+      return {
+        text: t(lang, 'step.quantity'),
         keyboard: backOnlyKeyboard(session),
       };
     case WizardStep.PHOTOS_FIRST:

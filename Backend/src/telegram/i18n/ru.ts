@@ -92,6 +92,7 @@ export const RU: BotStrings = {
   'preview.title': 'Название',
   'preview.description': 'Описание',
   'preview.price': 'Цена с учётом НДС',
+  'preview.quantity': 'Количество',
   'preview.vehicle': 'Автомобиль',
   'preview.category': 'Категория',
   'preview.viscosity': 'Вязкость',
@@ -166,6 +167,8 @@ export const RU: BotStrings = {
   'step.partNumber': '🔢 Введите {type} номер детали.\nПример: 96535062',
   'step.price':
     '💰 Введите цену в сумах с учётом НДС, если вы его платите: это итоговая цена для покупателя, НДС к ней не прибавляется.\nПример: 250 000',
+  'step.quantity':
+    '📦 Сколько единиц товара у вас в наличии? Введите целое число.\nПример: 5',
   'step.questionnaireDone': '⏳ Завершаем обработку фото…',
 
   'invalid.viscosity':
@@ -190,6 +193,8 @@ export const RU: BotStrings = {
     '❌ Не удалось распознать цену. Введите число в сумах, например: 250 000',
   'invalid.priceTooLarge':
     '❌ Слишком большая цена. Проверьте значение и введите ещё раз.',
+  'invalid.quantity':
+    '❌ Не удалось распознать количество. Введите целое число от {min} до {max}, например: 5',
 
   'stale.catalog':
     'Каталог был обновлён.\n' +

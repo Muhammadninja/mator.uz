@@ -91,6 +91,7 @@ export const EN: BotStrings = {
   'preview.title': 'Title',
   'preview.description': 'Description',
   'preview.price': 'Price (VAT included)',
+  'preview.quantity': 'Quantity',
   'preview.vehicle': 'Vehicle',
   'preview.category': 'Category',
   'preview.viscosity': 'Viscosity',
@@ -164,6 +165,8 @@ export const EN: BotStrings = {
   'step.partNumber': '🔢 Enter the {type} part number.\nExample: 96535062',
   'step.price':
     '💰 Enter the price in UZS, VAT included if you pay it: this is the final price for the buyer, and no VAT is added to it.\nExample: 250 000',
+  'step.quantity':
+    '📦 How many items do you have in stock? Enter a whole number.\nExample: 5',
   'step.questionnaireDone': '⏳ Finishing photo processing…',
 
   'invalid.viscosity':
@@ -188,6 +191,8 @@ export const EN: BotStrings = {
     '❌ Could not read the price. Enter a number in UZS, for example: 250 000',
   'invalid.priceTooLarge':
     '❌ That price is too large. Check the value and enter it again.',
+  'invalid.quantity':
+    "❌ Couldn't read the quantity. Enter a whole number from {min} to {max}, for example: 5",
 
   'stale.catalog':
     'The catalog has been updated.\n' +

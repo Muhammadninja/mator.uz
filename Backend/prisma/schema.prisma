@@ -708,6 +708,10 @@ model ProductDraft {
   // GRAMS, null for every other kind.
   antifreezeWeightG  Int?                 @map("antifreeze_weight_g")
   priceUzs           Decimal?             @map("price_uzs") @db.Decimal(14, 2)
+  // How many items the seller has, answered at the QUANTITY step (the last
+  // question of every flow). Written to Stock.quantity on commit and projected as
+  // the part's stock count. Null until answered.
+  quantity           Int?
   createdAt          DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt          DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
   expiresAt          DateTime             @map("expires_at") @db.Timestamptz(3) // TTL sweep

@@ -46,6 +46,7 @@ function draftRow(over: Record<string, unknown> = {}) {
     oilType: null,
     oilVolumeMl: null,
     priceUzs: new Decimal(450000),
+    quantity: 3,
     images: [
       {
         id: 'dimg_1',
@@ -476,7 +477,7 @@ describe('Draft flow — Redis coordination guards', () => {
       expect(drafts.reopenForEdit).toHaveBeenCalledWith(
         'draft_1',
         4, // pending.draftVersion — the optimistic lock's expected version
-        WizardStep.PRICE,
+        WizardStep.QUANTITY,
       );
       expect(svc.locks.acquired).toContain(RedisKeys.lockDraftReopen('draft_1'));
     });

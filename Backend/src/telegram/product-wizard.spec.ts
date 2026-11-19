@@ -18,6 +18,8 @@ import {
   choosePartNumberType,
   inputPartNumber,
   inputPrice,
+  inputQuantity,
+  parseQuantity,
   beginQuestionnaire,
   previousStep,
   goBack,
@@ -120,6 +122,7 @@ function sessionAtDone(): WizardSession {
   choosePartNumberType(s, 'OEM');
   inputPartNumber(s, '96535062');
   inputPrice(s, '250 000');
+  inputQuantity(s, '4');
   return s;
 }
 
@@ -180,6 +183,7 @@ describe('wizard happy path', () => {
       partNumberType: 'OEM',
       partNumber: '96535062',
       price: 250000,
+      quantity: 4,
     });
   });
 });
@@ -591,11 +595,12 @@ describe('price input (shared parsePrice rules)', () => {
     ['130.000 сум', 130000],
     ['1.250.000', 1250000],
     ['350000', 350000],
-  ])('parses %s → %i and advances to QUESTIONNAIRE_DONE', (raw, expected) => {
+  ])('parses %s → %i and advances to QUANTITY', (raw, expected) => {
     const s = atPrice();
     expect(inputPrice(s, raw).status).toBe('ok');
     expect(s.price).toBe(expected);
-    expect(s.step).toBe(WizardStep.QUESTIONNAIRE_DONE);
+    // The price is no longer the last question: the item count follows it.
+    expect(s.step).toBe(WizardStep.QUANTITY);
   });
 
   it.each([['нет цены'], ['0'], ['-500'], ['9999999999999999']])(
@@ -606,6 +611,78 @@ describe('price input (shared parsePrice rules)', () => {
       expect(s.step).toBe(WizardStep.PRICE);
     },
   );
+});
+
+describe('quantity input (the last question)', () => {
+  function atQuantity(): WizardSession {
+    const s = sessionAtTitle();
+    inputTitle(s, 'Фильтр масляный');
+    skipDescription(s);
+    choosePartNumberType(s, 'SKIP');
+    inputPrice(s, '250 000');
+    return s;
+  }
+
+  it('is asked right after the price, never skipped', () => {
+    expect(atQuantity().step).toBe(WizardStep.QUANTITY);
+  });
+
+  it.each([
+    ['1', 1],
+    ['7', 7],
+    ['  12 ', 12],
+    ['1 000', 1000],
+    ['5 шт', 5],
+    ['5шт.', 5],
+    ['3 штуки', 3],
+    ['10 dona', 10],
+    ['4 ta', 4],
+    ['100000', 100_000],
+  ])('accepts %s → %i and finishes the questionnaire', (raw, expected) => {
+    const s = atQuantity();
+    expect(inputQuantity(s, raw).status).toBe('ok');
+    expect(s.quantity).toBe(expected);
+    expect(s.step).toBe(WizardStep.QUESTIONNAIRE_DONE);
+  });
+
+  it.each([
+    ['0'],
+    ['-3'],
+    ['2.5'],
+    ['2,5'],
+    ['много'],
+    [''],
+    ['100001'],
+    ['99999999999999999999'],
+    ['5 кг'],
+  ])('rejects %s and re-asks with the accepted range', (raw) => {
+    const s = atQuantity();
+    const result = inputQuantity(s, raw);
+    expect(result.status).toBe('invalid');
+    expect(result.status === 'invalid' && result.message).toContain(
+      'от 1 до 100000',
+    );
+    expect(s.step).toBe(WizardStep.QUANTITY);
+    expect(s.quantity).toBeNull();
+  });
+
+  it('is stale on any other step', () => {
+    const s = sessionAtTitle();
+    expect(inputQuantity(s, '5').status).toBe('stale');
+    expect(s.quantity).toBeNull();
+  });
+
+  it('"⬅️ Назад" from QUANTITY returns to PRICE and keeps the price', () => {
+    const s = atQuantity();
+    expect(goBack(s).status).toBe('ok');
+    expect(s.step).toBe(WizardStep.PRICE);
+    expect(s.price).toBe(250000);
+  });
+
+  it('parseQuantity is a whole count, not a price', () => {
+    expect(parseQuantity('250 000 сум')).toBeNull();
+    expect(parseQuantity('3')).toBe(3);
+  });
 });
 
 describe('back navigation ("⬅️ Назад")', () => {
@@ -727,7 +804,9 @@ describe('stepPrompt', () => {
     expect(stepPrompt(s).text).toContain('OEM');
     inputPartNumber(s, '96535062');
     expect(labels(s)).toContain('⬅️ Назад'); // PRICE
-    inputPrice(s, '250 000'); // → QUESTIONNAIRE_DONE (terminal, no keyboard)
+    inputPrice(s, '250 000');
+    expect(labels(s)).toContain('⬅️ Назад'); // QUANTITY
+    inputQuantity(s, '2'); // → QUESTIONNAIRE_DONE (terminal, no keyboard)
     expect(stepPrompt(s).keyboard).toBeUndefined();
   });
 });
@@ -814,6 +893,7 @@ describe('photos-first entry', () => {
         'TITLE',
         'DESCRIPTION',
         'PRICE',
+        'QUANTITY',
         'QUESTIONNAIRE_DONE',
       ].sort(),
     );
