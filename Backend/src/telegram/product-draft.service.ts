@@ -63,6 +63,8 @@ export interface DraftFormPatch {
   // ANTIFREEZE attribute — the packaged net weight in GRAMS; null elsewhere.
   antifreezeWeightG?: number | null;
   priceUzs?: Prisma.Decimal | number | null;
+  /** How many items the seller has — the QUANTITY step, asked in every flow. */
+  quantity?: number | null;
 }
 
 /**
@@ -134,6 +136,9 @@ export interface DraftFormFields {
   oilType: OilType | null;
   oilVolumeMl: number | null;
   antifreezeWeightG: number | null;
+  /** Asked in every flow, like title and price. `undefined` (a row read without
+   *  the column) counts as unanswered. */
+  quantity?: number | null;
 }
 
 // Compile-time guarantee that every field a capability entry can REQUIRE is a
@@ -178,6 +183,10 @@ export function isPhotoUpdateDraft(draft: {
 
 export function isDraftFormComplete(draft: DraftFormFields): boolean {
   if (draft.title === null || draft.priceUzs === null) return false;
+  // The count is the LAST question of every flow. Without it in the gate, the
+  // last image to settle after the price would show the preview while the seller
+  // is still being asked how many items they have.
+  if (draft.quantity == null) return false;
   return capabilitiesOf(draft.kind).requiredFields.every(
     (field) => draft[field] !== null,
   );
@@ -303,6 +312,9 @@ export class ProductDraftService {
           oilVolumeMl: source.oilVolumeMl,
           antifreezeWeightG: source.antifreezeWeightG,
           priceUzs: source.priceUzs,
+          // Without it the clone is never complete and the new photos never
+          // reach a preview.
+          quantity: source.quantity,
         },
       });
     });
@@ -450,6 +462,7 @@ export class ProductDraftService {
         oilVolumeMl: patch.oilVolumeMl,
         antifreezeWeightG: patch.antifreezeWeightG,
         priceUzs: patch.priceUzs ?? undefined,
+        quantity: patch.quantity,
       },
     });
   }

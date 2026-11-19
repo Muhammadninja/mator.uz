@@ -666,6 +666,35 @@ describe('CatalogProjectionService — imported dealer positions (Driver\'s Vill
     expect(upsertArg(prisma, 'catalogPart').create).not.toHaveProperty('stockQty');
   });
 
+  it('writes a Telegram listing’s count when its seller has just stated it (quantityIsCount)', () => {
+    svc.buildProjectionOps(buildStock({ quantity: 12 }), new Map(), {
+      quantityIsCount: true,
+    });
+    const part = upsertArg(prisma, 'catalogPart');
+    // Both branches: a first listing and a re-listing carry the new count.
+    expect(part.create).toMatchObject({ inStock: true, stockQty: 12 });
+    expect(part.update).toMatchObject({ inStock: true, stockQty: 12 });
+
+    // Any other re-projection of the same listing leaves stockQty to its owners.
+    prisma.catalogPart.upsert.mockClear();
+    svc.buildProjectionOps(buildStock({ quantity: 12 }), new Map(), {
+      keepClassification: true,
+    });
+    expect(upsertArg(prisma, 'catalogPart').update).not.toHaveProperty(
+      'stockQty',
+    );
+
+    // keepPriceAndStock still wins on an existing part.
+    prisma.catalogPart.upsert.mockClear();
+    svc.buildProjectionOps(buildStock({ quantity: 12 }), new Map(), {
+      quantityIsCount: true,
+      keepPriceAndStock: true,
+    });
+    expect(upsertArg(prisma, 'catalogPart').update).not.toHaveProperty(
+      'stockQty',
+    );
+  });
+
   it('projects make-wide fitment into catalog_part_make_fits, reconciled every time', () => {
     svc.buildProjectionOps(
       imported({ product: { isUniversal: false, partModels: [], partMakes: [{ brand: { id: 9, name: 'Skoda' } }, { brand: { id: 9, name: 'Skoda' } }] } }),

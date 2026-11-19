@@ -41,6 +41,7 @@ function makeDraft(over: Partial<Record<string, unknown>> = {}) {
     oilVolumeMl: null,
     antifreezeWeightG: null,
     priceUzs: 250000,
+    quantity: 3,
     images: [] as Img[],
     ...over,
   };

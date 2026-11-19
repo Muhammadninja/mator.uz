@@ -42,6 +42,15 @@ export interface ProjectionOptions {
    * an operator's edit. A part created by the projection still gets them.
    */
   keepPriceAndStock?: boolean;
+  /**
+   * The stock row's quantity is a real count at this projection, so it becomes
+   * the part's stockQty, as an imported position's does. Set by the Telegram
+   * wizard's commit, where the seller has just answered how many items they
+   * have. Other re-projections of a Telegram listing leave it unset: listings
+   * published before the question existed hold the schema default 1, which is
+   * not a count. Has no effect with keepPriceAndStock on an existing part.
+   */
+  quantityIsCount?: boolean;
 }
 
 /**
@@ -720,12 +729,15 @@ export class CatalogProjectionService {
     const priceAndStock = {
       priceUzs: stock.priceUzs,
       inStock: stock.quantity > 0,
-      // The on-hand count, ONLY for a position imported from an external stock
-      // system — the one case where Stock.quantity is a real warehouse count.
-      // Telegram listings carry the schema default quantity (1), which is not a
-      // count, so their stockQty is left to its existing owners exactly as
-      // before.
-      ...(stock.sourceSystem ? { stockQty: stock.quantity } : {}),
+      // The on-hand count, for a position imported from an external stock
+      // system — where Stock.quantity is a real warehouse count — and for a
+      // Telegram listing whose seller has just stated it (quantityIsCount).
+      // Otherwise a Telegram listing's quantity may be the schema default 1,
+      // which is not a count, so its stockQty is left to its existing owners
+      // exactly as before.
+      ...(stock.sourceSystem || opts.quantityIsCount
+        ? { stockQty: stock.quantity }
+        : {}),
     };
 
     const partData = {

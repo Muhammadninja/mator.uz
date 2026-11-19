@@ -28,6 +28,7 @@ import {
   WizardStep,
   beginQuestionnaire,
   inputPrice,
+  inputQuantity,
   selectBrand,
 } from './product-wizard';
 
@@ -132,6 +133,7 @@ function readyDraft(over: Record<string, unknown> = {}) {
     oilType: null,
     oilVolumeMl: null,
     priceUzs: new Decimal(250000),
+    quantity: 3,
     formStep: 'QUESTIONNAIRE_DONE',
     images: [
       {
@@ -225,6 +227,34 @@ describe('TelegramService — draft flow (photos-first)', () => {
       expect(svc.draftCoordinator.onFormStep).not.toHaveBeenCalled(); // not done yet
     });
 
+    it('after the price the questionnaire is NOT done: the item count is asked next', async () => {
+      const drafts = { updateForm: jest.fn().mockResolvedValue(undefined) };
+      const svc = makeService({ drafts });
+      const ctx = makeCtx();
+      const session = svc.wizard.start(7);
+      session.draftId = 'draft_1';
+      session.step = WizardStep.PRICE;
+      session.title = 'Фильтр';
+      inputPrice(session, '250 000'); // → QUANTITY
+      const sendStepPrompt = jest
+        .spyOn(svc, 'sendStepPrompt')
+        .mockResolvedValue(undefined);
+
+      await svc.handleFormAdvance(ctx, 7, session);
+
+      expect(drafts.updateForm).toHaveBeenCalledWith(
+        'draft_1',
+        expect.objectContaining({
+          formStep: WizardStep.QUANTITY,
+          priceUzs: 250000,
+          quantity: null,
+        }),
+      );
+      expect(sendStepPrompt).toHaveBeenCalled();
+      expect(svc.draftCoordinator.onFormStep).not.toHaveBeenCalled();
+      expect(svc.wizard.get(7)).toBe(session); // the dialogue goes on
+    });
+
     it('on QUESTIONNAIRE_DONE: persists, consumes the session, calls the coordinator, and shows the holding message while still processing', async () => {
       const drafts = {
         updateForm: jest.fn().mockResolvedValue(undefined),
@@ -243,10 +273,19 @@ describe('TelegramService — draft flow (photos-first)', () => {
       session.model = 'Cobalt';
       session.category = 'ENGINE';
       session.title = 'Фильтр';
-      inputPrice(session, '250 000'); // → QUESTIONNAIRE_DONE (parallel)
+      inputPrice(session, '250 000'); // → QUANTITY
+      inputQuantity(session, '6'); // → QUESTIONNAIRE_DONE (parallel)
 
       await svc.handleFormAdvance(ctx, 7, session);
 
+      // The count is persisted with the rest: the rendezvous gate requires it.
+      expect(drafts.updateForm).toHaveBeenCalledWith(
+        'draft_1',
+        expect.objectContaining({
+          formStep: WizardStep.QUESTIONNAIRE_DONE,
+          quantity: 6,
+        }),
+      );
       expect(svc.draftCoordinator.onFormStep).toHaveBeenCalledWith('draft_1');
       expect(svc.wizard.get(7)).toBeUndefined(); // session consumed
       const texts = ctx.reply.mock.calls.map((c: unknown[]) => c[0]);
@@ -277,7 +316,8 @@ describe('TelegramService — draft flow (photos-first)', () => {
       session.step = WizardStep.PRICE;
       session.title = 'Antifriz G12 5kg';
       session.antifreezeWeightG = 5000; // answered at ANTIFREEZE_WEIGHT
-      inputPrice(session, '250 000'); // → QUESTIONNAIRE_DONE
+      inputPrice(session, '250 000'); // → QUANTITY
+      inputQuantity(session, '1'); // → QUESTIONNAIRE_DONE
 
       await svc.handleFormAdvance(ctx, 7, session);
 
@@ -305,9 +345,11 @@ describe('TelegramService — draft flow (photos-first)', () => {
       session.category = 'ENGINE';
       session.title = 'Фильтр';
       inputPrice(session, '250 000');
+      inputQuantity(session, '1');
 
       await svc.handleFormAdvance(ctx, 7, session);
 
+      expect(svc.draftCoordinator.onFormStep).toHaveBeenCalledWith('draft_1');
       const texts = ctx.reply.mock.calls.map((c: unknown[]) => c[0]);
       expect(texts.some((t: string) => t.includes('Завершаем обработку'))).toBe(
         false,
@@ -333,6 +375,7 @@ describe('TelegramService — draft flow (photos-first)', () => {
         oilType: null,
         oilVolumeMl: null,
         priceUzs: new Decimal(250000),
+        quantity: 3,
         images: [
           {
             status: 'READY',
@@ -408,6 +451,7 @@ describe('TelegramService — draft flow (photos-first)', () => {
         oilType: null,
         oilVolumeMl: null,
         priceUzs: new Decimal(250000),
+        quantity: 3,
         images: [
           {
             status: 'READY',
@@ -808,6 +852,7 @@ describe('TelegramService — draft flow (photos-first)', () => {
         oilType: null,
         oilVolumeMl: null,
         priceUzs: new Decimal(250000),
+        quantity: 3,
         images: [
           { id: 'a', status: 'READY', processedUrl: 'u1', jobId: 'j1' },
           { id: 'b', status: 'READY', processedUrl: 'u2', jobId: 'j2' },
@@ -982,11 +1027,11 @@ describe('TelegramService — draft flow (photos-first)', () => {
       await svc.reopenDraftForEdit(ctx, 7);
 
       // Reopened under the draft's CURRENT version (the preview send already bumped
-      // it), not a stale cached one.
+      // it), not a stale cached one — at the last question, the item count.
       expect(drafts.reopenForEdit).toHaveBeenCalledWith(
         'draft_1',
         3,
-        WizardStep.PRICE,
+        WizardStep.QUANTITY,
       );
       // The seller lands back in the wizard rather than being told to /start over.
       expect(svc.wizard.get(7)).toBeDefined();

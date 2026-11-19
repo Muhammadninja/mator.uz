@@ -62,6 +62,8 @@ export interface BotStrings {
   'preview.title': string;
   'preview.description': string;
   'preview.price': string;
+  /** The item count the seller entered at the QUANTITY step. */
+  'preview.quantity': string;
   'preview.vehicle': string;
   'preview.category': string;
   'preview.viscosity': string;
@@ -120,6 +122,7 @@ export interface BotStrings {
   /** `{type}` — OEM or GM, as the seller labelled it. */
   'step.partNumber': string;
   'step.price': string;
+  'step.quantity': string;
   'step.questionnaireDone': string;
 
   // ── Input validation ──────────────────────────────────────────────────────
@@ -136,6 +139,8 @@ export interface BotStrings {
   'invalid.partNumber': string;
   'invalid.price': string;
   'invalid.priceTooLarge': string;
+  /** `{min}` / `{max}` — the accepted range of the item count. */
+  'invalid.quantity': string;
 
   // ── Stale-catalog notices ─────────────────────────────────────────────────
   'stale.catalog': string;

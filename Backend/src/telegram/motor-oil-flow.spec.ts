@@ -28,6 +28,7 @@ import {
   selectSubcategory,
   selectModel,
   inputPrice,
+  inputQuantity,
   goBack,
   previousStep,
   stepPrompt,
@@ -129,6 +130,7 @@ function sessionAtDone(): WizardSession {
   inputTitle(s, 'Mobil 1 ESP 5W-30 4L');
   inputDescription(s, 'Оригинал, Бельгия');
   inputPrice(s, '450 000');
+  inputQuantity(s, '12');
   return s;
 }
 
@@ -222,7 +224,7 @@ describe('reaching the motor-oil flow', () => {
 });
 
 describe('motor-oil happy path', () => {
-  it('walks type → viscosity → volume → title → description → price', () => {
+  it('walks type → viscosity → volume → title → description → price → quantity', () => {
     const s = sessionAtDone();
     expect(s).toMatchObject({
       step: WizardStep.QUESTIONNAIRE_DONE,
@@ -233,6 +235,7 @@ describe('motor-oil happy path', () => {
       title: 'Mobil 1 ESP 5W-30 4L',
       description: 'Оригинал, Бельгия',
       price: 450_000,
+      quantity: 12,
     });
   });
 
