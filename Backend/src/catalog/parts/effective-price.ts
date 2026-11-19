@@ -17,7 +17,7 @@ import type { PrismaService } from '../../prisma/prisma.service';
  *     with the id as tiebreak (stable pages), and the page's ids are returned.
  *
  * The discount is applied in one place, the same call the card uses, so it can
- * never be applied twice. MATOR10 is a cart promo code and is not involved.
+ * never be applied twice. Cart promo codes are not involved.
  *
  * Above MAX_PRICED_ROWS matching rows the stored price is used instead and a
  * warning logged: the catalog is far below that today.
