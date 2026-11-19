@@ -233,6 +233,32 @@ export function presentCartPickupPoint(point: PickupPoint<CartPickupItem>) {
   };
 }
 
+/** A placed order's pickup point, for its buyer: like the cart's, keyed by order line. */
+export function presentOrderPickupPoint(
+  point: PickupPoint<{
+    id: string;
+    partId: string | null;
+    title: string;
+    quantity: number;
+  }>,
+) {
+  return {
+    dealer_id: point.dealerId,
+    dealer_name: point.dealerName,
+    address: point.address,
+    landmark: point.landmark,
+    location: point.location
+      ? { lat: point.location.lat, lng: point.location.lng }
+      : null,
+    items: point.items.map((item) => ({
+      order_item_id: item.id,
+      part_id: item.partId,
+      title: item.title,
+      quantity: item.quantity,
+    })),
+  };
+}
+
 @Injectable()
 export class PickupPointsService {
   constructor(private readonly prisma: PrismaService) {}

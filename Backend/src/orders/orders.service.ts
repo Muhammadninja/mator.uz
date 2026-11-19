@@ -91,6 +91,11 @@ import {
   linesSubtotalUzs,
   toTiyin,
 } from './service-fee.util';
+import {
+  findPickupPoints,
+  isGoodsLine,
+  presentOrderPickupPoint,
+} from '../shipping/pickup-points.service';
 
 const DEFAULT_ORDER_LIMIT = 20;
 
@@ -663,7 +668,21 @@ export class OrdersService {
       include: ORDER_INCLUDE,
     });
     if (!order || order.userId !== userId) throw new NotFoundException('Order not found');
-    return presentOrder(order);
+    const presented = presentOrder(order);
+    if (order.deliveryMethod !== DeliveryMethod.PICKUP) return presented;
+    // Where the buyer collects it: the same dealers the checkout showed, read from the
+    // seller each line recorded when placed (never looked up again from the part), with
+    // the same address and location rules. Only a pickup order has any, and only the
+    // detail carries them: the list stays one query.
+    const points = await findPickupPoints(
+      this.prisma,
+      order.items.filter(isGoodsLine).map((it) => ({
+        storefrontId: it.sellerId,
+        offerSellerTgId: it.offerSellerTgId,
+        item: it,
+      })),
+    );
+    return { ...presented, pickup_points: points.map(presentOrderPickupPoint) };
   }
 
   /**
