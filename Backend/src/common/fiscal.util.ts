@@ -148,13 +148,14 @@ export function resolveOilFiscalCodes(
 
 /**
  * Whether a category is fiscally CONFIGURED — i.e. a product in it can be sold
- * online at all. Both an MXIK and a single package code are required; the set and
- * box codes are optional and never make a category configured on their own.
+ * online at all. An MXIK and AT LEAST ONE package code are required, and any of the
+ * three forms will do: a category sold only as a set, or only in a box, needs no
+ * "штука" code it does not have.
  */
 export function isCategoryFiscallyConfigured(
   category: CategoryFiscalData,
 ): boolean {
-  return !!category.mxik && !!category.packageCodeSingle;
+  return !!category.mxik && offeredPackageForms(category).length > 0;
 }
 
 /** The sale forms this category holds a code for, in the order a seller is asked. */
@@ -181,9 +182,9 @@ export function offersPackageChoice(
  * code, least of all "штука", which on a set or a box would misstate what was sold.
  *
  *   • A stated form gets the code of that form, and only that.
- *   • A listing that states nothing gets the single code only where the category holds
- *     nothing else: a category with one code says everything there is sold that way.
- *     With more than one code, someone has to say which applies.
+ *   • A listing that states nothing gets the category's code only where it holds
+ *     exactly one, whichever form that is: a category with one code says everything
+ *     there is sold that way. With more than one code, someone has to say which applies.
  */
 export function resolvePackageCode(
   category: CategoryPackageCodeColumns,
@@ -191,8 +192,8 @@ export function resolvePackageCode(
 ): string | null {
   if (form) return category[PACKAGE_CODE_COLUMN[form]] ?? null;
   const offered = offeredPackageForms(category);
-  return offered.length === 1 && offered[0] === PackageForm.SINGLE
-    ? category.packageCodeSingle
+  return offered.length === 1
+    ? category[PACKAGE_CODE_COLUMN[offered[0]]]
     : null;
 }
 
@@ -361,10 +362,10 @@ export function resolveFiscalClassification(
     else if (!MXIK_PATTERN.test(category.mxik)) {
       gaps.push(`category MXIK "${category.mxik}" is malformed`);
     }
-    // A set code alone never makes a category configured, even for a listing sold
-    // as a set: see isCategoryFiscallyConfigured.
+    // Any one package code configures a category (see isCategoryFiscallyConfigured);
+    // whether it is the one this listing needs is packageFormGap's question.
     const formGap = packageFormGap(category, packageForm);
-    if (!category.packageCodeSingle) {
+    if (offeredPackageForms(category).length === 0) {
       gaps.push('category has no package code');
     } else if (formGap) {
       gaps.push(formGap);
@@ -440,8 +441,9 @@ export function categoryFiscalReadiness(category: FiscalCategorySource): {
   const result = resolveFiscalClassification({
     ...listingTypeForCategory(category.id),
     // A question about the category, not about a listing that forgot to say how it is
-    // sold: the form every configured category holds a code for.
-    packageForm: PackageForm.SINGLE,
+    // sold: asked for the first form it holds a code for, which need not be a piece.
+    // A category with none (or one fiscalized by oil type) is asked about a piece.
+    packageForm: offeredPackageForms(category)[0] ?? PackageForm.SINGLE,
     category,
   });
   if (result.ok) return { status: 'READY', gaps: [] };

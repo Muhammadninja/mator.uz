@@ -460,8 +460,8 @@ describe('DELETE guards (deactivation is the preferred path)', () => {
 // ── Фискальные данные ────────────────────────────────────────────────────────
 // A category owns the MXIK and the two Tasnif package codes every product in it
 // is fiscalized with. The rule the console must enforce is a property of the ROW
-// AFTER the patch, not of the body: "configured" means BOTH an MXIK and a single
-// package code, with the set code optional.
+// AFTER the patch, not of the body: "configured" means an MXIK and AT LEAST ONE
+// package code — single, set or box, whichever the category is sold as.
 
 describe('fiscal configuration', () => {
   const FISCAL = {
@@ -530,7 +530,7 @@ describe('fiscal configuration', () => {
     });
   });
 
-  it('rejects a box code with no MXIK or single code', async () => {
+  it('rejects a box code with no MXIK', async () => {
     const { service } = makeService();
     await expect(
       service.create({
@@ -590,7 +590,7 @@ describe('fiscal configuration', () => {
     ).rejects.toBeInstanceOf(BadRequestException);
   });
 
-  it('rejects an MXIK with no single package code', async () => {
+  it('rejects an MXIK with no package code of any form', async () => {
     const { service } = makeService();
     await expect(
       service.create({
@@ -603,18 +603,52 @@ describe('fiscal configuration', () => {
     ).rejects.toBeInstanceOf(BadRequestException);
   });
 
-  it('rejects a SET code without the single code it depends on', async () => {
-    const { service } = makeService();
-    await expect(
-      service.create({
-        nameRu: 'Brakes',
-        nameUz: 'Brakes',
-        nameEn: 'Brakes',
-        name: 'Brakes',
-        mxik: '08708005011000000',
-        packageCodeSet: '1417723',
-      }),
-    ).rejects.toBeInstanceOf(BadRequestException);
+  it('creates a category with only a SET code, no single code', async () => {
+    const { service, prisma } = makeService();
+    await service.create({
+      nameRu: 'Brakes',
+      nameUz: 'Brakes',
+      nameEn: 'Brakes',
+      name: 'Brakes',
+      mxik: '08708005011000000',
+      packageCodeSet: '1417723',
+    });
+    const data = prisma.partCategory.create.mock.calls[0][0].data;
+    expect(data).toMatchObject({
+      mxik: '08708005011000000',
+      packageCodeSet: '1417723',
+    });
+    expect(data).not.toHaveProperty('packageCodeSingle');
+  });
+
+  it('creates a category with only a BOX code, no single code', async () => {
+    const { service, prisma } = makeService();
+    await service.create({
+      nameRu: 'Steering',
+      nameUz: 'Steering',
+      nameEn: 'Steering',
+      name: 'Steering',
+      mxik: '08708001133000000',
+      packageCodeBox: '1533557',
+    });
+    expect(prisma.partCategory.create.mock.calls[0][0].data).toMatchObject({
+      mxik: '08708001133000000',
+      packageCodeBox: '1533557',
+    });
+  });
+
+  it('reports a set-only category as ready, with nothing to ask the seller', () => {
+    const row = node({
+      mxik: FISCAL.mxik,
+      packageCodeSingle: null,
+      packageCodeSet: FISCAL.packageCodeSet,
+    });
+    expect(presentAdminCategoryNode(row as never)).toMatchObject({
+      fiscalConfigured: true,
+      fiscalStatus: 'READY',
+      fiscalGaps: [],
+      offersPackageChoice: false,
+    });
   });
 
   it('adds a set code to an already-configured category', async () => {
@@ -629,11 +663,23 @@ describe('fiscal configuration', () => {
     expect(data).not.toHaveProperty('mxik');
   });
 
-  it('refuses to strip the single code from a configured category', async () => {
+  it('lets the single code go while the set code stays', async () => {
+    const { service, prisma } = makeService();
+    prisma.partCategory.findUnique.mockResolvedValue(node(FISCAL));
+    await service.update('brakes', { packageCodeSingle: null });
+    const data = prisma.partCategory.update.mock.calls[0][0].data;
+    expect(data.packageCodeSingle).toBeNull();
+    expect(data).not.toHaveProperty('packageCodeSet');
+  });
+
+  it('refuses to strip the LAST package code from a configured category', async () => {
     const { service, prisma } = makeService();
     prisma.partCategory.findUnique.mockResolvedValue(node(FISCAL));
     await expect(
-      service.update('brakes', { packageCodeSingle: null }),
+      service.update('brakes', {
+        packageCodeSingle: null,
+        packageCodeSet: null,
+      }),
     ).rejects.toBeInstanceOf(BadRequestException);
   });
 

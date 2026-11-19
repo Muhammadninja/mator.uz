@@ -58,6 +58,22 @@ const UNCONFIGURED = {
   packageCodeBox: null,
 };
 
+/** Sold only as a set: no "штука" code at all. */
+const SET_ONLY = {
+  mxik: '08708005011000000',
+  packageCodeSingle: null,
+  packageCodeSet: '1417723',
+  packageCodeBox: null,
+};
+
+/** Sold only in a consumer box: no "штука" code at all. */
+const BOX_ONLY = {
+  mxik: '08708001133000000',
+  packageCodeSingle: null,
+  packageCodeSet: null,
+  packageCodeBox: '1533557',
+};
+
 /** The steering mechanism, as Tasnif lists it on 2026-11-04: all three forms. */
 const STEERING = {
   mxik: '08708001133000000',
@@ -79,31 +95,27 @@ describe('isCategoryFiscallyConfigured', () => {
     expect(isCategoryFiscallyConfigured({ ...BOTH, mxik: null })).toBe(false);
   });
 
-  it('rejects a missing single package code', () => {
+  it('accepts a category whose only package code is the set code', () => {
+    expect(isCategoryFiscallyConfigured(SET_ONLY)).toBe(true);
+  });
+
+  it('accepts a category whose only package code is the box code', () => {
+    expect(isCategoryFiscallyConfigured(BOX_ONLY)).toBe(true);
+  });
+
+  it('rejects an MXIK with no package code of any form', () => {
     expect(
-      isCategoryFiscallyConfigured({ ...BOTH, packageCodeSingle: null }),
+      isCategoryFiscallyConfigured({ ...UNCONFIGURED, mxik: BOTH.mxik }),
     ).toBe(false);
   });
 
-  it('does not let the OPTIONAL set code configure a category on its own', () => {
-    expect(
-      isCategoryFiscallyConfigured({
-        mxik: BOTH.mxik,
-        packageCodeSingle: null,
-        packageCodeSet: BOTH.packageCodeSet,
-        packageCodeBox: null,
-      }),
-    ).toBe(false);
-  });
-
-  it('does not let the OPTIONAL box code configure a category on its own', () => {
-    expect(
-      isCategoryFiscallyConfigured({
-        ...STEERING,
-        packageCodeSingle: null,
-        packageCodeSet: null,
-      }),
-    ).toBe(false);
+  it('rejects a package code with no MXIK, whichever form it is', () => {
+    expect(isCategoryFiscallyConfigured({ ...SET_ONLY, mxik: null })).toBe(
+      false,
+    );
+    expect(isCategoryFiscallyConfigured({ ...BOX_ONLY, mxik: null })).toBe(
+      false,
+    );
   });
 
   it('treats an untouched category as unconfigured', () => {
@@ -175,6 +187,17 @@ describe('resolvePackageCode', () => {
     // One code on a category says it is true of everything there.
     expect(resolvePackageCode(SINGLE_ONLY, null)).toBe('1499205');
     expect(resolvePackageCode(SINGLE_ONLY, undefined)).toBe('1499205');
+  });
+
+  it('answers an unstated form with the one code even when it is not a piece', () => {
+    expect(resolvePackageCode(SET_ONLY, null)).toBe('1417723');
+    expect(resolvePackageCode(BOX_ONLY, undefined)).toBe('1533557');
+  });
+
+  it('never turns a stated piece into the set or box code of a category without one', () => {
+    expect(resolvePackageCode(SET_ONLY, PackageForm.SINGLE)).toBeNull();
+    expect(resolvePackageCode(BOX_ONLY, PackageForm.SINGLE)).toBeNull();
+    expect(resolvePackageCode(BOX_ONLY, PackageForm.SET)).toBeNull();
   });
 
   it.each([
@@ -342,6 +365,52 @@ describe('resolveFiscalClassification — the MXIK has to be the right one', () 
       });
     });
 
+    it('takes the one code of a set-only category for an unstated listing', () => {
+      expect(
+        resolveFiscalClassification(
+          sparePart(configuredCategory({ packageCodeSingle: null })),
+        ),
+      ).toEqual({
+        ok: true,
+        mxik: '08708005011000000',
+        packageCode: '1417723',
+      });
+    });
+
+    it('takes the one code of a box-only category for an unstated listing', () => {
+      expect(
+        resolveFiscalClassification(
+          sparePart(configuredCategory({ id: 'steering', ...BOX_ONLY })),
+        ),
+      ).toEqual({ ok: true, mxik: BOX_ONLY.mxik, packageCode: '1533557' });
+    });
+
+    it('refuses a piece on a set-only category, not the set code instead', () => {
+      const result = resolveFiscalClassification(
+        sparePart(configuredCategory({ packageCodeSingle: null }), {
+          packageForm: PackageForm.SINGLE,
+        }),
+      );
+      expect(result).toEqual({
+        ok: false,
+        gaps: [
+          'category "brakes" has no package code for a listing sold as SINGLE',
+        ],
+      });
+    });
+
+    it('still refuses an MXIK with no package code of any form', () => {
+      const result = resolveFiscalClassification(
+        sparePart(
+          configuredCategory({ packageCodeSingle: null, packageCodeSet: null }),
+        ),
+      );
+      expect(result).toEqual({
+        ok: false,
+        gaps: ['category has no package code'],
+      });
+    });
+
     it.each([PackageForm.SET, PackageForm.BOX])(
       'refuses a %s listing on a category with no code for it, not a piece instead',
       (packageForm) => {
@@ -419,8 +488,8 @@ describe('resolveFiscalClassification — the MXIK has to be the right one', () 
     },
   );
 
-  it('a set code alone never reaches a receipt', () => {
-    // A legacy or directly written row: the admin API refuses this shape.
+  it('a set code alone reaches the receipt of a listing sold as a set', () => {
+    // No "штука" code is needed: any one package code configures a category.
     const setOnly = {
       ...bareCategory('brakes'),
       mxik: '08708005011000000',
@@ -431,8 +500,12 @@ describe('resolveFiscalClassification — the MXIK has to be the right one', () 
       resolveFiscalClassification(
         sparePart(setOnly, { packageForm: PackageForm.SET }),
       ),
-    ).toEqual({ ok: false, gaps: ['category has no package code'] });
-    expect(categoryFiscalReadiness(setOnly).status).toBe('NEEDS_CODES');
+    ).toEqual({
+      ok: true,
+      mxik: '08708005011000000',
+      packageCode: '1417723',
+    });
+    expect(categoryFiscalReadiness(setOnly).status).toBe('READY');
   });
 
   it('never inherits: a leaf with no code of its own is refused, whatever its parent has', () => {
@@ -856,6 +929,17 @@ describe('the one place a receipt’s MXIK comes from', () => {
 describe('categoryFiscalReadiness — what an operator still has to do', () => {
   it.each([
     ['codes entered', configuredCategory(), 'READY'],
+    ['only a set code', configuredCategory({ packageCodeSingle: null }), 'READY'],
+    [
+      'only a box code',
+      configuredCategory({ id: 'steering', ...BOX_ONLY }),
+      'READY',
+    ],
+    [
+      'an MXIK with no package code',
+      configuredCategory({ packageCodeSingle: null, packageCodeSet: null }),
+      'NEEDS_CODES',
+    ],
     ['composition on the oil table', composition(SYNTHETIC_CATEGORY), 'READY'],
     ['no codes', bareCategory('front-brake-pads'), 'NEEDS_CODES'],
     [
@@ -873,6 +957,8 @@ describe('hasUsableFiscalCodes', () => {
   it('holds for a category with its codes', () => {
     expect(hasUsableFiscalCodes({ id: 'brakes', ...BOTH })).toBe(true);
     expect(hasUsableFiscalCodes({ id: 'filters', ...SINGLE_ONLY })).toBe(true);
+    expect(hasUsableFiscalCodes({ id: 'brakes', ...SET_ONLY })).toBe(true);
+    expect(hasUsableFiscalCodes({ id: 'steering', ...BOX_ONLY })).toBe(true);
   });
 
   it('holds for a composition with empty columns: the oil table has its codes', () => {
