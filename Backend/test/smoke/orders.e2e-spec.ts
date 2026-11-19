@@ -3,6 +3,16 @@ import { OrdersService } from '../../src/orders/orders.service';
 import { OrderStatusService } from '../../src/orders/order-status.service';
 import { partPriceFromCart, createPrismaMock, fakeConfig, fakeNotifications, fakeRealtime, buildCart, buildCartItem, buildOrder, buildAppUser, fakeDiscounts, PrismaMock, fakeAudit, fakeDeliveryQuotes } from '../utils/harness';
 
+// No promo code is live, so the discount math below runs against a test-only
+// 10% code. The mock mirrors resolvePromo's rounding.
+jest.mock('../../src/cart/promo.util', () => ({
+  resolvePromo: (code: string, subtotalUzs: number) =>
+    code.trim().toUpperCase() === 'TEST10'
+      ? { isValid: true, discountUzs: Math.round(subtotalUzs * 0.1) }
+      : { isValid: false, discountUzs: 0 },
+}));
+
+
 describe('Orders smoke', () => {
   let prisma: PrismaMock;
   beforeEach(() => {
@@ -74,7 +84,7 @@ describe('Orders smoke', () => {
   });
 
   it('embeds a promo discount into the ITEM prices, exact to the tiyin', async () => {
-    // MATOR10 = 10% off. The discount must end up inside the line prices, not
+    // TEST10 = 10% off. The discount must end up inside the line prices, not
     // beside them: a Payme receipt has no discount field, so whatever the items
     // do not carry can never be fiscalized. Two lines that divide awkwardly
     // (3 × 33 333 and 1 × 100 001) so the flooring remainder is real.
@@ -83,7 +93,7 @@ describe('Orders smoke', () => {
       buildCart({
         id: 'cart_1',
         userId: 'usr_1',
-        promoCode: 'MATOR10',
+        promoCode: 'TEST10',
         items: [
           buildCartItem({ id: 'ci_1', partId: 'part_a', priceUzsSnapshot: 33333, quantity: 3 }),
           buildCartItem({ id: 'ci_2', partId: 'part_b', priceUzsSnapshot: 100001, quantity: 1 }),

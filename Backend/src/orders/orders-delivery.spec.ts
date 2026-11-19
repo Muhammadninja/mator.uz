@@ -33,6 +33,15 @@ import {
   priceSourcesFollowCart,
 } from '../../test/utils/harness';
 
+// No promo code is live, so the promo case below runs against a test-only
+// 10% code. The mock mirrors resolvePromo's rounding.
+jest.mock('../cart/promo.util', () => ({
+  resolvePromo: (code: string, subtotalUzs: number) =>
+    code.trim().toUpperCase() === 'TEST10'
+      ? { isValid: true, discountUzs: Math.round(subtotalUzs * 0.1) }
+      : { isValid: false, discountUzs: 0 },
+}));
+
 const DESTINATION = {
   addressId: 'addr_1',
   lat: 41.31310000049,
@@ -210,7 +219,7 @@ describe('Courier delivery on an order', () => {
       buildCart({
         id: 'cart_1',
         userId: 'usr_1',
-        promoCode: 'MATOR10',
+        promoCode: 'TEST10',
         items: [buildCartItem({ partId: 'part_1', priceUzsSnapshot: 200_000 })],
       }),
     );

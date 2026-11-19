@@ -59,31 +59,25 @@ describe('Cart smoke', () => {
     );
   });
 
-  it('applies the MATOR10 promo as a 10% discount', async () => {
-    const base = buildCart({
-      id: 'cart_1',
-      userId: 'usr_1',
-      items: [buildCartItem({ priceUzsSnapshot: 185000, quantity: 1 })],
-    });
-    const promoed = buildCart({
-      id: 'cart_1',
-      userId: 'usr_1',
-      promoCode: 'MATOR10',
-      promoDiscountUzs: 18500,
-      items: [buildCartItem({ priceUzsSnapshot: 185000, quantity: 1 })],
-    });
-    prisma.cart.upsert.mockResolvedValueOnce(base).mockResolvedValue(promoed);
-    prisma.cart.update.mockResolvedValue({});
+  it('refuses MATOR10: the code was removed and is no longer a promo', async () => {
+    const base = buildCart({ id: 'cart_1', userId: 'usr_1', items: [buildCartItem({ priceUzsSnapshot: 185000 })] });
+    prisma.cart.upsert.mockResolvedValue(base);
+    const res: any = await svc.applyPromo('usr_1', 'MATOR10');
+    expect(res.promo).toEqual({ code: 'MATOR10', discountUzs: 0, isValid: false });
+    expect(prisma.cart.update).not.toHaveBeenCalled();
+  });
 
-    const res = await svc.applyPromo('usr_1', 'MATOR10');
+  it('clears MATOR10 from a cart that still holds it', async () => {
+    const stale = buildCart({ id: 'cart_1', userId: 'usr_1', promoCode: 'MATOR10', promoDiscountUzs: 18500, items: [] });
+    const cleared = buildCart({ id: 'cart_1', userId: 'usr_1', items: [] });
+    prisma.cart.upsert.mockResolvedValue(stale);
+    prisma.cart.update.mockResolvedValue(cleared);
+
+    await svc.snapshot('usr_1');
 
     expect(prisma.cart.update).toHaveBeenCalledWith(
-      expect.objectContaining({ data: { promoCode: 'MATOR10', promoDiscountUzs: 18500 } }),
+      expect.objectContaining({ where: { id: 'cart_1' }, data: { promoCode: null, promoDiscountUzs: null } }),
     );
-    expect(res.promo).toEqual({ code: 'MATOR10', discountUzs: 18500, isValid: true });
-    // 185 000 − 18 500 promo, plus the 5 000 fee of a 185 000 cart of parts.
-    expect(res.service_fee_uzs).toBe(5000);
-    expect(res.total_uzs).toBe(171500);
   });
 
   it('previews an invalid promo without persisting it', async () => {
