@@ -312,3 +312,69 @@ describe('AdminCategoryTransferService — fiscal readiness', () => {
     expect(codesOf(data.blockers)).not.toContain('TARGET_NOT_FISCALIZED');
   });
 });
+
+describe('AdminCategoryTransferService — emptying a category a delete removes', () => {
+  it('needs nothing of the target when the category holds nothing', async () => {
+    const tree = TREE.map((n) =>
+      n.id === 'brakes' ? { ...n, isActive: false } : n,
+    );
+    const { service, prisma } = world([], tree);
+
+    await expect(
+      service.drainForDelete(prisma as never, 'brake-discs', 'brakes'),
+    ).resolves.toBeNull();
+    expect(prisma.product.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("moves what is there with the transfer's own write", async () => {
+    const { service, prisma } = world([SPARE]);
+    prisma.product.count.mockResolvedValue(1);
+
+    const moved = await service.drainForDelete(
+      prisma as never,
+      'brake-discs',
+      'brakes',
+    );
+
+    expect(moved).toMatchObject({ listings: 2 });
+    expect(prisma.product.updateMany.mock.calls[0][0]).toMatchObject({
+      where: { categoryId: 'brake-discs', kind: ProductKind.SPARE_PART },
+      data: { categoryId: 'brakes', vehicleCategoryId: 'brake-system' },
+    });
+  });
+
+  it("refuses with the transfer's blocker, naming the category it is about", async () => {
+    const { service, prisma } = world([oil(OilType.MINERAL)]);
+    prisma.product.count.mockResolvedValue(1);
+
+    const err = await service
+      .drainForDelete(prisma as never, 'mineral-motor-oil', 'brakes')
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ConflictException);
+    const body = (err as ConflictException).getResponse() as {
+      code: string;
+      message: string;
+    };
+    expect(body.code).toBe('KIND_MISMATCH');
+    expect(body.message).toMatch(/^"mineral-motor-oil": /);
+    expect(prisma.product.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('a draft being published refuses even when nothing else is there', async () => {
+    const { service, prisma } = world([]);
+    prisma.productDraft.count.mockImplementation(
+      ({ where }: { where: { status?: unknown } }) =>
+        Promise.resolve(where.status === 'COMMITTING' ? 1 : 0),
+    );
+
+    const err = await service
+      .drainForDelete(prisma as never, 'brake-discs', 'brakes')
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ConflictException);
+    expect(
+      ((err as ConflictException).getResponse() as { code: string }).code,
+    ).toBe('DRAFT_COMMITTING');
+  });
+});

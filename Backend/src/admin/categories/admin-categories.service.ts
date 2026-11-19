@@ -38,6 +38,7 @@ import {
   buildAdminCategoryTree,
   presentAdminCategoryNode,
 } from './admin-categories.presenter';
+import { AdminCategoryTransferService } from './admin-category-transfer.service';
 import {
   translateCategoryDbErrors,
   writeCategoryTree,
@@ -50,15 +51,24 @@ import { UpdateCategoryDto } from './dto/update-category.dto';
 
 /**
  * Why a delete was refused, as the machine-readable `code` of the 409. Each needs
- * a different answer from the operator: only CATEGORY_HAS_PARTS is solved by
- * picking a reassign target, so the console must be able to tell them apart.
+ * a different answer from the operator, so the console must be able to tell them
+ * apart:
+ *   • HAS_PARTS / NEEDS_TARGET — something is filed in the subtree; picking a
+ *     reassign target solves it (parts only / listings or drafts too);
+ *   • HAS_LISTINGS — listings a transfer could not place, so they must be moved
+ *     by hand first;
+ *   • TREE_CHANGED — subcategories appeared while the delete was in flight;
+ *   • HAS_SALES, PROTECTED — no target helps; deactivating does.
+ * A transfer blocker (KIND_MISMATCH, TARGET_INACTIVE, …) may also come back when a
+ * target was given: it is about that target, and another one may do.
  */
 export const CategoryDeleteConflict = {
   PROTECTED: 'CATEGORY_PROTECTED',
   HAS_LISTINGS: 'CATEGORY_HAS_LISTINGS',
-  HAS_CHILDREN: 'CATEGORY_HAS_CHILDREN',
   HAS_PARTS: 'CATEGORY_HAS_PARTS',
+  NEEDS_TARGET: 'CATEGORY_NEEDS_TARGET',
   HAS_SALES: 'CATEGORY_HAS_SALES',
+  TREE_CHANGED: 'CATEGORY_TREE_CHANGED',
 } as const;
 
 /**
@@ -89,6 +99,7 @@ export class AdminCategoriesService {
     private readonly prisma: PrismaService,
     private readonly categories: PartCategoryService,
     private readonly audit: AdminAuditService,
+    private readonly transfers: AdminCategoryTransferService,
   ) {}
 
   /**
@@ -384,18 +395,27 @@ export class AdminCategoriesService {
   }
 
   /**
-   * Delete a category: the row is physically removed, there is no soft delete
-   * here (that is what deactivate is for). If parts still reference it
-   * (categoryId is a Restrict FK), a `reassignTo` target moves those parts in the
-   * same transaction; without a target, a 409 lists the referencing count. A
-   * category the application depends on by id, or one that listings, live drafts
-   * or children still point at, is refused. 404 if missing.
+   * Delete a category together with every subcategory under it. The rows are
+   * physically removed, there is no soft delete here (that is what deactivate is
+   * for). 404 if missing.
    *
-   * Every check and the delete run under a lock on the row. Inserting anything
-   * that references a category takes FOR KEY SHARE on it, which FOR UPDATE blocks
-   * and waits for, so once the lock is held no reference can appear or be in
-   * flight unseen. Without it a listing or child committed between a check and the
-   * delete would be silently stripped by their ON DELETE SET NULL FKs.
+   * Whatever is filed anywhere in the subtree needs somewhere to go first, so
+   * without a `reassignTo` target a 409 says what is there. With one, all in the
+   * same transaction:
+   *   • parts (categoryId is a Restrict FK) move under the operator-move rule,
+   *     exactly as a bulk move would move them;
+   *   • listings and live drafts (their FKs are ON DELETE SET NULL, so the database
+   *     would strip them silently) move under the rules and blockers of a transfer;
+   *   • finished drafts are history and only lose the FK.
+   * A subtree holding a category the application depends on by id, or one that a
+   * live sale targets, is refused outright.
+   *
+   * Every check and the delete run under the tree lock and a FOR UPDATE on each row
+   * of the subtree. Inserting anything that references a category takes FOR KEY
+   * SHARE on it, which FOR UPDATE blocks and waits for, so once the locks are held
+   * no reference and no child can appear or be in flight unseen. Without them a
+   * listing or child committed between a check and the delete would be silently
+   * stripped by their ON DELETE SET NULL FKs.
    */
   async remove(id: string, reassignTo?: string, ctx: AdminAuditContext = {}) {
     if (isLoadBearingCategory(id)) {
@@ -407,38 +427,45 @@ export class AdminCategoriesService {
       });
     }
 
-    const { parentId, reassigned } = await this.writeTree(async (tx) => {
-      const [category] = await tx.$queryRaw<
-        { parent_id: string | null; name: string }[]
+    const result = await this.writeTree(async (tx) => {
+      // No other tree write runs under the tree lock, so this shape holds. A writer
+      // outside it is caught once the rows are locked, below.
+      const layers = subtreeLayers(
+        id,
+        await tx.partCategory.findMany({
+          select: { id: true, parentId: true },
+        }),
+      );
+      const ids = layers.flat();
+      const rows = await tx.$queryRaw<
+        { id: string; parent_id: string | null; name: string }[]
       >`
-        SELECT "parent_id", "name" FROM "part_categories" WHERE "id" = ${id} FOR UPDATE`;
+        SELECT "id", "parent_id", "name" FROM "part_categories"
+        WHERE "id" IN (${Prisma.join(ids)}) FOR UPDATE`;
+      const category = rows.find((r) => r.id === id);
       if (!category) throw new NotFoundException('Category not found');
 
-      // Supply-side listings/drafts point here too. Their FKs are ON DELETE SET
-      // NULL (a listing must never become unreadable), so the DB would NOT stop
-      // the delete — it would silently strip those listings' category. Deleting a
-      // referenced category is therefore rejected outright: deactivate it instead.
-      const pointingHere = {
-        OR: [{ categoryId: id }, { vehicleCategoryId: id }],
-      };
-      const listings = await tx.product.count({ where: pointingHere });
-      const drafts = await tx.productDraft.count({
-        where: { ...pointingHere, status: { in: LIVE_DRAFT_STATUSES } },
-      });
-      if (listings + drafts > 0) {
+      const guarded = ids.find(isLoadBearingCategory);
+      if (guarded) {
         throw new ConflictException({
-          code: CategoryDeleteConflict.HAS_LISTINGS,
+          code: CategoryDeleteConflict.PROTECTED,
           message:
-            `${listings + drafts} listing(s)/draft(s) reference this category. ` +
-            'Deactivate it (POST /:id/deactivate) instead of deleting it.',
+            `The application depends on the subcategory "${guarded}", so this ` +
+            'category cannot be deleted. Move that subcategory out first, or ' +
+            'deactivate this one (POST /:id/deactivate) to hide it.',
         });
       }
 
-      const children = await tx.partCategory.count({ where: { parentId: id } });
-      if (children > 0) {
+      // A child the operator never saw would be orphaned into a root by the parent
+      // FK's SET NULL. Under the row locks none can be added any more.
+      const unseen = await tx.partCategory.count({
+        where: { parentId: { in: ids }, id: { notIn: ids } },
+      });
+      if (unseen > 0) {
         throw new ConflictException({
-          code: CategoryDeleteConflict.HAS_CHILDREN,
-          message: `This category has ${children} child categor(ies). Move or delete them first.`,
+          code: CategoryDeleteConflict.TREE_CHANGED,
+          message:
+            'Subcategories were added here meanwhile. Reload the tree and try again.',
         });
       }
 
@@ -450,7 +477,10 @@ export class AdminCategoriesService {
           deletedAt: null,
           OR: [{ endAt: null }, { endAt: { gte: new Date() } }],
           targets: {
-            some: { targetType: SaleScopeType.CATEGORIES, targetId: id },
+            some: {
+              targetType: SaleScopeType.CATEGORIES,
+              targetId: { in: ids },
+            },
           },
         },
         select: { title: true },
@@ -464,22 +494,45 @@ export class AdminCategoriesService {
         });
       }
 
-      const referencing = await tx.catalogPart.count({
-        where: { categoryId: id },
+      const pointingHere = {
+        OR: [{ categoryId: { in: ids } }, { vehicleCategoryId: { in: ids } }],
+      };
+      const liveDrafts = {
+        ...pointingHere,
+        status: { in: LIVE_DRAFT_STATUSES },
+      };
+      const parts = await tx.catalogPart.count({
+        where: { categoryId: { in: ids } },
       });
-      if (referencing > 0) {
-        if (!reassignTo) {
-          throw new ConflictException({
-            code: CategoryDeleteConflict.HAS_PARTS,
-            message: `Reassign ${referencing} product(s) first (pass ?reassignTo=<categoryId>)`,
-          });
-        }
-        if (reassignTo === id) {
+      const listings = await tx.product.count({ where: pointingHere });
+      const drafts = await tx.productDraft.count({ where: liveDrafts });
+      const supply = listings + drafts;
+
+      if (parts + supply > 0 && !reassignTo) {
+        throw new ConflictException(
+          supply > 0
+            ? {
+                code: CategoryDeleteConflict.NEEDS_TARGET,
+                message:
+                  `Move ${parts} product(s) and ${supply} listing(s)/draft(s) to ` +
+                  'another category first (pass ?reassignTo=<categoryId>)',
+              }
+            : {
+                code: CategoryDeleteConflict.HAS_PARTS,
+                message: `Reassign ${parts} product(s) first (pass ?reassignTo=<categoryId>)`,
+              },
+        );
+      }
+
+      const moved = { parts: 0, listings: 0, drafts: 0 };
+      let target: { id: string; parentId: string | null } | null = null;
+      if (parts + supply > 0) {
+        if (ids.includes(reassignTo!)) {
           throw new BadRequestException(
-            'reassignTo must be a different category',
+            'reassignTo must be a category outside the one being deleted',
           );
         }
-        const target = await tx.partCategory.findUnique({
+        target = await tx.partCategory.findUnique({
           where: { id: reassignTo },
           select: { id: true, parentId: true },
         });
@@ -488,45 +541,109 @@ export class AdminCategoriesService {
 
         // A reassignment is a product move, so it writes the same filing as
         // bulk-move: the parts leave this category's tile as well as its id.
-        const parts = await tx.catalogPart.findMany({
-          where: { categoryId: id },
-          select: { id: true, kind: true, oilType: true, categoryId: true },
-        });
-        await this.moveParts(
-          tx,
-          parts,
-          target,
-          await this.filingOn(reassignTo, tx),
-        );
+        if (parts > 0) {
+          const filed = await tx.catalogPart.findMany({
+            where: { categoryId: { in: ids } },
+            select: { id: true, kind: true, oilType: true, categoryId: true },
+          });
+          const res = await this.moveParts(
+            tx,
+            filed,
+            target,
+            await this.filingOn(target.id, tx),
+          );
+          moved.parts = res.count;
+        }
+
+        if (supply > 0) {
+          // Deepest first, though any order would do: moving a node's listings
+          // also rewrites the root they name.
+          for (const nodeId of [...ids].reverse()) {
+            const res = await this.transfers.drainForDelete(
+              tx,
+              nodeId,
+              target.id,
+            );
+            if (!res) continue;
+            moved.listings += res.listings;
+            moved.drafts += res.drafts;
+          }
+          // What a transfer cannot place (a listing whose own node has a broken
+          // path) must not be stripped by the FK in its stead.
+          const left =
+            (await tx.product.count({ where: pointingHere })) +
+            (await tx.productDraft.count({ where: liveDrafts }));
+          if (left > 0) {
+            throw new ConflictException({
+              code: CategoryDeleteConflict.HAS_LISTINGS,
+              message:
+                `${left} listing(s)/draft(s) could not be moved automatically. ` +
+                'Transfer them out of their subcategory first.',
+            });
+          }
+        }
       }
 
-      await tx.partCategory.delete({ where: { id } });
-      await this.audit.record(
-        {
-          action: AdminAuditAction.CATEGORY_DELETED,
-          actor: ctx.actor,
-          actorLabel: ctx.actorLabel,
-          target: {
-            entity: AdminAuditEntity.CATEGORY,
-            id,
-            name: category.name,
-          },
-          previousValues: { parentId: category.parent_id, parts: referencing },
-          newValues: { reassignedTo: referencing > 0 ? reassignTo! : null },
-          ip: ctx.ip,
-          userAgent: ctx.userAgent,
-        },
+      // Children before their parents: the parent FK is SET NULL, and a parent
+      // removed first would turn the rest of the subtree into roots for a moment.
+      for (const layer of [...layers].reverse()) {
+        await tx.partCategory.deleteMany({ where: { id: { in: layer } } });
+      }
+
+      const reassignedTo = target?.id ?? null;
+      const order = new Map(ids.map((nodeId, i) => [nodeId, i]));
+      await this.audit.recordMany(
+        [...rows]
+          .sort((a, b) => order.get(a.id)! - order.get(b.id)!)
+          .map((row) => ({
+            action: AdminAuditAction.CATEGORY_DELETED,
+            actor: ctx.actor,
+            actorLabel: ctx.actorLabel,
+            target: {
+              entity: AdminAuditEntity.CATEGORY,
+              id: row.id,
+              name: row.name,
+            },
+            previousValues:
+              row.id === id
+                ? {
+                    parentId: row.parent_id,
+                    parts,
+                    listings,
+                    drafts,
+                    subcategories: ids.length - 1,
+                  }
+                : { parentId: row.parent_id, deletedWith: id },
+            newValues: { reassignedTo },
+            ip: ctx.ip,
+            userAgent: ctx.userAgent,
+          })),
         tx,
       );
-      return { parentId: category.parent_id, reassigned: referencing };
+      return { parentId: category.parent_id, ids, moved, target };
     });
 
-    // The row's own key too: a seller already past this step reads `children:<id>`.
-    await this.categories.invalidate(parentId, id);
-    this.logger.log(
-      `Category ${id} deleted (${reassigned} part(s) reassigned)`,
+    const { parentId, ids, moved, target } = result;
+    // Every row's own key too: a seller already past this step reads `children:<id>`.
+    await this.categories.invalidate(
+      parentId,
+      ...ids,
+      ...(target ? [target.id, target.parentId] : []),
     );
-    return { success: true, data: { deleted: id, reassigned } };
+    this.logger.log(
+      `Category ${id} deleted with ${ids.length - 1} subcategor(ies) ` +
+        `(${moved.parts} part(s), ${moved.listings} listing(s), ${moved.drafts} draft(s) reassigned)`,
+    );
+    return {
+      success: true,
+      data: {
+        deleted: id,
+        reassigned: moved.parts,
+        listings: moved.listings,
+        drafts: moved.drafts,
+        subcategories: ids.slice(1),
+      },
+    };
   }
 
   /**
@@ -919,4 +1036,33 @@ export class AdminCategoriesService {
       level += 1;
     }
   }
+}
+
+/**
+ * `rootId` and every category under it, one array per depth: `[[root], [its
+ * children], [theirs], …]`. A node already seen is not visited again, so a cycle
+ * left by a writer outside the tree rules cannot loop forever.
+ */
+function subtreeLayers(
+  rootId: string,
+  edges: { id: string; parentId: string | null }[],
+): string[][] {
+  const childrenOf = new Map<string, string[]>();
+  for (const e of edges) {
+    if (!e.parentId) continue;
+    const list = childrenOf.get(e.parentId) ?? [];
+    list.push(e.id);
+    childrenOf.set(e.parentId, list);
+  }
+  const seen = new Set<string>();
+  const layers: string[][] = [];
+  let layer = [rootId];
+  while (layer.length > 0) {
+    for (const nodeId of layer) seen.add(nodeId);
+    layers.push(layer);
+    layer = layer
+      .flatMap((nodeId) => childrenOf.get(nodeId) ?? [])
+      .filter((nodeId) => !seen.has(nodeId));
+  }
+  return layers;
 }
