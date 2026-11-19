@@ -16,6 +16,7 @@ import { randomBytes } from 'crypto';
 import { AdminAuditService } from '../../src/admin/auth/admin-audit.service';
 import { AdminBrandsService } from '../../src/admin/brands/admin-brands.service';
 import { AdminCategoriesService } from '../../src/admin/categories/admin-categories.service';
+import { AdminCategoryTransferService } from '../../src/admin/categories/admin-category-transfer.service';
 import { AdminInventoryService } from '../../src/admin/inventory/admin-inventory.service';
 import { buyerListed } from '../../src/catalog/buyer-visibility';
 import { PartCategoryService } from '../../src/catalog/categories/part-category.service';
@@ -42,7 +43,12 @@ describeWithDb('catalog safety (real PostgreSQL)', () => {
   const cache = new CacheService(fakeRedis() as never);
   const tree = new PartCategoryService(prisma as never, cache);
   const audit = new AdminAuditService(prisma as never);
-  const categories = new AdminCategoriesService(prisma as never, tree, audit);
+  const categories = new AdminCategoriesService(
+    prisma as never,
+    tree,
+    audit,
+    new AdminCategoryTransferService(prisma as never, tree, audit),
+  );
   const inventory = new AdminInventoryService(prisma as never, audit);
   const brands = new AdminBrandsService(prisma as never, cache, audit);
   const projection = new CatalogProjectionService(prisma as never);

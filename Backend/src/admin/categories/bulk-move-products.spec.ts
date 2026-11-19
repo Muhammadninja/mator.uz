@@ -84,7 +84,7 @@ function adminWorld(rows: PartRow[], tree: readonly TreeRow[] = LIVE_TREE) {
       ),
       findMany: jest.fn(() => Promise.resolve(tree.map((n) => ({ ...n })))),
       count: jest.fn().mockResolvedValue(0),
-      delete: jest.fn().mockResolvedValue({}),
+      deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
     },
     product: { count: jest.fn().mockResolvedValue(0) },
     productDraft: { count: jest.fn().mockResolvedValue(0) },
@@ -108,7 +108,11 @@ function adminWorld(rows: PartRow[], tree: readonly TreeRow[] = LIVE_TREE) {
       ),
     },
     // The row lock in remove(), with the category it deletes present.
-    $queryRaw: jest.fn().mockResolvedValue([{ parent_id: 'brake-system' }]),
+    $queryRaw: jest
+      .fn()
+      .mockResolvedValue([
+        { id: 'old-pads', parent_id: 'brake-system', name: 'Old pads' },
+      ]),
     $executeRaw: jest.fn().mockResolvedValue(0),
     $transaction: jest.fn((arg: unknown): unknown =>
       typeof arg === 'function'
@@ -125,6 +129,7 @@ function adminWorld(rows: PartRow[], tree: readonly TreeRow[] = LIVE_TREE) {
     prisma as never,
     categories as never,
     audit as never,
+    {} as never,
   );
   return { service, prisma, audit };
 }
@@ -633,7 +638,7 @@ describe('category delete with ?reassignTo= — the same move', () => {
 
     const res = await service.remove('old-pads', 'air-filters');
 
-    expect(res.data).toEqual({ deleted: 'old-pads', reassigned: 2 });
+    expect(res.data).toMatchObject({ deleted: 'old-pads', reassigned: 2 });
     for (const r of rows) {
       expect(r).toMatchObject({
         categoryId: 'air-filters',
@@ -642,8 +647,8 @@ describe('category delete with ?reassignTo= — the same move', () => {
       });
     }
     expect(rows.map(unrelated)).toEqual(before);
-    expect(prisma.partCategory.delete).toHaveBeenCalledWith({
-      where: { id: 'old-pads' },
+    expect(prisma.partCategory.deleteMany).toHaveBeenCalledWith({
+      where: { id: { in: ['old-pads'] } },
     });
   });
 
@@ -656,6 +661,6 @@ describe('category delete with ?reassignTo= — the same move', () => {
       service.remove('old-pads', 'no-such-category'),
     ).rejects.toBeInstanceOf(NotFoundException);
     expect(prisma.catalogPart.updateMany).not.toHaveBeenCalled();
-    expect(prisma.partCategory.delete).not.toHaveBeenCalled();
+    expect(prisma.partCategory.deleteMany).not.toHaveBeenCalled();
   });
 });

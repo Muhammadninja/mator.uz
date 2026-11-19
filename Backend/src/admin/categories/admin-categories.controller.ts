@@ -198,26 +198,36 @@ export class AdminCategoriesController {
   @Roles(AdminRole.SUPER_ADMIN, AdminRole.MANAGER)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Delete a category (reassigning any parts first)',
+    summary:
+      'Delete a category with its subcategories (moving their contents first)',
     description:
-      'Physically removes the row. If parts reference the category, pass ' +
-      '?reassignTo=<categoryId> to move them (both run in one transaction). A ' +
-      'refusal is a 409 whose `code` says why: CATEGORY_HAS_PARTS (solved by ' +
-      'reassignTo), CATEGORY_HAS_LISTINGS (listings or live drafts point here), ' +
-      'CATEGORY_HAS_CHILDREN, CATEGORY_HAS_SALES (a live sale targets it), or ' +
-      'CATEGORY_PROTECTED (a home-grid bucket, a ' +
-      'seller-bot anchor or the Uncategorized bucket, which the application ' +
-      'depends on by id). Deactivate is the way to hide any of them.',
+      'Physically removes the row and every subcategory under it. If parts, ' +
+      'listings or live drafts are filed anywhere in that subtree, pass ' +
+      '?reassignTo=<categoryId> to move them (parts as a bulk move would, ' +
+      'listings and drafts as a transfer would; everything runs in one ' +
+      'transaction). A refusal is a 409 whose `code` says why: ' +
+      'CATEGORY_HAS_PARTS or CATEGORY_NEEDS_TARGET (solved by reassignTo), a ' +
+      'transfer blocker such as KIND_MISMATCH or TARGET_INACTIVE (about that ' +
+      'target: another may do), CATEGORY_HAS_LISTINGS (listings a transfer ' +
+      'could not place), CATEGORY_TREE_CHANGED (subcategories appeared ' +
+      'meanwhile), CATEGORY_HAS_SALES (a live sale targets the subtree), or ' +
+      'CATEGORY_PROTECTED (the subtree holds a home-grid bucket, a seller-bot ' +
+      'anchor or the Uncategorized bucket, which the application depends on by ' +
+      'id). Deactivate is the way to hide any of them.',
   })
   @ApiQuery({
     name: 'reassignTo',
     required: false,
-    description: 'Category id to move referencing parts into before deletion.',
+    description:
+      'Category id, outside the deleted subtree, to move its parts, listings and live drafts into.',
   })
   @ApiOkResponse({
-    description: 'Deletion result (deleted id + reassigned count).',
+    description:
+      'Deletion result: deleted id, the subcategories deleted with it, and how many parts (`reassigned`), listings and drafts moved.',
   })
-  @ApiBadRequestResponse({ description: 'reassignTo equals the deleted id.' })
+  @ApiBadRequestResponse({
+    description: 'reassignTo is inside the subtree being deleted.',
+  })
   @ApiConflictResponse({
     description: 'Something still depends on it; `code` says what.',
   })

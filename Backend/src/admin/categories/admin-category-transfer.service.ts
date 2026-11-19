@@ -57,8 +57,8 @@ export interface TransferIssue {
 
 /**
  * Empties a category into another: the supply-side listings and live drafts as well
- * as the buyer-side parts, which is what `bulk-move` alone cannot do. It is how a
- * category with listings can eventually be deleted.
+ * as the buyer-side parts, which is what `bulk-move` alone cannot do. A delete with
+ * a target runs the same move for every category of the subtree (drainForDelete).
  *
  * Each column keeps its own meaning, because a part and its listing can legitimately
  * disagree, and no column is ever derived from another table:
@@ -183,6 +183,41 @@ export class AdminCategoryTransferService {
         remaining: result.remaining,
       },
     };
+  }
+
+  /**
+   * Empty one category of a subtree that is about to be deleted, inside the
+   * caller's transaction. The caller holds the tree lock and a FOR UPDATE on every
+   * row of the subtree, and has already moved the parts, so what is left here is
+   * listings and live drafts: they move under exactly the rules of a transfer and
+   * its blockers, the first of which refuses the whole delete.
+   *
+   * A category holding nothing to move needs no target at all, so the target's own
+   * blockers (deactivated, no fiscal codes, …) are ignored for it. A draft being
+   * published right now still refuses: the delete would strip its category mid-way.
+   *
+   * @returns what moved, or null when there was nothing here.
+   */
+  async drainForDelete(
+    tx: Prisma.TransactionClient,
+    sourceId: string,
+    targetId: string,
+  ) {
+    const plan = await this.plan(tx, sourceId, targetId);
+    const { parts, listings, listingRootCorrections, liveDrafts } = plan.counts;
+    const toMove = parts + listings + listingRootCorrections + liveDrafts;
+    const blockers =
+      toMove > 0
+        ? plan.blockers
+        : plan.blockers.filter((b) => b.code === 'DRAFT_COMMITTING');
+    if (blockers.length > 0) {
+      throw new ConflictException({
+        code: blockers[0].code,
+        message: `"${plan.source.name}": ${blockers[0].message}`,
+      });
+    }
+    if (toMove === 0) return null;
+    return this.write(tx, plan);
   }
 
   // ── plan ───────────────────────────────────────────────────────────────────

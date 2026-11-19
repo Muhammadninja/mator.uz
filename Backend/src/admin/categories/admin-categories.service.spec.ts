@@ -1,6 +1,6 @@
 // Tests for the admin Category-tree console: filtered listing, create/update
-// with DERIVED levels, activate/deactivate, the delete guards that protect
-// referenced categories, and the cache invalidation that makes an admin edit
+// with DERIVED levels, activate/deactivate, the subtree delete and the guards
+// that protect what depends on it, and the cache invalidation that makes an admin edit
 // reach the Telegram seller bot.
 
 import {
@@ -55,6 +55,7 @@ function makePrismaMock() {
       update: jest.fn().mockResolvedValue(node()),
       updateMany: jest.fn().mockResolvedValue({ count: 0 }),
       delete: jest.fn().mockResolvedValue(node()),
+      deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
       count: jest.fn().mockResolvedValue(0),
     },
     product: { count: jest.fn().mockResolvedValue(0) },
@@ -62,10 +63,15 @@ function makePrismaMock() {
     sale: { findMany: jest.fn().mockResolvedValue([]) },
     catalogPart: {
       count: jest.fn().mockResolvedValue(0),
+      findMany: jest.fn().mockResolvedValue([]),
       updateMany: jest.fn(),
     },
     // The row-lock read in remove(): the row exists, under 'brake-system'.
-    $queryRaw: jest.fn().mockResolvedValue([{ parent_id: 'brake-system' }]),
+    $queryRaw: jest
+      .fn()
+      .mockResolvedValue([
+        { id: 'old-pads', parent_id: 'brake-system', name: 'Old pads' },
+      ]),
     $executeRaw: jest.fn().mockResolvedValue(0),
     // Both forms, against this same mock: `tx.x.y` === `prisma.x.y`.
     $transaction: jest.fn((arg: unknown): unknown =>
@@ -88,13 +94,18 @@ function makeCategoriesMock() {
 function makeService() {
   const prisma = makePrismaMock();
   const categories = makeCategoriesMock();
-  const audit = { record: jest.fn().mockResolvedValue(undefined) };
+  const audit = {
+    record: jest.fn().mockResolvedValue(undefined),
+    recordMany: jest.fn().mockResolvedValue(undefined),
+  };
+  const transfers = { drainForDelete: jest.fn().mockResolvedValue(null) };
   const service = new AdminCategoriesService(
     prisma as never,
     categories as never,
     audit as never,
+    transfers as never,
   );
-  return { service, prisma, categories, audit };
+  return { service, prisma, categories, audit, transfers };
 }
 
 describe('GET /v1/admin/categories (list)', () => {
@@ -317,7 +328,7 @@ describe('activate / deactivate', () => {
   });
 });
 
-describe('DELETE guards (deactivation is the preferred path)', () => {
+describe('DELETE: a category goes with its subtree, its contents moved first', () => {
   /** The 409's machine code, which is what the console branches on. */
   const conflictCode = async (run: Promise<unknown>) => {
     const err = await run.then(
@@ -328,20 +339,49 @@ describe('DELETE guards (deactivation is the preferred path)', () => {
     return ((err as ConflictException).getResponse() as { code?: string }).code;
   };
 
-  it('refuses to delete a category referenced by listings', async () => {
-    const { service, prisma } = makeService();
+  /** old-pads → (front → front-left), rear; under brake-system. */
+  const SUBTREE = [
+    { id: 'old-pads', parentId: 'brake-system' },
+    { id: 'front', parentId: 'old-pads' },
+    { id: 'rear', parentId: 'old-pads' },
+    { id: 'front-left', parentId: 'front' },
+  ];
+  const lockedRows = (edges: { id: string; parentId: string | null }[]) =>
+    edges.map((e) => ({ id: e.id, parent_id: e.parentId, name: e.id }));
+
+  const withSubtree = () => {
+    const made = makeService();
+    made.prisma.partCategory.findMany.mockResolvedValue(SUBTREE);
+    made.prisma.$queryRaw.mockResolvedValue(lockedRows(SUBTREE));
+    return made;
+  };
+
+  it('asks for a target when listings point anywhere in the subtree', async () => {
+    const { service, prisma } = withSubtree();
     prisma.product.count.mockResolvedValue(3);
     expect(await conflictCode(service.remove('old-pads'))).toBe(
-      CategoryDeleteConflict.HAS_LISTINGS,
+      CategoryDeleteConflict.NEEDS_TARGET,
     );
-    expect(prisma.partCategory.delete).not.toHaveBeenCalled();
+    expect(prisma.product.count).toHaveBeenCalledWith({
+      where: {
+        OR: [
+          { categoryId: { in: ['old-pads', 'front', 'rear', 'front-left'] } },
+          {
+            vehicleCategoryId: {
+              in: ['old-pads', 'front', 'rear', 'front-left'],
+            },
+          },
+        ],
+      },
+    });
+    expect(prisma.partCategory.deleteMany).not.toHaveBeenCalled();
   });
 
-  it('refuses to delete a category referenced by live drafts, and counts only those', async () => {
+  it('live drafts need a target too, and only live ones count', async () => {
     const { service, prisma } = makeService();
     prisma.productDraft.count.mockResolvedValue(1);
     expect(await conflictCode(service.remove('old-pads'))).toBe(
-      CategoryDeleteConflict.HAS_LISTINGS,
+      CategoryDeleteConflict.NEEDS_TARGET,
     );
     expect(prisma.productDraft.count).toHaveBeenCalledWith({
       where: expect.objectContaining({
@@ -350,36 +390,25 @@ describe('DELETE guards (deactivation is the preferred path)', () => {
     });
   });
 
-  it('refuses while a live sale targets it, naming the sale', async () => {
-    const { service, prisma } = makeService();
-    prisma.sale.findMany.mockResolvedValue([{ title: 'Spring brakes' }]);
-    const run = service.remove('old-pads');
-    await expect(run).rejects.toThrow(/Spring brakes/);
-    expect(prisma.partCategory.delete).not.toHaveBeenCalled();
-  });
-
-  it('records who deleted what, in the same transaction', async () => {
-    const { service, prisma, audit } = makeService();
-    prisma.$queryRaw.mockResolvedValue([{ parent_id: null, name: 'Old pads' }]);
-
-    await service.remove('old-pads', undefined, {
-      actor: { id: 'adm_1', email: 'a@m.uz', name: 'A' },
-    });
-
-    expect(audit.record).toHaveBeenCalledTimes(1);
-    expect(audit.record.mock.calls[0][0]).toMatchObject({
-      action: 'CATEGORY_DELETED',
-      actor: { id: 'adm_1' },
-      target: { entity: 'CATEGORY', id: 'old-pads', name: 'Old pads' },
-    });
-  });
-
-  it('asks for a reassign target only when parts are the one thing in the way', async () => {
+  it('asks for a reassign target with the parts code when parts are the one thing in the way', async () => {
     const { service, prisma } = makeService();
     prisma.catalogPart.count.mockResolvedValue(2);
     expect(await conflictCode(service.remove('old-pads'))).toBe(
       CategoryDeleteConflict.HAS_PARTS,
     );
+  });
+
+  it('refuses while a live sale targets anything in the subtree, naming the sale', async () => {
+    const { service, prisma } = withSubtree();
+    prisma.sale.findMany.mockResolvedValue([{ title: 'Spring brakes' }]);
+    await expect(service.remove('old-pads')).rejects.toThrow(/Spring brakes/);
+    expect(prisma.sale.findMany.mock.calls[0][0].where.targets).toEqual({
+      some: {
+        targetType: 'CATEGORIES',
+        targetId: { in: ['old-pads', 'front', 'rear', 'front-left'] },
+      },
+    });
+    expect(prisma.partCategory.deleteMany).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -393,10 +422,32 @@ describe('DELETE guards (deactivation is the preferred path)', () => {
     expect(await conflictCode(service.remove(id))).toBe(
       CategoryDeleteConflict.PROTECTED,
     );
-    expect(prisma.partCategory.delete).not.toHaveBeenCalled();
+    expect(prisma.partCategory.deleteMany).not.toHaveBeenCalled();
   });
 
-  it('takes the tree lock and the row lock before checking anything', async () => {
+  it('refuses a subtree that holds a protected category, naming it', async () => {
+    const { service, prisma } = makeService();
+    const edges = [
+      { id: 'custom-fluids', parentId: null },
+      { id: 'motor-oil', parentId: 'custom-fluids' },
+    ];
+    prisma.partCategory.findMany.mockResolvedValue(edges);
+    prisma.$queryRaw.mockResolvedValue(lockedRows(edges));
+
+    const run = service.remove('custom-fluids');
+    expect(await conflictCode(run)).toBe(CategoryDeleteConflict.PROTECTED);
+    await expect(service.remove('custom-fluids')).rejects.toThrow(/motor-oil/);
+    expect(prisma.partCategory.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it('refuses the Uncategorized fallback bucket', async () => {
+    const { service } = makeService();
+    await expect(service.remove('cat_uncategorized')).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+  });
+
+  it('takes the tree lock and the row locks before checking anything', async () => {
     const { service, prisma } = makeService();
     const order: string[] = [];
     prisma.$executeRaw.mockImplementation(() => {
@@ -405,7 +456,7 @@ describe('DELETE guards (deactivation is the preferred path)', () => {
     });
     prisma.$queryRaw.mockImplementation(() => {
       order.push('row-lock');
-      return Promise.resolve([{ parent_id: null }]);
+      return Promise.resolve([{ id: 'old-pads', parent_id: null, name: 'x' }]);
     });
     prisma.product.count.mockImplementation(() => {
       order.push('checks');
@@ -425,26 +476,23 @@ describe('DELETE guards (deactivation is the preferred path)', () => {
     );
   });
 
-  it('refuses to delete a category that still has children', async () => {
+  it('refuses when subcategories appeared that the delete did not see', async () => {
     const { service, prisma } = makeService();
-    prisma.partCategory.count.mockResolvedValue(2);
-    await expect(service.remove('brake-system')).rejects.toBeInstanceOf(
-      ConflictException,
+    prisma.partCategory.count.mockResolvedValue(1);
+    expect(await conflictCode(service.remove('old-pads'))).toBe(
+      CategoryDeleteConflict.TREE_CHANGED,
     );
-  });
-
-  it('refuses to delete the Uncategorized fallback bucket', async () => {
-    const { service } = makeService();
-    await expect(service.remove('cat_uncategorized')).rejects.toBeInstanceOf(
-      ConflictException,
-    );
+    expect(prisma.partCategory.count).toHaveBeenCalledWith({
+      where: { parentId: { in: ['old-pads'] }, id: { notIn: ['old-pads'] } },
+    });
+    expect(prisma.partCategory.deleteMany).not.toHaveBeenCalled();
   });
 
   it('deletes an unreferenced leaf and busts the cache, its own key included', async () => {
     const { service, prisma, categories } = makeService();
     const res = await service.remove('old-pads');
-    expect(prisma.partCategory.delete).toHaveBeenCalledWith({
-      where: { id: 'old-pads' },
+    expect(prisma.partCategory.deleteMany).toHaveBeenCalledWith({
+      where: { id: { in: ['old-pads'] } },
     });
     expect(categories.invalidate).toHaveBeenCalledWith(
       'brake-system',
@@ -452,7 +500,172 @@ describe('DELETE guards (deactivation is the preferred path)', () => {
     );
     expect(res).toEqual({
       success: true,
-      data: { deleted: 'old-pads', reassigned: 0 },
+      data: {
+        deleted: 'old-pads',
+        reassigned: 0,
+        listings: 0,
+        drafts: 0,
+        subcategories: [],
+      },
+    });
+  });
+
+  it('deletes an empty subtree, children before their parents', async () => {
+    const { service, prisma, categories } = withSubtree();
+
+    const res = await service.remove('old-pads');
+
+    expect(
+      prisma.partCategory.deleteMany.mock.calls.map((c) => c[0].where.id.in),
+    ).toEqual([['front-left'], ['front', 'rear'], ['old-pads']]);
+    expect(categories.invalidate).toHaveBeenCalledWith(
+      'brake-system',
+      'old-pads',
+      'front',
+      'rear',
+      'front-left',
+    );
+    expect(res.data.subcategories).toEqual(['front', 'rear', 'front-left']);
+  });
+
+  it('records who deleted what, one entry per row, in the same transaction', async () => {
+    const { service, prisma, audit } = withSubtree();
+
+    await service.remove('old-pads', undefined, {
+      actor: { id: 'adm_1', email: 'a@m.uz', name: 'A' },
+    });
+
+    expect(audit.recordMany).toHaveBeenCalledTimes(1);
+    const [entries, tx] = audit.recordMany.mock.calls[0];
+    expect(tx).toBe(prisma);
+    expect(entries.map((e: { target: { id: string } }) => e.target.id)).toEqual(
+      ['old-pads', 'front', 'rear', 'front-left'],
+    );
+    expect(entries[0]).toMatchObject({
+      action: 'CATEGORY_DELETED',
+      actor: { id: 'adm_1' },
+      target: { entity: 'CATEGORY', id: 'old-pads', name: 'old-pads' },
+      previousValues: { parentId: 'brake-system', subcategories: 3 },
+    });
+    expect(entries[3].previousValues).toEqual({
+      parentId: 'front',
+      deletedWith: 'old-pads',
+    });
+  });
+
+  describe('with a target', () => {
+    const TARGET = { id: 'pads', parentId: 'brakes' };
+
+    const stocked = () => {
+      const made = withSubtree();
+      const { prisma } = made;
+      prisma.partCategory.findUnique.mockResolvedValue(TARGET);
+      prisma.catalogPart.count.mockResolvedValue(2);
+      prisma.catalogPart.findMany.mockResolvedValue([
+        { id: 'p1', kind: 'SPARE_PART', oilType: null, categoryId: 'front' },
+        { id: 'p2', kind: 'SPARE_PART', oilType: null, categoryId: 'rear' },
+      ]);
+      prisma.catalogPart.updateMany.mockResolvedValue({ count: 2 });
+      // Three listings before the move, none after it.
+      prisma.product.count.mockResolvedValueOnce(3).mockResolvedValue(0);
+      made.transfers.drainForDelete.mockImplementation(
+        (_tx: unknown, nodeId: string) =>
+          Promise.resolve(
+            nodeId === 'front-left'
+              ? { parts: 0, listings: 3, listingRootCorrections: 0, drafts: 1 }
+              : null,
+          ),
+      );
+      return made;
+    };
+
+    it('moves the parts, drains every node deepest first, then deletes', async () => {
+      const { service, prisma, transfers, categories } = stocked();
+
+      const res = await service.remove('old-pads', 'pads');
+
+      expect(prisma.catalogPart.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            categoryId: { in: ['old-pads', 'front', 'rear', 'front-left'] },
+          },
+        }),
+      );
+      expect(prisma.catalogPart.updateMany).toHaveBeenCalledWith({
+        where: { id: { in: ['p1', 'p2'] } },
+        data: expect.objectContaining({ categoryId: 'pads' }),
+      });
+      expect(transfers.drainForDelete.mock.calls.map((c) => c[1])).toEqual([
+        'front-left',
+        'rear',
+        'front',
+        'old-pads',
+      ]);
+      expect(transfers.drainForDelete.mock.calls[0][2]).toBe('pads');
+      expect(prisma.partCategory.deleteMany).toHaveBeenCalledTimes(3);
+      expect(res.data).toEqual({
+        deleted: 'old-pads',
+        reassigned: 2,
+        listings: 3,
+        drafts: 1,
+        subcategories: ['front', 'rear', 'front-left'],
+      });
+      expect(categories.invalidate).toHaveBeenCalledWith(
+        'brake-system',
+        'old-pads',
+        'front',
+        'rear',
+        'front-left',
+        'pads',
+        'brakes',
+      );
+    });
+
+    it('drains no listings when only parts are there', async () => {
+      const { service, prisma, transfers } = stocked();
+      prisma.product.count.mockReset().mockResolvedValue(0);
+
+      await service.remove('old-pads', 'pads');
+
+      expect(transfers.drainForDelete).not.toHaveBeenCalled();
+      expect(prisma.partCategory.deleteMany).toHaveBeenCalledTimes(3);
+    });
+
+    it('refuses a target inside the subtree being deleted', async () => {
+      const { service, prisma } = stocked();
+      await expect(service.remove('old-pads', 'front')).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+      expect(prisma.catalogPart.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('404s on an unknown target, moving nothing', async () => {
+      const { service, prisma } = stocked();
+      prisma.partCategory.findUnique.mockResolvedValue(null);
+      await expect(service.remove('old-pads', 'nope')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(prisma.catalogPart.updateMany).not.toHaveBeenCalled();
+    });
+
+    it("a transfer blocker refuses the whole delete with the transfer's code", async () => {
+      const { service, prisma, transfers } = stocked();
+      transfers.drainForDelete.mockRejectedValue(
+        new ConflictException({ code: 'KIND_MISMATCH', message: 'no' }),
+      );
+      expect(await conflictCode(service.remove('old-pads', 'pads'))).toBe(
+        'KIND_MISMATCH',
+      );
+      expect(prisma.partCategory.deleteMany).not.toHaveBeenCalled();
+    });
+
+    it('listings a transfer could not place refuse the delete rather than lose their category', async () => {
+      const { service, prisma } = stocked();
+      prisma.product.count.mockReset().mockResolvedValue(1);
+      expect(await conflictCode(service.remove('old-pads', 'pads'))).toBe(
+        CategoryDeleteConflict.HAS_LISTINGS,
+      );
+      expect(prisma.partCategory.deleteMany).not.toHaveBeenCalled();
     });
   });
 });

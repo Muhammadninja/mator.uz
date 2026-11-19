@@ -51,7 +51,12 @@ describeWithDb('category transfer (real PostgreSQL)', () => {
     tree,
     audit,
   );
-  const categories = new AdminCategoriesService(prisma as never, tree, audit);
+  const categories = new AdminCategoriesService(
+    prisma as never,
+    tree,
+    audit,
+    transfers,
+  );
   const projection = new CatalogProjectionService(prisma as never);
 
   let dealerId: string;
@@ -328,7 +333,10 @@ describeWithDb('category transfer (real PostgreSQL)', () => {
       const codes = (await preview(from.id, to.id)).warnings.map((w) => w.code);
 
       expect(codes).toEqual(
-        expect.arrayContaining(['FISCAL_CODES_CHANGE', 'SALE_FORM_UNAVAILABLE']),
+        expect.arrayContaining([
+          'FISCAL_CODES_CHANGE',
+          'SALE_FORM_UNAVAILABLE',
+        ]),
       );
     });
 
@@ -617,6 +625,115 @@ describeWithDb('category transfer (real PostgreSQL)', () => {
       expect(
         await prisma.partCategory.findUnique({ where: { id: from.id } }),
       ).toBeNull();
+    });
+  });
+
+  describe('a delete with a target', () => {
+    it('removes the whole subtree, moving parts, listings and live drafts out of every level', async () => {
+      const parent = await category('parent');
+      const child = await category('child', { parentId: parent.id, level: 2 });
+      const to = await category('to');
+      const p = await part('p', child.id);
+      const l = await listing('l', {
+        categoryId: child.id,
+        vehicleCategoryId: root,
+      });
+      const live = await draft('d-live', DraftStatus.CREATING, {
+        categoryId: parent.id,
+        vehicleCategoryId: root,
+      });
+      const dead = await draft('d-dead', DraftStatus.EXPIRED, {
+        categoryId: child.id,
+      });
+
+      const res = await categories.remove(parent.id, to.id, { actor: ACTOR });
+
+      expect(res.data).toEqual({
+        deleted: parent.id,
+        reassigned: 1,
+        listings: 1,
+        drafts: 1,
+        subcategories: [child.id],
+      });
+      expect(
+        await prisma.partCategory.count({
+          where: { id: { in: [parent.id, child.id] } },
+        }),
+      ).toBe(0);
+      expect(
+        (await prisma.catalogPart.findUniqueOrThrow({ where: { id: p.id } }))
+          .categoryId,
+      ).toBe(to.id);
+      expect(
+        await prisma.product.findUniqueOrThrow({ where: { id: l.id } }),
+      ).toMatchObject({ categoryId: to.id, vehicleCategoryId: root });
+      expect(
+        (
+          await prisma.productDraft.findUniqueOrThrow({
+            where: { id: live.id },
+          })
+        ).categoryId,
+      ).toBe(to.id);
+      // A finished draft is history: it only loses the FK, as before.
+      expect(
+        (
+          await prisma.productDraft.findUniqueOrThrow({
+            where: { id: dead.id },
+          })
+        ).categoryId,
+      ).toBeNull();
+      expect(
+        await prisma.adminAudit.count({
+          where: {
+            action: AdminAuditAction.CATEGORY_DELETED,
+            targetEntityId: { in: [parent.id, child.id] },
+          },
+        }),
+      ).toBe(2);
+    });
+
+    it('a target the transfer refuses leaves the whole subtree as it was', async () => {
+      const parent = await category('parent');
+      const child = await category('child', { parentId: parent.id, level: 2 });
+      const to = await category('to', { isActive: false });
+      const p = await part('p', parent.id);
+      const l = await listing('l', { categoryId: child.id });
+
+      const err = await categories
+        .remove(parent.id, to.id)
+        .catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(ConflictException);
+      expect(
+        ((err as ConflictException).getResponse() as { code: string }).code,
+      ).toBe('TARGET_INACTIVE');
+      expect(
+        await prisma.partCategory.count({
+          where: { id: { in: [parent.id, child.id] } },
+        }),
+      ).toBe(2);
+      // The parts had already moved inside the transaction: rolled back with it.
+      expect(
+        (await prisma.catalogPart.findUniqueOrThrow({ where: { id: p.id } }))
+          .categoryId,
+      ).toBe(parent.id);
+      expect(
+        (await prisma.product.findUniqueOrThrow({ where: { id: l.id } }))
+          .categoryId,
+      ).toBe(child.id);
+    });
+
+    it('refuses a target inside the subtree being deleted', async () => {
+      const parent = await category('parent');
+      const child = await category('child', { parentId: parent.id, level: 2 });
+      await part('p', parent.id);
+
+      await expect(
+        categories.remove(parent.id, child.id),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(
+        await prisma.partCategory.count({ where: { id: parent.id } }),
+      ).toBe(1);
     });
   });
 

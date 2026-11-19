@@ -17,6 +17,7 @@ import { DraftStatus, PartMainCategory, Prisma } from '@prisma/client';
 import { randomBytes } from 'crypto';
 import { AdminAuditService } from '../../src/admin/auth/admin-audit.service';
 import { AdminCategoriesService } from '../../src/admin/categories/admin-categories.service';
+import { AdminCategoryTransferService } from '../../src/admin/categories/admin-category-transfer.service';
 import { AdminInventoryService } from '../../src/admin/inventory/admin-inventory.service';
 import { AdminProductsRatingService } from '../../src/admin/products/admin-products-rating.service';
 import { PartCategoryService } from '../../src/catalog/categories/part-category.service';
@@ -42,7 +43,17 @@ describeWithDb(
     const cache = new CacheService(redis as never);
     const tree = new PartCategoryService(prisma as never, cache);
     const audit = new AdminAuditService(prisma as never);
-    const service = new AdminCategoriesService(prisma as never, tree, audit);
+    const transfers = new AdminCategoryTransferService(
+      prisma as never,
+      tree,
+      audit,
+    );
+    const service = new AdminCategoriesService(
+      prisma as never,
+      tree,
+      audit,
+      transfers,
+    );
     const projection = new CatalogProjectionService(prisma as never);
     const inventory = new AdminInventoryService(prisma as never, audit);
     const ratings = new AdminProductsRatingService(prisma as never, projection);
@@ -162,7 +173,13 @@ describeWithDb(
 
         expect(res).toEqual({
           success: true,
-          data: { deleted: leaf.id, reassigned: 0 },
+          data: {
+            deleted: leaf.id,
+            reassigned: 0,
+            listings: 0,
+            drafts: 0,
+            subcategories: [],
+          },
         });
         expect(await exists(leaf.id)).toBe(false);
       });
@@ -195,7 +212,7 @@ describeWithDb(
 
         const res = await service.remove(from.id, to.id);
 
-        expect(res.data).toEqual({ deleted: from.id, reassigned: 1 });
+        expect(res.data).toMatchObject({ deleted: from.id, reassigned: 1 });
         expect(await exists(from.id)).toBe(false);
         const moved = await prisma.catalogPart.findUnique({
           where: { id: p.id },
@@ -218,18 +235,37 @@ describeWithDb(
         expect(after?.categoryId).toBe(cat.id);
       });
 
-      it('a category with children is refused and the child keeps its parent', async () => {
+      it('a category with children goes together with its whole subtree', async () => {
         const parent = await category('parent');
         const child = await category('child', { parentId: parent.id });
+        const grandchild = await category('grandchild', {
+          parentId: child.id,
+          level: 2,
+        });
+
+        const res = await service.remove(parent.id);
+
+        expect(res.data.subcategories).toEqual([child.id, grandchild.id]);
+        for (const id of [parent.id, child.id, grandchild.id]) {
+          expect(await exists(id)).toBe(false);
+        }
+      });
+
+      it('a subtree with parts anywhere in it needs a target, and keeps everything without one', async () => {
+        const parent = await category('parent-parts');
+        const child = await category('child-parts', { parentId: parent.id });
+        const p = await part('p-deep', child.id);
 
         await expect(service.remove(parent.id)).rejects.toBeInstanceOf(
           ConflictException,
         );
 
-        const after = await prisma.partCategory.findUnique({
-          where: { id: child.id },
+        expect(await exists(parent.id)).toBe(true);
+        expect(await exists(child.id)).toBe(true);
+        const after = await prisma.catalogPart.findUnique({
+          where: { id: p.id },
         });
-        expect(after?.parentId).toBe(parent.id);
+        expect(after?.categoryId).toBe(child.id);
       });
 
       it.each(['categoryId', 'vehicleCategoryId'] as const)(
