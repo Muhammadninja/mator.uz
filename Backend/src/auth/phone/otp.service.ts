@@ -32,6 +32,10 @@ import { RedisKeys } from '../../redis/redis.keys';
 import { resolveSmsLang, type SmsLang } from '../../sms/otp-message.i18n';
 import { OtpJobSecretStore } from '../../queue/otp-job-secret.store';
 import { StagingOtpPolicy } from './staging-otp.policy';
+import {
+  readStoreReviewLogin,
+  type StoreReviewLogin,
+} from './store-review-login.config';
 
 const OTP_LENGTH = 6;
 const OTP_TTL_MS = 5 * 60 * 1000; // 5 min
@@ -183,6 +187,8 @@ interface OtpRecord {
 export class OtpService {
   private readonly logger = new Logger(OtpService.name);
   private readonly devMode: boolean;
+  /** The store-review number and its fixed code, or null (store-review-login.config.ts). */
+  private readonly reviewLogin: StoreReviewLogin | null;
 
   constructor(
     private readonly redis: RedisService,
@@ -208,6 +214,31 @@ export class OtpService {
     if (this.devMode) {
       this.logger.warn('AUTH_DEV_MODE is ON — OTPs are returned in the API, SMS is skipped. Do NOT enable in production.');
     }
+    this.reviewLogin = readStoreReviewLogin((key) =>
+      this.config.get<string>(key),
+    );
+    if (this.reviewLogin) {
+      this.logger.warn(
+        `Store-review sign-in is ON for ${maskPhone(this.reviewLogin.phoneE164)}: its login code is fixed and never sent by SMS.`,
+      );
+    }
+  }
+
+  /** A login for the store-review number: fixed code, no SMS, no send limits. */
+  private isReviewLogin(phoneE164: string, purpose: string): boolean {
+    return (
+      this.reviewLogin !== null &&
+      purpose === OtpPurpose.LOGIN &&
+      otpCooldownPhone(phoneE164) ===
+        otpCooldownPhone(this.reviewLogin.phoneE164)
+    );
+  }
+
+  /** The code for a new or resent request: the review code, or a random one. */
+  private codeFor(phoneE164: string, purpose: string): string {
+    return this.isReviewLogin(phoneE164, purpose)
+      ? this.reviewLogin!.code
+      : this.generateCode();
   }
 
   private get stagingOn(): boolean {
@@ -449,6 +480,12 @@ export class OtpService {
         await this.deliverToTester(record, code);
         return undefined;
       }
+      if (this.isReviewLogin(record.phoneE164, record.purpose)) {
+        this.logger.log(
+          `Store-review OTP issued for ${maskPhone(record.phoneE164)} (SMS skipped)`,
+        );
+        return undefined;
+      }
       await this.deliver(
         record.phoneE164,
         code,
@@ -499,7 +536,10 @@ export class OtpService {
     const slot = slotOf(phoneE164, purpose);
     const requestId = prefixedId(IdPrefix.OTP);
     // First: a refused request must not create a code or touch the live one.
-    await this.claimSendCooldown(phoneE164, requestId);
+    // The review number sends no SMS, so it has nothing to throttle.
+    if (!this.isReviewLogin(phoneE164, purpose)) {
+      await this.claimSendCooldown(phoneE164, requestId);
+    }
     let previous: OtpRecord | null;
     try {
       previous = await this.loadByPhone(slot);
@@ -508,7 +548,7 @@ export class OtpService {
       throw err;
     }
 
-    const code = this.generateCode();
+    const code = this.codeFor(phoneE164, purpose);
     const now = Date.now();
     const expiresAt = new Date(now + OTP_TTL_MS);
     const record: OtpRecord = {
@@ -558,9 +598,11 @@ export class OtpService {
     }
     // The same slot a first request takes, so resending cannot get around it.
     const claim = prefixedId(IdPrefix.OTP);
-    await this.claimSendCooldown(record.phoneE164, claim);
+    if (!this.isReviewLogin(record.phoneE164, record.purpose)) {
+      await this.claimSendCooldown(record.phoneE164, claim);
+    }
 
-    const code = this.generateCode();
+    const code = this.codeFor(record.phoneE164, record.purpose);
     const now = Date.now();
     const expiresAt = new Date(now + OTP_TTL_MS);
     const updated: OtpRecord = {
