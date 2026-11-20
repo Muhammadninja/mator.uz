@@ -347,6 +347,14 @@ platform-wide 100 requests per minute per client.
 **Verification.** Five attempts per request and ten per phone per hour, counted
 atomically before the code is compared. With Redis down, verification answers 503.
 
+**Store-review sign-in.** Google Play and App Store reviewers have no Uzbek number, so one
+number can be given a fixed login code: set `STORE_REVIEW_PHONE` (`+998XXXXXXXXX`, a number
+no real customer holds) and `STORE_REVIEW_CODE` (6 digits, not a trivial sequence) together.
+For that number's sign-in no SMS is sent and the cooldown and send quota are skipped; the
+verification limits above still apply. Phone changes, and every other number, are
+unaffected. The account is an ordinary customer. Unset both to turn it off; a half-set or
+weak value stops the boot. Give the code only in the stores' review-access forms.
+
 ## SMS provider
 
 `SMS_PROVIDER` chooses the provider, with its own credentials as listed in
