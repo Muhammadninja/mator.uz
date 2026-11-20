@@ -115,6 +115,86 @@ describe('AccountDeletionService', () => {
     });
   });
 
+  it('KEEPS sourcing tickets but unlinks them and drops the message and VIN', async () => {
+    const { service, prisma } = build();
+    const VIN = 'XWBJA69V9KA123456';
+    prisma.sourcingTicket.findMany.mockResolvedValue([
+      {
+        id: 'tkt_1',
+        partName: 'Тормозные колодки',
+        partKey: 'колодки тормозные',
+        extractedData: {
+          brand: 'Chevrolet',
+          model: 'Cobalt',
+          year: '2019',
+          vin: VIN,
+          part_name: 'Тормозные колодки',
+          preference: null,
+        },
+      },
+      // The LLM copied the VIN into the part name: it must not survive anywhere.
+      {
+        id: 'tkt_2',
+        partName: `Фильтр ${VIN}`,
+        partKey: `${VIN.toLowerCase()} фильтр`,
+        extractedData: { part_name: `Фильтр ${VIN}`, vin: VIN },
+      },
+      { id: 'tkt_3', partName: null, partKey: null, extractedData: null },
+    ]);
+
+    await service.deleteAccount(USER_ID);
+
+    expect(prisma.sourcingTicket.findMany).toHaveBeenCalledWith({
+      where: { userId: USER_ID },
+      select: { id: true, extractedData: true, partName: true, partKey: true },
+    });
+    expect(prisma.sourcingTicket.deleteMany).not.toHaveBeenCalled();
+    expect(prisma.sourcingTicket.update).toHaveBeenCalledWith({
+      where: { id: 'tkt_1' },
+      data: {
+        userId: null,
+        rawMessage: '',
+        extractedData: {
+          brand: 'Chevrolet',
+          model: 'Cobalt',
+          year: '2019',
+          part_name: 'Тормозные колодки',
+          preference: null,
+        },
+        partName: 'Тормозные колодки',
+        partKey: 'колодки тормозные',
+        customerNotice: null,
+      },
+    });
+    expect(prisma.sourcingTicket.update).toHaveBeenCalledWith({
+      where: { id: 'tkt_2' },
+      data: {
+        userId: null,
+        rawMessage: '',
+        extractedData: { part_name: 'Фильтр' },
+        partName: 'Фильтр',
+        partKey: 'фильтр',
+        customerNotice: null,
+      },
+    });
+    expect(prisma.sourcingTicket.update).toHaveBeenCalledWith({
+      where: { id: 'tkt_3' },
+      data: {
+        userId: null,
+        rawMessage: '',
+        extractedData: {},
+        partName: null,
+        partKey: null,
+        customerNotice: null,
+      },
+    });
+    const written = JSON.stringify(prisma.sourcingTicket.update.mock.calls);
+    expect(written.toUpperCase()).not.toContain(VIN);
+    expect(prisma.sourcingRequest.deleteMany).toHaveBeenCalledWith({
+      where: { userId: USER_ID },
+    });
+  });
+
   it('RETAINS legal consent but strips its network/device provenance', async () => {
     const { service, prisma } = build();
 
@@ -264,6 +344,7 @@ const PERSONAL_DATA_MODELS = [
   'emailVerificationToken',
   'myIdVerification',
   'myIdSession',
+  'sourcingRequest',
 ];
 
 async function refusal(service: AccountDeletionService) {
@@ -424,7 +505,9 @@ describe('AccountDeletionService — an order in progress blocks deletion', () =
       prisma.order.findMany.mockResolvedValue([{ id: 'o1' }]);
       orderStatus.cancelUncollectedOffline.mockResolvedValue(false);
       prisma.order.count.mockResolvedValue(1);
-      await expect(service.deleteAccount(USER_ID)).rejects.toMatchObject({ status: 409 });
+      await expect(service.deleteAccount(USER_ID)).rejects.toMatchObject({
+        status: 409,
+      });
     });
   });
 });

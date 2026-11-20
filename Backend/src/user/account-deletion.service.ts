@@ -25,6 +25,39 @@ import {
 /** Machine-readable code the client switches on (see HttpExceptionFilter). */
 export const ACCOUNT_HAS_ACTIVE_ORDERS = 'ACCOUNT_HAS_ACTIVE_ORDERS';
 
+/** A VIN: 17 characters, letters other than I, O and Q, and digits. */
+const VIN_RE = /\b[A-HJ-NPR-Z0-9]{17}\b/gi;
+
+/** Text with any VIN-shaped token removed (the LLM may copy one into a field). */
+function scrubVin(text: string): string {
+  return text
+    .replace(VIN_RE, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+/**
+ * A sourcing extraction without its VIN: the `vin` key dropped and VIN-shaped
+ * tokens scrubbed from the other text values. Anything that is not an object
+ * is kept as {}.
+ */
+function withoutVin(data: Prisma.JsonValue): Prisma.InputJsonObject {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return {};
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { vin, ...rest } = data;
+  return Object.fromEntries(
+    Object.entries(rest).map(([key, value]) => [
+      key,
+      typeof value === 'string' ? scrubVin(value) : value,
+    ]),
+  );
+}
+
+/** A nullable text column with VIN-shaped tokens scrubbed. */
+function scrubVinOrNull(text: string | null): string | null {
+  return text === null ? null : scrubVin(text);
+}
+
 /**
  * Permanent account deletion — DELETE /v1/me.
  *
@@ -90,11 +123,11 @@ export const ACCOUNT_HAS_ACTIVE_ORDERS = 'ACCOUNT_HAS_ACTIVE_ORDERS';
  * The user can delete once those orders are delivered, cancelled, refunded or
  * expired.
  *
- * OPEN BUSINESS DECISION — deliberately NOT decided in code:
- *   • SOURCING TICKETS. `sourcing_tickets` rows carry the customer's raw chat
- *     request and the LLM extraction (which may include a VIN) under a non-FK
- *     `user_id`; they are NOT deleted or anonymized here. Whether they are
- *     personal data to erase or operational records to keep is undecided.
+ * Sourcing tickets (owner decision, 2026-11-19): KEPT as purchasing history but
+ * anonymized — `user_id` → NULL, `raw_message` blanked, `vin` removed from
+ * `extracted_data`, `customer_notice` cleared. The part, make/model/year and
+ * sellers' offers stay. The user's `sourcing_requests` (request payloads) are
+ * deleted.
  *
  * ── Ordering and failure strategy ───────────────────────────────────────────
  * The database work runs in ONE transaction: it either fully commits or changes
@@ -182,6 +215,37 @@ export class AccountDeletionService {
         where: { userId },
         data: { ipAddress: null, userAgent: null },
       });
+
+      // Part-sourcing tickets are KEPT as purchasing history (the part, the
+      // car's make/model/year, the sellers' offers) but stop being this
+      // person's: unlinked, the raw chat message blanked, the VIN dropped from
+      // the extraction and scrubbed from every other text field the LLM filled
+      // (it may copy a VIN into the part name), and any pending customer notice
+      // cancelled. Their requests hold the customer's request payload and are
+      // deleted (tickets keep their row: request_id is SetNull).
+      const tickets = await tx.sourcingTicket.findMany({
+        where: { userId },
+        select: {
+          id: true,
+          extractedData: true,
+          partName: true,
+          partKey: true,
+        },
+      });
+      for (const ticket of tickets) {
+        await tx.sourcingTicket.update({
+          where: { id: ticket.id },
+          data: {
+            userId: null,
+            rawMessage: '',
+            extractedData: withoutVin(ticket.extractedData),
+            partName: scrubVinOrNull(ticket.partName),
+            partKey: scrubVinOrNull(ticket.partKey),
+            customerNotice: null,
+          },
+        });
+      }
+      await tx.sourcingRequest.deleteMany({ where: { userId } });
 
       // ── 2. Delete every other personal-data relation ──────────────────────
       // Written explicitly rather than relying on the schema's ON DELETE CASCADE,
