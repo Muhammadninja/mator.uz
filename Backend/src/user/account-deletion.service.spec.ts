@@ -115,6 +115,59 @@ describe('AccountDeletionService', () => {
     });
   });
 
+  it('KEEPS sourcing tickets but unlinks them and drops the message and VIN', async () => {
+    const { service, prisma } = build();
+    prisma.sourcingTicket.findMany.mockResolvedValue([
+      {
+        id: 'tkt_1',
+        extractedData: {
+          brand: 'Chevrolet',
+          model: 'Cobalt',
+          year: '2019',
+          vin: 'XWBJA69V9KA123456',
+          part_name: 'Тормозные колодки',
+          preference: null,
+        },
+      },
+      { id: 'tkt_2', extractedData: null },
+    ]);
+
+    await service.deleteAccount(USER_ID);
+
+    expect(prisma.sourcingTicket.findMany).toHaveBeenCalledWith({
+      where: { userId: USER_ID },
+      select: { id: true, extractedData: true },
+    });
+    expect(prisma.sourcingTicket.deleteMany).not.toHaveBeenCalled();
+    expect(prisma.sourcingTicket.update).toHaveBeenCalledWith({
+      where: { id: 'tkt_1' },
+      data: {
+        userId: null,
+        rawMessage: '',
+        extractedData: {
+          brand: 'Chevrolet',
+          model: 'Cobalt',
+          year: '2019',
+          part_name: 'Тормозные колодки',
+          preference: null,
+        },
+        customerNotice: null,
+      },
+    });
+    expect(prisma.sourcingTicket.update).toHaveBeenCalledWith({
+      where: { id: 'tkt_2' },
+      data: {
+        userId: null,
+        rawMessage: '',
+        extractedData: {},
+        customerNotice: null,
+      },
+    });
+    expect(prisma.sourcingRequest.deleteMany).toHaveBeenCalledWith({
+      where: { userId: USER_ID },
+    });
+  });
+
   it('RETAINS legal consent but strips its network/device provenance', async () => {
     const { service, prisma } = build();
 
@@ -264,6 +317,7 @@ const PERSONAL_DATA_MODELS = [
   'emailVerificationToken',
   'myIdVerification',
   'myIdSession',
+  'sourcingRequest',
 ];
 
 async function refusal(service: AccountDeletionService) {
@@ -424,7 +478,9 @@ describe('AccountDeletionService — an order in progress blocks deletion', () =
       prisma.order.findMany.mockResolvedValue([{ id: 'o1' }]);
       orderStatus.cancelUncollectedOffline.mockResolvedValue(false);
       prisma.order.count.mockResolvedValue(1);
-      await expect(service.deleteAccount(USER_ID)).rejects.toMatchObject({ status: 409 });
+      await expect(service.deleteAccount(USER_ID)).rejects.toMatchObject({
+        status: 409,
+      });
     });
   });
 });
