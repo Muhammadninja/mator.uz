@@ -25,12 +25,37 @@ import {
 /** Machine-readable code the client switches on (see HttpExceptionFilter). */
 export const ACCOUNT_HAS_ACTIVE_ORDERS = 'ACCOUNT_HAS_ACTIVE_ORDERS';
 
-/** A sourcing extraction without its VIN; anything that is not an object is kept as {}. */
+/** A VIN: 17 characters, letters other than I, O and Q, and digits. */
+const VIN_RE = /\b[A-HJ-NPR-Z0-9]{17}\b/gi;
+
+/** Text with any VIN-shaped token removed (the LLM may copy one into a field). */
+function scrubVin(text: string): string {
+  return text
+    .replace(VIN_RE, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+/**
+ * A sourcing extraction without its VIN: the `vin` key dropped and VIN-shaped
+ * tokens scrubbed from the other text values. Anything that is not an object
+ * is kept as {}.
+ */
 function withoutVin(data: Prisma.JsonValue): Prisma.InputJsonObject {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return {};
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const { vin, ...rest } = data;
-  return rest;
+  return Object.fromEntries(
+    Object.entries(rest).map(([key, value]) => [
+      key,
+      typeof value === 'string' ? scrubVin(value) : value,
+    ]),
+  );
+}
+
+/** A nullable text column with VIN-shaped tokens scrubbed. */
+function scrubVinOrNull(text: string | null): string | null {
+  return text === null ? null : scrubVin(text);
 }
 
 /**
@@ -194,12 +219,18 @@ export class AccountDeletionService {
       // Part-sourcing tickets are KEPT as purchasing history (the part, the
       // car's make/model/year, the sellers' offers) but stop being this
       // person's: unlinked, the raw chat message blanked, the VIN dropped from
-      // the extraction and any pending customer notice cancelled. Their
-      // requests hold the customer's request payload and are deleted (tickets
-      // keep their row: request_id is SetNull).
+      // the extraction and scrubbed from every other text field the LLM filled
+      // (it may copy a VIN into the part name), and any pending customer notice
+      // cancelled. Their requests hold the customer's request payload and are
+      // deleted (tickets keep their row: request_id is SetNull).
       const tickets = await tx.sourcingTicket.findMany({
         where: { userId },
-        select: { id: true, extractedData: true },
+        select: {
+          id: true,
+          extractedData: true,
+          partName: true,
+          partKey: true,
+        },
       });
       for (const ticket of tickets) {
         await tx.sourcingTicket.update({
@@ -208,6 +239,8 @@ export class AccountDeletionService {
             userId: null,
             rawMessage: '',
             extractedData: withoutVin(ticket.extractedData),
+            partName: scrubVinOrNull(ticket.partName),
+            partKey: scrubVinOrNull(ticket.partKey),
             customerNotice: null,
           },
         });
