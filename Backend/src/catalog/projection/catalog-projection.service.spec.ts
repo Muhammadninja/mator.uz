@@ -5,6 +5,10 @@
 //
 // DB-independent: we drive the shared Prisma mock and inspect the upsert args
 // the service builds.
+//
+// buildProjectionOps returns lazy Prisma operations that run only inside a
+// $transaction; these tests read the mock's call arguments and never run them.
+/* eslint-disable @typescript-eslint/no-floating-promises */
 
 import { hasDisplayablePhoto } from '../../admin/photo-coverage/photo-coverage.rules';
 import { PartCondition } from '@prisma/client';

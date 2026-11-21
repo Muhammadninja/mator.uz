@@ -363,7 +363,6 @@ describe('TelegramService — confirmation session', () => {
 
   it('stores one pending product per user', () => {
     const svc = makeService(makePrisma(), makeCloudinary());
-    const ctx = makeCtx();
     svc.storePending(draft(1));
     expect(svc.pending.has(1)).toBe(true);
     expect(svc.pending.size).toBe(1);

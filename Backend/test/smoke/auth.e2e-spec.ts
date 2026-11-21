@@ -755,7 +755,7 @@ describe('Auth smoke', () => {
     });
 
     it('a non-blacklisted token still authenticates (only that one jti dies)', async () => {
-      const { tokens, keys, payload } = await issue({ id: 'usr_b', tokenVersion: 0 });
+      const { tokens, payload } = await issue({ id: 'usr_b', tokenVersion: 0 });
       const other = await issue({ id: 'usr_b', tokenVersion: 0 }); // different jti
       prisma.appUser.findUnique.mockResolvedValue(
         buildAppUser({ id: 'usr_b', tokenVersion: 0, passwordHash: 'secret' }),

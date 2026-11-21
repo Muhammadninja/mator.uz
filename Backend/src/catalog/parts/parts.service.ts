@@ -42,7 +42,6 @@ import {
   computeCompatibility,
   curatedFitment,
   curatedModelIds,
-  VehicleCompatContext,
 } from './part.presenter';
 import { ActiveSale, DiscountResult, DiscountService } from '../../sales/discount.service';
 import {

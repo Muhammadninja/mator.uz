@@ -218,4 +218,6 @@ async function bootstrap() {
   else await app.listen(process.env.PORT ?? 3000);
   logger.log(`Mator backend listening on port ${process.env.PORT ?? 3000}`);
 }
-bootstrap();
+// A startup failure reaches the unhandledRejection handler installed at the top
+// of bootstrap(): it logs, closes the app and exits 1.
+void bootstrap();

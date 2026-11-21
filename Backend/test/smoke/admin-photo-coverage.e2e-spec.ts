@@ -11,6 +11,7 @@ import request from 'supertest';
 import { AdminAuthConfig } from '../../src/admin/auth/admin-auth.config';
 import { AdminJwtStrategy } from '../../src/admin/auth/strategies/admin-jwt.strategy';
 import { AdminTokenService } from '../../src/admin/auth/admin-token.service';
+import { AdminPartPhotosService } from '../../src/admin/photo-coverage/admin-part-photos.service';
 import { AdminPhotoCoverageController } from '../../src/admin/photo-coverage/admin-photo-coverage.controller';
 import { AdminPhotoCoverageService } from '../../src/admin/photo-coverage/admin-photo-coverage.service';
 import { PrismaService } from '../../src/prisma/prisma.service';
@@ -75,6 +76,8 @@ describe('GET /v1/admin/photo-coverage/*', () => {
         },
         { provide: PrismaService, useValue: prisma },
         { provide: AdminPhotoCoverageService, useValue: coverage },
+        // The photo editor routes share this controller; not exercised here.
+        { provide: AdminPartPhotosService, useValue: {} },
       ],
     }).compile();
     app = moduleRef.createNestApplication();

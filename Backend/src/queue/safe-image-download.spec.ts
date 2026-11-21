@@ -27,7 +27,7 @@ describe('source image security', () => {
     await expect(readImageStream(stream, 10)).rejects.toThrow('byte limit');
     expect(stream.destroyed).toBe(true);
   });
-  it.each([
+  it.each<Record<string, string>>([
     { 'content-length': String(IMAGE_DOWNLOAD_MAX_BYTES + 1) },
     { 'content-length': 'not-a-number' },
     { 'content-length': '1' },

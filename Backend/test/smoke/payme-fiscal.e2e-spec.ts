@@ -1351,7 +1351,7 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
     });
 
     it('a second tap on Pay keeps the invoice and the receipt, whatever changed', async () => {
-      const amount = payable();
+      payable();
       await startPayment();
       const [invoice] = invoices;
       const agreed = invoice.fiscalSnapshot;

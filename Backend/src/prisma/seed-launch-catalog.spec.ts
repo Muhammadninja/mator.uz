@@ -1,4 +1,4 @@
-import { OilType, PartCondition, ProductKind } from '@prisma/client';
+import { OilType, ProductKind } from '@prisma/client';
 import { createPrismaMock, PrismaMock } from '../../test/utils/harness';
 import * as dataset from './seed-data/launch-catalog.seed';
 import { seedLaunchCatalog, launchDatasetIsEmpty } from './seed-launch-catalog';

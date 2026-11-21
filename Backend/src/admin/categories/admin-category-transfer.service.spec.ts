@@ -7,7 +7,6 @@ import { ConflictException } from '@nestjs/common';
 import { OilType, PackageForm, ProductKind } from '@prisma/client';
 import { AdminCategoryTransferService } from './admin-category-transfer.service';
 import {
-  configuredCategory,
   createPrismaMock,
   fakeAudit,
   PrismaMock,
