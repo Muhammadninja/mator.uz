@@ -122,6 +122,11 @@ export class AdminEventsGateway
         ? this.reject(client, CLOSE_UNAUTHORIZED, 'unauthorized')
         : this.reject(client, CLOSE_TRY_AGAIN, 'unavailable');
     }
+    // The client can leave while the token is checked. Its close event has
+    // then already run handleDisconnect, before the socket was added, so adding
+    // it now would keep a dead socket in the broadcast pool for good.
+    // Everything below is synchronous: no close can slip in after this.
+    if (client.readyState !== WebSocket.OPEN) return;
     const adminId = session.adminId;
 
     client.adminId = adminId;
@@ -216,23 +221,35 @@ export class AdminEventsGateway
     this.admins.delete(client);
   }
 
+  /** Terminate an unresponsive socket and forget it at once. */
+  private kill(client: TrackedSocket): void {
+    client.terminate();
+    this.admins.delete(client);
+  }
+
   private async sweep(): Promise<void> {
     const nowSeconds = Math.floor(Date.now() / 1000);
     for (const client of [...this.admins]) {
+      // Already closing or closed: nothing to ping, and a close event that
+      // never reached handleDisconnect must not keep it in the pool.
+      if (client.readyState !== WebSocket.OPEN) {
+        this.admins.delete(client);
+        continue;
+      }
       // The heartbeat must not carry a socket past its access token's expiry.
       if (client.session?.exp && client.session.exp <= nowSeconds) {
         this.drop(client, CLOSE_UNAUTHORIZED, 'token_expired');
         continue;
       }
       if (client.isAlive === false) {
-        client.terminate();
+        this.kill(client);
         continue;
       }
       client.isAlive = false;
       try {
         client.ping();
       } catch {
-        client.terminate();
+        this.kill(client);
       }
     }
     this.handshakes.prune();

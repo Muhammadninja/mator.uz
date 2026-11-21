@@ -21,6 +21,84 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ESLint with type information. Violations that already existed are recorded
+  # in Backend/eslint-suppressions.json, so only new ones fail. Once old ones
+  # are fixed, the run fails until `npm run lint:prune` shrinks the file. The
+  # guard step fails a PR that adds or raises a suppression, so a PR cannot
+  # record its own new errors with `eslint --suppress-all` or a hand edit.
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: Backend
+    steps:
+      - name: Check out PR
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: Backend/package-lock.json
+
+      - name: Test the baseline guard
+        run: node --test scripts/ci/eslint-baseline-guard.test.cjs
+
+      - name: Lint baseline may only shrink
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          node scripts/ci/eslint-baseline-guard.cjs "$BASE_SHA"
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      # Typed rules read the generated Prisma types.
+      - name: Generate Prisma client
+        run: npx prisma generate --schema prisma/schema.prisma
+
+      - name: Run ESLint (no --fix)
+        run: npm run lint:ci
+
+  # Smoke suites in test/smoke. Prisma and Redis are mocked; the database and
+  # Redis addresses point at a closed port so nothing real can be reached.
+  # In band: under parallel load the throttle suites can hit their 30 s timeout.
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: Backend
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://ci:ci@127.0.0.1:9/unreachable?schema=public
+      DIRECT_URL: postgresql://ci:ci@127.0.0.1:9/unreachable?schema=public
+      REDIS_HOST: 127.0.0.1
+      REDIS_PORT: '9'
+    steps:
+      - name: Check out PR
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: Backend/package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate --schema prisma/schema.prisma
+
+      - name: Run e2e smoke tests
+        run: npm run test:e2e -- --ci --runInBand
+
   backend:
     runs-on: ubuntu-latest
     timeout-minutes: 30

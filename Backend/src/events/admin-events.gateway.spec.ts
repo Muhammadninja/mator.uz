@@ -18,7 +18,7 @@ const SECRET = 'test-admin-secret-at-least-32-characters-long';
 
 function fakeSocket() {
   return {
-    readyState: WebSocket.OPEN,
+    readyState: WebSocket.OPEN as number,
     on: jest.fn(),
     send: jest.fn(),
     close: jest.fn(),
@@ -151,6 +151,71 @@ describe('AdminEventsGateway', () => {
     const blocked = fakeSocket();
     await gateway.handleConnection(blocked as never, from(200));
     expect(blocked.close).toHaveBeenCalledWith(4429, 'rate_limited');
+  });
+
+  // Nest runs handleDisconnect on the close event, which can fire while
+  // handleConnection is still awaiting the token check.
+  it('a socket that closes while its token is checked never joins the pool', async () => {
+    let finish!: (s: ReturnType<typeof session>) => void;
+    auth.authenticate.mockReturnValueOnce(
+      new Promise((resolve) => (finish = resolve)),
+    );
+    const ghost = fakeSocket();
+    const pending = gateway.handleConnection(ghost as never, req);
+
+    ghost.readyState = WebSocket.CLOSED;
+    gateway.handleDisconnect(ghost as never);
+    finish(session('adm_1'));
+    await pending;
+
+    expect(ghost.on).not.toHaveBeenCalled();
+    expect(ghost.send).not.toHaveBeenCalled();
+    await gateway.revalidate();
+    expect(auth.stillValid).not.toHaveBeenCalled();
+  });
+
+  it('the heartbeat forgets closed sockets and terminated ones at once', async () => {
+    jest.useFakeTimers();
+    try {
+      gateway.afterInit({ on: jest.fn() } as never);
+      const closed = await connect(session('adm_1'));
+      const silent = await connect(session('adm_2'));
+      closed.readyState = WebSocket.CLOSED;
+
+      jest.advanceTimersByTime(30_000); // closed forgotten, silent pinged
+      expect(closed.ping).not.toHaveBeenCalled();
+      expect(silent.ping).toHaveBeenCalledTimes(1);
+
+      jest.advanceTimersByTime(30_000); // no pong: silent terminated
+      expect(silent.terminate).toHaveBeenCalledTimes(1);
+    } finally {
+      jest.useRealTimers();
+    }
+    auth.stillValid.mockClear();
+    await gateway.revalidate();
+    expect(auth.stillValid).not.toHaveBeenCalled();
+  });
+
+  it('cleanup removes only the socket that went; other admins keep receiving', async () => {
+    const gone = await connect(session('adm_1'));
+    const stays = await connect(session('adm_2'));
+    const sameAdmin = await connect(session('adm_1', { jti: 'b', sid: 's2' }));
+    gone.readyState = WebSocket.CLOSED;
+    jest.useFakeTimers();
+    try {
+      gateway.afterInit({ on: jest.fn() } as never);
+
+      jest.advanceTimersByTime(30_000);
+      expect(stays.ping).toHaveBeenCalledTimes(1);
+      expect(sameAdmin.ping).toHaveBeenCalledTimes(1);
+    } finally {
+      jest.useRealTimers();
+    }
+    gateway.handleDisconnect(gone as never); // the late close event: harmless
+    gateway.notifyAdminsNewTicket(ticket);
+    expect(received(stays)).toBe(1);
+    expect(received(sameAdmin)).toBe(1);
+    expect(received(gone)).toBe(0);
   });
 
   // A throw here escapes the ws listener as an uncaughtException, and main.ts

@@ -155,6 +155,11 @@ export class RealtimeGateway
         ? this.reject(client, CLOSE_UNAUTHORIZED, 'unauthorized')
         : this.reject(client, CLOSE_TRY_AGAIN, 'unavailable');
     }
+    // The client can leave while the token is checked. Its close event has
+    // then already run handleDisconnect, which had nothing to forget yet, so
+    // tracking it now would keep a dead socket against the per-user cap for
+    // good. Everything below is synchronous: no close can slip in after this.
+    if (client.readyState !== WebSocket.OPEN) return;
     const userId = session.userId;
 
     const channel = new URL(
@@ -268,9 +273,21 @@ export class RealtimeGateway
     this.handleDisconnect(client);
   }
 
+  /** Terminate an unresponsive socket and forget it at once. */
+  private kill(client: TrackedSocket): void {
+    client.terminate();
+    this.handleDisconnect(client);
+  }
+
   private async sweep(): Promise<void> {
     const nowSeconds = Math.floor(Date.now() / 1000);
     for (const client of this.allSockets()) {
+      // Already closing or closed: nothing to ping, and a close event that
+      // never reached handleDisconnect must not keep it tracked.
+      if (client.readyState !== WebSocket.OPEN) {
+        this.handleDisconnect(client);
+        continue;
+      }
       // The access token ran out: the socket goes with it. The app reconnects
       // with the token its refresh produced.
       if (client.session?.exp && client.session.exp <= nowSeconds) {
@@ -278,14 +295,14 @@ export class RealtimeGateway
         continue;
       }
       if (client.isAlive === false) {
-        client.terminate();
+        this.kill(client);
         continue;
       }
       client.isAlive = false;
       try {
         client.ping();
       } catch {
-        client.terminate();
+        this.kill(client);
       }
     }
     this.handshakes.prune();
