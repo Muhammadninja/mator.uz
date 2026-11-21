@@ -9,6 +9,7 @@ import { PrismaService } from './../src/prisma/prisma.service';
 import { RedisModule } from './../src/redis/redis.module';
 import { RedisService } from './../src/redis/redis.service';
 import { fakeRedis, createPrismaMock, FakeQueueModule } from './utils/harness';
+import { listenOnLoopback } from './utils/loopback-server';
 
 /**
  * HTTP integration boot: stands up real contract controllers + the JWT guard
@@ -49,6 +50,7 @@ describe('App integration boot (e2e)', () => {
       }),
     );
     await app.init();
+    await listenOnLoopback(app);
   });
 
   afterAll(async () => {

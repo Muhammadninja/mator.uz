@@ -12,6 +12,7 @@ import {
   catalogPrisma,
   listedOf,
 } from './brand-catalogue.test-util';
+import { listenOnLoopback } from '../../../test/utils/loopback-server';
 
 // Boots a real Nest HTTP app around the controller and the REAL PartsService
 // (Prisma answered from the in-memory catalogue), with the global
@@ -38,6 +39,7 @@ describe('GET /v1/catalog/parts?brand= (wiring)', () => {
       }),
     );
     await app.init();
+    await listenOnLoopback(app);
   });
 
   afterAll(async () => await app.close());

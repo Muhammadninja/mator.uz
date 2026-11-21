@@ -14,6 +14,10 @@ import { AdminAuthController } from './admin-auth.controller';
 import { RedisKeys } from '../../redis/redis.keys';
 import { RedisUnavailableError } from '../../redis/redis-backlog';
 import { resolveTrustProxy } from '../../common/trust-proxy.util';
+import {
+  closeServer,
+  listenOnLoopback,
+} from '../../../test/utils/loopback-server';
 
 const SECRET = 'a'.repeat(40);
 const PATH = '/v1/auth/admin/login';
@@ -93,8 +97,15 @@ describe('trust proxy', () => {
     const app = express();
     app.set('trust proxy', trust);
     app.get('/', (req, res) => res.send(req.ip));
-    const { text } = await request(app).get('/').set('X-Forwarded-For', xff);
-    return text;
+    const server = await listenOnLoopback(app);
+    try {
+      const { text } = await request(server)
+        .get('/')
+        .set('X-Forwarded-For', xff);
+      return text;
+    } finally {
+      await closeServer(server);
+    }
   }
 
   it('behind local Nginx, a spoofed X-Forwarded-For entry cannot replace the real one', async () => {

@@ -20,6 +20,7 @@ import { PrismaService } from '../../src/prisma/prisma.service';
 import { QUEUE_NAMES } from '../../src/queue/queue.constants';
 import { RealtimeGateway } from '../../src/realtime/realtime.gateway';
 import { createPrismaMock, PrismaMock } from '../utils/harness';
+import { listenOnLoopback } from '../utils/loopback-server';
 
 const ref = (id: string, name: string, over: Record<string, unknown> = {}) => ({
   id,
@@ -84,6 +85,7 @@ describe('Garage identity over HTTP', () => {
     );
     app.useGlobalFilters(new HttpExceptionFilter());
     await app.init();
+    await listenOnLoopback(app);
   });
 
   afterAll(async () => {

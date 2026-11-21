@@ -19,6 +19,7 @@ import {
   fakeRedis,
   PrismaMock,
 } from '../utils/harness';
+import { listenOnLoopback } from '../utils/loopback-server';
 
 describe('GET /v1/shipping/pickup-points (e2e)', () => {
   let app: INestApplication;
@@ -65,6 +66,7 @@ describe('GET /v1/shipping/pickup-points (e2e)', () => {
     );
     app.useGlobalFilters(new HttpExceptionFilter());
     await app.init();
+    await listenOnLoopback(app);
   });
 
   afterAll(async () => {

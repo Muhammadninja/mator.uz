@@ -15,6 +15,7 @@ import { AdminPartPhotosService } from '../../src/admin/photo-coverage/admin-par
 import { AdminPhotoCoverageController } from '../../src/admin/photo-coverage/admin-photo-coverage.controller';
 import { AdminPhotoCoverageService } from '../../src/admin/photo-coverage/admin-photo-coverage.service';
 import { PrismaService } from '../../src/prisma/prisma.service';
+import { listenOnLoopback } from '../utils/loopback-server';
 
 const SECRET = 'photo-coverage-test-secret-'.repeat(3);
 
@@ -89,6 +90,7 @@ describe('GET /v1/admin/photo-coverage/*', () => {
       }),
     );
     await app.init();
+    await listenOnLoopback(app);
   });
 
   afterAll(async () => {

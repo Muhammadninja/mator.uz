@@ -14,6 +14,7 @@ import {
   FakeQueueModule,
   PrismaMock,
 } from '../utils/harness';
+import { listenOnLoopback } from '../utils/loopback-server';
 
 /**
  * DI-graph boot + HTTP check for CatalogModule after it started importing
@@ -60,6 +61,7 @@ describe('CatalogModule boot + check-compatibility over HTTP (e2e)', () => {
       }),
     );
     await app.init();
+    await listenOnLoopback(app);
 
     prisma.refreshToken.create.mockResolvedValue({ id: 'rt_1' });
     token = (

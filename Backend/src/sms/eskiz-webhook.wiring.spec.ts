@@ -3,6 +3,7 @@ import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import { EskizWebhookController } from './eskiz-webhook.controller';
 import { SmsService } from './sms.service';
+import { listenOnLoopback } from '../../test/utils/loopback-server';
 
 // Boots a real Nest HTTP app around the controller so the ROUTE (path, verb,
 // status code) and the per-route ValidationPipe are exercised end-to-end —
@@ -20,6 +21,7 @@ describe('POST /v1/sms/webhooks/eskiz (wiring)', () => {
     }).compile();
     app = moduleRef.createNestApplication();
     await app.init();
+    await listenOnLoopback(app);
   });
 
   afterAll(async () => await app.close());

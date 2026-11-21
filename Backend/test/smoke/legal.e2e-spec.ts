@@ -17,6 +17,7 @@ import { RedisService } from '../../src/redis/redis.service';
 import { JwtAuthGuard } from '../../src/auth/guards/jwt-auth.guard';
 import { HttpExceptionFilter } from '../../src/common/http-exception.filter';
 import { fakeRedis, FakeQueueModule } from '../utils/harness';
+import { listenOnLoopback } from '../utils/loopback-server';
 
 /**
  * REAL HTTP smoke tests for /v1/legal/*. Boots the module behind the same
@@ -180,6 +181,7 @@ describe('Legal API (e2e)', () => {
     );
     app.useGlobalFilters(new HttpExceptionFilter());
     await app.init();
+    await listenOnLoopback(app);
     authed = true;
   });
 

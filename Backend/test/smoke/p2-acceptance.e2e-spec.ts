@@ -25,6 +25,7 @@ import {
   fakeQueue,
   fakeRedis,
 } from '../utils/harness';
+import { listenOnLoopback } from '../utils/loopback-server';
 
 describe('OTP sending over HTTP', () => {
   let app: INestApplication;
@@ -62,6 +63,7 @@ describe('OTP sending over HTTP', () => {
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
     app.useGlobalFilters(new HttpExceptionFilter());
     await app.init();
+    await listenOnLoopback(app);
   });
 
   afterAll(() => app.close());
