@@ -1,0 +1,2303 @@
+{
+  "src/account/account.controller.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/addresses/addresses.controller.ts": {
+    "prettier/prettier": {
+      "count": 5
+    }
+  },
+  "src/addresses/addresses.service.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    },
+    "prettier/prettier": {
+      "count": 21
+    }
+  },
+  "src/addresses/addresses.service.ts": {
+    "prettier/prettier": {
+      "count": 5
+    }
+  },
+  "src/admin/auth/admin-client-ip.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/admin/auth/admin-invite.controller.ts": {
+    "prettier/prettier": {
+      "count": 3
+    }
+  },
+  "src/admin/auth/admin-invite.service.ts": {
+    "prettier/prettier": {
+      "count": 90
+    }
+  },
+  "src/admin/auth/admin-login-protection.service.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/admin/auth/admin-login-protection.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    },
+    "@typescript-eslint/require-await": {
+      "count": 4
+    },
+    "prettier/prettier": {
+      "count": 32
+    }
+  },
+  "src/admin/auth/admin-token.service.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 3
+    },
+    "prettier/prettier": {
+      "count": 3
+    }
+  },
+  "src/admin/auth/admin-token.service.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/admin/brands/admin-brands.cache.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 2
+    },
+    "@typescript-eslint/require-await": {
+      "count": 1
+    },
+    "prettier/prettier": {
+      "count": 5
+    }
+  },
+  "src/admin/brands/admin-brands.controller.ts": {
+    "prettier/prettier": {
+      "count": 8
+    }
+  },
+  "src/admin/brands/admin-brands.service.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/admin/brands/admin-models.controller.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/admin/brands/dto/create-admin-brand.dto.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/admin/categories/admin-category-transfer.service.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 5
+    }
+  },
+  "src/admin/categories/admin-products.controller.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/admin/categories/dto/category-names.dto.spec.ts": {
+    "prettier/prettier": {
+      "count": 7
+    }
+  },
+  "src/admin/categories/dto/create-category.dto.ts": {
+    "prettier/prettier": {
+      "count": 3
+    }
+  },
+  "src/admin/categories/dto/move-category.dto.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/admin/categories/dto/update-category.dto.ts": {
+    "prettier/prettier": {
+      "count": 5
+    }
+  },
+  "src/admin/dealers/admin-dealers.service.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 2
+    },
+    "prettier/prettier": {
+      "count": 8
+    }
+  },
+  "src/admin/dealers/admin-dealers.service.ts": {
+    "prettier/prettier": {
+      "count": 4
+    }
+  },
+  "src/admin/dealers/dto/create-admin-dealer.dto.ts": {
+    "prettier/prettier": {
+      "count": 10
+    }
+  },
+  "src/admin/dealers/dto/dealer-contact.validation.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "src/admin/dealers/dto/list-admin-dealers.query.dto.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/admin/dealers/dto/update-admin-dealer.dto.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/admin/inventory/admin-inventory-delete.service.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 7
+    }
+  },
+  "src/admin/inventory/admin-inventory.batch.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 5
+    },
+    "@typescript-eslint/require-await": {
+      "count": 3
+    }
+  },
+  "src/admin/inventory/admin-inventory.controller.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/admin/inventory/admin-inventory.presenter.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    },
+    "prettier/prettier": {
+      "count": 8
+    }
+  },
+  "src/admin/inventory/admin-inventory.presenter.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/admin/photo-coverage/admin-part-photos.service.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 12
+    }
+  },
+  "src/admin/users/admin-users.presenter.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/admin/users/admin-users.service.spec.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/admin/users/admin-users.service.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/admin/vehicle-images/admin-vehicle-images.controller.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/admin/vehicle-images/admin-vehicle-images.service.spec.ts": {
+    "prettier/prettier": {
+      "count": 34
+    }
+  },
+  "src/admin/vehicle-images/admin-vehicle-images.service.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    }
+  },
+  "src/ai-advisor/ai-advisor.service.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 4
+    }
+  },
+  "src/ai-advisor/ai-advisor.service.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/ai-advisor/catalog-tools.service.spec.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/ai-advisor/catalog-tools.service.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/ai-chat/ai-chat.controller.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 2
+    },
+    "@typescript-eslint/require-await": {
+      "count": 2
+    },
+    "prettier/prettier": {
+      "count": 9
+    }
+  },
+  "src/ai-chat/ai-chat.controller.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    },
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/ai-chat/ai-chat.guard.spec.ts": {
+    "prettier/prettier": {
+      "count": 6
+    }
+  },
+  "src/ai-chat/ai-chat.module.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/ai-chat/ai-chat.service.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 2
+    },
+    "@typescript-eslint/require-await": {
+      "count": 8
+    },
+    "prettier/prettier": {
+      "count": 40
+    }
+  },
+  "src/ai-chat/ai-chat.service.ts": {
+    "prettier/prettier": {
+      "count": 48
+    }
+  },
+  "src/ai-chat/dto/send-message.dto.spec.ts": {
+    "prettier/prettier": {
+      "count": 5
+    }
+  },
+  "src/ai-chat/part-synonyms.util.spec.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/ai-chat/part-synonyms.util.ts": {
+    "prettier/prettier": {
+      "count": 4
+    }
+  },
+  "src/ai-chat/rag-search.service.spec.ts": {
+    "prettier/prettier": {
+      "count": 6
+    }
+  },
+  "src/ai-chat/rag-search.service.ts": {
+    "prettier/prettier": {
+      "count": 5
+    }
+  },
+  "src/ai-chat/rag-search.vehicle.spec.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/ai/bfl-url-policy.spec.ts": {
+    "@typescript-eslint/unbound-method": {
+      "count": 1
+    }
+  },
+  "src/ai/image-enhance.service.spec.ts": {
+    "prettier/prettier": {
+      "count": 6
+    }
+  },
+  "src/ai/image-enhance.service.ts": {
+    "prettier/prettier": {
+      "count": 9
+    }
+  },
+  "src/ai/part-classifier.spec.ts": {
+    "prettier/prettier": {
+      "count": 26
+    }
+  },
+  "src/ai/part-classifier.ts": {
+    "prettier/prettier": {
+      "count": 63
+    }
+  },
+  "src/ai/part-number.spec.ts": {
+    "prettier/prettier": {
+      "count": 14
+    }
+  },
+  "src/ai/part-number.ts": {
+    "no-useless-escape": {
+      "count": 2
+    }
+  },
+  "src/ai/price-parser.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    },
+    "prettier/prettier": {
+      "count": 4
+    }
+  },
+  "src/ai/price-parser.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/ai/subcategory-classifier.ts": {
+    "prettier/prettier": {
+      "count": 50
+    }
+  },
+  "src/ai/vehicle-catalog.spec.ts": {
+    "prettier/prettier": {
+      "count": 22
+    }
+  },
+  "src/ai/vehicle-catalog.ts": {
+    "prettier/prettier": {
+      "count": 43
+    }
+  },
+  "src/alerting/alert-evaluator.service.spec.ts": {
+    "@typescript-eslint/unbound-method": {
+      "count": 5
+    }
+  },
+  "src/alerting/alert-notifier.service.spec.ts": {
+    "@typescript-eslint/unbound-method": {
+      "count": 12
+    }
+  },
+  "src/alerting/alerting.module.di.spec.ts": {
+    "@typescript-eslint/unbound-method": {
+      "count": 1
+    }
+  },
+  "src/auth/auth.controller.ts": {
+    "prettier/prettier": {
+      "count": 7
+    }
+  },
+  "src/auth/auth.service.ts": {
+    "prettier/prettier": {
+      "count": 9
+    }
+  },
+  "src/auth/dto/register.dto.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/auth/dto/sign-up.dto.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/auth/email-verification/email-verification.service.ts": {
+    "prettier/prettier": {
+      "count": 5
+    }
+  },
+  "src/auth/guards/optional-jwt-auth.guard.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    },
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/auth/legacy-auth.controller.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/auth/myid/myid-provider.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/auth/myid/myid.service.ts": {
+    "prettier/prettier": {
+      "count": 11
+    }
+  },
+  "src/auth/password.util.ts": {
+    "prettier/prettier": {
+      "count": 3
+    }
+  },
+  "src/auth/phone/dto/check-availability.dto.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/auth/phone/dto/legal-acceptance.dto.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/auth/phone/dto/verify-otp.dto.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/auth/phone/otp-log-privacy.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 9
+    }
+  },
+  "src/auth/phone/otp.attempt-limits.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 3
+    }
+  },
+  "src/auth/phone/otp.service.spec.ts": {
+    "@typescript-eslint/no-require-imports": {
+      "count": 2
+    },
+    "@typescript-eslint/require-await": {
+      "count": 8
+    },
+    "prettier/prettier": {
+      "count": 38
+    }
+  },
+  "src/auth/phone/otp.service.ts": {
+    "prettier/prettier": {
+      "count": 10
+    }
+  },
+  "src/auth/phone/otp.sms-protection.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 6
+    },
+    "prettier/prettier": {
+      "count": 18
+    }
+  },
+  "src/auth/phone/phone-auth.enumeration.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 3
+    }
+  },
+  "src/auth/phone/phone-auth.service.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 2
+    },
+    "prettier/prettier": {
+      "count": 4
+    }
+  },
+  "src/auth/phone/phone-auth.service.ts": {
+    "prettier/prettier": {
+      "count": 24
+    }
+  },
+  "src/auth/phone/staging-otp.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 8
+    }
+  },
+  "src/auth/phone/store-review-login.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 8
+    }
+  },
+  "src/auth/social/apple-verifier.service.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    },
+    "prettier/prettier": {
+      "count": 3
+    }
+  },
+  "src/auth/social/google-verifier.service.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/auth/social/social-identity.service.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 2
+    }
+  },
+  "src/auth/social/social-identity.service.ts": {
+    "prettier/prettier": {
+      "count": 6
+    }
+  },
+  "src/auth/strategies/jwt.strategy.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/auth/tokens/token-rotation.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 7
+    }
+  },
+  "src/auth/tokens/token.service.ts": {
+    "prettier/prettier": {
+      "count": 4
+    }
+  },
+  "src/blueprint/blueprint-auth.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/blueprint/blueprint.gateway.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    },
+    "prettier/prettier": {
+      "count": 4
+    }
+  },
+  "src/blueprint/db-telemetry.service.ts": {
+    "prettier/prettier": {
+      "count": 4
+    }
+  },
+  "src/blueprint/schema-blueprint.ts": {
+    "prettier/prettier": {
+      "count": 51
+    }
+  },
+  "src/cart/cart-pricing.util.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/cart/cart.controller.ts": {
+    "prettier/prettier": {
+      "count": 3
+    }
+  },
+  "src/cart/cart.presenter.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    },
+    "prettier/prettier": {
+      "count": 4
+    }
+  },
+  "src/cart/cart.presenter.ts": {
+    "prettier/prettier": {
+      "count": 3
+    }
+  },
+  "src/cart/cart.service.ts": {
+    "prettier/prettier": {
+      "count": 11
+    }
+  },
+  "src/catalog/buyer-visibility.spec.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/catalog/catalog-consistency.p2.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 5
+    },
+    "@typescript-eslint/require-await": {
+      "count": 2
+    },
+    "prettier/prettier": {
+      "count": 63
+    }
+  },
+  "src/catalog/categories/categories.service.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 10
+    },
+    "prettier/prettier": {
+      "count": 7
+    }
+  },
+  "src/catalog/categories/categories.service.ts": {
+    "prettier/prettier": {
+      "count": 3
+    }
+  },
+  "src/catalog/categories/dto/list-categories.query.dto.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/catalog/categories/home-grid-buckets.spec.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/catalog/categories/part-categories.catalog.ts": {
+    "prettier/prettier": {
+      "count": 22
+    }
+  },
+  "src/catalog/categories/root-product-counts.spec.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/catalog/compatibility/vehicle-fitment.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    },
+    "prettier/prettier": {
+      "count": 9
+    }
+  },
+  "src/catalog/compatibility/vehicle-fitment.ts": {
+    "prettier/prettier": {
+      "count": 3
+    }
+  },
+  "src/catalog/parts/category-subtree.spec.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/catalog/parts/check-compatibility.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    },
+    "prettier/prettier": {
+      "count": 7
+    }
+  },
+  "src/catalog/parts/compatibility-realworld.spec.ts": {
+    "prettier/prettier": {
+      "count": 8
+    }
+  },
+  "src/catalog/parts/dto/list-parts.query.dto.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/catalog/parts/effective-price.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 1
+    }
+  },
+  "src/catalog/parts/part.presenter.spec.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/catalog/parts/parts.controller.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/catalog/parts/parts.service.spec.ts": {
+    "prettier/prettier": {
+      "count": 9
+    }
+  },
+  "src/catalog/parts/parts.service.ts": {
+    "@typescript-eslint/no-redundant-type-constituents": {
+      "count": 4
+    },
+    "prettier/prettier": {
+      "count": 11
+    }
+  },
+  "src/catalog/projection/catalog-projection.service.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 2
+    },
+    "@typescript-eslint/unbound-method": {
+      "count": 1
+    },
+    "prettier/prettier": {
+      "count": 29
+    }
+  },
+  "src/catalog/search/search.controller.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 2
+    }
+  },
+  "src/catalog/search/search.controller.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/catalog/search/search.service.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 13
+    },
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/catalog/search/search.service.ts": {
+    "prettier/prettier": {
+      "count": 8
+    }
+  },
+  "src/cloudinary/cloudinary.service.ts": {
+    "prettier/prettier": {
+      "count": 6
+    }
+  },
+  "src/common/app-lang.util.spec.ts": {
+    "prettier/prettier": {
+      "count": 3
+    }
+  },
+  "src/common/app-lang.util.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/common/fiscal.util.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    },
+    "prettier/prettier": {
+      "count": 5
+    }
+  },
+  "src/common/http-exception.filter.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/common/i18n.util.spec.ts": {
+    "prettier/prettier": {
+      "count": 11
+    }
+  },
+  "src/common/i18n.util.ts": {
+    "prettier/prettier": {
+      "count": 8
+    }
+  },
+  "src/common/swagger-auth.middleware.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 3
+    },
+    "prettier/prettier": {
+      "count": 25
+    }
+  },
+  "src/common/uzbek-latin.util.spec.ts": {
+    "prettier/prettier": {
+      "count": 3
+    }
+  },
+  "src/dealers/dealers.controller.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/dealers/dealers.service.spec.ts": {
+    "prettier/prettier": {
+      "count": 9
+    }
+  },
+  "src/events/admin-events.gateway.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    },
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/garage/vehicle-images/vehicle-image.catalog-discovery.service.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 2
+    }
+  },
+  "src/garage/vehicle-images/vehicle-image.catalog-discovery.service.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    },
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "src/garage/vehicle-images/vehicle-image.catalog.spec.ts": {
+    "prettier/prettier": {
+      "count": 8
+    }
+  },
+  "src/garage/vehicle-images/vehicle-image.delivery.service.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 1
+    },
+    "prettier/prettier": {
+      "count": 14
+    }
+  },
+  "src/garage/vehicle-images/vehicle-image.delivery.service.ts": {
+    "prettier/prettier": {
+      "count": 5
+    }
+  },
+  "src/garage/vehicle-images/vehicle-image.discovery-years.data.ts": {
+    "prettier/prettier": {
+      "count": 74
+    }
+  },
+  "src/garage/vehicle-images/vehicle-image.discovery-years.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/garage/vehicle-images/vehicle-image.identity.spec.ts": {
+    "prettier/prettier": {
+      "count": 14
+    }
+  },
+  "src/garage/vehicle-images/vehicle-image.identity.ts": {
+    "prettier/prettier": {
+      "count": 7
+    }
+  },
+  "src/garage/vehicle-images/vehicle-image.pipeline-admin-client.spec.ts": {
+    "prettier/prettier": {
+      "count": 20
+    }
+  },
+  "src/garage/vehicle-images/vehicle-image.pipeline-admin-client.ts": {
+    "prettier/prettier": {
+      "count": 33
+    }
+  },
+  "src/garage/vehicle-images/vehicle-image.pipeline-client.spec.ts": {
+    "prettier/prettier": {
+      "count": 33
+    }
+  },
+  "src/garage/vehicle-images/vehicle-image.pipeline-client.ts": {
+    "prettier/prettier": {
+      "count": 14
+    }
+  },
+  "src/garage/vehicle-images/vehicle-image.reconcile.service.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 2
+    },
+    "prettier/prettier": {
+      "count": 19
+    }
+  },
+  "src/garage/vehicle-images/vehicle-image.reconcile.service.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 2
+    },
+    "prettier/prettier": {
+      "count": 15
+    }
+  },
+  "src/garage/vehicle-images/vehicle-image.resolution.spec.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/garage/vehicle-images/vehicle-image.resolution.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/garage/vehicle-images/vehicle-image.state.spec.ts": {
+    "prettier/prettier": {
+      "count": 38
+    }
+  },
+  "src/garage/vehicle-images/vehicle-image.state.ts": {
+    "prettier/prettier": {
+      "count": 14
+    }
+  },
+  "src/garage/vehicle-images/vehicle-images.service.ts": {
+    "prettier/prettier": {
+      "count": 3
+    }
+  },
+  "src/garage/vehicles/dto/update-vehicle.dto.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/garage/vehicles/garage-identity.scenarios.spec.ts": {
+    "prettier/prettier": {
+      "count": 4
+    }
+  },
+  "src/garage/vehicles/manual-vehicle.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 7
+    },
+    "@typescript-eslint/require-await": {
+      "count": 6
+    },
+    "prettier/prettier": {
+      "count": 73
+    }
+  },
+  "src/garage/vehicles/manual-vehicle.ts": {
+    "no-control-regex": {
+      "count": 1
+    },
+    "prettier/prettier": {
+      "count": 16
+    }
+  },
+  "src/garage/vehicles/vehicle.presenter.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/garage/vehicles/vehicles.controller.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/garage/vehicles/vehicles.service.generation.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 5
+    }
+  },
+  "src/garage/vehicles/vehicles.service.ts": {
+    "prettier/prettier": {
+      "count": 27
+    }
+  },
+  "src/garage/vehicles/vehicles.service.vehicle-image.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 3
+    }
+  },
+  "src/health/health.controller.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/imports/drivers-village/drivers-village.store.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/imports/drivers-village/telegram-ingest/import-runner.spec.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/integrations/integrations.service.spec.ts": {
+    "prettier/prettier": {
+      "count": 14
+    }
+  },
+  "src/integrations/integrations.service.ts": {
+    "prettier/prettier": {
+      "count": 7
+    }
+  },
+  "src/legal/dto/accept-legal-documents.dto.spec.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/legal/dto/legal-document-type.params.dto.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/legal/dto/legal-document-version.params.dto.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/legal/dto/no-duplicate-document-types.validator.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/legal/legal.controller.ts": {
+    "prettier/prettier": {
+      "count": 4
+    }
+  },
+  "src/legal/legal.service.spec.ts": {
+    "prettier/prettier": {
+      "count": 36
+    }
+  },
+  "src/legal/legal.service.ts": {
+    "prettier/prettier": {
+      "count": 24
+    }
+  },
+  "src/mail/mail.service.ts": {
+    "prettier/prettier": {
+      "count": 5
+    }
+  },
+  "src/main.ts": {
+    "prefer-const": {
+      "count": 1
+    }
+  },
+  "src/maintenance/maintenance-guard.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 1
+    }
+  },
+  "src/metrics/http-metrics.interceptor.spec.ts": {
+    "@typescript-eslint/unbound-method": {
+      "count": 4
+    }
+  },
+  "src/metrics/metrics.service.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/metrics/queue-metrics.collector.spec.ts": {
+    "@typescript-eslint/unbound-method": {
+      "count": 12
+    }
+  },
+  "src/metrics/sms-cost.collector.spec.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/mobile-config/mobile-config.controller.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/mobile-config/mobile-config.service.spec.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/mobile-config/mobile-config.service.ts": {
+    "prettier/prettier": {
+      "count": 3
+    }
+  },
+  "src/notifications/devices.controller.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/notifications/devices.service.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/notifications/dto/register-device.dto.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/notifications/dto/test-notification.dto.ts": {
+    "prettier/prettier": {
+      "count": 3
+    }
+  },
+  "src/notifications/notifications.controller.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 2
+    }
+  },
+  "src/notifications/notifications.controller.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/notifications/notifications.service.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 4
+    }
+  },
+  "src/notifications/notifications.service.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    },
+    "prettier/prettier": {
+      "count": 12
+    }
+  },
+  "src/notifications/push-token-ownership.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 5
+    }
+  },
+  "src/notifications/push/providers/apns.provider.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 1
+    },
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/notifications/push/providers/expo.provider.ts": {
+    "prettier/prettier": {
+      "count": 3
+    }
+  },
+  "src/notifications/push/providers/fcm.provider.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 1
+    },
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/notifications/push/push-dispatch.service.ts": {
+    "prettier/prettier": {
+      "count": 5
+    }
+  },
+  "src/ops/bull-board-auth.middleware.spec.ts": {
+    "prettier/prettier": {
+      "count": 11
+    }
+  },
+  "src/orders/non-part-lines.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 2
+    },
+    "@typescript-eslint/require-await": {
+      "count": 2
+    }
+  },
+  "src/orders/offline-collection.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 3
+    },
+    "prettier/prettier": {
+      "count": 8
+    }
+  },
+  "src/orders/order-availability.spec.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/orders/order-availability.ts": {
+    "prettier/prettier": {
+      "count": 27
+    }
+  },
+  "src/orders/order-checkout-race.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "src/orders/order-integrity.p2.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 3
+    },
+    "@typescript-eslint/require-await": {
+      "count": 17
+    },
+    "prettier/prettier": {
+      "count": 111
+    }
+  },
+  "src/orders/order-repricing.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 8
+    }
+  },
+  "src/orders/order-status.service.spec.ts": {
+    "prettier/prettier": {
+      "count": 8
+    }
+  },
+  "src/orders/order-status.service.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/orders/order.presenter.ts": {
+    "prettier/prettier": {
+      "count": 3
+    }
+  },
+  "src/orders/orders-delivery.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 2
+    },
+    "prettier/prettier": {
+      "count": 4
+    }
+  },
+  "src/orders/orders.controller.spec.ts": {
+    "@typescript-eslint/unbound-method": {
+      "count": 1
+    }
+  },
+  "src/orders/orders.controller.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/orders/orders.service.ts": {
+    "prettier/prettier": {
+      "count": 148
+    }
+  },
+  "src/orders/payment-providers-disabled.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 2
+    }
+  },
+  "src/orders/payments.controller.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/orders/payments.service.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/orders/webhooks/click.config.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/orders/webhooks/click.service.ts": {
+    "prettier/prettier": {
+      "count": 7
+    }
+  },
+  "src/orders/webhooks/payme-fiscal-receipt.service.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    },
+    "@typescript-eslint/unbound-method": {
+      "count": 3
+    },
+    "prettier/prettier": {
+      "count": 20
+    }
+  },
+  "src/orders/webhooks/payme-fiscal-receipt.util.spec.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/orders/webhooks/payme-fiscal.service.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 10
+    },
+    "prettier/prettier": {
+      "count": 55
+    }
+  },
+  "src/orders/webhooks/payme-fiscal.service.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/orders/webhooks/payme-fiscal.util.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/orders/webhooks/payme-transaction.sweeper.ts": {
+    "prettier/prettier": {
+      "count": 3
+    }
+  },
+  "src/orders/webhooks/payme.config.spec.ts": {
+    "prettier/prettier": {
+      "count": 4
+    }
+  },
+  "src/orders/webhooks/payme.config.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/orders/webhooks/payme.service.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 5
+    },
+    "prettier/prettier": {
+      "count": 11
+    }
+  },
+  "src/orders/webhooks/payme.service.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/orders/webhooks/settlement-store.test-util.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 1
+    }
+  },
+  "src/prisma/held-model-years-migration.spec.ts": {
+    "prettier/prettier": {
+      "count": 3
+    }
+  },
+  "src/prisma/seed-data/legal-documents.loader.spec.ts": {
+    "prettier/prettier": {
+      "count": 16
+    }
+  },
+  "src/prisma/seed-data/legal-documents.loader.ts": {
+    "no-irregular-whitespace": {
+      "count": 1
+    },
+    "prettier/prettier": {
+      "count": 9
+    }
+  },
+  "src/prisma/seed-data/legal-documents.publish.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 5
+    },
+    "prettier/prettier": {
+      "count": 23
+    }
+  },
+  "src/prisma/seed-data/legal-documents.publish.ts": {
+    "prettier/prettier": {
+      "count": 11
+    }
+  },
+  "src/prisma/seed-data/legal-documents.seed.spec.ts": {
+    "prettier/prettier": {
+      "count": 4
+    }
+  },
+  "src/prisma/seed-data/legal-seed-decision.spec.ts": {
+    "prettier/prettier": {
+      "count": 4
+    }
+  },
+  "src/prisma/seed-data/subcategory-taxonomy.seed.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/prisma/seed-data/vehicle-catalog.seed.ts": {
+    "prettier/prettier": {
+      "count": 20
+    }
+  },
+  "src/prisma/seed-legal.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/prisma/seed.ts": {
+    "prettier/prettier": {
+      "count": 15
+    }
+  },
+  "src/prisma/uzbekistan-lineup-migration.spec.ts": {
+    "prettier/prettier": {
+      "count": 7
+    }
+  },
+  "src/prisma/uzbekistan-lineup-years-migration.spec.ts": {
+    "prettier/prettier": {
+      "count": 8
+    }
+  },
+  "src/products/products.service.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/providers/booking-sweeper.service.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 3
+    },
+    "prettier/prettier": {
+      "count": 4
+    }
+  },
+  "src/providers/booking-sweeper.service.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/providers/bookings.controller.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/providers/bookings.service.ts": {
+    "prettier/prettier": {
+      "count": 9
+    }
+  },
+  "src/providers/dto/create-booking.dto.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/providers/dto/nearby.query.dto.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/providers/geo.util.ts": {
+    "prettier/prettier": {
+      "count": 4
+    }
+  },
+  "src/providers/provider.presenter.ts": {
+    "prettier/prettier": {
+      "count": 5
+    }
+  },
+  "src/providers/providers.service.ts": {
+    "prettier/prettier": {
+      "count": 5
+    }
+  },
+  "src/providers/sto.controller.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/queue/async-delivery.processors.spec.ts": {
+    "prettier/prettier": {
+      "count": 4
+    }
+  },
+  "src/queue/draft-cleanup.processor.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 2
+    },
+    "prettier/prettier": {
+      "count": 19
+    }
+  },
+  "src/queue/draft-cleanup.processor.ts": {
+    "prettier/prettier": {
+      "count": 5
+    }
+  },
+  "src/queue/image-download.spec.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/queue/image-download.ts": {
+    "prettier/prettier": {
+      "count": 8
+    }
+  },
+  "src/queue/otp-job-secret.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "src/queue/queue.processors.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/queue/queue.service.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 10
+    },
+    "prettier/prettier": {
+      "count": 5
+    }
+  },
+  "src/queue/safe-image-download.spec.ts": {
+    "@typescript-eslint/unbound-method": {
+      "count": 1
+    },
+    "prettier/prettier": {
+      "count": 16
+    }
+  },
+  "src/queue/safe-image-download.ts": {
+    "prettier/prettier": {
+      "count": 22
+    }
+  },
+  "src/realtime/realtime.gateway.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    },
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/realtime/ws-auth.service.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/redis/atomic-budget.service.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/redis/cache.service.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 4
+    },
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/redis/cache.service.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/redis/draft-lock.service.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 4
+    },
+    "prettier/prettier": {
+      "count": 8
+    }
+  },
+  "src/redis/rate-limiter.service.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 4
+    },
+    "prettier/prettier": {
+      "count": 3
+    }
+  },
+  "src/redis/rate-limiter.service.ts": {
+    "prettier/prettier": {
+      "count": 3
+    }
+  },
+  "src/redis/redis-bounds.spec.ts": {
+    "prettier/prettier": {
+      "count": 22
+    }
+  },
+  "src/redis/redis.keys.ts": {
+    "prettier/prettier": {
+      "count": 3
+    }
+  },
+  "src/redis/redis.service.ts": {
+    "prettier/prettier": {
+      "count": 3
+    }
+  },
+  "src/reference/reference.controller.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/reference/reference.service.spec.ts": {
+    "prettier/prettier": {
+      "count": 31
+    }
+  },
+  "src/reference/reference.service.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/retention/retention.service.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 6
+    },
+    "prettier/prettier": {
+      "count": 4
+    }
+  },
+  "src/retention/retention.service.ts": {
+    "prettier/prettier": {
+      "count": 8
+    }
+  },
+  "src/sales/discount.service.spec.ts": {
+    "@typescript-eslint/unbound-method": {
+      "count": 3
+    }
+  },
+  "src/sales/sale-discount-safety.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 8
+    },
+    "@typescript-eslint/unbound-method": {
+      "count": 1
+    }
+  },
+  "src/sellers/sellers.service.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    },
+    "@typescript-eslint/require-await": {
+      "count": 4
+    },
+    "@typescript-eslint/unbound-method": {
+      "count": 1
+    },
+    "prettier/prettier": {
+      "count": 17
+    }
+  },
+  "src/sellers/sellers.service.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/shipping/delivery-quote.service.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 1
+    }
+  },
+  "src/shipping/delivery-quote.service.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/shipping/routing/uzmaps-routing.provider.spec.ts": {
+    "prettier/prettier": {
+      "count": 3
+    }
+  },
+  "src/shipping/shipping.service.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    },
+    "@typescript-eslint/require-await": {
+      "count": 2
+    },
+    "prettier/prettier": {
+      "count": 8
+    }
+  },
+  "src/shipping/shipping.service.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/sms/otp-message.i18n.ts": {
+    "prettier/prettier": {
+      "count": 3
+    }
+  },
+  "src/sms/providers/eskiz.provider.spec.ts": {
+    "@typescript-eslint/unbound-method": {
+      "count": 2
+    },
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/sms/providers/log.provider.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/sms/providers/playmobile.provider.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/sms/providers/sayqal.provider.spec.ts": {
+    "@typescript-eslint/unbound-method": {
+      "count": 7
+    },
+    "prettier/prettier": {
+      "count": 15
+    }
+  },
+  "src/sms/providers/sayqal.provider.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/sms/resolver/sms-operator.resolver.spec.ts": {
+    "prettier/prettier": {
+      "count": 6
+    }
+  },
+  "src/sms/sms.service.spec.ts": {
+    "prettier/prettier": {
+      "count": 16
+    }
+  },
+  "src/sms/sms.service.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/sourcing/admin-sourcing.controller.ts": {
+    "prettier/prettier": {
+      "count": 5
+    }
+  },
+  "src/sourcing/dto/query-sourcing-tickets.dto.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/sourcing/sourcing-capabilities.controller.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/sourcing/sourcing-keys.spec.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/sourcing/sourcing-lifecycle.service.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 13
+    },
+    "prettier/prettier": {
+      "count": 18
+    }
+  },
+  "src/sourcing/sourcing-lifecycle.service.ts": {
+    "prettier/prettier": {
+      "count": 15
+    }
+  },
+  "src/sourcing/sourcing-notice.copy.ts": {
+    "prettier/prettier": {
+      "count": 7
+    }
+  },
+  "src/sourcing/sourcing-offer.service.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 24
+    },
+    "prettier/prettier": {
+      "count": 34
+    }
+  },
+  "src/sourcing/sourcing-offer.service.ts": {
+    "no-irregular-whitespace": {
+      "count": 1
+    },
+    "prettier/prettier": {
+      "count": 3
+    }
+  },
+  "src/sourcing/sourcing-request.service.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 5
+    },
+    "prettier/prettier": {
+      "count": 10
+    }
+  },
+  "src/sourcing/sourcing-request.service.ts": {
+    "prettier/prettier": {
+      "count": 5
+    }
+  },
+  "src/sourcing/sourcing.config.ts": {
+    "prettier/prettier": {
+      "count": 9
+    }
+  },
+  "src/sourcing/sourcing.module.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/sourcing/sourcing.service.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 14
+    },
+    "prettier/prettier": {
+      "count": 9
+    }
+  },
+  "src/sourcing/sourcing.service.ts": {
+    "prettier/prettier": {
+      "count": 4
+    }
+  },
+  "src/telegram/callback-message-cleanup.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 2
+    },
+    "@typescript-eslint/require-await": {
+      "count": 9
+    }
+  },
+  "src/telegram/draft-coordinator.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 3
+    }
+  },
+  "src/telegram/draft-lock.test-util.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 2
+    },
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/telegram/i18n/ru.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/telegram/motor-oil-catalog.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/telegram/motor-oil-flow.spec.ts": {
+    "prettier/prettier": {
+      "count": 7
+    }
+  },
+  "src/telegram/other-branch-oil-category.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 6
+    },
+    "prettier/prettier": {
+      "count": 4
+    }
+  },
+  "src/telegram/package-form-flow.spec.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/telegram/product-draft.service.spec.ts": {
+    "prettier/prettier": {
+      "count": 7
+    }
+  },
+  "src/telegram/product-draft.service.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/telegram/product-gallery.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 3
+    }
+  },
+  "src/telegram/product-wizard.spec.ts": {
+    "prettier/prettier": {
+      "count": 4
+    }
+  },
+  "src/telegram/prompt-message-cleanup.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 6
+    },
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/telegram/telegram-notifier.service.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 3
+    },
+    "prettier/prettier": {
+      "count": 17
+    }
+  },
+  "src/telegram/telegram-notifier.service.ts": {
+    "prettier/prettier": {
+      "count": 14
+    }
+  },
+  "src/telegram/telegram-offer.service.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 8
+    },
+    "prettier/prettier": {
+      "count": 4
+    }
+  },
+  "src/telegram/telegram-offer.service.ts": {
+    "no-irregular-whitespace": {
+      "count": 1
+    },
+    "prettier/prettier": {
+      "count": 4
+    }
+  },
+  "src/telegram/telegram.categories.spec.ts": {
+    "prettier/prettier": {
+      "count": 22
+    }
+  },
+  "src/telegram/telegram.confirmation.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 21
+    },
+    "prettier/prettier": {
+      "count": 9
+    }
+  },
+  "src/telegram/telegram.draft-flow.spec.ts": {
+    "prettier/prettier": {
+      "count": 3
+    }
+  },
+  "src/telegram/telegram.draft-locks.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 8
+    },
+    "prettier/prettier": {
+      "count": 3
+    }
+  },
+  "src/telegram/telegram.language.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 5
+    },
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/telegram/telegram.service.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    },
+    "prettier/prettier": {
+      "count": 32
+    }
+  },
+  "src/telegram/vehicle-links.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 4
+    }
+  },
+  "src/telegram/wizard-catalog.ts": {
+    "prettier/prettier": {
+      "count": 26
+    }
+  },
+  "src/user/account-deletion.service.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 4
+    }
+  },
+  "src/user/avatar.service.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 2
+    },
+    "@typescript-eslint/unbound-method": {
+      "count": 1
+    }
+  },
+  "src/user/dto/address-input.dto.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "src/user/phone-change.proofs.spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 2
+    },
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/user/phone-change.service.spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 3
+    },
+    "@typescript-eslint/require-await": {
+      "count": 8
+    },
+    "prettier/prettier": {
+      "count": 10
+    }
+  },
+  "src/user/phone-change.service.ts": {
+    "prettier/prettier": {
+      "count": 3
+    }
+  },
+  "src/user/user.controller.spec.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "src/user/user.module.ts": {
+    "prettier/prettier": {
+      "count": 2
+    }
+  },
+  "test/integration/admin-catalog-safety.int-spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "test/integration/admin-category-transfer.int-spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "test/integration/p1-concurrency.int-spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    }
+  },
+  "test/integration/payme-fiscal.int-spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 3
+    },
+    "prettier/prettier": {
+      "count": 4
+    }
+  },
+  "test/integration/security-ownership.int-spec.ts": {
+    "prettier/prettier": {
+      "count": 15
+    }
+  },
+  "test/integration/vehicle-image-e2e.int-spec.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    },
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 3
+    },
+    "@typescript-eslint/restrict-template-expressions": {
+      "count": 3
+    }
+  },
+  "test/integration/vehicle-image-lifecycle.int-spec.ts": {
+    "prettier/prettier": {
+      "count": 49
+    }
+  },
+  "test/smoke/account-shipping.e2e-spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 2
+    },
+    "@typescript-eslint/require-await": {
+      "count": 1
+    },
+    "prettier/prettier": {
+      "count": 5
+    }
+  },
+  "test/smoke/admin-photo-coverage.e2e-spec.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 1
+    },
+    "prettier/prettier": {
+      "count": 6
+    }
+  },
+  "test/smoke/ai-advisor.e2e-spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 2
+    },
+    "@typescript-eslint/require-await": {
+      "count": 1
+    }
+  },
+  "test/smoke/auth-compat.e2e-spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 9
+    },
+    "prettier/prettier": {
+      "count": 19
+    }
+  },
+  "test/smoke/auth.e2e-spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 13
+    },
+    "prettier/prettier": {
+      "count": 53
+    }
+  },
+  "test/smoke/cart.e2e-spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 2
+    },
+    "prettier/prettier": {
+      "count": 9
+    }
+  },
+  "test/smoke/catalog.e2e-spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 3
+    },
+    "prettier/prettier": {
+      "count": 19
+    }
+  },
+  "test/smoke/exception-filter.e2e-spec.ts": {
+    "prettier/prettier": {
+      "count": 4
+    }
+  },
+  "test/smoke/garage-identity.e2e-spec.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "test/smoke/garage-set-primary.e2e-spec.ts": {
+    "prettier/prettier": {
+      "count": 11
+    }
+  },
+  "test/smoke/garage.e2e-spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    },
+    "prettier/prettier": {
+      "count": 14
+    }
+  },
+  "test/smoke/legal.e2e-spec.ts": {
+    "prettier/prettier": {
+      "count": 25
+    }
+  },
+  "test/smoke/orders-list.e2e-spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 4
+    },
+    "prettier/prettier": {
+      "count": 3
+    }
+  },
+  "test/smoke/orders.e2e-spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 2
+    },
+    "prettier/prettier": {
+      "count": 19
+    }
+  },
+  "test/smoke/p2-acceptance.e2e-spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    },
+    "@typescript-eslint/unbound-method": {
+      "count": 1
+    },
+    "prettier/prettier": {
+      "count": 20
+    }
+  },
+  "test/smoke/payme-fiscal.e2e-spec.ts": {
+    "prettier/prettier": {
+      "count": 6
+    }
+  },
+  "test/smoke/payme-webhook.e2e-spec.ts": {
+    "prettier/prettier": {
+      "count": 5
+    }
+  },
+  "test/smoke/payments.e2e-spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 5
+    }
+  },
+  "test/smoke/providers.e2e-spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 2
+    },
+    "prettier/prettier": {
+      "count": 23
+    }
+  },
+  "test/smoke/push.e2e-spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    },
+    "@typescript-eslint/require-await": {
+      "count": 1
+    },
+    "prettier/prettier": {
+      "count": 19
+    }
+  },
+  "test/smoke/realtime.e2e-spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    },
+    "prettier/prettier": {
+      "count": 4
+    }
+  },
+  "test/smoke/settlement-order-paid.e2e-spec.ts": {
+    "prettier/prettier": {
+      "count": 1
+    }
+  },
+  "test/smoke/user.e2e-spec.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 4
+    },
+    "prettier/prettier": {
+      "count": 6
+    }
+  },
+  "test/utils/drivers-village-fake-db.ts": {
+    "@typescript-eslint/no-base-to-string": {
+      "count": 1
+    },
+    "prettier/prettier": {
+      "count": 10
+    }
+  },
+  "test/utils/harness.ts": {
+    "@typescript-eslint/no-unnecessary-type-assertion": {
+      "count": 1
+    },
+    "@typescript-eslint/require-await": {
+      "count": 20
+    },
+    "prettier/prettier": {
+      "count": 8
+    }
+  },
+  "test/utils/jose-stub.ts": {
+    "@typescript-eslint/require-await": {
+      "count": 1
+    }
+  }
+}
