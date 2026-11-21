@@ -35,9 +35,13 @@ import { GenericWebhookAlertChannel } from './channels/generic-webhook.channel';
 import { SlackAlertChannel } from './channels/slack.channel';
 import { TelegramAlertChannel } from './channels/telegram.channel';
 import { OpsAlertBridge } from './ops-alert.bridge';
+import { OrderNoticeService } from './orders/order-notice.service';
+import { RedisWatchdog } from './redis-watchdog.service';
 import { BackendHealthRule } from './rules/backend-health.rule';
+import { HttpErrorsRule } from './rules/http-errors.rule';
 import { ImageLatencyRule } from './rules/image-latency.rule';
 import { QueueBacklogRule } from './rules/queue-backlog.rule';
+import { RedisMemoryRule } from './rules/redis-memory.rule';
 import { SmsFailureRule } from './rules/sms-failure.rule';
 
 /**
@@ -50,6 +54,8 @@ const RULES = [
   ImageLatencyRule,
   SmsFailureRule,
   BackendHealthRule,
+  HttpErrorsRule,
+  RedisMemoryRule,
 ] as const;
 
 /** The channel classes, mirroring `CHANNELS` in alerting.module.ts. */
@@ -93,6 +99,8 @@ async function buildAlertingSlice() {
       AlertScheduler,
       AlertProcessor,
       OpsAlertBridge,
+      OrderNoticeService,
+      RedisWatchdog,
       { provide: ConfigService, useValue: { get: () => undefined } },
       {
         provide: RedisService,
@@ -201,6 +209,10 @@ describe('AlertingModule DI wiring', () => {
     expect(moduleRef.get(AlertSilenceService)).toBeInstanceOf(
       AlertSilenceService,
     );
+    expect(moduleRef.get(OrderNoticeService)).toBeInstanceOf(
+      OrderNoticeService,
+    );
+    expect(moduleRef.get(RedisWatchdog)).toBeInstanceOf(RedisWatchdog);
     await moduleRef.close();
   });
 

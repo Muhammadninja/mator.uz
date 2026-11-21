@@ -301,6 +301,8 @@ describe('delivery’s fiscal codes', () => {
         'src/admin/refunds/admin-refunds.presenter.ts', // a refund's share of it
         'src/admin/refunds/admin-refunds.service.ts', // a refund's share of it
         'src/admin/refunds/dto/record-refund.dto.ts', // a refund's share of it
+        'src/alerting/orders/order-notice.message.ts', // shows it to the operators
+        'src/alerting/orders/order-notice.service.ts', // reads it for that notice
         'src/cart/cart.presenter.ts', // states none: only a quote prices delivery
         'src/orders/financial-refund.ledger.ts', // what of it went back
         'src/orders/order-settlement.ts', // keeps it out of what a seller is owed

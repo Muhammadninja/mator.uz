@@ -101,7 +101,7 @@ export class QueueBacklogRule implements AlertRule {
    * must not be reported as "backlog resolved" — returning null leaves an
    * already-active alert to be resolved by the evaluator only if the queue is
    * genuinely readable and healthy on a later run. Redis being unreachable is
-   * itself covered by the dedicated health rule, so the condition is never lost.
+   * itself covered by RedisWatchdog, so the condition is never lost.
    */
   private async checkQueue(
     name: BacklogQueueName,

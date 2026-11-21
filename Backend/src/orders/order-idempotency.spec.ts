@@ -154,6 +154,7 @@ function world() {
     delegate[method].mockImplementationOnce(async () => {
       throw err;
     });
+  const notices = { placed: jest.fn(), paid: jest.fn() };
   const orders = new OrdersService(
     prisma,
     fakeConfig(),
@@ -163,11 +164,13 @@ function world() {
     new DiscountService(prisma),
     { record: jest.fn() } as never,
     fakeDeliveryQuotes(),
+    notices as never,
   );
   return {
     prisma,
     tx,
     orders,
+    notices,
     failOnce,
     db: () => committed,
     refill: (userId = USER) => {
@@ -420,6 +423,59 @@ describe('checkout idempotency', () => {
     const placed = await w.orders.checkout(USER, PICKUP_TERMINAL, KEY);
     expect(placed.replayed).toBe(false);
     expect(w.db().orders).toHaveLength(1);
+  });
+});
+
+describe('the operators’ notice of a placed order', () => {
+  it('a cash or terminal order is announced once, after it is committed', async () => {
+    const w = world();
+    const first = await w.orders.checkout(USER, PICKUP, KEY);
+    await w.orders.checkout(USER, PICKUP, KEY); // a replay of the same checkout
+
+    expect(w.notices.placed).toHaveBeenCalledTimes(1);
+    expect(w.notices.placed).toHaveBeenCalledWith(first.order.order_id);
+    expect(w.db().orders.map((o) => o.id)).toEqual([first.order.order_id]);
+
+    w.refill();
+    const terminal = await w.orders.checkout(USER, PICKUP_TERMINAL, null);
+    expect(w.notices.placed).toHaveBeenLastCalledWith(terminal.order.order_id);
+    expect(w.notices.placed).toHaveBeenCalledTimes(2);
+  });
+
+  it('two simultaneous submissions of one checkout announce one order', async () => {
+    const w = world();
+    await Promise.all([
+      w.orders.checkout(USER, PICKUP, KEY),
+      w.orders.checkout(USER, PICKUP, KEY),
+    ]);
+
+    expect(w.db().orders).toHaveLength(1);
+    expect(w.notices.placed).toHaveBeenCalledTimes(1);
+  });
+
+  it('an online order is not announced when placed: its payment announces it', async () => {
+    const w = world();
+    await w.orders.checkout(
+      USER,
+      {
+        cart_snapshot: { delivery_method: 'pickup' },
+        payment_type: 'payme',
+      } as never,
+      null,
+    );
+
+    expect(w.db().orders).toHaveLength(1);
+    expect(w.notices.placed).not.toHaveBeenCalled();
+  });
+
+  it('a refused checkout announces nothing', async () => {
+    const w = world();
+    w.db().carts[USER] = [];
+
+    await expect(w.orders.checkout(USER, PICKUP, KEY)).rejects.toThrow(
+      'Cart is empty',
+    );
+    expect(w.notices.placed).not.toHaveBeenCalled();
   });
 });
 

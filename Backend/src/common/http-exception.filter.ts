@@ -9,6 +9,7 @@ import {
 import type { Request, Response } from 'express';
 import { getRequestId } from './request-context';
 import { RedisUnavailableError } from '../redis/redis-backlog';
+import { describeError, routeTemplate, serverErrors } from './server-errors';
 
 /** Stable machine-readable error codes the mobile client switches on. */
 const STATUS_CODE: Record<number, string> = {
@@ -90,6 +91,14 @@ export class HttpExceptionFilter implements ExceptionFilter {
         `${tag}${req?.method} ${req?.url} -> ${status} ${body.code}: ${(exception as Error)?.message}`,
         (exception as Error)?.stack,
       );
+      // Counted for the `http_5xx` alert (src/alerting/rules/http-errors.rule.ts).
+      serverErrors.record({
+        at: Date.now(),
+        route: routeTemplate(req ?? {}),
+        status,
+        message: describeError(exception),
+        requestId,
+      });
     }
     // The app reads a 429's wait from this header.
     const retryAfter = body.details?.retry_after_seconds;

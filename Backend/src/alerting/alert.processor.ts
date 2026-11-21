@@ -4,8 +4,20 @@ import type { Job } from 'bullmq';
 import { QUEUE_NAMES } from '../queue/queue.constants';
 import { MetricsService } from '../metrics/metrics.service';
 import { jobDurationSeconds } from '../metrics/job-duration.util';
+import type { OrderNotice } from '../orders/order-notices';
 import type { AlertDeliveryJob } from './alert-notifier.service';
 import { ALERT_CHANNELS, type AlertChannel } from './alerting.types';
+import {
+  ORDER_NOTICE_JOB,
+  OrderNoticeService,
+} from './orders/order-notice.service';
+
+/** What travels on the alerts queue: alert deliveries, and order notices. */
+type AlertQueueJob = AlertDeliveryJob | OrderNotice;
+
+function isOrderNoticeJob(job: Job<AlertQueueJob>): job is Job<OrderNotice> {
+  return job.name === ORDER_NOTICE_JOB;
+}
 
 /**
  * The worker that actually delivers an alert to its channel.
@@ -24,6 +36,11 @@ import { ALERT_CHANNELS, type AlertChannel } from './alerting.types';
  * thing retried: the alert's STATE was already committed by the evaluator
  * before this job existed, so a send that never succeeds degrades notification
  * — it can never corrupt the ACTIVE/RESOLVED bookkeeping.
+ *
+ * Order notices (ORDER_NOTICE_JOB, see orders/order-notice.service.ts) ride the same
+ * queue and worker: they go to the same operators through the same bot, and are as few
+ * as orders are. Every Telegram call here is bounded (channels/telegram-send.ts), so
+ * neither kind can hold the other up for long.
  */
 @Processor(QUEUE_NAMES.ALERTS)
 export class AlertProcessor extends WorkerHost {
@@ -32,14 +49,22 @@ export class AlertProcessor extends WorkerHost {
 
   constructor(
     @Inject(ALERT_CHANNELS) channels: readonly AlertChannel[],
+    private readonly orderNotices: OrderNoticeService,
     @Optional() private readonly metrics?: MetricsService,
   ) {
     super();
     this.byName = new Map(channels.map((channel) => [channel.name, channel]));
   }
 
-  async process(job: Job<AlertDeliveryJob>): Promise<void> {
-    const { channel: channelName, notification } = job.data;
+  async process(job: Job<AlertQueueJob>): Promise<void> {
+    if (isOrderNoticeJob(job)) {
+      // Throwing is what triggers BullMQ's retry/backoff — do not swallow.
+      await this.orderNotices.deliver(job.data);
+      return;
+    }
+    const { channel: channelName, notification } = (
+      job as Job<AlertDeliveryJob>
+    ).data;
     const channel = this.byName.get(channelName);
 
     if (channel === undefined) {
@@ -68,11 +93,21 @@ export class AlertProcessor extends WorkerHost {
   }
 
   @OnWorkerEvent('completed')
-  onCompleted(job: Job<AlertDeliveryJob>): void {
+  onCompleted(job: Job<AlertQueueJob>): void {
+    if (isOrderNoticeJob(job)) {
+      // OrderNoticeService logs what it did (sent, or dropped and why).
+      this.metrics?.observeJob(
+        QUEUE_NAMES.ALERTS,
+        'success',
+        jobDurationSeconds(job),
+      );
+      return;
+    }
+    const { notification, channel } = (job as Job<AlertDeliveryJob>).data;
     this.logger.log(
-      `[${job.data.notification.fingerprint}] Alert notification sent: ` +
-        `${job.data.notification.dedupeKey} (${job.data.notification.state}) ` +
-        `via ${job.data.channel}`,
+      `[${notification.fingerprint}] Alert notification sent: ` +
+        `${notification.dedupeKey} (${notification.state}) ` +
+        `via ${channel}`,
     );
     this.metrics?.observeJob(
       QUEUE_NAMES.ALERTS,
@@ -87,7 +122,45 @@ export class AlertProcessor extends WorkerHost {
    * convention the SMS and notification workers use.
    */
   @OnWorkerEvent('failed')
-  onFailed(job: Job<AlertDeliveryJob> | undefined, err: Error): void {
+  onFailed(job: Job<AlertQueueJob> | undefined, err: Error): void {
+    if (job && isOrderNoticeJob(job)) {
+      this.onOrderNoticeFailed(job, err);
+      return;
+    }
+    const alertJob = job as Job<AlertDeliveryJob> | undefined;
+    this.onAlertFailed(alertJob, err);
+  }
+
+  /**
+   * An order notice attempt failed. Terminal when the attempts are spent, or when the
+   * service gave up for good (UnrecoverableError: Telegram refused the request), where
+   * BullMQ does not retry however many attempts are left.
+   */
+  private onOrderNoticeFailed(job: Job<OrderNotice>, err: Error): void {
+    const maxAttempts = job.opts.attempts ?? 1;
+    const what = `Order ${job.data.orderId}: ${job.data.trigger} notice`;
+    const permanent = err.name === 'UnrecoverableError';
+    if (!permanent && job.attemptsMade < maxAttempts) {
+      this.logger.warn(
+        `${what} attempt ${job.attemptsMade}/${maxAttempts} failed: ${err.message} — retrying`,
+      );
+      return;
+    }
+    this.metrics?.observeJob(
+      QUEUE_NAMES.ALERTS,
+      'failure',
+      jobDurationSeconds(job),
+    );
+    this.logger.error(
+      `${what} FAILED permanently after ${job.attemptsMade} attempt(s): ${err.message}`,
+      err.stack,
+    );
+  }
+
+  private onAlertFailed(
+    job: Job<AlertDeliveryJob> | undefined,
+    err: Error,
+  ): void {
     const maxAttempts = job?.opts.attempts ?? 1;
     const attemptsMade = job?.attemptsMade ?? 0;
     const key = job?.data?.notification?.dedupeKey ?? 'unknown';

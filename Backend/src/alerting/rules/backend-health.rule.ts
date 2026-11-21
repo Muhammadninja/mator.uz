@@ -1,7 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
-import { RedisService } from '../../redis/redis.service';
 import { resolveAlertingConfig } from '../alerting.config';
 import {
   AlertSeverity,
@@ -12,7 +11,7 @@ import {
 } from '../alerting.types';
 
 /**
- * Alerts when PostgreSQL or Redis cannot be reached from THIS process.
+ * Alerts when PostgreSQL cannot be reached from THIS process.
  *
  * ── Why an application-level probe ──
  * The brief is explicit: do not infer this from Prometheus scrape failures. A
@@ -27,16 +26,11 @@ import {
  * TCP connection would hang the evaluation itself — the monitoring equivalent
  * of the failure it is meant to report.
  *
- * Two independent alert instances (`backend_health:database` and
- * `:redis`) so a Postgres outage neither masks nor resolves a Redis one.
- *
- * ── The Redis caveat ──
- * Alert STATE lives in Redis (see AlertStateStore). If Redis is the component
- * that is down, the state write fails and this alert cannot be dispatched
- * through the normal path — the notifier logs it regardless, and delivery is
- * retried by BullMQ (also Redis-backed) once Redis returns. This is an inherent
- * limit of self-hosted alerting without an external dependency, and is called
- * out in the follow-up recommendations rather than papered over.
+ * Redis is NOT probed here. Alert state and delivery both live in Redis, so an
+ * alert about Redis raised through this path could never be sent: RedisWatchdog
+ * (src/alerting/redis-watchdog.service.ts) watches it and reaches the channels
+ * without Redis. Probing it here as well would only add a duplicate message on a
+ * partial outage.
  */
 
 /** The probes this rule runs. Adding a dependency means adding one entry. */
@@ -64,11 +58,7 @@ export class BackendHealthRule implements AlertRule {
   private readonly timeoutMs: number;
   private readonly probes: readonly HealthProbe[];
 
-  constructor(
-    prisma: PrismaService,
-    redis: RedisService,
-    config: ConfigService,
-  ) {
+  constructor(prisma: PrismaService, config: ConfigService) {
     this.timeoutMs = resolveAlertingConfig(config).healthTimeoutMs;
 
     this.probes = [
@@ -78,11 +68,6 @@ export class BackendHealthRule implements AlertRule {
         // The same trivial query HealthController uses, so the alert and the
         // load balancer's readiness probe agree on what "up" means.
         check: () => prisma.$queryRaw`SELECT 1`,
-      },
-      {
-        id: 'redis',
-        label: 'Redis',
-        check: () => redis.getClient().ping(),
       },
     ];
   }

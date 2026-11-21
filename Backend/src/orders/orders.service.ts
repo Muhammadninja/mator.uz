@@ -5,6 +5,7 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  Optional,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
@@ -84,6 +85,7 @@ import {
   recordOrderIdempotency,
 } from './order-idempotency';
 import { OFFLINE_PAYMENT_TYPES } from './offline-order.policy';
+import { OrderNotices } from './order-notices';
 import {
   OrderCharges,
   PricedLine,
@@ -158,6 +160,8 @@ export class OrdersService {
     private readonly discounts: DiscountService,
     private readonly audit: AdminAuditService,
     private readonly deliveryQuotes: DeliveryQuoteService,
+    // Optional only so a unit test can build the service without it; OrdersModule provides it.
+    @Optional() private readonly orderNotices?: OrderNotices,
   ) {
     this.stockConflicts = new StockConflictRefuser(this.prisma, this.discounts);
   }
@@ -319,6 +323,9 @@ export class OrdersService {
     const paymentType = dto.payment_type
       ? PAYMENT_TYPE_MAP[dto.payment_type]
       : undefined;
+    // Cash or terminal: collected in person, so the order can be taken up as soon as it is placed.
+    const paidInPerson =
+      !!paymentType && OFFLINE_PAYMENT_TYPES.includes(paymentType);
     // Courier delivery is charged what the backend computes now, never a figure from the
     // request. `confirmed_delivery_uzs` and `delivery_quote_id` only say what the buyer was
     // shown:
@@ -481,8 +488,7 @@ export class OrdersService {
           deliveryAddressId: snap.delivery_address_id ?? undefined,
           deliveryMethod,
           paymentType,
-          offlineCollectionRequired:
-            !!paymentType && OFFLINE_PAYMENT_TYPES.includes(paymentType),
+          offlineCollectionRequired: paidInPerson,
           contactPhoneE164: contactPhone,
           promoCode: cart.promoCode ?? undefined,
           expiresAt,
@@ -561,6 +567,10 @@ export class OrdersService {
       }
       throw err;
     });
+
+    // After the commit: the operators hear only of an order that exists. An online order
+    // is announced when its payment settles (SettlementService), not now.
+    if (paidInPerson) this.orderNotices?.placed(order.id);
 
     return presentOrder(order);
   }
