@@ -184,7 +184,12 @@ export class ClickService {
     return timingSafeEqual(Buffer.from(expected), Buffer.from(provided));
   }
 
-  private reply(p: Record<string, any>, error: number, note: string, prepareId?: string | null) {
+  private reply(
+    p: Record<string, unknown>,
+    error: number,
+    note: string,
+    prepareId?: string | null,
+  ) {
     return {
       click_trans_id: p.click_trans_id,
       merchant_trans_id: p.merchant_trans_id,

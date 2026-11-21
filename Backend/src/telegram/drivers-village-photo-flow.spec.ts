@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-return, @typescript-eslint/require-await -- the handler harness is untyped by design, like the other TelegramService specs; the Telegram/queue fakes mirror async APIs */
+/* eslint-disable @typescript-eslint/require-await -- the handler harness is untyped by design, like the other TelegramService specs; the Telegram/queue fakes mirror async APIs */
 // End-to-end specs for Driver's Village photo updates over Telegram:
 //   photos + caption = code_1c → same draft/worker/coordinator pipeline →
 //   same preview media → Confirm (gallery replaced) / Cancel (nothing changed).

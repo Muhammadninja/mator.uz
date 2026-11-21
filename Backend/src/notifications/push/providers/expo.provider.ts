@@ -40,8 +40,8 @@ export class ExpoPushProvider implements PushProvider {
         },
         body: JSON.stringify(payload),
       });
-      const json: any = await res.json();
-      const tickets: any[] = Array.isArray(json?.data) ? json.data : [];
+      const json = (await res.json()) as { data?: unknown } | null;
+      const tickets: unknown[] = Array.isArray(json?.data) ? json.data : [];
       return messages.map((m, i) => this.mapTicket(m.token, tickets[i]));
     } catch (err) {
       this.logger.warn(`Expo push request failed: ${(err as Error).message}`);
@@ -49,9 +49,13 @@ export class ExpoPushProvider implements PushProvider {
     }
   }
 
-  private mapTicket(token: string, ticket: any): PushResult {
-    if (ticket?.status === 'ok') return { token, ok: true };
-    const err = ticket?.details?.error;
+  private mapTicket(token: string, ticket: unknown): PushResult {
+    const t = ticket as
+      | { status?: unknown; details?: { error?: unknown } | null }
+      | null
+      | undefined;
+    if (t?.status === 'ok') return { token, ok: true };
+    const err = t?.details?.error;
     return {
       token,
       ok: false,

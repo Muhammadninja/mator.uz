@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-return -- reads the arguments of a jest spy, which are untyped */
 // The UzMaps address search adapter, against https://docs.uzmaps.uz/http-search/. axios is
 // stubbed, so nothing here reaches the network. The docs show no address-kind result, so
 // these results follow their table of result fields.

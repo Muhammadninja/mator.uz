@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument -- Prisma and Telegram doubles are untyped by design */
 // OrderNoticeService: the event listener (enqueue only) and the worker half (read the
 // order, send). The Bot API is replaced by stubbing Telegram.prototype.callApi on the
 // REAL Telegraf, so nothing leaves the process and no real token is involved.

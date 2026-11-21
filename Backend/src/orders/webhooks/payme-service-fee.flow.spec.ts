@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access -- the in-memory store and the JSON-RPC replies are untyped by design, like the other settlement-store specs */
 /**
  * An order with a service fee, paid through Payme and given back: the real PaymeService and
  * SettlementService over the in-memory store, which serialises transactions and re-checks a

@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-return, @typescript-eslint/require-await -- the Prisma harness (test/utils/harness.ts) is untyped by design, like the other harness-based specs */
+/* eslint-disable @typescript-eslint/require-await -- async fakes stand in for the Prisma calls they replace */
 // BUG-001: an order is charged the catalog's current price, never the snapshot the
 // cart took when the item was added. The real CartService, OrdersService and
 // DiscountService run over one stateful in-memory cart and catalog.

@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access -- reads the arguments of a jest spy, which are untyped */
 // The UzMaps reverse geocoding adapter, against the response documented at
 // https://docs.uzmaps.uz/http-search/. axios is stubbed, so nothing reaches the network.
 

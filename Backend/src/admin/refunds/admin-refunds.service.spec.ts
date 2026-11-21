@@ -340,7 +340,6 @@ describe('AdminRefundsService.voidEntry', () => {
   });
 });
 
-/* eslint-disable @typescript-eslint/no-unsafe-assignment -- jest matchers are typed `any` */
 describe('AdminRefundsService.record — the service fee', () => {
   // The brief's order: 600 000 of parts, a 20 000 fee, 25 000 of delivery.
   const PAID = { received: 645_000, fee: 20_000 };
@@ -605,4 +604,3 @@ describe('AdminRefundsService.forOrder — whose goods can go back', () => {
     ]);
   });
 });
-/* eslint-enable @typescript-eslint/no-unsafe-assignment */

@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
 export interface GetProductsQuery {
@@ -47,7 +48,7 @@ export class ProductsService {
     const limit = query.limit || 20;
     const skip = (page - 1) * limit;
 
-    const where: any = {};
+    const where: Prisma.ProductWhereInput = {};
 
     if (query.title) {
       where.title = { contains: query.title, mode: 'insensitive' };

@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-argument, @typescript-eslint/require-await -- the Prisma harness (test/utils/harness.ts) and supertest bodies are untyped by design */
+/* eslint-disable @typescript-eslint/require-await -- async fakes stand in for the Prisma calls they replace */
 /**
  * POST /v1/garage/vehicles over HTTP (real controller, ValidationPipe as in
  * main.ts, HttpExceptionFilter): the Brand → Model → Year body resolves and

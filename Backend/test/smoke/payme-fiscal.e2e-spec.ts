@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 /**
  * Payme Check against a catalog an operator distributed by hand: every subcategory
  * with its own MXIK, and the four broad nodes above or beside them still holding the
@@ -465,7 +464,6 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
     });
   });
 
-  /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-return -- jest matchers and the mocks are untyped */
   // The simplified VAT regime (decree УП-100 of 2026-05-26) charges 6% on everything a
   // dealer on it sells. It is a VAT rate like 12, so it goes on the line as it stands,
   // and like any rate it labels the line, never the price.
@@ -614,8 +612,6 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
       expect(refusedCode(await check(briefOrder()))).toBe(REFUSED);
     });
   });
-
-  /* eslint-enable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-return */
 
   describe('2. a product on a category with no MXIK', () => {
     it('is refused before any transaction exists', async () => {

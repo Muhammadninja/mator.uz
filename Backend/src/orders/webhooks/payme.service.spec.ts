@@ -1,5 +1,4 @@
 import { Logger } from '@nestjs/common';
-/* eslint-disable @typescript-eslint/no-explicit-any */
 /**
  * Payme Merchant API conformance suite.
  *
@@ -1140,7 +1139,7 @@ describe('PaymeService (Merchant API)', () => {
       expect(res.result).toEqual({ transactions: [] });
     });
 
-    /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unnecessary-type-assertion -- the Prisma double and the JSON-RPC replies are untyped */
+    /* eslint-disable @typescript-eslint/no-unnecessary-type-assertion -- the Prisma double and the JSON-RPC replies are untyped */
     it('asks for every transaction created in the window, oldest first, as Payme requires', async () => {
       prisma.payment.findMany.mockResolvedValue([]);
 
@@ -1235,7 +1234,7 @@ describe('PaymeService (Merchant API)', () => {
       });
     });
   });
-  /* eslint-enable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unnecessary-type-assertion */
+  /* eslint-enable @typescript-eslint/no-unnecessary-type-assertion */
 });
 
 // ── Release fixes: params, active transaction, order state, concurrency ─────

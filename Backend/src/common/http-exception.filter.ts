@@ -86,7 +86,7 @@ export class HttpExceptionFilter implements ExceptionFilter {
     }
 
     const { status, body } = this.normalize(exception);
-    if (status >= HttpStatus.INTERNAL_SERVER_ERROR) {
+    if (status >= (HttpStatus.INTERNAL_SERVER_ERROR as number)) {
       this.logger.error(
         `${tag}${req?.method} ${req?.url} -> ${status} ${body.code}: ${(exception as Error)?.message}`,
         (exception as Error)?.stack,
@@ -102,7 +102,10 @@ export class HttpExceptionFilter implements ExceptionFilter {
     }
     // The app reads a 429's wait from this header.
     const retryAfter = body.details?.retry_after_seconds;
-    if (status === HttpStatus.TOO_MANY_REQUESTS && typeof retryAfter === 'number') {
+    if (
+      status === (HttpStatus.TOO_MANY_REQUESTS as number) &&
+      typeof retryAfter === 'number'
+    ) {
       res.setHeader('Retry-After', String(retryAfter));
     }
     // Hand the id to the client as well, so a user reporting "it failed" can

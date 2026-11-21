@@ -31,7 +31,7 @@ export async function readImageStream(stream: Readable, maxBytes = IMAGE_DOWNLOA
   const chunks: Buffer[] = [];
   let size = 0;
   try {
-    for await (const chunk of stream) {
+    for await (const chunk of stream as AsyncIterable<Buffer | string>) {
       const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       size += bytes.length;
       if (size > maxBytes) throw new Error('Image response exceeds byte limit');

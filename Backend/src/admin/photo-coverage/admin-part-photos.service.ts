@@ -446,7 +446,7 @@ export class AdminPartPhotosService {
       )
       .map((r) => r.value);
     if (done.length < files.length) {
-      const reason = results.find(
+      const reason: unknown = results.find(
         (r): r is PromiseRejectedResult => r.status === 'rejected',
       )?.reason;
       this.logger.error(

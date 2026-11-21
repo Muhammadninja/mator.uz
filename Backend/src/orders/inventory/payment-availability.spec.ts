@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-return, @typescript-eslint/require-await -- the Prisma harness is untyped by design */
+/* eslint-disable @typescript-eslint/require-await -- async fakes stand in for the Prisma calls they replace */
 // Paying for an existing order: it is never blocked by its own units, always by other
 // buyers', and a hold that ran out pays for nothing. Plus the zero of a Driver's
 // Village count, which is always zero.

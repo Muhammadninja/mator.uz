@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-argument -- the Prisma harness (test/utils/harness.ts) and supertest bodies are untyped by design */
 // GET /v1/shipping/pickup-points through the real DI graph, guard wiring and exception filter,
 // with only the database and Redis standing in: where the buyer collects each dealer's goods.
 

@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call -- mocked collaborators are untyped */
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { AdminAuditAction, AdminAuditEntity } from '@prisma/client';
 import { AdminVehicleImagesService } from './admin-vehicle-images.service';

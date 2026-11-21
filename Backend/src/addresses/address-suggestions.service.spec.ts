@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call -- the mocks and the in-memory Redis double are untyped by design */
 // What a buyer gets back while choosing a place. The providers are stand-ins, the cache is
 // the real one over an in-memory Redis.
 

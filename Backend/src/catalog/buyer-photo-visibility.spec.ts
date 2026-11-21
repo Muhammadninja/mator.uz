@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-argument -- the Prisma harness (test/utils/harness.ts) is untyped by design, like the other harness-based specs */
 // No buyer-facing catalog read returns a part without a READY photo. It is
 // decided in the `where` itself, so no count, facet or page includes such a
 // part, while the admin console still sees every part. Each read runs its

@@ -165,7 +165,7 @@ export class FavoritesService {
         throw new Error();
       const value = JSON.parse(
         Buffer.from(token, 'base64url').toString('utf8'),
-      );
+      ) as Record<string, unknown> | null;
       if (
         typeof value?.createdAt !== 'string' ||
         !Number.isFinite(Date.parse(value.createdAt)) ||

@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-argument -- the Prisma harness (test/utils/harness.ts) is untyped by design, like the other harness-based specs */
 // Where the operator sees a pickup order collected (GET /v1/admin/orders/:id): each dealer
 // the order recorded, its address and coordinates, and the lines that are its own. And that
 // this holds for an order placed through the real checkout path, from the dealer each line

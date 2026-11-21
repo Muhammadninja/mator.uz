@@ -154,7 +154,6 @@ describe('Click disabled — no invoices, not listed', () => {
   });
 });
 
-/* eslint-disable @typescript-eslint/no-unsafe-assignment -- jest matchers are typed `any` */
 describe('Click — an order with a service fee', () => {
   const SECRET = 'real-secret';
   // 600 000 of parts, a 20 000 fee and 25 000 of delivery.
@@ -301,4 +300,3 @@ describe('Click — an order with a service fee', () => {
     });
   });
 });
-/* eslint-enable @typescript-eslint/no-unsafe-assignment */

@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access -- the Telegram stub is untyped by design */
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import { Telegram } from 'telegraf';

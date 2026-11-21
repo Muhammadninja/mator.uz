@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unnecessary-type-assertion -- service responses and the in-memory Prisma stand-in are untyped by design */
+/* eslint-disable @typescript-eslint/no-unnecessary-type-assertion -- service responses and the in-memory Prisma stand-in are untyped by design */
 /**
  * Garage "Brand → Model → Year → Add" end to end through the real services
  * (VehiclesService + VehicleImagesService + the vendored image registry) over an

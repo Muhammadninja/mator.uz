@@ -190,7 +190,7 @@ function parseFrontMatter(
 
 /** Type guard over the Prisma enum, so an unknown `type:` cannot reach the DB. */
 function isLegalDocumentType(value: string): value is LegalDocumentType {
-  return Object.prototype.hasOwnProperty.call(LegalDocumentType, value);
+  return Object.hasOwn(LegalDocumentType, value);
 }
 
 /**
