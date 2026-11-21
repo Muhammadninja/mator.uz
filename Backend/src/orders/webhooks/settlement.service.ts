@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   NotificationType,
@@ -12,6 +12,7 @@ import { RealtimeGateway } from '../../realtime/realtime.gateway';
 import { recordProviderRefund } from '../financial-refund.ledger';
 import { OFFLINE_PAYMENT_TYPES } from '../offline-order.policy';
 import { OrderStatusService } from '../order-status.service';
+import { OrderNotices } from '../order-notices';
 import { extendHold } from '../inventory/inventory-reservation.store';
 import {
   PAYABLE_ORDER_STATUSES,
@@ -91,6 +92,8 @@ export class SettlementService {
     private readonly realtime: RealtimeGateway,
     private readonly orderStatus: OrderStatusService,
     private readonly config: ConfigService,
+    // Optional only so a unit test can build the service without it; OrdersModule provides it.
+    @Optional() private readonly orderNotices?: OrderNotices,
   ) {}
 
   /**
@@ -187,6 +190,8 @@ export class SettlementService {
     // Payme would retry a payment that already succeeded. Failures are logged
     // for follow-up instead. Only the call that settled notifies.
     await this.notifyPaid(payment);
+    // The operators, likewise once: the order is now theirs to send.
+    this.orderNotices?.paid(payment.orderId);
     return 'paid';
   }
 

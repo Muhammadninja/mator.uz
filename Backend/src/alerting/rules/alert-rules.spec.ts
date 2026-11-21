@@ -4,10 +4,11 @@ import type { Queue } from 'bullmq';
 import { QUEUE_NAMES } from '../../queue/queue.constants';
 import type { MetricsService } from '../../metrics/metrics.service';
 import type { PrismaService } from '../../prisma/prisma.service';
-import type { RedisService } from '../../redis/redis.service';
 import { IMAGE_DURATION_BUCKETS } from '../../metrics/metrics.config';
 import { AlertSeverity, type AlertRule } from '../alerting.types';
 import { BackendHealthRule, truncate } from './backend-health.rule';
+import { HttpErrorsRule } from './http-errors.rule';
+import { RedisMemoryRule } from './redis-memory.rule';
 import { ImageLatencyRule } from './image-latency.rule';
 import { QueueBacklogRule, queueLabel } from './queue-backlog.rule';
 import { SmsFailureRule } from './sms-failure.rule';
@@ -86,7 +87,7 @@ describe('QueueBacklogRule', () => {
 
   it('does not report a backlog when the queue cannot be sampled', async () => {
     // A Redis error must not read as "recovered" — that would resolve a real
-    // alert. Redis being down is covered by BackendHealthRule instead.
+    // alert. Redis being down is covered by RedisWatchdog instead.
     const broken = {
       getJobCounts: jest.fn().mockRejectedValue(new Error('redis down')),
     } as unknown as Queue;
@@ -150,7 +151,12 @@ describe('rule dashboard declarations', () => {
       ],
       [new SmsFailureRule({} as never, configWith()), 'mator-sms'],
       [
-        new BackendHealthRule({} as never, {} as never, configWith()),
+        new BackendHealthRule({} as never, configWith()),
+        'mator-backend-overview',
+      ],
+      [new HttpErrorsRule(configWith()), 'mator-backend-overview'],
+      [
+        new RedisMemoryRule({} as never, configWith()),
         'mator-backend-overview',
       ],
     ];
@@ -400,17 +406,8 @@ describe('BackendHealthRule', () => {
       $queryRaw: jest.fn().mockResolvedValue([{ '?column?': 1 }]),
     }) as unknown as PrismaService;
 
-  const healthyRedis = () =>
-    ({
-      getClient: () => ({ ping: jest.fn().mockResolvedValue('PONG') }),
-    }) as unknown as RedisService;
-
-  it('reports nothing when both dependencies are reachable', async () => {
-    const rule = new BackendHealthRule(
-      healthyPrisma(),
-      healthyRedis(),
-      configWith(),
-    );
+  it('reports nothing when the database is reachable', async () => {
+    const rule = new BackendHealthRule(healthyPrisma(), configWith());
 
     expect((await rule.evaluate()).firing).toHaveLength(0);
   });
@@ -419,7 +416,7 @@ describe('BackendHealthRule', () => {
     const prisma = {
       $queryRaw: jest.fn().mockRejectedValue(new Error('ECONNREFUSED')),
     } as unknown as PrismaService;
-    const rule = new BackendHealthRule(prisma, healthyRedis(), configWith());
+    const rule = new BackendHealthRule(prisma, configWith());
 
     const { firing } = await rule.evaluate();
 
@@ -432,39 +429,9 @@ describe('BackendHealthRule', () => {
     });
   });
 
-  it('fires a critical alert when Redis is unreachable', async () => {
-    const redis = {
-      getClient: () => ({
-        ping: jest.fn().mockRejectedValue(new Error('connection lost')),
-      }),
-    } as unknown as RedisService;
-    const rule = new BackendHealthRule(healthyPrisma(), redis, configWith());
-
-    const { firing } = await rule.evaluate();
-
-    expect(firing[0].labels.component).toBe('redis');
-  });
-
-  it('reports both independently when both are down', async () => {
-    const prisma = {
-      $queryRaw: jest.fn().mockRejectedValue(new Error('down')),
-    } as unknown as PrismaService;
-    const redis = {
-      getClient: () => ({
-        ping: jest.fn().mockRejectedValue(new Error('down')),
-      }),
-    } as unknown as RedisService;
-
-    const { firing } = await new BackendHealthRule(
-      prisma,
-      redis,
-      configWith(),
-    ).evaluate();
-
-    expect(firing.map((f) => f.labels.component).sort()).toEqual([
-      'database',
-      'redis',
-    ]);
+  it('leaves Redis to RedisWatchdog: an alert about it here could never be sent', () => {
+    // Two parameters: no RedisService to probe with.
+    expect(BackendHealthRule.length).toBe(2);
   });
 
   it('treats a hung probe as down rather than hanging the evaluation', async () => {
@@ -475,7 +442,6 @@ describe('BackendHealthRule', () => {
     } as unknown as PrismaService;
     const rule = new BackendHealthRule(
       prisma,
-      healthyRedis(),
       configWith({ ALERT_HEALTH_TIMEOUT_MS: '20' }),
     );
 

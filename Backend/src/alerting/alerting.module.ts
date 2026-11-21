@@ -22,9 +22,13 @@ import { GenericWebhookAlertChannel } from './channels/generic-webhook.channel';
 import { SlackAlertChannel } from './channels/slack.channel';
 import { TelegramAlertChannel } from './channels/telegram.channel';
 import { OpsAlertBridge } from './ops-alert.bridge';
+import { OrderNoticeService } from './orders/order-notice.service';
+import { RedisWatchdog } from './redis-watchdog.service';
 import { BackendHealthRule } from './rules/backend-health.rule';
+import { HttpErrorsRule } from './rules/http-errors.rule';
 import { ImageLatencyRule } from './rules/image-latency.rule';
 import { QueueBacklogRule } from './rules/queue-backlog.rule';
+import { RedisMemoryRule } from './rules/redis-memory.rule';
 import { SmsFailureRule } from './rules/sms-failure.rule';
 
 /**
@@ -42,8 +46,9 @@ import { SmsFailureRule } from './rules/sms-failure.rule';
  *
  * Strictly additive: no rule mutates anything. The queue rule only calls
  * `getJobCounts`, the metric rules only READ existing prom-client series, and
- * the health rule issues `SELECT 1` / `PING`. No business flow, payload, retry
- * policy or schema is touched by this module running — or by it being disabled.
+ * the health rule issues `SELECT 1`; RedisWatchdog sends `PING` and the Redis
+ * memory rule `INFO memory`. No business flow, payload, retry policy or schema
+ * is touched by this module running — or by it being disabled.
  *
  * ── Adding a rule ──
  * Implement `AlertRule`, then add the class to `RULES` below. Nothing else
@@ -65,6 +70,8 @@ const RULES = [
   ImageLatencyRule,
   SmsFailureRule,
   BackendHealthRule,
+  HttpErrorsRule,
+  RedisMemoryRule,
 ] as const;
 
 /**
@@ -148,6 +155,11 @@ const sourceProvider: Provider = {
     AlertScheduler,
     AlertProcessor,
     OpsAlertBridge,
+    // Orders an operator has to take up (src/orders/order-notices.ts), to the same
+    // Telegram chat by default, through the same queue and worker.
+    OrderNoticeService,
+    // Redis being down, told without Redis (the normal path needs it twice).
+    RedisWatchdog,
   ],
   // Exported so a future admin endpoint can trigger an evaluation or manage
   // silences, and so any module can raise a notification through the same path

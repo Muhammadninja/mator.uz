@@ -1,5 +1,7 @@
+/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access -- the Telegram stub is untyped by design */
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
+import { Telegram } from 'telegraf';
 import {
   ALERT_STATE,
   AlertSeverity,
@@ -342,6 +344,52 @@ describe('TelegramAlertChannel', () => {
     expect(
       channel.accepts(notification({ severity: AlertSeverity.ERROR })),
     ).toBe(true);
+  });
+
+  // The REAL Telegraf with only its network call stubbed: what reaches the Bot API.
+  it('delivers the rendered HTML to the chat through a bounded call', async () => {
+    const calls: { method: string; payload: any; opts: any }[] = [];
+    const callApi = jest
+      .spyOn(Telegram.prototype as any, 'callApi')
+      .mockImplementation((method: any, payload: any, opts: any) => {
+        calls.push({ method, payload, opts });
+        return Promise.resolve({ message_id: 1 });
+      });
+    const channel = new TelegramAlertChannel(
+      configWith({
+        TELEGRAM_BOT_TOKEN: '123456:TEST-TOKEN',
+        ALERT_TELEGRAM_CHAT_ID: '-100',
+      }),
+    );
+
+    await channel.deliver(notification());
+    callApi.mockRestore();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].method).toBe('sendMessage');
+    expect(calls[0].payload).toMatchObject({
+      chat_id: '-100',
+      parse_mode: 'HTML',
+      link_preview_options: { is_disabled: true },
+    });
+    expect(calls[0].payload.text).toContain(
+      '<b>Sms Queue Backlog</b> <code>[A7F91B]</code>',
+    );
+    expect(calls[0].opts.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('throws when Telegram refuses, so BullMQ retries the job', async () => {
+    const callApi = jest
+      .spyOn(Telegram.prototype as any, 'callApi')
+      .mockRejectedValue(new Error('400: Bad Request: chat not found'));
+    const channel = new TelegramAlertChannel(
+      configWith({ TELEGRAM_BOT_TOKEN: 't', ALERT_TELEGRAM_CHAT_ID: '-100' }),
+    );
+
+    await expect(channel.deliver(notification())).rejects.toThrow(
+      'chat not found',
+    );
+    callApi.mockRestore();
   });
 });
 

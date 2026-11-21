@@ -304,18 +304,39 @@ describe('SettlementService.markPaid — concurrency and order state (in-memory 
     });
     const notifications = { emit: jest.fn().mockResolvedValue(undefined) };
     const realtime = { emit: jest.fn() };
+    const orderNotices = { paid: jest.fn(), placed: jest.fn() };
     const svc = new SettlementService(
       store.prisma as any,
       notifications as any,
       realtime as any,
       new OrderStatusService(store.prisma as any),
       fakeConfig({ ORDER_TTL_MIN: '30' }),
+      orderNotices as never,
     );
-    return { store, svc, notifications, realtime };
+    return { store, svc, notifications, realtime, orderNotices };
   }
 
   const paidRows = (store: ReturnType<typeof settlementStore>) =>
     store.history().filter((h) => h.status === OrderStatus.PAID);
+
+  it('tells the operators of a settled order once, however many callbacks raced', async () => {
+    const { svc, orderNotices } = build(OrderStatus.PENDING_PAYMENT);
+
+    await Promise.all([svc.markPaid('pay_1'), svc.markPaid('pay_1')]);
+    await svc.markPaid('pay_1');
+
+    expect(orderNotices.paid).toHaveBeenCalledTimes(1);
+    expect(orderNotices.paid).toHaveBeenCalledWith('ord_1');
+    expect(orderNotices.placed).not.toHaveBeenCalled();
+  });
+
+  it('tells the operators nothing when the payment did not settle the order', async () => {
+    const { svc, orderNotices } = build(OrderStatus.CANCELLED);
+
+    await expect(svc.markPaid('pay_1')).resolves.toBe('order_not_payable');
+
+    expect(orderNotices.paid).not.toHaveBeenCalled();
+  });
 
   it('PENDING_PAYMENT → paid: one history row, one notification', async () => {
     const { store, svc, notifications } = build(OrderStatus.PENDING_PAYMENT);

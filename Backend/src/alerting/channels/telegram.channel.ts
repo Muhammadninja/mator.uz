@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Telegraf } from 'telegraf';
 import { renderAlertMessage } from '../alert-message';
+import { sendTelegramHtml } from './telegram-send';
 import { resolveAlertingConfig, type AlertingConfig } from '../alerting.config';
 import type {
   AlertChannel,
@@ -58,10 +59,13 @@ export class TelegramAlertChannel implements AlertChannel {
   async deliver(notification: AlertNotification): Promise<void> {
     const text = renderAlertMessage(notification, this.config.environmentLabel);
 
-    await this.bot().telegram.sendMessage(this.config.telegramChatId, text, {
-      parse_mode: 'HTML',
-      link_preview_options: { is_disabled: true },
-    });
+    // Bounded: the alerts worker is serial, so a call Telegram never answers would
+    // otherwise hold every alert behind it for Telegraf's 500 s (see telegram-send.ts).
+    await sendTelegramHtml(
+      this.bot().telegram,
+      this.config.telegramChatId,
+      text,
+    );
 
     this.logger.debug(`Telegram delivered ${notification.dedupeKey}`);
   }
