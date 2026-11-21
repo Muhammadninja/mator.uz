@@ -240,13 +240,20 @@ export class RealtimeGateway
 
   // ── internals ───────────────────────────────────────────────────────────────
   private onMessage(client: TrackedSocket, raw: RawData): void {
-    let parsed: { type?: string };
+    let parsed: unknown;
     try {
       parsed = JSON.parse(raw.toString());
     } catch {
       return; // ignore non-JSON frames
     }
-    if (parsed.type === 'ping') {
+    // `null` is valid JSON too. Reading `.type` off it would throw out of the
+    // ws listener, and main.ts exits the process on an uncaught exception.
+    if (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      'type' in parsed &&
+      parsed.type === 'ping'
+    ) {
       this.sendTo(client, { type: 'pong', data: { ts: Date.now() } });
     }
   }

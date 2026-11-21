@@ -152,6 +152,24 @@ describe('AdminEventsGateway', () => {
     await gateway.handleConnection(blocked as never, from(200));
     expect(blocked.close).toHaveBeenCalledWith(4429, 'rate_limited');
   });
+
+  // A throw here escapes the ws listener as an uncaughtException, and main.ts
+  // exits the process on one.
+  it('ignores a JSON frame that is not an object instead of throwing', async () => {
+    const sock = await connect(session('adm_1'));
+    const onMessage = (
+      sock.on.mock.calls as [string, (raw: Buffer) => void][]
+    ).find(([event]) => event === 'message')![1];
+    sock.send.mockClear();
+
+    for (const frame of ['null', '5', '"ping"', '[]', 'true']) {
+      expect(() => onMessage(Buffer.from(frame))).not.toThrow();
+    }
+    expect(sock.send).not.toHaveBeenCalled();
+
+    onMessage(Buffer.from(JSON.stringify({ type: 'ping' })));
+    expect(sock.send).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('AdminWsAuthService', () => {

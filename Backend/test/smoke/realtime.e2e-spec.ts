@@ -388,6 +388,25 @@ describe('Realtime smoke', () => {
       expect(JSON.parse(sock.send.mock.calls[0][0]).type).toBe('pong');
     });
 
+    // A throw here escapes the ws listener as an uncaughtException, and main.ts
+    // exits the process on one: any signed-in user could restart the API.
+    it('ignores a JSON frame that is not an object instead of throwing', async () => {
+      wsAuth.authenticate.mockResolvedValue(session('usr_1'));
+      const sock = fakeSocket();
+      await gateway.handleConnection(
+        sock as any,
+        { url: '/realtime?channel=garage:usr_1', headers: {} } as any,
+      );
+      sock.send.mockClear();
+
+      for (const frame of ['null', '5', '"ping"', '[]', 'true']) {
+        expect(() =>
+          sock.handlers['message'](Buffer.from(frame)),
+        ).not.toThrow();
+      }
+      expect(sock.send).not.toHaveBeenCalled();
+    });
+
     it('heartbeat pings live sockets and terminates unresponsive ones', async () => {
       jest.useFakeTimers();
       try {
