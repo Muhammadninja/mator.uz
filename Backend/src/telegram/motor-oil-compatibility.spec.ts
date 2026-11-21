@@ -22,7 +22,6 @@ import {
   selectBrand,
   selectCategory,
   selectModel,
-  selectOilType,
   selectOilViscosity,
   selectOilVolume,
   selectOtherBrand,
@@ -30,7 +29,7 @@ import {
   selectOtherCategory,
   selectSubcategory,
 } from './product-wizard';
-import { OIL_TYPES, OIL_VISCOSITIES, OIL_VOLUMES } from './motor-oil-catalog';
+import { OIL_VISCOSITIES, OIL_VOLUMES } from './motor-oil-catalog';
 import {
   CategoryAnchor,
   MOTOR_OIL_CATEGORY_IDS,
@@ -39,7 +38,6 @@ import {
 const CHEVROLET = 0;
 const COBALT = 0;
 const FIVE_W_30 = OIL_VISCOSITIES.indexOf('5W-30');
-const SYNTHETIC = OIL_TYPES.findIndex((t) => t.value === OilType.SYNTHETIC);
 const FOUR_LITRES = OIL_VOLUMES.findIndex((v) => v.value === 4_000);
 
 /** The four compositions offered under "Моторные масла". */

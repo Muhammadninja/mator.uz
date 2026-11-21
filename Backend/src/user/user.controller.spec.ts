@@ -30,45 +30,45 @@ function build() {
 const REQ = { user: { id: 'u1' } };
 
 describe('UserController.uploadAvatar — field selection', () => {
-  it('picks `avatar` when present (even alongside aliases)', () => {
+  it('picks `avatar` when present (even alongside aliases)', async () => {
     const { controller, avatars } = build();
-    controller.uploadAvatar(REQ, [file('image'), file('file'), file('avatar')]);
+    await controller.uploadAvatar(REQ, [file('image'), file('file'), file('avatar')]);
     expect(avatars.upload).toHaveBeenCalledWith(
       'u1',
       expect.objectContaining({ fieldname: 'avatar' }),
     );
   });
 
-  it('falls back to `file` when there is no `avatar`', () => {
+  it('falls back to `file` when there is no `avatar`', async () => {
     const { controller, avatars } = build();
-    controller.uploadAvatar(REQ, [file('image'), file('file')]);
+    await controller.uploadAvatar(REQ, [file('image'), file('file')]);
     expect(avatars.upload).toHaveBeenCalledWith(
       'u1',
       expect.objectContaining({ fieldname: 'file' }),
     );
   });
 
-  it('accepts a generic `image` field', () => {
+  it('accepts a generic `image` field', async () => {
     const { controller, avatars } = build();
-    controller.uploadAvatar(REQ, [file('image')]);
+    await controller.uploadAvatar(REQ, [file('image')]);
     expect(avatars.upload).toHaveBeenCalledWith(
       'u1',
       expect.objectContaining({ fieldname: 'image' }),
     );
   });
 
-  it('falls back to the first file for any other single field name', () => {
+  it('falls back to the first file for any other single field name', async () => {
     const { controller, avatars } = build();
-    controller.uploadAvatar(REQ, [file('photo')]);
+    await controller.uploadAvatar(REQ, [file('photo')]);
     expect(avatars.upload).toHaveBeenCalledWith(
       'u1',
       expect.objectContaining({ fieldname: 'photo' }),
     );
   });
 
-  it('forwards undefined when no file was uploaded (service returns 415)', () => {
+  it('forwards undefined when no file was uploaded (service returns 415)', async () => {
     const { controller, avatars } = build();
-    controller.uploadAvatar(REQ, []);
+    await controller.uploadAvatar(REQ, []);
     expect(avatars.upload).toHaveBeenCalledWith('u1', undefined);
   });
 });

@@ -87,10 +87,6 @@ const EFFECTIVE_DATE_LABELS: Record<LegalLocale, string> = {
 /** The blank a draft carries until its effective date is decided. */
 export const LEGAL_DATE_BLANK = '__.__.____';
 
-/** Every (type, locale) pair that must exist for the seed to be complete. */
-const REQUIRED_SOURCE_COUNT =
-  Object.keys(LegalDocumentType).length * LEGAL_LOCALES.length;
-
 /** `<document>.v<version>.<locale>.md` */
 const FILENAME_PATTERN = /^([a-z0-9-]+)\.v(\d+)\.([a-z]{2})\.md$/;
 

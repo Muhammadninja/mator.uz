@@ -30,7 +30,6 @@ import {
   stepPrompt,
   previewLines,
   isUniversalFor,
-  antifreezeWeightKeyboard,
 } from './product-wizard';
 import {
   ANTIFREEZE_WEIGHTS,

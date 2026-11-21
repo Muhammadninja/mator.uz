@@ -35,7 +35,6 @@ import {
   previewLines,
   isUniversalFor,
   oilViscosityKeyboard,
-  oilTypeKeyboard,
   oilVolumeKeyboard,
   otherCategoryKeyboard,
   otherKindKeyboard,
@@ -45,8 +44,6 @@ import {
   OIL_TYPES,
   OIL_VISCOSITIES,
   OIL_VOLUMES,
-  normalizeViscosity,
-  parseVolumeLitres,
 } from './motor-oil-catalog';
 import { WIZARD_BRANDS } from './wizard-catalog';
 import {

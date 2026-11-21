@@ -125,7 +125,6 @@ import {
   selectAntifreezeWeight,
   inputAntifreezeWeight,
   OTHER_KIND_BY_WIRE,
-  isCategoryLevelStep,
   inputTitle,
   inputDescription,
   skipDescription,
@@ -4052,10 +4051,6 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       await ctx.reply(t(lang, 'confirm.alreadyProcessed'));
       return;
     }
-    // The claim bumped the row's version; the PUBLISHED transition below must
-    // present this one.
-    const committingVersion = session.draftVersion + 1;
-
     const {
       sellerId,
       metadata,

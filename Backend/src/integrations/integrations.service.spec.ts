@@ -156,7 +156,7 @@ describe('IntegrationsService.syncInventory', () => {
 
     const { data } = updateMany.mock.calls[0][0];
     expect(data).not.toHaveProperty('priceUzs');
-    expect(data.purchasePriceUzs.toString()).toBe('5000');
+    expect(data.purchasePriceUzs?.toString()).toBe('5000');
   });
 
   it('PARTIAL: an overflowing total is refused before the first chunk commits (LOW-ING-011)', async () => {

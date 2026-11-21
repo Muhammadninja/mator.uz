@@ -32,7 +32,7 @@ import type {
   VehicleReference,
 } from '../../src/imports/drivers-village/drivers-village.types';
 
-interface FakeProduct {
+export interface FakeProduct {
   id: number;
   gmNumber: string | null;
   title: string;
@@ -56,7 +56,7 @@ export interface FakeCatalogPart {
   [key: string]: unknown;
 }
 
-interface FakeStock {
+export interface FakeStock {
   id: number;
   sellerId: number;
   productId: number;
