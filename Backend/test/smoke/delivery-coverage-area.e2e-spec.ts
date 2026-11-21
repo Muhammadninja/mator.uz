@@ -22,6 +22,7 @@ import {
   fakeRedis,
   PrismaMock,
 } from '../utils/harness';
+import { listenOnLoopback } from '../utils/loopback-server';
 
 /**
  * The approved area through the real DI graph, pipe and filter, configured by the real env
@@ -108,6 +109,7 @@ describe('Delivery to Tashkent City and New Tashkent only (e2e)', () => {
     );
     app.useGlobalFilters(new HttpExceptionFilter());
     await app.init();
+    await listenOnLoopback(app);
   });
 
   afterAll(async () => {

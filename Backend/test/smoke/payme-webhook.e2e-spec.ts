@@ -9,21 +9,24 @@
  * JSON parser, which only a real request exercises.
  */
 import express from 'express';
+import type { Server } from 'http';
 import request from 'supertest';
 import {
   PAYME_MAX_BODY_BYTES,
   PAYME_WEBHOOK_PATH,
   paymeRawBodyMiddleware,
 } from '../../src/orders/webhooks/payme-raw-body.middleware';
+import { closeServer, listenOnLoopback } from '../utils/loopback-server';
 
 const KEY = 'merchant-secret';
 const AUTH = 'Basic ' + Buffer.from(`Paycom:${KEY}`).toString('base64');
 
 describe('Payme webhook transport', () => {
   let app: express.Express;
+  let server: Server;
   let handleRaw: jest.Mock;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     handleRaw = jest.fn().mockResolvedValue({ jsonrpc: '2.0', id: 1, result: { allow: true } });
 
     app = express();
@@ -36,11 +39,14 @@ describe('Payme webhook transport', () => {
         res.status(200).json(await handleRaw(req.headers.authorization, req.body));
       })();
     });
+    server = await listenOnLoopback(app);
   });
+
+  afterEach(() => closeServer(server));
 
   it('passes a well-formed body through as raw text', async () => {
     const body = { id: 1, method: 'CheckPerformTransaction', params: {} };
-    const res = await request(app).post(PAYME_WEBHOOK_PATH).set('Authorization', AUTH).send(body);
+    const res = await request(server).post(PAYME_WEBHOOK_PATH).set('Authorization', AUTH).send(body);
 
     expect(res.status).toBe(200);
     // The handler receives the raw string, not a pre-parsed object.
@@ -54,7 +60,7 @@ describe('Payme webhook transport', () => {
       error: { code: -32700, message: { ru: 'x', uz: 'x', en: 'x' } },
     });
 
-    const res = await request(app)
+    const res = await request(server)
       .post(PAYME_WEBHOOK_PATH)
       .set('Authorization', AUTH)
       .set('Content-Type', 'application/json')
@@ -67,7 +73,7 @@ describe('Payme webhook transport', () => {
   });
 
   it('forwards the Authorization header verbatim', async () => {
-    await request(app)
+    await request(server)
       .post(PAYME_WEBHOOK_PATH)
       .set('Authorization', 'Basic wrong')
       .send({ id: 1, method: 'CheckTransaction', params: {} });
@@ -82,7 +88,7 @@ describe('Payme webhook transport', () => {
       res.status(200).json({ ok: true });
     });
 
-    await request(app).post('/v1/other').send({ hello: 'world' });
+    await request(server).post('/v1/other').send({ hello: 'world' });
 
     // Parsed object, not raw text — the middleware is scoped to Payme only.
     expect(seen[0]).toEqual({ hello: 'world' });
@@ -90,7 +96,7 @@ describe('Payme webhook transport', () => {
 
   // LOW-PAY-007: an oversized body is refused before it is buffered or handled.
   it('answers 413 for a body over 64 KB and never calls the handler', async () => {
-    const res = await request(app)
+    const res = await request(server)
       .post(PAYME_WEBHOOK_PATH)
       .set('Authorization', AUTH)
       .set('Content-Type', 'application/json')
@@ -101,7 +107,7 @@ describe('Payme webhook transport', () => {
   });
 
   it('still accepts a body just under the limit', async () => {
-    const res = await request(app)
+    const res = await request(server)
       .post(PAYME_WEBHOOK_PATH)
       .set('Authorization', AUTH)
       .set('Content-Type', 'application/json')
@@ -114,7 +120,7 @@ describe('Payme webhook transport', () => {
   it.each(['null', '[]', '[1,2]', '42', '"text"', 'true'])(
     'passes the JSON value %s through as text for the service to refuse',
     async (payload) => {
-      await request(app)
+      await request(server)
         .post(PAYME_WEBHOOK_PATH)
         .set('Authorization', AUTH)
         .set('Content-Type', 'application/json')

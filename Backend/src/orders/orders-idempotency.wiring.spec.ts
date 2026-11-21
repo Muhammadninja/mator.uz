@@ -6,6 +6,7 @@ import { HttpExceptionFilter } from '../common/http-exception.filter';
 import { OfflineCollectionService } from './offline-collection.service';
 import { OrdersController } from './orders.controller';
 import { OrdersService } from './orders.service';
+import { listenOnLoopback } from '../../test/utils/loopback-server';
 
 // POST /v1/orders through a real Nest HTTP app, with the global pipe and filter as main.ts
 // installs them: the header reaches the service exactly as sent, a malformed one is a 400
@@ -44,6 +45,7 @@ describe('POST /v1/orders Idempotency-Key (wiring)', () => {
     );
     app.useGlobalFilters(new HttpExceptionFilter());
     await app.init();
+    await listenOnLoopback(app);
   });
 
   afterAll(async () => await app.close());

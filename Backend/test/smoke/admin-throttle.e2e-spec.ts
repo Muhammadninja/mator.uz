@@ -18,6 +18,7 @@ import {
   THROTTLERS,
   verifiedAdminId,
 } from '../../src/admin/auth/admin-throttle';
+import { listenOnLoopback } from '../utils/loopback-server';
 
 // Spending a budget takes over a hundred sequential requests, which the default 5s
 // does not always cover while other suites run alongside.
@@ -80,6 +81,7 @@ describe('global throttling of admin traffic', () => {
     }).compile();
     app = moduleRef.createNestApplication();
     await app.init();
+    await listenOnLoopback(app);
   });
 
   afterEach(async () => {

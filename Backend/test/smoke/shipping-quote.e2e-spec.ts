@@ -36,6 +36,7 @@ import {
   PrismaMock,
   TEST_DELIVERY_COVERAGE,
 } from '../utils/harness';
+import { listenOnLoopback } from '../utils/loopback-server';
 
 /**
  * POST /v1/shipping/quote through the real DI graph, validation pipe and exception filter,
@@ -96,6 +97,7 @@ describe('POST /v1/shipping/quote (e2e)', () => {
     );
     app.useGlobalFilters(new HttpExceptionFilter());
     await app.init();
+    await listenOnLoopback(app);
   });
 
   afterAll(async () => {
@@ -327,6 +329,7 @@ describe('With no delivery area configured (e2e)', () => {
     app = mod.createNestApplication();
     app.useGlobalFilters(new HttpExceptionFilter());
     await app.init();
+    await listenOnLoopback(app);
   });
 
   afterAll(async () => {
@@ -441,6 +444,7 @@ describe('Saving and searching addresses (e2e)', () => {
     );
     app.useGlobalFilters(new HttpExceptionFilter());
     await app.init();
+    await listenOnLoopback(app);
   });
 
   afterAll(async () => {

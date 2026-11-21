@@ -788,6 +788,83 @@ describe('PaymeService (Merchant API)', () => {
     });
   });
 
+  // ── account.order_id shapes ────────────────────────────────────────────────
+  // Payme echoes back the text our checkout link carried (`ac.order_id=ord_…`):
+  // its docs leave the account's field types to the merchant, and every example
+  // is a string. Any other JSON shape names no order. It is refused as an account
+  // error before the database is asked; String() once turned ["ord_1"] (and
+  // [["ord_1"]]) into "ord_1" and went on with that order.
+  describe('account.order_id shapes', () => {
+    const REFUSED: [string, unknown][] = [
+      ['["ord_1"]', ['ord_1']],
+      ['[["ord_1"]]', [['ord_1']]],
+      ['[]', []],
+      ['{"id":"ord_1"}', { id: 'ord_1' }],
+      ['true', true],
+      ['false', false],
+      ['null', null],
+    ];
+    const paramsFor = (method: string, orderId: unknown) => ({
+      ...(method === 'CreateTransaction'
+        ? { id: 'pmt-xyz', time: 1_700_000_000_000 }
+        : {}),
+      amount: 21_500_000,
+      account: { order_id: orderId },
+    });
+
+    beforeEach(() => {
+      // "ord_1" exists, so a refusal below comes from the shape, not a miss.
+      prisma.payment.findUnique.mockResolvedValue(null);
+      prisma.order.findUnique.mockResolvedValue(
+        buildOrder({ id: 'ord_1', totalUzs: 215000 }),
+      );
+    });
+
+    describe.each(['CheckPerformTransaction', 'CreateTransaction'])(
+      '%s',
+      (method) => {
+        it.each(REFUSED)(
+          'refuses order_id %s with -31050 and never looks it up',
+          async (_label, orderId) => {
+            const res = await call(method, paramsFor(method, orderId));
+            expect(res.error.code).toBe(-31050);
+            expect(res.error.data).toBe('order_id');
+            expect(prisma.order.findUnique).not.toHaveBeenCalled();
+            expect(prisma.payment.create).not.toHaveBeenCalled();
+            expect(prisma.payment.update).not.toHaveBeenCalled();
+          },
+        );
+
+        it('looks a numeric order_id up as text', async () => {
+          prisma.order.findUnique.mockResolvedValue(null);
+          const res = await call(method, paramsFor(method, 123));
+          expect(prisma.order.findUnique).toHaveBeenCalledWith({
+            where: { id: '123' },
+          });
+          expect(res.error.code).toBe(-31050);
+          expect(res.error.data).toBe('order_id');
+        });
+      },
+    );
+
+    it('a repeated CreateTransaction is answered from the stored row, whatever its account', async () => {
+      // The Payme id is looked up before the account: a retry never meets the check.
+      const stored = buildPayment();
+      prisma.payment.findUnique.mockResolvedValue(stored);
+      const res = await call(
+        'CreateTransaction',
+        paramsFor('CreateTransaction', ['ord_1']),
+      );
+      expect(res.result).toEqual({
+        create_time: Number(stored.providerCreateTime),
+        transaction: 'pay_1',
+        state: 1,
+      });
+      expect(prisma.order.findUnique).not.toHaveBeenCalled();
+      expect(prisma.payment.update).not.toHaveBeenCalled();
+    });
+  });
+
   // ── PerformTransaction ─────────────────────────────────────────────────────
   describe('PerformTransaction', () => {
     it('settles a created transaction and returns state 2', async () => {

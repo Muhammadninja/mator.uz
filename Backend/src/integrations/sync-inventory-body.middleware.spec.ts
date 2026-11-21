@@ -10,6 +10,10 @@ import {
   SYNC_INVENTORY_PATH,
   syncInventoryBodyMiddleware,
 } from './sync-inventory-body.middleware';
+import {
+  closeServer,
+  listenOnLoopback,
+} from '../../test/utils/loopback-server';
 
 function app() {
   const server = express();
@@ -27,10 +31,16 @@ function largestRow() {
   const escaped = (n: number) => '\\u0416'.repeat(n);
   return `{"article":"${escaped(64)}","title":"${escaped(255)}","quantity":1000000,"price":10000000000.00,"unit":"${escaped(16)}","warehouse":"${escaped(64)}"}`;
 }
+let server: http.Server;
 const send = (body: string, path = SYNC_INVENTORY_PATH) =>
-  request(app()).post(path).set('Content-Type', 'application/json').send(body);
+  request(server).post(path).set('Content-Type', 'application/json').send(body);
 
 describe('sync-inventory body limit (ING-003)', () => {
+  beforeAll(async () => {
+    server = await listenOnLoopback(app());
+  });
+  afterAll(() => closeServer(server));
+
   it('accepts the largest valid 5,000-row upload', async () => {
     const body = `{"mode":"full","expectedTotal":${MAX_SYNC_ITEMS},"items":[${Array(MAX_SYNC_ITEMS).fill(largestRow()).join(',')}]}`;
     expect(Buffer.byteLength(body)).toBeLessThanOrEqual(MAX_SYNC_BODY_BYTES);
@@ -50,10 +60,11 @@ describe('sync-inventory body limit (ING-003)', () => {
    */
   function oversized(headers: Record<string, string | number>, first: Buffer) {
     return new Promise<{ status?: number; body: string }>((resolve, reject) => {
-      const server = app().listen(0, () => {
+      const server = app().listen(0, '127.0.0.1', () => {
         const { port } = server.address() as AddressInfo;
         const req = http.request(
           {
+            host: '127.0.0.1',
             port,
             method: 'POST',
             path: SYNC_INVENTORY_PATH,

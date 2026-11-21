@@ -16,6 +16,7 @@ import { MetricsModule } from './metrics.module';
 import { MetricsService } from './metrics.service';
 import { METRICS_REGISTRY } from './metrics.providers';
 import { QueueMetricsCollector } from './queue-metrics.collector';
+import { listenOnLoopback } from '../../test/utils/loopback-server';
 
 /**
  * Integration tests for the mounted endpoint.
@@ -84,6 +85,7 @@ async function buildApp(env: Record<string, string | undefined> = {}) {
   const moduleRef = await builder.compile();
   const app = moduleRef.createNestApplication();
   await app.init();
+  await listenOnLoopback(app);
 
   const restore = () => {
     for (const [key, value] of Object.entries(previous)) {

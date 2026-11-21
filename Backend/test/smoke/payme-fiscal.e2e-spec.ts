@@ -55,6 +55,7 @@ import {
   fakeAudit,
   PrismaMock,
 } from '../utils/harness';
+import { listenOnLoopback } from '../utils/loopback-server';
 
 // Set here, read by nothing else: no real key, token or configuration is involved.
 const MATOR_TIN = '123456789';
@@ -305,6 +306,7 @@ describe('Payme Check for a hand-distributed catalog (smoke, Prisma mocked)', ()
     );
     app.useGlobalFilters(new HttpExceptionFilter());
     await app.init();
+    await listenOnLoopback(app);
   });
 
   afterEach(async () => {
