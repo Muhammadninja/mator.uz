@@ -421,7 +421,7 @@ export class PaymeService {
     const invoice = await this.invoiceOrRefuse(
       this.prisma,
       order.id,
-      BigInt(params.amount),
+      BigInt(params.amount as number), // checked by assertParams
     );
 
     return { allow: true, detail: invoice.fiscalSnapshot.detail };
@@ -505,7 +505,7 @@ export class PaymeService {
     // Payme supplies the authoritative creation time; fall back to ours only if
     // the field is absent, so `create_time` echoes what Payme recorded.
     const createTime = Number(params.time ?? Date.now());
-    const amountTiyin = BigInt(params.amount);
+    const amountTiyin = BigInt(params.amount as number); // checked by assertParams
 
     try {
       const payment = await this.prisma.$transaction(async (tx) => {
@@ -860,8 +860,13 @@ export class PaymeService {
   }
 
   private async orderFromAccount(params: Record<string, any>) {
-    const orderId = params.account?.[this.accountField];
-    if (!orderId)
+    const account = params.account as Record<string, unknown> | null;
+    const orderId = account?.[this.accountField];
+    // Payme sends the order id as a string or number; nothing else names one.
+    if (
+      (typeof orderId !== 'string' && typeof orderId !== 'number') ||
+      !orderId
+    )
       throw new PaymeError(-31050, 'Order not found', this.accountField);
     const order = await this.prisma.order.findUnique({
       where: { id: String(orderId) },

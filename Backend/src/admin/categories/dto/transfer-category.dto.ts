@@ -31,7 +31,9 @@ export class TransferCategoryDto {
   targetCategoryId!: string;
 
   @ApiProperty({ description: 'Why, for the audit trail.' })
-  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.trim() : value,
+  )
   @IsString()
   @IsNotEmpty({ message: 'reason is required' })
   @MaxLength(500)

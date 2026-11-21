@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-argument -- the Prisma harness (test/utils/harness.ts) is untyped by design, like the other harness-based specs */
 // Where the buyer collects their own pickup order (GET /v1/orders/:id): each dealer the
 // order recorded, with the address and place the checkout showed, and only its own lines.
 // A courier order has none and reads no seller for them.

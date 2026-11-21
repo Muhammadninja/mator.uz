@@ -4,7 +4,7 @@ import { Logger, ValidationPipe } from '@nestjs/common';
 import { WsAdapter } from '@nestjs/platform-ws';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import helmet from 'helmet';
-import type { RequestHandler } from 'express';
+import type { Application, RequestHandler } from 'express';
 import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/http-exception.filter';
 import { requestIdMiddleware } from './common/request-id.middleware';
@@ -92,10 +92,10 @@ async function bootstrap() {
   // Trust only a proxy on this machine (Nginx, see docs/DEPLOYMENT.md) so req.ip
   // is the real client's address. Unlike a hop count, a client that reaches the
   // app port directly cannot pick its own address with X-Forwarded-For.
-  app
-    .getHttpAdapter()
-    .getInstance()
-    .set('trust proxy', resolveTrustProxy(process.env.TRUST_PROXY));
+  (app.getHttpAdapter().getInstance() as Application).set(
+    'trust proxy',
+    resolveTrustProxy(process.env.TRUST_PROXY),
+  );
 
   // Correlation id, FIRST in the chain so every subsequent log line — including
   // ones emitted by rejected requests — can carry it. Echoed back as
@@ -124,7 +124,10 @@ async function bootstrap() {
   app.enableCors({
     // Reflect only allowlisted origins. Requests without an Origin header
     // (native mobile app, server-to-server, curl) are always allowed.
-    origin: (origin, callback) => {
+    origin: (
+      origin: string | undefined,
+      callback: (err: Error | null, allow?: boolean) => void,
+    ) => {
       if (!origin || allowlist.includes(origin)) return callback(null, true);
       return callback(null, false);
     },

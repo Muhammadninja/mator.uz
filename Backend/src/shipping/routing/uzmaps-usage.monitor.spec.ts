@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-return -- reads the arguments of a jest spy, which are untyped */
 // Watching the UzMaps allowance, from UzMaps' own count. axios is stubbed.
 
 import { Logger } from '@nestjs/common';

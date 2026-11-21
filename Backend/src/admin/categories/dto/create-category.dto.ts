@@ -41,7 +41,9 @@ export class CreateCategoryDto {
     description: 'Display name in Russian. Required, non-blank.',
     example: 'Турбокомпрессоры',
   })
-  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.trim() : value,
+  )
   @IsString()
   @IsNotEmpty({ message: 'nameRu is required and cannot be empty' })
   @MaxLength(160)
@@ -59,7 +61,9 @@ export class CreateCategoryDto {
       "O'/G' apostrophe forms are allowed.",
     example: 'Turbokompressorlar',
   })
-  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.trim() : value,
+  )
   @IsString()
   @IsNotEmpty({ message: 'nameUz is required and cannot be empty' })
   @IsUzbekLatin({
@@ -74,7 +78,9 @@ export class CreateCategoryDto {
       'slug/id is derived from when no explicit slug is given.',
     example: 'Turbochargers',
   })
-  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.trim() : value,
+  )
   @IsString()
   @IsNotEmpty({ message: 'nameEn is required and cannot be empty' })
   @MaxLength(160)

@@ -121,7 +121,6 @@ describe('Orders smoke', () => {
 
     // …and the order's own total is those same goods plus the fee, which no line carries.
     // The tier is read from the parts before the promo: 200 000 is the 10 000 tier.
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access -- `data` is the untyped mock's argument, as above
     expect(data.serviceFeeUzs).toBe(10000);
     expect(Math.round(data.totalUzs * 100)).toBe(goodsTiyin + 10000 * 100);
   });

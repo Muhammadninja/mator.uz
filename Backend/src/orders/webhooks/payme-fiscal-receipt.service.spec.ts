@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 /**
  * Recording fiscal receipts over an in-memory table that honours the (payment, type)
  * key. It says nothing about PostgreSQL. The concurrent case is staged by forcing the
@@ -320,7 +319,7 @@ describe('PaymeFiscalReceiptService', () => {
     );
   });
 
-  /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unnecessary-type-assertion -- the Prisma double and the JSON-RPC replies are untyped */
+  /* eslint-disable @typescript-eslint/no-unnecessary-type-assertion -- the Prisma double and the JSON-RPC replies are untyped */
   describe('what needs a person: alerts (Phase 3)', () => {
     let alerts: { raise: jest.Mock };
     beforeEach(() => {
@@ -387,5 +386,5 @@ describe('PaymeFiscalReceiptService', () => {
       );
     });
   });
-  /* eslint-enable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unnecessary-type-assertion */
+  /* eslint-enable @typescript-eslint/no-unnecessary-type-assertion */
 });

@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-return -- results are read as the presented order, untyped by design */
 // Checkout idempotency on real PostgreSQL: the unique index, the transaction that writes
 // the order and its key together, and the cart's FOR UPDATE are what make one key one
 // order, so these are proved here against the database itself, not a double.

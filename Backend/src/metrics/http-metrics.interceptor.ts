@@ -73,8 +73,8 @@ export class HttpMetricsInterceptor implements NestInterceptor {
    * or typo-controlled URL — an unmatched path is unbounded by definition.
    */
   private resolveRoute(context: ExecutionContext, req: Request): string {
-    const routePath = (req as Request & { route?: { path?: string } }).route
-      ?.path;
+    // Express types `route` as `any`; read it as unknown and narrow below.
+    const routePath = (req as { route?: { path?: unknown } }).route?.path;
     if (typeof routePath === 'string' && routePath.length > 0) {
       // `baseUrl` carries any prefix the router was mounted under, so a
       // globally-prefixed app still yields the full template.

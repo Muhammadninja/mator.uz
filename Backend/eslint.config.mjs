@@ -43,4 +43,18 @@ export default tseslint.config(
       "prettier/prettier": ["error", { endOfLine: "auto" }],
     },
   },
+  {
+    // Tests drive `any`-typed doubles by design: the Prisma harness
+    // (test/utils/harness.ts), jest mocks and supertest bodies. The
+    // no-unsafe-* family would only report the doubles, never the code under
+    // test, so it stays on for production code alone.
+    files: ['**/*.spec.ts', '**/*-spec.ts', '**/*.test-util.ts', 'test/**/*.ts'],
+    rules: {
+      '@typescript-eslint/no-unsafe-argument': 'off',
+      '@typescript-eslint/no-unsafe-assignment': 'off',
+      '@typescript-eslint/no-unsafe-call': 'off',
+      '@typescript-eslint/no-unsafe-member-access': 'off',
+      '@typescript-eslint/no-unsafe-return': 'off',
+    },
+  },
 );

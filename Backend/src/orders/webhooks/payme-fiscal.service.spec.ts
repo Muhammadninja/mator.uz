@@ -1565,7 +1565,6 @@ describe('platform charge lines', () => {
     expect(gaps.join(' ')).not.toMatch(/VAT/);
   });
 
-  /* eslint-disable @typescript-eslint/no-unsafe-argument -- the Prisma double is typed `any` */
   describe('the service fee’s own line', () => {
     it('is a line of its own, at the stored fee, count 1, under the fee’s codes and Mator’s tax id', async () => {
       stubOrder({ deliveryUzs: 25000, serviceFeeUzs: 20000 });
@@ -1724,8 +1723,6 @@ describe('platform charge lines', () => {
       },
     );
   });
-
-  /* eslint-enable @typescript-eslint/no-unsafe-argument */
 
   // ── the sum Payme itself checks ────────────────────────────────────────────
   it('makes products + delivery + fee add up to the charged amount', async () => {

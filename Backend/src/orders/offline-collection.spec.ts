@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-return, @typescript-eslint/require-await -- the fake client is untyped by design */
+/* eslint-disable @typescript-eslint/require-await -- async fakes stand in for the Prisma calls they replace */
 // FIN-001: on a tracked cash or terminal order, money counts when it is collected.
 import { OrderStatus, PaymentType, Prisma } from '@prisma/client';
 import {

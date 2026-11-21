@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access -- reads the arguments of a jest spy, which are untyped */
 // The UzMaps adapter, against the contract at https://docs.uzmaps.uz/http-routing/.
 // axios is stubbed, so nothing here reaches the network.
 

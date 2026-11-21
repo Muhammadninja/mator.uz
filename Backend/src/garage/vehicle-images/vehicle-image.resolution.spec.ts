@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment -- plan fixtures are untyped by design */
 import { planVehicleImage } from './vehicle-image.resolution';
 import { canonicalIdentityKey } from './vehicle-image.identity';
 import type { CatalogAsset } from './vehicle-image.catalog';

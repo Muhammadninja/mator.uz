@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-call -- the Prisma double and jest matchers are untyped */
 // Looking at the money rather than moving it: one order by whose it is, the tax receipts that
 // need a person, and Payme's statement checked against the refund registry.
 

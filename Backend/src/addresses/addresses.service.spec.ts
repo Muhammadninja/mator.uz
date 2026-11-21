@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-return -- reads the arguments of a jest mock, which are untyped */
 // Integration tests for the user Address CRUD service (Phase 4A). Prisma is
 // mocked — no DB. These guard: ownership scoping (only own addresses), the
 // single-default invariant (transactional promote/demote), first-address auto

@@ -37,7 +37,9 @@ export class SendMessageDto {
   // Trim first so a whitespace-only message ("   ") is rejected as empty
   // (→ 400) instead of slipping past @IsNotEmpty and crashing the LLM call
   // downstream (→ 503).
-  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.trim() : value,
+  )
   @IsString()
   @IsNotEmpty()
   @MaxLength(2000)

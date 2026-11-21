@@ -1,6 +1,6 @@
 import { Injectable, UnauthorizedException, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { OAuth2Client } from 'google-auth-library';
+import { LoginTicket, OAuth2Client } from 'google-auth-library';
 import { AuthProvider } from '@prisma/client';
 import { SocialProfile } from './social-profile.interface';
 import { normalizeEmail } from '../email.util';
@@ -26,7 +26,7 @@ export class GoogleVerifierService {
       throw new UnauthorizedException('Google sign-in is not available');
     }
 
-    let ticket;
+    let ticket: LoginTicket;
     try {
       ticket = await this.client.verifyIdToken({
         idToken,

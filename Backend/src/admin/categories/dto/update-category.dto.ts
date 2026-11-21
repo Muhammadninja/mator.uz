@@ -45,7 +45,9 @@ export class UpdateCategoryDto {
     example: 'Турбокомпрессоры',
   })
   @ValidateIf((_, value) => value !== undefined)
-  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.trim() : value,
+  )
   @IsString()
   @IsNotEmpty({ message: 'nameRu cannot be empty' })
   @MaxLength(160)
@@ -61,7 +63,9 @@ export class UpdateCategoryDto {
     example: 'Turbokompressorlar',
   })
   @ValidateIf((_, value) => value !== undefined)
-  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.trim() : value,
+  )
   @IsString()
   @IsNotEmpty({ message: 'nameUz cannot be empty' })
   @IsUzbekLatin({
@@ -75,7 +79,9 @@ export class UpdateCategoryDto {
     example: 'Turbochargers',
   })
   @ValidateIf((_, value) => value !== undefined)
-  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.trim() : value,
+  )
   @IsString()
   @IsNotEmpty({ message: 'nameEn cannot be empty' })
   @MaxLength(160)

@@ -65,7 +65,8 @@ export class BlueprintGateway
     client.on('pong', () => (client.isAlive = true));
     client.on('message', (raw) => {
       try {
-        if (JSON.parse(raw.toString())?.type === 'ping') {
+        const frame = JSON.parse(raw.toString()) as { type?: unknown } | null;
+        if (frame?.type === 'ping') {
           this.send(client, { type: 'pong', data: { ts: Date.now() } });
         }
       } catch {

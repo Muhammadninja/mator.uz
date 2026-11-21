@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call -- mocked collaborators are untyped */
 import { VehicleImageReconcileService } from './vehicle-image.reconcile.service';
 import { currentIdentityStamp } from './vehicle-images.service';
 

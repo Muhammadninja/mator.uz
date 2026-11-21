@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access -- registry fixtures are mutated as untyped JSON on purpose */
 import { createHash } from 'node:crypto';
 import {
   VEHICLE_IMAGE_CATALOG_SHA256,
