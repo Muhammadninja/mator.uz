@@ -11,7 +11,7 @@
  * all. Every part is filed in the brake system (front pads, discs) or under
  * shock absorbers, and fits a Chevrolet Cobalt, a BYD Song Plus or a
  * Volkswagen Polo. The last two parts are a brandless one and a Bosch one no
- * buyer may see (no photo).
+ * buyer may see (suspended dealer).
  */
 import {
   PartMainCategory,
@@ -98,7 +98,6 @@ function partAt(i: number) {
       id: `p${String(i + 1).padStart(3, '0')}`,
       fits: [CARS[k % 3]],
     }),
-    ...(i === 131 ? { images: [] } : {}),
     title: `${shocks ? 'Shock absorber' : k % 2 ? 'Brake disc' : 'Brake pad'} ${i + 1}`,
     brandId,
     brand,
@@ -115,7 +114,7 @@ function partAt(i: number) {
       ratingAvg: 4.5,
       certified: false,
       lowestPrice: false,
-      status: 'ACTIVE',
+      status: i === 131 ? 'SUSPENDED' : 'ACTIVE',
     },
     oemNumbers: [],
     gmNumbers: [],

@@ -71,8 +71,11 @@ const ROWS: CatalogueRow[] = [
   row('xref_candidate', { gmNumbers: ['96879799'] }),
   row('short_2106', { gmNumbers: ['2106'] }),
   row('short_123', { oemNumbers: ['123'] }),
-  // Same number, but no photo: not listed.
-  row('no_photo', { gmNumbers: ['96879797'], images: [] }),
+  // Same number, but a suspended dealer: not listed.
+  row('suspended', {
+    gmNumbers: ['96879797'],
+    seller: { ...base.seller, status: 'SUSPENDED' },
+  }),
   // Same number, fits a Spark only.
   row('spark_only', {
     gmNumbers: ['96879797'],
@@ -266,9 +269,9 @@ describe('ranking, sorting and pagination', () => {
 });
 
 describe('buyer catalog rules stay in force', () => {
-  it('a part without a photo is never listed, even on an exact number', async () => {
+  it('a part of a suspended dealer is never listed, even on an exact number', async () => {
     const { ids } = await list({ q: '96879797', page_size: 50 });
-    expect(ids).not.toContain('no_photo');
+    expect(ids).not.toContain('suspended');
   });
 
   it('garage vehicle: only parts that fit it, ranked exact first', async () => {

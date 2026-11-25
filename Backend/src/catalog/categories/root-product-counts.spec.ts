@@ -196,8 +196,8 @@ describe('the count under each root', () => {
     const counts = await countsOf();
     // root, springs, shocks, wheel-hubs-bearings, ball and roller bearings
     expect(counts['suspension-and-steering']).toBe(6);
-    // root, front pads, the bucket row
-    expect(counts['brake-system']).toBe(3);
+    // root, front pads, the bucket row, the front pad without a photo
+    expect(counts['brake-system']).toBe(4);
     expect(counts['motor-oil']).toBe(2);
   });
 
@@ -225,9 +225,9 @@ describe('the count under each root', () => {
     );
   });
 
-  it('leaves out what the catalog does not list: no ready photo, a suspended dealer', async () => {
+  it('counts a part without a photo, leaves out a suspended dealer', async () => {
     const counts = await countsOf(PARTS.filter((p) => p.id.startsWith('b_')));
-    expect(counts['brake-system']).toBe(3);
+    expect(counts['brake-system']).toBe(4);
   });
 
   it('is the whole result, not a page of it', async () => {
