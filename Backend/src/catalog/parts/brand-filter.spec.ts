@@ -102,7 +102,7 @@ describe('a brand narrows the whole catalogue before it is paged', () => {
 
   it('never lists or counts a part a buyer may not see, nor a part of no brand', async () => {
     const shown = (await scrolled({ brand: BOSCH })).flatMap(ids);
-    expect(shown).not.toContain('p132'); // Bosch, but no photo
+    expect(shown).not.toContain('p132'); // Bosch, but a suspended dealer
     expect(shown).not.toContain('p131'); // no brand
   });
 });

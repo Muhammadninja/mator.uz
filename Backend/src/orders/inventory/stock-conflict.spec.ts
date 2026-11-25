@@ -176,8 +176,9 @@ describe('a refused checkout', () => {
       sellerId: { not: ORIGIN.sellerId },
       inStock: true,
       seller: { status: { not: 'SUSPENDED' } },
-      images: { isEmpty: false },
+      NOT: { priceUzs: { lte: 0 } },
     });
+    expect(where).not.toHaveProperty('images');
   });
 
   it('with no seller at all, opens one ticket in the existing outbox', async () => {

@@ -13,38 +13,28 @@ import { DealerStatus, Prisma } from '@prisma/client';
  * approval is enforced in the seller bot), so requiring ACTIVE here would hide
  * most of the catalogue.
  *
- * This is the purchase gate (cart). What the catalog LISTS is narrower — see
- * BUYER_LISTED_PART.
+ * This is the purchase gate (cart). What the catalog LISTS is narrower (no
+ * zero price) — see BUYER_LISTED_PART.
  */
 export const BUYER_VISIBLE_PART = {
   seller: { status: { not: DealerStatus.SUSPENDED } },
 } satisfies Prisma.CatalogPartWhereInput;
 
 /**
- * Which parts the buyer CATALOG lists: buyer-visible AND at least one READY
- * photo. A part without one is not deleted or changed (price, stock, seller,
- * fitment stay as they are) — it is just not listed until it has a photo.
+ * Which parts the buyer CATALOG lists: buyer-visible AND a positive price.
  *
- * `catalog_parts.images` only ever holds finished photos. The image pipeline
- * (the BullMQ worker over product_draft_images) marks a photo READY once its
- * processed upload exists; the confirm of a Telegram listing or of a Driver's
- * Village `1C` photo update writes the READY ones into product_images, and the
- * projection copies those here. A photo still queued or processing, or one
- * that FAILED, never leaves its draft. So an empty array means "no ready photo
- * yet" (e.g. a fresh 1C import), and the part is listed by itself once a photo
- * update is projected — there is no status to flip.
- *
- * `isEmpty: false` compiles to `images <> '{}'`, which a NULL array (the column
- * is nullable) never satisfies: NULL is no photo either.
+ * A photo is NOT required. A part with an empty (or NULL) `images` array — e.g.
+ * a fresh Driver's Village 1C import — is listed too, and the app shows its
+ * placeholder image. (From 2026-10-19 photo-less parts were hidden; the owner
+ * reverted that.)
  *
  * For catalog READS: the listing with its counts and facets, the detail,
  * search, typeahead, quick filters, category counts and the AI catalog lookups.
  * The cart keeps BUYER_VISIBLE_PART: whether a part can be bought is order
- * logic, which a photo does not change.
+ * logic.
  */
 export const BUYER_LISTED_PART = {
   ...BUYER_VISIBLE_PART,
-  images: { isEmpty: false },
   // A price of 0 is a data error: the order gate refuses it, so the listing must
   // not offer what checkout will reject.
   NOT: { priceUzs: { lte: 0 } },

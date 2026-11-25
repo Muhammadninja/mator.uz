@@ -821,13 +821,13 @@ async function catalogLists(w: FakePrisma, stockId: number): Promise<boolean> {
   return matchesWhere(row, where);
 }
 
-describe("Driver's Village photo update → buyer catalog: only READY photos list a part", () => {
+describe("Driver's Village photo update → buyer catalog: listed with or without photos, only READY ones reach it", () => {
   const CODE = '96273708';
 
-  it('a position imported without photos stays unlisted while its photos are queued or processing', async () => {
+  it('a position imported without photos is listed, and stays so while its photos are queued or processing', async () => {
     const t = withPosition(CODE);
     expect(projectedImages(t.world, 501)).toEqual([]);
-    expect(await catalogLists(t.world, 501)).toBe(false);
+    expect(await catalogLists(t.world, 501)).toBe(true);
 
     await t.sendAlbum(['p1', 'p2'], `1C ${CODE}`);
     // Enqueued in BullMQ, not processed yet: nothing reaches the product.
@@ -838,24 +838,26 @@ describe("Driver's Village photo update → buyer catalog: only READY photos lis
       'PROCESSING',
     ]);
     expect(t.world.writes).toEqual([]);
-    expect(await catalogLists(t.world, 501)).toBe(false);
+    expect(await catalogLists(t.world, 501)).toBe(true);
   });
 
-  it('failed processing keeps it unlisted: it has no other ready photo', async () => {
+  it('failed processing writes no photo and the part stays listed without one', async () => {
     const t = withPosition(CODE);
     await t.sendAlbum(['p1', 'p2'], `1C ${CODE}`);
     await t.finishImages('FAILED');
     expect(t.world.writes).toEqual([]);
-    expect(await catalogLists(t.world, 501)).toBe(false);
+    expect(projectedImages(t.world, 501)).toEqual([]);
+    expect(await catalogLists(t.world, 501)).toBe(true);
   });
 
-  it('once processing succeeds and the update is confirmed it is listed — no status is written', async () => {
+  it('once processing succeeds and the update is confirmed the photos reach it — no status is written', async () => {
     const t = withPosition(CODE);
     const stocksBefore = structuredClone(t.world.state.stocks);
     await t.sendAlbum(['p1', 'p2'], `1C ${CODE}`);
     const draftId = await t.finishImages('READY');
     // READY photos wait in the draft for the preview's Confirm.
-    expect(await catalogLists(t.world, 501)).toBe(false);
+    expect(projectedImages(t.world, 501)).toEqual([]);
+    expect(await catalogLists(t.world, 501)).toBe(true);
 
     await t.tap(`dvph:ok:${draftId}`);
 

@@ -70,7 +70,7 @@ interface PartSpec {
   compat?: { trimId: string | null; engineId: string | null; status: string }[];
   /** The dealer storefront's DealerStatus (default PENDING, like projections). */
   sellerStatus?: string;
-  /** catalog_parts.images (default: one ready photo, so the catalog lists it). */
+  /** catalog_parts.images (default: one ready photo). */
   images?: string[] | null;
 }
 
