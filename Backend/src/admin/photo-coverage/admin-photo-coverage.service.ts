@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { Prisma, StockSourceSystem } from '@prisma/client';
 import { clampLimit } from '../../common/pagination.util';
 import { PrismaService } from '../../prisma/prisma.service';
+import { loadPhotoRequestCard } from '../../photo-requests/photo-request-card';
 import {
   ListPhotoCoverageQueryDto,
   ListPhotoRequestsQueryDto,
@@ -222,11 +223,17 @@ export class AdminPhotoCoverageService {
     const codes = await this.code1cByPartId(ids);
     const byId = new Map(rows.map((r) => [r.id, r]));
     const totalItems = Number(totals?.parts ?? 0n);
+    // The same details the staff Telegram card carries: what it fits, the
+    // waiting customers' cars, brand, price, seller, link. One page at a time.
+    const details = await Promise.all(
+      groups.map((g) => loadPhotoRequestCard(this.prisma, g.partId, g.partTitle)),
+    );
 
     return {
       success: true,
-      data: groups.map((g) => {
+      data: groups.map((g, i) => {
         const row = byId.get(g.partId);
+        const d = details[i];
         return {
           partId: g.partId,
           partTitle: g.partTitle,
@@ -234,6 +241,16 @@ export class AdminPhotoCoverageService {
           firstRequestedAt: g.firstRequestedAt.toISOString(),
           lastRequestedAt: g.lastRequestedAt.toISOString(),
           part: row ? presentPhotoCoverageRow(row, codes.get(row.id) ?? null) : null,
+          details: {
+            brand: d.brand,
+            condition: d.condition,
+            priceUzs: d.priceUzs,
+            fits: d.fits,
+            moreFits: d.moreFits,
+            customerVehicles: d.customerVehicles,
+            seller: d.seller,
+            url: d.url,
+          },
         };
       }),
       meta: {

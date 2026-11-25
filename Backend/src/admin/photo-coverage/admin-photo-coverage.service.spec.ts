@@ -367,6 +367,13 @@ describe('AdminPhotoCoverageService.requests', () => {
         { partId: 'gone', partTitle: 'Old', waiting: 1n, firstRequestedAt: first, lastRequestedAt: first },
       ]);
     prisma.catalogPart.findMany.mockResolvedValue([PART('p1', { images: [] })]);
+    Object.assign(prisma, {
+      photoRequest: {
+        findMany: jest.fn(async () => [{ vehicleLabel: '2026 BYD Song Plus' }, { vehicleLabel: null }]),
+      },
+      stock: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn(async () => null) },
+    });
+    (prisma.catalogPart as any).findUnique = jest.fn(async () => null);
 
     const res = await service(prisma).requests({});
 
@@ -382,6 +389,7 @@ describe('AdminPhotoCoverageService.requests', () => {
       part: expect.objectContaining({ id: 'p1' }),
     });
     expect(res.data[1].part).toBeNull();
+    expect(res.data[0].details.customerVehicles).toEqual(['2026 BYD Song Plus']);
   });
 
   it('is empty when nobody is waiting', async () => {
