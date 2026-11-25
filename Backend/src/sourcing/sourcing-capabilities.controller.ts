@@ -21,6 +21,8 @@ export class SourcingCapabilitiesController {
       idempotency: true,
       vehicle_context: true,
       multi_part: true,
+      // X-Chat-Intent: request_photo is answered as a photo request (photo-requests).
+      photo_requests: true,
       ticket_submission_enabled: this.config.ticketsEnabled,
     };
   }
