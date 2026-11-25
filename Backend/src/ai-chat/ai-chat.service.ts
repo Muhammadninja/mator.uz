@@ -21,6 +21,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import { sourcingPartKey, sourcingVehicleKey } from '../sourcing/sourcing-keys';
 import { SourcingConfig } from '../sourcing/sourcing.config';
 import { SourcingLifecycleService } from '../sourcing/sourcing-lifecycle.service';
+import { PhotoRequestsService } from '../photo-requests/photo-requests.service';
+import { photoReplyText, type PhotoReply } from '../photo-requests/photo-request.copy';
 import {
   SourcingLeaseLostError,
   SourcingRequestService,
@@ -37,7 +39,10 @@ export type ChatIntent =
   | 'FOUND_IN_STOCK'
   | 'SOURCING_AUTH_REQUIRED'
   | 'SOURCING_UNAVAILABLE'
-  | 'PARTS_RESULT';
+  | 'PARTS_RESULT'
+  | 'PHOTO_REQUESTED'
+  | 'PHOTO_AUTH_REQUIRED'
+  | 'PHOTO_ALREADY_AVAILABLE';
 
 export type ChatPreference = 'cheapest' | 'oem' | 'fastest' | null;
 
@@ -79,6 +84,8 @@ export interface ChatResponse {
   /** Single-part replies keep these for installed apps. */
   items?: StockItem[];
   ticket_id?: string;
+  /** Set only on a reply to a photo request. */
+  photo_request?: { part_id: string; part_title: string; status: PhotoReply };
 }
 
 /** What the controller verified. Nothing here comes from the request body. */
@@ -86,6 +93,8 @@ export interface ChatRequestContext {
   userId: string | null;
   idempotencyKey: string | null;
   selectedVehicleId: string | null;
+  /** The catalog part the customer asked a photo of, from the product page. */
+  photoRequestPartId?: string | null;
 }
 
 /** The model's reading of one message, before matching. */
@@ -147,6 +156,7 @@ export class AiChatService {
     private readonly requests: SourcingRequestService,
     private readonly lifecycle: SourcingLifecycleService,
     private readonly config: SourcingConfig,
+    private readonly photoRequests: PhotoRequestsService,
   ) {
     const apiKey = configService.get<string>('ANTHROPIC_API_KEY');
     // Bounded, so the server answers before the app's timeout.
@@ -163,6 +173,11 @@ export class AiChatService {
     context: ChatRequestContext = { userId: null, idempotencyKey: null, selectedVehicleId: null },
     leaseRetries = 0,
   ): Promise<ChatResponse> {
+    // A photo request names its part exactly, so there is nothing for the model
+    // to read: answering it never calls the LLM or searches stock.
+    if (context.photoRequestPartId) {
+      return this.answerPhotoRequest(dto, context.photoRequestPartId, context.userId);
+    }
     const vehicle = await this.loadSelectedVehicle(context);
     const payloadHash = sourcingPayloadHash(dto.message, vehicle?.id ?? null, dto.vin);
 
@@ -201,6 +216,52 @@ export class AiChatService {
       );
       throw new ServiceUnavailableException('AI chat is temporarily unavailable');
     }
+  }
+
+  /**
+   * "Request a photo" from a product page. A signed-in customer gets the request
+   * recorded (staff are told, and the customer is notified once a photo is up);
+   * a guest is asked to sign in first, since there would be no one to notify.
+   */
+  private async answerPhotoRequest(
+    dto: SendMessageDto,
+    partId: string,
+    userId: string | null,
+  ): Promise<ChatResponse> {
+    const lang = detectConversationLanguage(dto.message, []);
+    const part = await this.photoRequests.lookup(partId);
+    let status: PhotoReply;
+    if (!part) status = 'NOT_FOUND';
+    else if (part.hasPhoto) status = 'ALREADY_AVAILABLE';
+    else if (!userId) status = 'AUTH_REQUIRED';
+    else {
+      const outcome = await this.photoRequests.request(userId, partId);
+      status = outcome.kind === 'REQUESTED' ? 'REQUESTED' : outcome.kind;
+    }
+    const intent: ChatIntent =
+      status === 'REQUESTED'
+        ? 'PHOTO_REQUESTED'
+        : status === 'AUTH_REQUIRED'
+          ? 'PHOTO_AUTH_REQUIRED'
+          : status === 'ALREADY_AVAILABLE'
+            ? 'PHOTO_ALREADY_AVAILABLE'
+            : 'GENERAL_QUESTION';
+    return {
+      reply_text: photoReplyText(status, lang),
+      intent,
+      extracted_data: {
+        brand: null,
+        model: null,
+        year: null,
+        vin: null,
+        part_name: part?.title ?? null,
+        preference: null,
+      },
+      parts: [],
+      all_parts_accounted: false,
+      selected_vehicle: null,
+      ...(part ? { photo_request: { part_id: part.id, part_title: part.title, status } } : {}),
+    };
   }
 
   /** Only the caller's own, undeleted vehicle. Anything else is treated as none. */

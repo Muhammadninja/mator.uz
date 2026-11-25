@@ -7,6 +7,7 @@ import { EventsModule } from '../events/events.module';
 import { SalesModule } from '../sales/sales.module';
 import { TelegramNotifierModule } from '../telegram/telegram-notifier.module';
 import { AuthModule } from '../auth/auth.module';
+import { PhotoRequestsModule } from '../photo-requests/photo-requests.module';
 
 /**
  * Anthropic-backed support/sourcing chat. Runs RAG over the catalog projection
@@ -19,7 +20,7 @@ import { AuthModule } from '../auth/auth.module';
  * ticket to the authenticated customer. Guests can chat, but never create one.
  */
 @Module({
-  imports: [SourcingModule, EventsModule, SalesModule, TelegramNotifierModule, AuthModule],
+  imports: [SourcingModule, EventsModule, SalesModule, TelegramNotifierModule, AuthModule, PhotoRequestsModule],
   providers: [AiChatService, RagSearchService],
   controllers: [AiChatController],
   exports: [AiChatService],

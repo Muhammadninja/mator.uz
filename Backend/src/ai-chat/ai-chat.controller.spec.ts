@@ -50,7 +50,19 @@ describe('AiChatController.sendMessage — request context', () => {
       userId: 'u1',
       idempotencyKey: 'user-123:v1',
       selectedVehicleId: 'v1',
+      photoRequestPartId: null,
     });
+  });
+
+  it('passes a photo request on only with its intent and a well-formed part id', async () => {
+    const ctx = async (...headers: (string | undefined)[]) => {
+      const { controller, aiChat } = build();
+      await controller.sendMessage({ message: 'x' } as never, req, undefined, undefined, ...headers);
+      return (aiChat.processUserMessage as jest.Mock).mock.calls[0][1].photoRequestPartId;
+    };
+    expect(await ctx('request_photo', 'part_stock_6567')).toBe('part_stock_6567');
+    expect(await ctx(undefined, 'part_stock_6567')).toBeNull();
+    expect(await ctx('request_photo', "x' OR 1=1")).toBeNull();
   });
 
   it.each(['short', 'has spaces in it', 'x'.repeat(129)])('rejects request id %s', async (key) => {

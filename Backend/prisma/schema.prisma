@@ -378,6 +378,7 @@ enum NotificationType {
   MARKETING
   SOURCING_OFFER
   SOURCING_STATUS
+  PRODUCT_PHOTO_ADDED
 }
 
 enum AiMessageRole {
@@ -841,6 +842,7 @@ model AppUser {
 
   sourcingRequests SourcingRequest[]
   orderIdempotency OrderIdempotency[]
+  photoRequests    PhotoRequest[]
 
   @@index([deletedAt])
   @@map("app_users")
@@ -1200,37 +1202,37 @@ enum VehicleImageCatalogDiscoveryTrigger {
 /// row is what Garage responses read, so they never wait on the pipeline.
 model VehicleImageIdentity {
   /// SHA-256 hex of the canonical tuple: the pipeline's `identityKey`.
-  identityKey       String               @id @map("identity_key") @db.Char(64)
+  identityKey        String               @id @map("identity_key") @db.Char(64)
   /// The exact legacy 7-field or market-aware 8-field canonical identity sent to the pipeline.
-  identity          Json
+  identity           Json
   /// Display facts sent with it ({manufacturer, model, trim?}).
-  display           Json
-  status            VehicleImageStatus   @default(PENDING)
-  reason            String?              @db.VarChar(64)
-  pipelineStatus    String?              @map("pipeline_status") @db.VarChar(32)
-  pipelineRequestId String?              @map("pipeline_request_id") @db.VarChar(64)
+  display            Json
+  status             VehicleImageStatus   @default(PENDING)
+  reason             String?              @db.VarChar(64)
+  pipelineStatus     String?              @map("pipeline_status") @db.VarChar(32)
+  pipelineRequestId  String?              @map("pipeline_request_id") @db.VarChar(64)
   /// Published (public HTTPS) URL and version; set only once approved and published.
-  imageUrl          String?              @map("image_url") @db.VarChar(2048)
-  imageVersion      Int?                 @map("image_version")
-  imageLicense      String?              @map("image_license") @db.VarChar(80)
-  imageLicenseUrl   String?              @map("image_license_url") @db.VarChar(2048)
-  imageAuthor       String?              @map("image_author") @db.VarChar(500)
-  imageAttribution  String?              @map("image_attribution") @db.VarChar(1000)
-  imageSourcePage   String?              @map("image_source_page") @db.VarChar(2048)
-  imageSourceTitle  String?              @map("image_source_title") @db.VarChar(500)
-  imageModifications String?             @map("image_modifications") @db.VarChar(500)
+  imageUrl           String?              @map("image_url") @db.VarChar(2048)
+  imageVersion       Int?                 @map("image_version")
+  imageLicense       String?              @map("image_license") @db.VarChar(80)
+  imageLicenseUrl    String?              @map("image_license_url") @db.VarChar(2048)
+  imageAuthor        String?              @map("image_author") @db.VarChar(500)
+  imageAttribution   String?              @map("image_attribution") @db.VarChar(1000)
+  imageSourcePage    String?              @map("image_source_page") @db.VarChar(2048)
+  imageSourceTitle   String?              @map("image_source_title") @db.VarChar(500)
+  imageModifications String?              @map("image_modifications") @db.VarChar(500)
   /// Key into the owner-approved bundled vehicle image catalog; null for pipeline publications.
-  catalogAssetKey   String?              @map("catalog_asset_key") @db.VarChar(96)
-  lastSyncedAt      DateTime?            @map("last_synced_at") @db.Timestamptz(3)
-  nextSyncAt        DateTime?            @map("next_sync_at") @db.Timestamptz(3)
+  catalogAssetKey    String?              @map("catalog_asset_key") @db.VarChar(96)
+  lastSyncedAt       DateTime?            @map("last_synced_at") @db.Timestamptz(3)
+  nextSyncAt         DateTime?            @map("next_sync_at") @db.Timestamptz(3)
   /// Last failed pipeline call for this identity (`network:ECONNREFUSED`,
   /// `registry_mismatch`, `http_502`, …) and when; cleared by the next success.
-  lastError         String?              @map("last_error") @db.VarChar(120)
-  lastErrorAt       DateTime?            @map("last_error_at") @db.Timestamptz(3)
-  createdAt         DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt         DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
-  vehicles          Vehicle[]
-  outbox            VehicleImageOutbox[]
+  lastError          String?              @map("last_error") @db.VarChar(120)
+  lastErrorAt        DateTime?            @map("last_error_at") @db.Timestamptz(3)
+  createdAt          DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt          DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
+  vehicles           Vehicle[]
+  outbox             VehicleImageOutbox[]
 
   @@index([nextSyncAt])
   @@map("vehicle_image_identities")
@@ -3258,4 +3260,35 @@ model LegalAcceptance {
   @@index([documentId])
   @@index([userId, documentVersion])
   @@map("legal_acceptances")
+}
+
+enum PhotoRequestStatus {
+  PENDING
+  FULFILLED
+}
+
+/// A customer asking, through Mator AI, for a photo of a catalog part that has
+/// none. Staff hear about it in Telegram; once the part has a photo the
+/// customer gets a PRODUCT_PHOTO_ADDED notification. One row per customer and
+/// part: asking again reuses it. `partId` is not a foreign key on purpose,
+/// because catalog_parts rows are projections that can be rebuilt.
+model PhotoRequest {
+  id                  String             @id @default(uuid()) @db.Uuid
+  userId              String             @map("user_id") @db.Uuid
+  partId              String             @map("part_id") @db.VarChar(64)
+  /// The part's title when asked, for the staff card and the notification.
+  partTitle           String             @map("part_title")
+  status              PhotoRequestStatus @default(PENDING)
+  /// Null until the staff card was delivered; the sweep retries until then.
+  staffNotifiedAt     DateTime?          @map("staff_notified_at")
+  staffNotifyAttempts Int                @default(0) @map("staff_notify_attempts")
+  fulfilledAt         DateTime?          @map("fulfilled_at")
+  createdAt           DateTime           @default(now()) @map("created_at")
+  updatedAt           DateTime           @updatedAt @map("updated_at")
+
+  user AppUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, partId])
+  @@index([status, partId])
+  @@map("photo_requests")
 }

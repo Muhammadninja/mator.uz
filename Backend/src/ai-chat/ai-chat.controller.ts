@@ -16,6 +16,8 @@ import { AiChatService, ChatResponse } from './ai-chat.service';
 import { SendMessageDto } from './dto/send-message.dto';
 
 const REQUEST_ID = /^[A-Za-z0-9:_-]{8,128}$/;
+/** A catalog part id (`part_stock_6567`, seeded ids): see CatalogPart.id. */
+const PRODUCT_ID = /^[A-Za-z0-9_-]{1,64}$/;
 
 @Controller('api/ai-chat')
 export class AiChatController {
@@ -42,6 +44,8 @@ export class AiChatController {
     @Req() req: Request,
     @Headers('idempotency-key') idempotencyKey?: string,
     @Headers('x-selected-vehicle-id') selectedVehicleId?: string,
+    @Headers('x-chat-intent') chatIntent?: string,
+    @Headers('x-product-id') productId?: string,
   ): Promise<ChatResponse> {
     if (idempotencyKey !== undefined && !REQUEST_ID.test(idempotencyKey)) {
       throw new BadRequestException({
@@ -56,6 +60,12 @@ export class AiChatController {
       userId,
       idempotencyKey: idempotencyKey ?? null,
       selectedVehicleId: selectedVehicleId?.slice(0, 64) || null,
+      // Headers, not body fields: the DTO rejects unknown properties, and older
+      // backends simply ignore an unknown header.
+      photoRequestPartId:
+        chatIntent === 'request_photo' && productId && PRODUCT_ID.test(productId)
+          ? productId
+          : null,
     });
   }
 }

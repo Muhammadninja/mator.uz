@@ -55,6 +55,14 @@ function build({ model = {}, ticketsEnabled = true, found = false, vehicle = nul
     release: jest.fn(async () => undefined),
   };
   const lifecycle = { dispatchStaffNotification: jest.fn(async () => undefined) };
+  const photoRequests = {
+    lookup: jest.fn(async (id: string) => ({ id, title: 'Уплотнитель двери', hasPhoto: false })),
+    request: jest.fn(async (_u: string, id: string) => ({
+      kind: 'REQUESTED',
+      partId: id,
+      partTitle: 'Уплотнитель двери',
+    })),
+  };
   const config = {
     ticketsEnabled,
     duplicateWindowMs: 3_600_000,
@@ -69,10 +77,11 @@ function build({ model = {}, ticketsEnabled = true, found = false, vehicle = nul
     requests as never,
     lifecycle as never,
     config as never,
+    photoRequests as never,
   );
   (service as any).client = { messages: { create } };
   jest.spyOn((service as any).logger, 'error').mockImplementation(() => undefined);
-  return { service, create, rag, sourcing, adminEvents, prisma, requests, lifecycle };
+  return { service, create, rag, sourcing, adminEvents, prisma, requests, lifecycle, photoRequests };
 }
 
 const guest = { userId: null, idempotencyKey: null, selectedVehicleId: null };
@@ -399,5 +408,52 @@ describe('no usage limits (SEC-009)', () => {
     requests.commit.mockRejectedValue(new SourcingLeaseLostError());
     await expect(service.processUserMessage(message, signedIn)).rejects.toMatchObject({ status: 503 });
     expect(create).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('photo requests', () => {
+  const ask = { message: 'Пожалуйста, запросите актуальное фото товара: Уплотнитель двери' } as never;
+
+  it('records a signed-in request without calling the model or searching stock', async () => {
+    const { service, create, rag, requests, photoRequests } = build();
+    const reply = await service.processUserMessage(ask, {
+      ...signedIn,
+      photoRequestPartId: 'part_stock_1',
+    });
+    expect(photoRequests.request).toHaveBeenCalledWith('u1', 'part_stock_1');
+    expect(reply.intent).toBe('PHOTO_REQUESTED');
+    expect(reply.reply_text).toMatch(/Запрос на фото принят/);
+    expect(reply.photo_request).toEqual({
+      part_id: 'part_stock_1',
+      part_title: 'Уплотнитель двери',
+      status: 'REQUESTED',
+    });
+    expect(create).not.toHaveBeenCalled();
+    expect(rag.searchInStock).not.toHaveBeenCalled();
+    expect(requests.claim).not.toHaveBeenCalled();
+  });
+
+  it('asks a guest to sign in and records nothing', async () => {
+    const { service, photoRequests } = build();
+    const reply = await service.processUserMessage(ask, { ...guest, photoRequestPartId: 'part_stock_1' });
+    expect(reply.intent).toBe('PHOTO_AUTH_REQUIRED');
+    expect(photoRequests.request).not.toHaveBeenCalled();
+  });
+
+  it('says so when the part already has a photo', async () => {
+    const { service, photoRequests } = build();
+    photoRequests.lookup.mockResolvedValueOnce({ id: 'p', title: 'T', hasPhoto: true });
+    const reply = await service.processUserMessage(ask, { ...signedIn, photoRequestPartId: 'p' });
+    expect(reply.intent).toBe('PHOTO_ALREADY_AVAILABLE');
+    expect(photoRequests.request).not.toHaveBeenCalled();
+  });
+
+  it('answers in Uzbek when asked in Uzbek', async () => {
+    const { service } = build();
+    const reply = await service.processUserMessage(
+      { message: 'Iltimos, mahsulotning dolzarb suratini soʻrang' } as never,
+      { ...signedIn, photoRequestPartId: 'p' },
+    );
+    expect(reply.reply_text).toMatch(/Surat soʻrovi qabul qilindi/);
   });
 });

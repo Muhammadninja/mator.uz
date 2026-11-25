@@ -59,6 +59,8 @@ export class TelegramNotifierService {
   private readonly botToken: string;
   private readonly dealersGroupId: string;
   private readonly escalationChatId: string;
+  /** Where photo requests go: its own chat, else the internal escalation chat. */
+  private readonly photoRequestChatId: string;
   /**
    * URL the «Связаться для доставки» card button opens (a manager's Telegram).
    * Empty → the card is sent without the button. Env-configured, never hardcoded.
@@ -75,6 +77,9 @@ export class TelegramNotifierService {
       config.get<string>('TELEGRAM_DEALERS_GROUP_ID')?.trim() ?? '';
     this.escalationChatId =
       config.get<string>('TELEGRAM_SOURCING_ESCALATION_CHAT_ID')?.trim() ?? '';
+    this.photoRequestChatId =
+      config.get<string>('TELEGRAM_PHOTO_REQUESTS_CHAT_ID')?.trim() ||
+      this.escalationChatId;
     this.managerContactUrl = this.normalizeContactUrl(
       config.get<string>('TELEGRAM_MANAGER_USERNAME'),
     );
@@ -145,6 +150,44 @@ export class TelegramNotifierService {
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
       this.logger.error(`Failed to escalate sourcing ticket ${ticket.id}: ${error}`);
+      return { ok: false, error };
+    }
+  }
+
+  get photoRequestsConfigured(): boolean {
+    return this.botToken !== '' && this.photoRequestChatId !== '';
+  }
+
+  /**
+   * Tell staff a customer wants a photo of a part. Internal chat only: the part
+   * and how many customers are waiting, nothing about who asked.
+   */
+  async sendPhotoRequest(request: {
+    partId: string;
+    partTitle: string;
+    waiting: number;
+  }): Promise<TelegramSendResult> {
+    if (!this.photoRequestsConfigured) {
+      return { ok: false, error: 'Photo request chat not configured' };
+    }
+    const rows = [
+      '📷 <b>Нужно фото товара</b>',
+      '',
+      this.row('Товар', request.partTitle),
+      this.row('Part ID', request.partId),
+      this.row('Ждут фото', request.waiting),
+      '',
+      '<i>Загрузите фото в «Контроль фотографий» — клиент получит уведомление.</i>',
+    ].filter((r): r is string => r !== null);
+    try {
+      await this.bot().telegram.sendMessage(this.photoRequestChatId, rows.join('\n'), {
+        parse_mode: 'HTML',
+        link_preview_options: { is_disabled: true },
+      });
+      return { ok: true };
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Failed to send photo request for ${request.partId}: ${error}`);
       return { ok: false, error };
     }
   }
