@@ -60,3 +60,19 @@ export class ListPhotoCoverageQueryDto {
   @MaxLength(64)
   code1c?: string;
 }
+
+/** Query params for GET /v1/admin/photo-coverage/requests: offset pagination. */
+export class ListPhotoRequestsQueryDto {
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  page?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  limit?: number;
+}

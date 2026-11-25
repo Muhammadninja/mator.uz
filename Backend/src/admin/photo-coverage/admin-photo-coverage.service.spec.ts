@@ -353,3 +353,43 @@ describe('AdminPhotoCoverageController', () => {
     expect(guards).toEqual([AdminJwtGuard, AdminRoleGuard]);
   });
 });
+
+describe('AdminPhotoCoverageService.requests', () => {
+  const first = new Date('2026-11-25T10:00:00Z');
+  const last = new Date('2026-11-25T12:00:00Z');
+
+  it('lists waiting parts, most asked first, with the part as the list shows it', async () => {
+    const prisma = makePrisma();
+    prisma.$queryRaw
+      .mockResolvedValueOnce([{ parts: 2n, requests: 3n }])
+      .mockResolvedValueOnce([
+        { partId: 'p1', partTitle: 'Seal', waiting: 2n, firstRequestedAt: first, lastRequestedAt: last },
+        { partId: 'gone', partTitle: 'Old', waiting: 1n, firstRequestedAt: first, lastRequestedAt: first },
+      ]);
+    prisma.catalogPart.findMany.mockResolvedValue([PART('p1', { images: [] })]);
+
+    const res = await service(prisma).requests({});
+
+    expect(sqlOf(prisma, 1).text).toContain("WHERE status = 'PENDING'");
+    expect(sqlOf(prisma, 1).text).toContain('ORDER BY waiting DESC');
+    expect(res.meta).toEqual({ page: 1, limit: 25, totalItems: 2, totalPages: 1, pendingRequests: 3 });
+    expect(res.data[0]).toMatchObject({
+      partId: 'p1',
+      partTitle: 'Seal',
+      waiting: 2,
+      firstRequestedAt: first.toISOString(),
+      lastRequestedAt: last.toISOString(),
+      part: expect.objectContaining({ id: 'p1' }),
+    });
+    expect(res.data[1].part).toBeNull();
+  });
+
+  it('is empty when nobody is waiting', async () => {
+    const prisma = makePrisma();
+    prisma.$queryRaw.mockResolvedValueOnce([{ parts: 0n, requests: 0n }]).mockResolvedValueOnce([]);
+    const res = await service(prisma).requests({ page: 2, limit: 10 });
+    expect(res.data).toEqual([]);
+    expect(res.meta.totalItems).toBe(0);
+    expect(prisma.catalogPart.findMany).not.toHaveBeenCalled();
+  });
+});

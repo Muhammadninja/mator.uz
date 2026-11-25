@@ -44,7 +44,10 @@ import {
   type PartPhotosContext,
 } from './admin-part-photos.service';
 import { AdminPhotoCoverageService } from './admin-photo-coverage.service';
-import { ListPhotoCoverageQueryDto } from './dto/list-photo-coverage.query.dto';
+import {
+  ListPhotoCoverageQueryDto,
+  ListPhotoRequestsQueryDto,
+} from './dto/list-photo-coverage.query.dto';
 import { PartPhotosVersionDto } from './dto/part-photos.dto';
 
 type AdminRequest = Request & { user: AuthenticatedAdmin };
@@ -110,6 +113,21 @@ export class AdminPhotoCoverageController {
   @ApiBadRequestResponse({ description: 'Invalid query parameter.' })
   list(@Query() query: ListPhotoCoverageQueryDto) {
     return this.coverage.list(query);
+  }
+
+  @Get('requests')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Parts customers asked a photo of, still waiting',
+    description:
+      'Open photo requests made through Mator AI, one row per part, most ' +
+      'asked first. Each row has the part as the parts list shows it (null if ' +
+      'it left the catalog). meta.pendingRequests counts the customers waiting.',
+  })
+  @ApiOkResponse({ description: 'Paginated parts in the standard admin envelope.' })
+  @ApiBadRequestResponse({ description: 'Invalid query parameter.' })
+  requests(@Query() query: ListPhotoRequestsQueryDto) {
+    return this.coverage.requests(query);
   }
 
   // ── one part's photos ──────────────────────────────────────────────────────

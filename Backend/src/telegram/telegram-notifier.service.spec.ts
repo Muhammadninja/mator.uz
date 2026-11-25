@@ -257,3 +257,45 @@ describe('TelegramNotifierService', () => {
     });
   });
 });
+
+describe('TelegramNotifierService.sendPhotoRequest', () => {
+  const make = (env: Record<string, string>) => {
+    const service = new TelegramNotifierService({ get: (k: string) => env[k] } as never);
+    const sendMessage = jest.fn(async () => ({}));
+    (service as any).client = { telegram: { sendMessage } };
+    return { service, sendMessage };
+  };
+  const request = { partId: 'part_stock_1', partTitle: 'Seal <A&B>', waiting: 2 };
+
+  it('posts the part and the waiting count to the photo request chat', async () => {
+    const { service, sendMessage } = make({
+      TELEGRAM_BOT_TOKEN: 't',
+      TELEGRAM_DEALERS_GROUP_ID: 'dealers',
+      TELEGRAM_PHOTO_REQUESTS_CHAT_ID: 'photos',
+    });
+    expect(await service.sendPhotoRequest(request)).toEqual({ ok: true });
+    const [chat, html] = (sendMessage.mock.calls[0] as unknown) as [string, string];
+    expect(chat).toBe('photos');
+    expect(html).toContain('Seal &lt;A&amp;B&gt;');
+    expect(html).toContain('<b>Ждут фото:</b> 2');
+  });
+
+  it('falls back to the escalation chat, then to the dealers group', async () => {
+    const escalation = make({
+      TELEGRAM_BOT_TOKEN: 't',
+      TELEGRAM_DEALERS_GROUP_ID: 'dealers',
+      TELEGRAM_SOURCING_ESCALATION_CHAT_ID: 'staff',
+    });
+    await escalation.service.sendPhotoRequest(request);
+    expect((escalation.sendMessage.mock.calls[0] as unknown[])[0]).toBe('staff');
+
+    const dealers = make({ TELEGRAM_BOT_TOKEN: 't', TELEGRAM_DEALERS_GROUP_ID: 'dealers' });
+    await dealers.service.sendPhotoRequest(request);
+    expect((dealers.sendMessage.mock.calls[0] as unknown[])[0]).toBe('dealers');
+  });
+
+  it('reports a failure without a bot token', async () => {
+    const { service } = make({ TELEGRAM_PHOTO_REQUESTS_CHAT_ID: 'photos' });
+    expect((await service.sendPhotoRequest(request)).ok).toBe(false);
+  });
+});

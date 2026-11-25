@@ -59,7 +59,8 @@ export class TelegramNotifierService {
   private readonly botToken: string;
   private readonly dealersGroupId: string;
   private readonly escalationChatId: string;
-  /** Where photo requests go: its own chat, else the internal escalation chat. */
+  /** Where photo requests go: its own chat, else the escalation chat, else the
+   *  dealers group (sellers there listed these parts and can add the photo). */
   private readonly photoRequestChatId: string;
   /**
    * URL the «Связаться для доставки» card button opens (a manager's Telegram).
@@ -79,7 +80,8 @@ export class TelegramNotifierService {
       config.get<string>('TELEGRAM_SOURCING_ESCALATION_CHAT_ID')?.trim() ?? '';
     this.photoRequestChatId =
       config.get<string>('TELEGRAM_PHOTO_REQUESTS_CHAT_ID')?.trim() ||
-      this.escalationChatId;
+      this.escalationChatId ||
+      this.dealersGroupId;
     this.managerContactUrl = this.normalizeContactUrl(
       config.get<string>('TELEGRAM_MANAGER_USERNAME'),
     );
@@ -177,7 +179,7 @@ export class TelegramNotifierService {
       this.row('Part ID', request.partId),
       this.row('Ждут фото', request.waiting),
       '',
-      '<i>Загрузите фото в «Контроль фотографий» — клиент получит уведомление.</i>',
+      '<i>Как только у товара появится фото, клиенты получат уведомление.</i>',
     ].filter((r): r is string => r !== null);
     try {
       await this.bot().telegram.sendMessage(this.photoRequestChatId, rows.join('\n'), {

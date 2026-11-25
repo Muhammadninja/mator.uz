@@ -4,6 +4,7 @@ import { clampLimit } from '../../common/pagination.util';
 import { PrismaService } from '../../prisma/prisma.service';
 import {
   ListPhotoCoverageQueryDto,
+  ListPhotoRequestsQueryDto,
   PhotoCoverageFilter,
 } from './dto/list-photo-coverage.query.dto';
 import {
@@ -179,6 +180,68 @@ export class AdminPhotoCoverageService {
         limit,
         totalItems,
         totalPages: Math.ceil(totalItems / limit),
+      },
+    };
+  }
+
+  /**
+   * Parts customers asked a photo of through Mator AI and still wait for, most
+   * asked first. Each row carries the part as the parts list shows it (null when
+   * the part has left the catalog), so the console opens the same photo editor.
+   * Uploading a photo closes the requests: the photo-requests sweep notifies the
+   * customers and the part leaves this list.
+   */
+  async requests(query: ListPhotoRequestsQueryDto) {
+    const page = query.page ?? 1;
+    const limit = clampLimit(query.limit, DEFAULT_LIMIT, MAX_LIMIT);
+    const offset = (page - 1) * limit;
+
+    const [totals] = await this.prisma.$queryRaw<{ parts: bigint; requests: bigint }[]>(
+      Prisma.sql`SELECT COUNT(DISTINCT part_id)::bigint AS parts, COUNT(*)::bigint AS requests
+      FROM photo_requests WHERE status = 'PENDING'`,
+    );
+    const groups = await this.prisma.$queryRaw<
+      { partId: string; partTitle: string; waiting: bigint; firstRequestedAt: Date; lastRequestedAt: Date }[]
+    >(
+      Prisma.sql`SELECT part_id AS "partId", MAX(part_title) AS "partTitle", COUNT(*)::bigint AS waiting,
+             MIN(created_at) AS "firstRequestedAt", MAX(created_at) AS "lastRequestedAt"
+      FROM photo_requests
+      WHERE status = 'PENDING'
+      GROUP BY part_id
+      ORDER BY waiting DESC, "lastRequestedAt" DESC, part_id ASC
+      LIMIT ${limit} OFFSET ${offset}`,
+    );
+
+    const ids = groups.map((g) => g.partId);
+    const rows = ids.length
+      ? await this.prisma.catalogPart.findMany({
+          where: { id: { in: ids } },
+          select: PHOTO_COVERAGE_ROW_SELECT,
+        })
+      : [];
+    const codes = await this.code1cByPartId(ids);
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    const totalItems = Number(totals?.parts ?? 0n);
+
+    return {
+      success: true,
+      data: groups.map((g) => {
+        const row = byId.get(g.partId);
+        return {
+          partId: g.partId,
+          partTitle: g.partTitle,
+          waiting: Number(g.waiting),
+          firstRequestedAt: g.firstRequestedAt.toISOString(),
+          lastRequestedAt: g.lastRequestedAt.toISOString(),
+          part: row ? presentPhotoCoverageRow(row, codes.get(row.id) ?? null) : null,
+        };
+      }),
+      meta: {
+        page,
+        limit,
+        totalItems,
+        totalPages: Math.ceil(totalItems / limit),
+        pendingRequests: Number(totals?.requests ?? 0n),
       },
     };
   }
