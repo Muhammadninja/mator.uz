@@ -3278,6 +3278,8 @@ model PhotoRequest {
   partId              String             @map("part_id") @db.VarChar(64)
   /// The part's title when asked, for the staff card and the notification.
   partTitle           String             @map("part_title")
+  /// The customer's selected garage car when they asked, e.g. "2026 BYD Song Plus".
+  vehicleLabel        String?            @map("vehicle_label") @db.VarChar(160)
   status              PhotoRequestStatus @default(PENDING)
   /// Null until the staff card was delivered; the sweep retries until then.
   staffNotifiedAt     DateTime?          @map("staff_notified_at")

@@ -5,6 +5,7 @@ import { NotificationType, PhotoRequestStatus, Prisma } from '@prisma/client';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { TelegramNotifierService } from '../telegram/telegram-notifier.service';
+import { loadPhotoRequestCard } from './photo-request-card';
 import { photoAddedCopy } from './photo-request.copy';
 
 export type PhotoRequestOutcome =
@@ -45,8 +46,16 @@ export class PhotoRequestsService {
     return part ? { id: part.id, title: part.title, hasPhoto: part.images.length > 0 } : null;
   }
 
-  /** Record the request. Asking again while one is open changes nothing. */
-  async request(userId: string, partId: string): Promise<PhotoRequestOutcome> {
+  /**
+   * Record the request. Asking again while one is open sends no second card; it
+   * only keeps the customer's car up to date. `vehicleLabel` is the car selected
+   * in their garage, so staff know which vehicle the photo is for.
+   */
+  async request(
+    userId: string,
+    partId: string,
+    vehicleLabel: string | null = null,
+  ): Promise<PhotoRequestOutcome> {
     const part = await this.lookup(partId);
     if (!part) return { kind: 'NOT_FOUND' };
     if (part.hasPhoto) {
@@ -55,15 +64,19 @@ export class PhotoRequestsService {
 
     const existing = await this.prisma.photoRequest.findUnique({
       where: { userId_partId: { userId, partId } },
-      select: { status: true },
+      select: { id: true, status: true, vehicleLabel: true },
     });
     if (existing?.status === PhotoRequestStatus.PENDING) {
+      if (vehicleLabel && vehicleLabel !== existing.vehicleLabel) {
+        await this.prisma.photoRequest.update({ where: { id: existing.id }, data: { vehicleLabel } });
+      }
       return { kind: 'REQUESTED', partId: part.id, partTitle: part.title };
     }
 
     // New, or fulfilled earlier and the photos have since been removed.
     const fresh = {
       partTitle: part.title,
+      vehicleLabel,
       status: PhotoRequestStatus.PENDING,
       staffNotifiedAt: null,
       staffNotifyAttempts: 0,
@@ -125,10 +138,8 @@ export class PhotoRequestsService {
       select: { partId: true, partTitle: true },
     });
     if (!row) return;
-    const waiting = await this.prisma.photoRequest.count({
-      where: { partId: row.partId, status: PhotoRequestStatus.PENDING },
-    });
-    const result = await this.telegram.sendPhotoRequest({ ...row, waiting });
+    const card = await loadPhotoRequestCard(this.prisma, row.partId, row.partTitle);
+    const result = await this.telegram.sendPhotoRequest(card);
     if (result.ok) {
       await this.prisma.photoRequest.update({
         where: { id },

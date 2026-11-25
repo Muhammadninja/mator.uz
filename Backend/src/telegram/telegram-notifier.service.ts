@@ -53,6 +53,33 @@ interface ExtractedFields {
  * a deployment without the group configured degrades gracefully rather than
  * crashing the chat.
  */
+/** What a photo-request card shows. Built by photo-requests/photo-request-card. */
+export interface PhotoRequestCard {
+  partId: string;
+  partTitle: string;
+  brand: string | null;
+  oemNumbers: string[];
+  gmNumbers: string[];
+  category: string | null;
+  condition: string | null;
+  priceUzs: number | null;
+  /** Up to a few "Make Model" fitments; `moreFits` counts the rest. */
+  fits: string[];
+  moreFits: number;
+  /** Cars selected in the waiting customers' garages, e.g. "2026 BYD Song Plus". */
+  customerVehicles: string[];
+  seller: string | null;
+  code1c: string | null;
+  waiting: number;
+  url: string | null;
+}
+
+const CONDITION_RU: Record<string, string> = {
+  NEW: 'новая',
+  USED: 'б/у',
+  REFURBISHED: 'восстановленная',
+};
+
 @Injectable()
 export class TelegramNotifierService {
   private readonly logger = new Logger(TelegramNotifierService.name);
@@ -161,37 +188,55 @@ export class TelegramNotifierService {
   }
 
   /**
-   * Tell staff a customer wants a photo of a part. Internal chat only: the part
-   * and how many customers are waiting, nothing about who asked.
+   * Tell staff a customer wants a photo of a part, with enough to find it: what
+   * it is, what it fits, the waiting customers' cars, seller, 1C code and a link.
+   * Nothing about who asked.
    */
-  async sendPhotoRequest(request: {
-    partId: string;
-    partTitle: string;
-    waiting: number;
-  }): Promise<TelegramSendResult> {
+  async sendPhotoRequest(card: PhotoRequestCard): Promise<TelegramSendResult> {
     if (!this.photoRequestsConfigured) {
       return { ok: false, error: 'Photo request chat not configured' };
     }
-    const rows = [
-      '📷 <b>Нужно фото товара</b>',
-      '',
-      this.row('Товар', request.partTitle),
-      this.row('Part ID', request.partId),
-      this.row('Ждут фото', request.waiting),
-      '',
-      '<i>Как только у товара появится фото, клиенты получат уведомление.</i>',
-    ].filter((r): r is string => r !== null);
     try {
-      await this.bot().telegram.sendMessage(this.photoRequestChatId, rows.join('\n'), {
+      await this.bot().telegram.sendMessage(this.photoRequestChatId, this.formatPhotoRequest(card), {
         parse_mode: 'HTML',
         link_preview_options: { is_disabled: true },
       });
       return { ok: true };
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
-      this.logger.error(`Failed to send photo request for ${request.partId}: ${error}`);
+      this.logger.error(`Failed to send photo request for ${card.partId}: ${error}`);
       return { ok: false, error };
     }
+  }
+
+  formatPhotoRequest(card: PhotoRequestCard): string {
+    const join = (values: string[]) => (values.length > 0 ? values.join(', ') : null);
+    const fits = card.fits.length
+      ? `${card.fits.join(', ')}${card.moreFits > 0 ? ` (+${card.moreFits})` : ''}`
+      : null;
+    const rows = [
+      '📷 <b>Нужно фото товара</b>',
+      '',
+      this.row('Товар', card.partTitle),
+      this.row('Бренд', card.brand),
+      this.row('OEM', join(card.oemNumbers)),
+      this.row('GM', join(card.gmNumbers)),
+      this.row('Категория', card.category),
+      this.row('Состояние', card.condition ? CONDITION_RU[card.condition] ?? card.condition : null),
+      this.row('Подходит к', fits),
+      this.row('Авто клиентов', join(card.customerVehicles)),
+      this.row(
+        'Цена',
+        card.priceUzs !== null ? `${card.priceUzs.toLocaleString('ru-RU')} сум` : null,
+      ),
+      this.row('Продавец', card.seller),
+      this.row('Код 1С', card.code1c),
+      this.row('Ждут фото', card.waiting),
+      card.url ? `<a href="${this.escape(card.url)}">Открыть товар</a>` : null,
+      '',
+      `<i>Part ID ${this.escape(card.partId)}. Как только у товара появится фото, клиенты получат уведомление.</i>`,
+    ];
+    return rows.filter((r): r is string => r !== null).join('\n');
   }
 
   /**

@@ -265,7 +265,23 @@ describe('TelegramNotifierService.sendPhotoRequest', () => {
     (service as any).client = { telegram: { sendMessage } };
     return { service, sendMessage };
   };
-  const request = { partId: 'part_stock_1', partTitle: 'Seal <A&B>', waiting: 2 };
+  const request = {
+    partId: 'part_stock_1',
+    partTitle: 'Seal <A&B>',
+    brand: 'Chevrolet',
+    oemNumbers: ['94779211'],
+    gmNumbers: [],
+    category: 'Кузов и экстерьер',
+    condition: 'NEW',
+    priceUzs: 144000,
+    fits: ['Chevrolet Cobalt', 'Chevrolet Nexia 3'],
+    moreFits: 2,
+    customerVehicles: ['2026 BYD Song Plus'],
+    seller: 'Driver’s Village',
+    code1c: '00-0012',
+    waiting: 2,
+    url: 'https://mator.uz/p/part_stock_1',
+  };
 
   it('posts the part and the waiting count to the photo request chat', async () => {
     const { service, sendMessage } = make({
@@ -278,6 +294,15 @@ describe('TelegramNotifierService.sendPhotoRequest', () => {
     expect(chat).toBe('photos');
     expect(html).toContain('Seal &lt;A&amp;B&gt;');
     expect(html).toContain('<b>Ждут фото:</b> 2');
+    expect(html).toContain('<b>Бренд:</b> Chevrolet');
+    expect(html).toContain('<b>OEM:</b> 94779211');
+    expect(html).toContain('<b>Подходит к:</b> Chevrolet Cobalt, Chevrolet Nexia 3 (+2)');
+    expect(html).toContain('<b>Авто клиентов:</b> 2026 BYD Song Plus');
+    expect(html).toContain('<b>Состояние:</b> новая');
+    expect(html).toContain('<b>Код 1С:</b> 00-0012');
+    expect(html).toContain('<a href="https://mator.uz/p/part_stock_1">Открыть товар</a>');
+    // Empty fields are left out rather than shown as blanks.
+    expect(html).not.toContain('<b>GM:</b>');
   });
 
   it('falls back to the escalation chat, then to the dealers group', async () => {

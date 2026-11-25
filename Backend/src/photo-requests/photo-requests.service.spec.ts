@@ -14,6 +14,7 @@ function build(part: { id: string; title: string; images: string[] } | null) {
       findMany: jest.fn(async () => []),
     },
     $queryRaw: jest.fn(async (): Promise<any[]> => []),
+    stock: { findFirst: jest.fn(async () => null) },
   };
   const telegram = { sendPhotoRequest: jest.fn(async () => ({ ok: true })) };
   const notifications = { emit: jest.fn(async () => ({})) };
@@ -32,22 +33,27 @@ describe('PhotoRequestsService.request', () => {
     prisma.photoRequest.findUnique
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce({ partId: 'p1', partTitle: 'Seal' });
-    const outcome = await service.request('u1', 'p1');
+    prisma.catalogPart.findUnique
+      .mockResolvedValueOnce({ id: 'p1', title: 'Seal', images: [] })
+      .mockResolvedValueOnce(null);
+    prisma.photoRequest.findMany.mockResolvedValueOnce([{ vehicleLabel: '2026 BYD Song Plus' }] as never);
+    const outcome = await service.request('u1', 'p1', '2026 BYD Song Plus');
     expect(outcome).toEqual({ kind: 'REQUESTED', partId: 'p1', partTitle: 'Seal' });
-    expect(prisma.photoRequest.upsert).toHaveBeenCalled();
+    expect(prisma.photoRequest.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ create: expect.objectContaining({ vehicleLabel: '2026 BYD Song Plus' }) }),
+    );
     await flush();
-    expect(telegram.sendPhotoRequest).toHaveBeenCalledWith({
-      partId: 'p1',
-      partTitle: 'Seal',
-      waiting: 2,
-    });
+    expect(telegram.sendPhotoRequest).toHaveBeenCalledWith(
+      expect.objectContaining({ partId: 'p1', partTitle: 'Seal', waiting: 1, customerVehicles: ['2026 BYD Song Plus'] }),
+    );
   });
 
-  it('does not repeat an open request', async () => {
+  it('does not repeat an open request, only updates the car', async () => {
     const { service, prisma, telegram } = build({ id: 'p1', title: 'Seal', images: [] });
-    prisma.photoRequest.findUnique.mockResolvedValueOnce({ status: PhotoRequestStatus.PENDING });
-    expect((await service.request('u1', 'p1')).kind).toBe('REQUESTED');
+    prisma.photoRequest.findUnique.mockResolvedValueOnce({ id: 'pr1', status: PhotoRequestStatus.PENDING, vehicleLabel: null });
+    expect((await service.request('u1', 'p1', 'Chevrolet Cobalt 2020')).kind).toBe('REQUESTED');
     expect(prisma.photoRequest.upsert).not.toHaveBeenCalled();
+    expect(prisma.photoRequest.update).toHaveBeenCalledWith({ where: { id: 'pr1' }, data: { vehicleLabel: 'Chevrolet Cobalt 2020' } });
     await flush();
     expect(telegram.sendPhotoRequest).not.toHaveBeenCalled();
   });

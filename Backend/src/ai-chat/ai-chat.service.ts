@@ -176,7 +176,8 @@ export class AiChatService {
     // A photo request names its part exactly, so there is nothing for the model
     // to read: answering it never calls the LLM or searches stock.
     if (context.photoRequestPartId) {
-      return this.answerPhotoRequest(dto, context.photoRequestPartId, context.userId);
+      const car = await this.loadSelectedVehicle(context);
+      return this.answerPhotoRequest(dto, context.photoRequestPartId, context.userId, car?.label ?? null);
     }
     const vehicle = await this.loadSelectedVehicle(context);
     const payloadHash = sourcingPayloadHash(dto.message, vehicle?.id ?? null, dto.vin);
@@ -227,6 +228,7 @@ export class AiChatService {
     dto: SendMessageDto,
     partId: string,
     userId: string | null,
+    vehicleLabel: string | null,
   ): Promise<ChatResponse> {
     const lang = detectConversationLanguage(dto.message, []);
     const part = await this.photoRequests.lookup(partId);
@@ -235,7 +237,7 @@ export class AiChatService {
     else if (part.hasPhoto) status = 'ALREADY_AVAILABLE';
     else if (!userId) status = 'AUTH_REQUIRED';
     else {
-      const outcome = await this.photoRequests.request(userId, partId);
+      const outcome = await this.photoRequests.request(userId, partId, vehicleLabel);
       status = outcome.kind === 'REQUESTED' ? 'REQUESTED' : outcome.kind;
     }
     const intent: ChatIntent =

@@ -420,7 +420,7 @@ describe('photo requests', () => {
       ...signedIn,
       photoRequestPartId: 'part_stock_1',
     });
-    expect(photoRequests.request).toHaveBeenCalledWith('u1', 'part_stock_1');
+    expect(photoRequests.request).toHaveBeenCalledWith('u1', 'part_stock_1', null);
     expect(reply.intent).toBe('PHOTO_REQUESTED');
     expect(reply.reply_text).toMatch(/Запрос на фото принят/);
     expect(reply.photo_request).toEqual({
@@ -431,6 +431,17 @@ describe('photo requests', () => {
     expect(create).not.toHaveBeenCalled();
     expect(rag.searchInStock).not.toHaveBeenCalled();
     expect(requests.claim).not.toHaveBeenCalled();
+  });
+
+  it('records the car selected in the garage, so staff know which vehicle', async () => {
+    const { service, photoRequests } = build({ vehicle: VEHICLE });
+    await service.processUserMessage(ask, {
+      ...signedIn,
+      selectedVehicleId: 'v1',
+      photoRequestPartId: 'part_stock_1',
+    });
+    const [, , label] = photoRequests.request.mock.calls[0] as unknown as [string, string, string];
+    expect(label).toMatch(/Cobalt/);
   });
 
   it('asks a guest to sign in and records nothing', async () => {
