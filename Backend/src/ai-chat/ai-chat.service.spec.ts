@@ -459,6 +459,15 @@ describe('photo requests', () => {
     expect(photoRequests.request).not.toHaveBeenCalled();
   });
 
+  it('answers in English when the app is in English, despite the Russian product name', async () => {
+    const { service } = build();
+    const reply = await service.processUserMessage(
+      { message: 'Please request a current photo of this product:\nProduct: Уплотнитель двери' } as never,
+      { ...signedIn, photoRequestPartId: 'p' },
+    );
+    expect(reply.reply_text).toBe("Photo request received. We'll notify you when the photo is available.");
+  });
+
   it('answers in Uzbek when asked in Uzbek', async () => {
     const { service } = build();
     const reply = await service.processUserMessage(

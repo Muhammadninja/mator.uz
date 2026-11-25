@@ -22,7 +22,11 @@ import { sourcingPartKey, sourcingVehicleKey } from '../sourcing/sourcing-keys';
 import { SourcingConfig } from '../sourcing/sourcing.config';
 import { SourcingLifecycleService } from '../sourcing/sourcing-lifecycle.service';
 import { PhotoRequestsService } from '../photo-requests/photo-requests.service';
-import { photoReplyText, type PhotoReply } from '../photo-requests/photo-request.copy';
+import {
+  photoReplyLanguage,
+  photoReplyText,
+  type PhotoReply,
+} from '../photo-requests/photo-request.copy';
 import {
   SourcingLeaseLostError,
   SourcingRequestService,
@@ -230,7 +234,7 @@ export class AiChatService {
     userId: string | null,
     vehicleLabel: string | null,
   ): Promise<ChatResponse> {
-    const lang = detectConversationLanguage(dto.message, []);
+    const lang = photoReplyLanguage(dto.message);
     const part = await this.photoRequests.lookup(partId);
     let status: PhotoReply;
     if (!part) status = 'NOT_FOUND';
