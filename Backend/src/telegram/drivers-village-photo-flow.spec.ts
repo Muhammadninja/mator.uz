@@ -15,7 +15,6 @@ import {
 } from '../../test/utils/dv-photo-world';
 import { makeFakeRedis } from '../../test/utils/fake-redis';
 import { createPrismaMock } from '../../test/utils/harness';
-import { FixedWindowRateLimiter } from '../redis/rate-limiter.service';
 import { matchesWhere } from '../catalog/compatibility/where-eval.test-util';
 import { PartsService } from '../catalog/parts/parts.service';
 import { CatalogProjectionService } from '../catalog/projection/catalog-projection.service';
@@ -31,7 +30,7 @@ import { TelegramService } from './telegram.service';
 
 const USER = 42;
 
-function setup(config: Record<string, string> = {}, autoStart = true) {
+function setup(autoStart = true) {
   const redis = makeFakeRedis();
   const world = new FakePrisma();
   const drafts = new FakeDrafts(world);
@@ -108,11 +107,7 @@ function setup(config: Record<string, string> = {}, autoStart = true) {
       world.prisma,
       drafts as unknown as ProductDraftService,
     ),
-    dvLimits: new DvPhotoLimits(
-      redis as never,
-      new FixedWindowRateLimiter(redis as never),
-      { get: (key: string) => config[key] } as never,
-    ),
+    dvLimits: new DvPhotoLimits(redis as never),
     bot: {
       action: (trigger: unknown, fn: (ctx: any) => Promise<void>) =>
         actions.push({ trigger, fn }),
@@ -894,8 +889,8 @@ describe("Driver's Village photo update → buyer catalog: only READY photos lis
 describe("Driver's Village photo update: rate limits and confirmation (SEC-004)", () => {
   const CODE = '96273708';
   const ALBUM = `1C ${CODE}`;
-  const position = (config: Record<string, string> = {}, autoStart = false) => {
-    const t = setup(config, autoStart);
+  const position = (autoStart = false) => {
+    const t = setup(autoStart);
     t.world.addDvPosition({
       stockId: 501,
       productId: 101,
@@ -905,7 +900,7 @@ describe("Driver's Village photo update: rate limits and confirmation (SEC-004)"
     return t;
   };
   it('stays open: an unregistered Telegram user gets through to the gallery', async () => {
-    const t = position({}, true);
+    const t = position(true);
     t.svc.sellers.findByTgId.mockResolvedValue(null);
 
     await t.sendPhoto('p1', ALBUM, 777);
@@ -930,7 +925,7 @@ describe("Driver's Village photo update: rate limits and confirmation (SEC-004)"
     });
 
     it('an unknown code never reaches a confirm button', async () => {
-      const t = setup({}, false);
+      const t = setup(false);
 
       await t.sendPhoto('p1', '1C 11112222');
 
@@ -962,7 +957,7 @@ describe("Driver's Village photo update: rate limits and confirmation (SEC-004)"
     });
 
     it('sets no daily FLUX quota: job counts never stop a sender', async () => {
-      const t = position({ DV_PHOTO_ALBUMS_PER_HOUR: '100' });
+      const t = position();
       // 310 images, past both of the removed caps (60 per sender, 300 in all).
       for (let i = 0; i < 31; i++) {
         await t.svc.handleDvPhotos(
@@ -1040,69 +1035,48 @@ describe("Driver's Village photo update: rate limits and confirmation (SEC-004)"
     });
   });
 
-  describe('per-sender limits', () => {
-    it('throttles albums past the hourly limit, before any lookup', async () => {
-      const t = position({ DV_PHOTO_ALBUMS_PER_HOUR: '2' });
+  describe('no rate limit', () => {
+    it('never throttles albums from one sender', async () => {
+      const t = position();
       const lookup = jest.spyOn(t.svc.dvPhotos, 'resolvePosition');
-      await t.sendAlbum(['p1'], ALBUM, 0);
-      await t.sendAlbum(['p2'], ALBUM, 0);
 
-      await t.sendAlbum(['p3'], ALBUM, 0);
+      for (let i = 0; i < 50; i++) await t.sendAlbum([`p${i}`], ALBUM, 0);
 
-      expect(t.replies.at(-1)).toContain('Слишком много');
-      expect(lookup).toHaveBeenCalledTimes(2);
-      expect(t.startPrompts).toHaveLength(2);
+      expect(lookup).toHaveBeenCalledTimes(50);
+      expect(t.startPrompts).toHaveLength(50);
+      expect(t.replies.join('\n')).not.toContain('Слишком много');
+      expect(
+        [...t.redis.store.keys()].filter((k) => k.startsWith('rate:')),
+      ).toEqual([]);
     });
 
-    it('one sender’s albums do not limit another', async () => {
-      const t = position({ DV_PHOTO_ALBUMS_PER_HOUR: '1' });
-      await t.sendPhoto('p1', ALBUM, 100);
-      await t.sendPhoto('p2', ALBUM, 200);
-
-      expect(t.startPrompts.map((p) => p.from)).toEqual([100, 200]);
-    });
-
-    it('a failed lookup gives the album back', async () => {
-      const t = position({ DV_PHOTO_ALBUMS_PER_HOUR: '1' });
-      jest
-        .spyOn(t.svc.dvPhotos, 'resolvePosition')
-        .mockRejectedValueOnce(new Error('db down'));
-
-      await t.sendAlbum(['p1'], ALBUM, 0);
-      await t.sendAlbum(['p2'], ALBUM, 0);
-
-      expect(t.startPrompts).toHaveLength(1);
-    });
-
-    it('rate-limits the list shown for an ambiguous code', async () => {
-      const t = position({ DV_PHOTO_AMBIGUOUS_PER_HOUR: '1' });
+    it('never throttles the list shown for an ambiguous code', async () => {
+      const t = position();
       jest.spyOn(t.svc.dvPhotos, 'resolvePosition').mockResolvedValue({
         kind: 'ambiguous',
         positions: [
-          { code1c: 'SECRET-A', title: 'A' },
-          { code1c: 'SECRET-B', title: 'B' },
+          { code1c: 'CODE-A', title: 'A' },
+          { code1c: 'CODE-B', title: 'B' },
         ],
       });
 
-      await t.sendAlbum(['p1'], ALBUM, 0);
-      expect(t.replies.at(-1)).toContain('SECRET-A');
-
-      await t.sendAlbum(['p2'], ALBUM, 0);
-      expect(t.replies.at(-1)).toContain('Слишком много');
-      expect(t.replies.at(-1)).not.toContain('SECRET');
+      for (let i = 0; i < 10; i++) {
+        await t.sendAlbum([`p${i}`], ALBUM, 0);
+        expect(t.replies.at(-1)).toContain('CODE-A');
+      }
     });
   });
 
   describe('failures', () => {
-    it('Redis down at the album: nothing is looked up or queued', async () => {
+    it('Redis down at the album: nothing is offered or queued', async () => {
       const t = position();
-      t.redis.incr.mockRejectedValue(new Error('connection lost'));
-      const lookup = jest.spyOn(t.svc.dvPhotos, 'resolvePosition');
+      t.redis.setEx.mockRejectedValue(new Error('connection lost'));
 
       await t.sendAlbum(['p1'], ALBUM, 0);
 
       expect(t.replies.at(-1)).toContain('временно недоступна');
-      expect(lookup).not.toHaveBeenCalled();
+      expect(t.startPrompts).toHaveLength(0);
+      expect(t.svc.queue.enqueueImage).not.toHaveBeenCalled();
     });
 
     it('Redis down at the start: nothing is queued', async () => {
@@ -1139,12 +1113,14 @@ describe("Driver's Village photo update: rate limits and confirmation (SEC-004)"
     });
   });
 
-  it('an ordinary listing photo never touches these limits', async () => {
+  it('an ordinary listing photo never enters the photo-update path', async () => {
     const t = setup();
     t.svc.wizard.start(USER, 'ru');
 
     await t.sendPhoto('p1');
 
-    expect(t.redis.incr).not.toHaveBeenCalled();
+    expect(
+      [...t.redis.store.keys()].filter((k) => k.startsWith('dv:photo:')),
+    ).toEqual([]);
   });
 });

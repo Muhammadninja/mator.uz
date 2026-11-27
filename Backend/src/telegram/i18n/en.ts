@@ -226,7 +226,6 @@ export const EN: BotStrings = {
     'Position {code}\n{title}\nPhotos received: {count} (the product has {current} now).\n\nTap "Process photos" to start. The product changes only after you confirm the result.',
   'dv.confirmExpired':
     'This request has expired. Send the photos with the 1C code again.',
-  'dv.rateLimited': 'Too many photo update requests. Please try again later.',
   'dv.unavailable':
     'Photo processing is temporarily unavailable. Please try again shortly.',
   'dv.photosUpdated': '✅ Photos of position {code} updated ({count}).',

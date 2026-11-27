@@ -3230,14 +3230,6 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     const images = fileIds.slice(0, MAX_IMAGES_PER_LISTING);
     if (images.length === 0) return;
 
-    const admission = await this.dvLimits.admitAlbum(tgUserId);
-    if (admission !== 'allowed') {
-      await ctx.reply(
-        t(lang, admission === 'limited' ? 'dv.rateLimited' : 'dv.unavailable'),
-      );
-      return;
-    }
-
     let lookup: DvLookup;
     try {
       lookup = await this.dvPhotos.resolvePosition(code1c);
@@ -3246,7 +3238,6 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       this.logger.error(
         `Driver's Village lookup failed for ${code1c} (tg ${tgUserId}): ${err instanceof Error ? err.message : String(err)}`,
       );
-      await this.dvLimits.returnAlbum(tgUserId);
       await ctx.reply(t(lang, 'photos.notAccepted'));
       return;
     }
@@ -3255,13 +3246,6 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       return;
     }
     if (lookup.kind === 'ambiguous') {
-      const listing = await this.dvLimits.admitAmbiguousListing(tgUserId);
-      if (listing !== 'allowed') {
-        await ctx.reply(
-          t(lang, listing === 'limited' ? 'dv.rateLimited' : 'dv.unavailable'),
-        );
-        return;
-      }
       await ctx.reply(
         t(lang, 'dv.ambiguous', {
           code: code1c,
