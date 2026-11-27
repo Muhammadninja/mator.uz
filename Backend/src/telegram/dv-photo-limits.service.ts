@@ -1,20 +1,14 @@
 /**
- * Rate limits of Driver's Village photo updates, and the albums waiting for their
- * sender to confirm. The path is open to any Telegram user by the owner's decision.
- * All of it lives in Redis, shared across processes.
+ * The Driver's Village albums waiting for their sender to confirm. The path is
+ * open to any Telegram user by the owner's decision, and by the owner's decision
+ * it has no rate limit on albums or position lists. It lives in Redis, shared
+ * across processes.
  *
- * Every check fails closed: when Redis cannot answer, the outcome is `unavailable`
- * and the album stops there. The ordinary seller listing flow never comes here.
- *
- * Defaults (overridable, see docs/DEPLOYMENT.md):
- *   DV_PHOTO_ALBUMS_PER_HOUR      20   albums entering the path, per sender
- *   DV_PHOTO_AMBIGUOUS_PER_HOUR    5   position lists shown, per sender
+ * When Redis cannot answer, nothing is saved or claimed and the album stops
+ * there. The ordinary seller listing flow never comes here.
  */
 import { randomBytes } from 'crypto';
-import { Inject, Injectable, Logger } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import type { RateLimiter } from '../redis/rate-limiter.service';
-import { RATE_LIMITER } from '../redis/rate-limiter.service';
+import { Injectable, Logger } from '@nestjs/common';
 import { RedisKeys } from '../redis/redis.keys';
 import {
   RedisService,
@@ -22,13 +16,10 @@ import {
   withRedisTimeout,
 } from '../redis/redis.service';
 
-const HOUR_S = 60 * 60;
 /** How long a sender has to confirm before the album must be sent again. */
 const PENDING_TTL_S = 15 * 60;
 /** Bot handlers share one queue: a check must not wait out a Redis outage. */
 const REDIS_TIMEOUT_MS = 2_000;
-
-export type DvLimitOutcome = 'allowed' | 'limited' | 'unavailable';
 
 /** An album waiting for its sender to confirm. Nothing costly has happened yet. */
 export interface DvPendingAlbum {
@@ -44,49 +35,11 @@ export type DvPendingClaim =
   | { kind: 'not_yours' }
   | { kind: 'unavailable' };
 
-function positiveInt(raw: string | undefined, fallback: number): number {
-  const value = Number(raw);
-  return raw !== undefined && Number.isInteger(value) && value > 0
-    ? value
-    : fallback;
-}
-
 @Injectable()
 export class DvPhotoLimits {
   private readonly logger = new Logger(DvPhotoLimits.name);
-  private readonly albumsPerHour: number;
-  private readonly ambiguousPerHour: number;
 
-  constructor(
-    private readonly redis: RedisService,
-    @Inject(RATE_LIMITER) private readonly limiter: RateLimiter,
-    config: ConfigService,
-  ) {
-    const read = (key: string, fallback: number) =>
-      positiveInt(config.get<string>(key), fallback);
-    this.albumsPerHour = read('DV_PHOTO_ALBUMS_PER_HOUR', 20);
-    this.ambiguousPerHour = read('DV_PHOTO_AMBIGUOUS_PER_HOUR', 5);
-  }
-
-  /** One album entering the path, charged before any database lookup. */
-  admitAlbum(tgUserId: number): Promise<DvLimitOutcome> {
-    return this.consume(RedisKeys.rateDvAlbum(tgUserId), this.albumsPerHour);
-  }
-
-  /** The lookup failed on our side, so the album does not count against them. */
-  async returnAlbum(tgUserId: number): Promise<void> {
-    await this.quietly('return of an album', () =>
-      this.redis.decr(RedisKeys.rateDvAlbum(tgUserId)),
-    );
-  }
-
-  /** One list of positions shown for an ambiguous code, which discloses codes. */
-  admitAmbiguousListing(tgUserId: number): Promise<DvLimitOutcome> {
-    return this.consume(
-      RedisKeys.rateDvAmbiguous(tgUserId),
-      this.ambiguousPerHour,
-    );
-  }
+  constructor(private readonly redis: RedisService) {}
 
   /** Keep an album until its sender confirms. Null when Redis cannot take it. */
   async savePending(album: DvPendingAlbum): Promise<string | null> {
@@ -122,31 +75,6 @@ export class DvPhotoLimits {
     } catch (err) {
       this.logger.error(`Pending album not claimed: ${this.describe(err)}`);
       return { kind: 'unavailable' };
-    }
-  }
-
-  private async consume(key: string, limit: number): Promise<DvLimitOutcome> {
-    try {
-      const { allowed } = await this.bounded(`limit ${key}`, () =>
-        this.limiter.consume(key, limit, HOUR_S),
-      );
-      return allowed ? 'allowed' : 'limited';
-    } catch (err) {
-      this.logger.error(
-        `Photo-update limit could not be checked: ${this.describe(err)}`,
-      );
-      return 'unavailable';
-    }
-  }
-
-  private async quietly(
-    what: string,
-    command: () => Promise<unknown>,
-  ): Promise<void> {
-    try {
-      await this.bounded(what, command);
-    } catch (err) {
-      this.logger.warn(`${what} failed: ${this.describe(err)}`);
     }
   }
 

@@ -176,7 +176,6 @@ export interface BotStrings {
   /** The start button outlived its album, or was already used. */
   'dv.confirmExpired': string;
   /** Too many albums or code look-ups from this sender. */
-  'dv.rateLimited': string;
   /** The limits cannot be checked right now, so nothing was started. */
   'dv.unavailable': string;
   /** Confirmed: the position's gallery now shows the new photos. */

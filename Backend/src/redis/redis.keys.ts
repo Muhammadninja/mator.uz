@@ -95,10 +95,6 @@ export const RedisKeys = {
   // being enforced is model spend, so opening a second session must not grant a
   // second allowance.
   rateAiMessage: (userId: string): string => `rate:ai:message:${userId}`,
-  // Driver's Village photo updates (see DvPhotoLimits).
-  rateDvAlbum: (tgUserId: number): string => `rate:dv:album:${tgUserId}`,
-  rateDvAmbiguous: (tgUserId: number): string =>
-    `rate:dv:ambiguous:${tgUserId}`,
   // An album waiting for its sender to confirm, before any FLUX job exists.
   dvPhotoPending: (token: string): string => `dv:photo:pending:${token}`,
 

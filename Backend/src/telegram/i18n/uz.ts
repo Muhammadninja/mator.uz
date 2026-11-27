@@ -233,8 +233,6 @@ export const UZ: BotStrings = {
     'Pozitsiya {code}\n{title}\nQabul qilingan rasmlar: {count} (hozir mahsulotda: {current}).\n\nBoshlash uchun «Rasmlarga ishlov berish» tugmasini bosing. Mahsulot faqat natijani tasdiqlaganingizdan keyin o‘zgaradi.',
   'dv.confirmExpired':
     'Bu so‘rov eskirgan. Rasmlarni 1C kodi bilan qayta yuboring.',
-  'dv.rateLimited':
-    'Rasmlarni yangilash so‘rovlari juda ko‘p. Keyinroq urinib ko‘ring.',
   'dv.unavailable':
     'Rasmlarga ishlov berish vaqtincha mavjud emas. Birozdan keyin urinib ko‘ring.',
   'dv.photosUpdated':
