@@ -193,8 +193,22 @@ describe('incorrect identifiers are rejected', () => {
     expect((await list({ q: 'А123' })).ids).toEqual([]);
   });
 
-  it('no prefix match: part of a number finds nothing by number', async () => {
-    expect((await list({ q: '9687979' })).ids).toEqual(TITLE_96879797);
+  it('the start of a number lists every part whose own number starts with it, before title matches', async () => {
+    const { ids } = await list({ q: '9687979', page_size: 50 });
+    // 96879797 ×3, 96879798 and 96879799 all start with 9687979; newest first.
+    expect(ids).toEqual([
+      'disc_exact', 'spark_only', 'xref_candidate', 'one_digit_off', 'gm_exact',
+      ...TITLE_96879797,
+    ]);
+  });
+
+  it('the full number still lists only that exact number first', async () => {
+    const { ids } = await list({ q: '96879797', page_size: 50 });
+    expect(ids.slice(0, 3)).toEqual(EXACT_96879797);
+  });
+
+  it('the middle of a number is not a number match', async () => {
+    expect((await list({ q: '879797' })).ids).toEqual(TITLE_96879797);
   });
 
   it('a long number beside words is still looked up exactly', async () => {

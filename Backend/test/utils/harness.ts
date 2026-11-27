@@ -95,6 +95,10 @@ export function createPrismaMock(): PrismaMock {
             typeof arg === 'function' ? arg(proxy) : Promise.all(arg),
           ));
         }
+        // A raw read returns rows like Prisma does: none, unless a test stubs it.
+        if (prop === '$queryRaw' || prop === '$queryRawUnsafe') {
+          return (cache[prop] ??= jest.fn().mockResolvedValue([]));
+        }
         if (prop.startsWith('$') || prop.startsWith('onModule') || prop === 'enableShutdownHooks') {
           return (cache[prop] ??= jest.fn());
         }

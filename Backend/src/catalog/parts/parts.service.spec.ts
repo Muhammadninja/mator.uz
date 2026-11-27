@@ -48,6 +48,7 @@ function makePrisma() {
   };
   return {
     calls,
+    $queryRaw: jest.fn().mockResolvedValue([]),
     partCategory: { findMany: jest.fn(partCategoryFindMany()) },
     catalogPart: {
       count: jest.fn().mockImplementation((args: unknown) => {

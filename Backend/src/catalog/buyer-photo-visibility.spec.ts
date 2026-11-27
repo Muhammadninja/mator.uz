@@ -75,6 +75,7 @@ function sortRows(rows: Row[], orderBy: unknown): Row[] {
 function catalogStore(rows: Row[]) {
   const hit = (where: unknown) => rows.filter((r) => matchesWhere(r, where));
   return {
+    $queryRaw: jest.fn().mockResolvedValue([]),
     catalogPart: {
       count: jest.fn((a: { where?: unknown }) =>
         Promise.resolve(hit(a.where).length),

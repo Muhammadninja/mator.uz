@@ -4,7 +4,9 @@
  */
 import { matchesWhere } from '../compatibility/where-eval.test-util';
 import {
+  numberPrefixKey,
   partTextWhere,
+  prefixIdsIn,
   relevanceTiers,
   searchTier,
   tieredPage,
@@ -67,18 +69,64 @@ const QUERIES = [
   '   ',
   '%',
   'фильтр 2106',
+  // Number prefixes (typed start of a stored number).
+  '968',
+  '9687979',
+  'sp13',
+  'SP-13',
+  '098645',
+  '21',
+  '263',
 ];
 
 describe('searchTier agrees with the Prisma predicate', () => {
   it.each(QUERIES)('query %j', (q) => {
-    const tiers = relevanceTiers(q);
+    const ids = prefixIdsIn(PARTS, q);
+    const tiers = relevanceTiers(q, ids);
     for (const part of PARTS) {
-      const matched = matchesWhere(part, partTextWhere(q));
+      const matched = matchesWhere(part, partTextWhere(q, ids));
       const tier = tiers.findIndex((t) =>
-        matchesWhere(part, { AND: [partTextWhere(q), t] }),
+        matchesWhere(part, { AND: [partTextWhere(q, ids), t] }),
       );
-      expect(searchTier(part, q)).toBe(matched ? tier : null);
+      expect(searchTier(part, q, ids.length > 0)).toBe(matched ? tier : null);
     }
+  });
+});
+
+describe('number prefix', () => {
+  it('lists parts whose number starts with the typed digits', () => {
+    expect(prefixIdsIn(PARTS, '968')).toEqual(['gm']);
+    expect(prefixIdsIn(PARTS, '9687979')).toEqual(['gm']);
+    expect(prefixIdsIn(PARTS, '098645')).toEqual(['zero']);
+  });
+
+  it('ignores separators on both sides', () => {
+    expect(prefixIdsIn(PARTS, 'sp13').sort()).toEqual(['oem_dash', 'oem_space']);
+    expect(prefixIdsIn(PARTS, 'SP-13').sort()).toEqual(['oem_dash', 'oem_space']);
+  });
+
+  it('never matches the middle or end of a number', () => {
+    expect(prefixIdsIn(PARTS, '879797')).toEqual([]);
+    expect(prefixIdsIn(PARTS, '986452041')).toEqual([]);
+  });
+
+  it('needs a lone number of at least 3 characters with a digit', () => {
+    expect(numberPrefixKey('21')).toBeNull();
+    expect(numberPrefixKey('filter')).toBeNull();
+    expect(numberPrefixKey('фильтр 2106')).toBeNull();
+    expect(numberPrefixKey('ЗМЗ-406')).toBeNull();
+    expect(numberPrefixKey(' 263 ')).toBe('263');
+    expect(numberPrefixKey('96 87')).toBe('9687');
+  });
+
+  it('ranks after an exact number and before titles', () => {
+    const parts = [
+      { id: 'exact', title: 'x', gmNumbers: ['2106'], oemNumbers: [] },
+      { id: 'longer', title: 'y', gmNumbers: ['21065'], oemNumbers: [] },
+      { id: 'title', title: 'Прокладка 2106', gmNumbers: [], oemNumbers: [] },
+    ];
+    const ids = prefixIdsIn(parts, '2106');
+    expect(parts.map((p) => searchTier(p, '2106', ids.length > 0))).toEqual([0, 1, 2]);
   });
 });
 

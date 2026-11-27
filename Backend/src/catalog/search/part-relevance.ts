@@ -1,4 +1,4 @@
-import { Prisma } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 import { escapeLike } from '../../common/like-escape.util';
 import {
   literalNumberForms,
@@ -23,10 +23,67 @@ type Where = Prisma.CatalogPartWhereInput;
  * has no column that tells it apart from an OEM number, so both rank as one
  * "exact number" tier.
  *
- * Only exact equality on a stored number counts: no prefix, no fuzzy number
- * match, and no cross-reference. A Wave 4 candidate or verified pair is never
- * read here, so a number on part A never lists part B.
+ *   - a stored GM/OEM number STARTS WITH the typed number (owner request
+ *     2026-11-27: typing "263" should already list 26391154). Only for a text
+ *     that is a number on its own — at least MIN_NUMBER_PREFIX letters/digits
+ *     with a digit among them; separators are ignored on both sides.
+ *
+ * Ranking: exact number, then canonical number, then number prefix, then title.
+ * No fuzzy number match and no cross-reference: a Wave 4 candidate or verified
+ * pair is never read here, so a number on part A never lists part B.
  */
+
+/** Shortest typed number that is looked up by the start of stored numbers. */
+export const MIN_NUMBER_PREFIX = 3;
+/** Cap on prefix-matched ids per search; exact matches are never capped. */
+const MAX_PREFIX_IDS = 1000;
+
+/** A stored or typed number reduced to its comparable letters and digits. */
+const compact = (s: string) => s.toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+/**
+ * The key a text is prefix-matched by, or null when the text is not a lone
+ * number (words, a single letter run, or too short to narrow anything down).
+ */
+export function numberPrefixKey(text: string): string | null {
+  const t = text.trim();
+  if (!/^[A-Za-z0-9 .\-/]+$/.test(t)) return null;
+  const key = compact(t);
+  if (key.length < MIN_NUMBER_PREFIX || key.length > 40 || !/\d/.test(key)) return null;
+  return key;
+}
+
+/** Whether one of the part's stored numbers starts with `key`. */
+function startsWithKey(part: SearchablePart, key: string): boolean {
+  return [...part.oemNumbers, ...part.gmNumbers].some((n) => compact(n).startsWith(key));
+}
+
+/**
+ * Ids of parts with a stored number that starts with the text's prefix key
+ * ([] when the text is not a lone number). Arrays can't be prefix-matched by
+ * a Prisma filter, so this is one raw scan over the ~4k-row projection; the
+ * ids then join the ordinary Prisma where (visibility, filters, paging).
+ */
+export async function numberPrefixIds(
+  prisma: Pick<PrismaClient, '$queryRaw'>,
+  text: string,
+): Promise<string[]> {
+  const key = numberPrefixKey(text);
+  if (!key) return [];
+  const rows = await prisma.$queryRaw<{ id: string }[]>`
+    SELECT p.id FROM catalog_parts p
+    WHERE EXISTS (
+      SELECT 1 FROM unnest(p.oem_numbers || p.gm_numbers) AS n
+      WHERE upper(regexp_replace(n, '[^A-Za-z0-9]', '', 'g')) LIKE ${key + '%'}
+    )
+    LIMIT ${MAX_PREFIX_IDS}`;
+  return rows.map((r) => r.id);
+}
+
+/** The prefix tier as a where: membership in the precomputed ids. */
+function prefixIn(prefixIds: readonly string[]): Where | null {
+  return prefixIds.length > 0 ? { id: { in: [...prefixIds] } } : null;
+}
 
 /** `has` on both arrays for each value: exact membership, GIN-indexed. */
 function numberIn(values: string[]): Where | null {
@@ -78,7 +135,13 @@ export interface SearchablePart {
  * the Prisma predicate. Title matching is case-insensitive substring, as
  * ILIKE with the text escaped.
  */
-export function searchTier(part: SearchablePart, text: string): number | null {
+export function searchTier(
+  part: SearchablePart,
+  text: string,
+  // Whether the prefix tier exists for this search: in the database it does
+  // only when some part matched it (numberPrefixIds came back non-empty).
+  hasPrefixTier: boolean = numberPrefixKey(text) !== null,
+): number | null {
   const { literal, canonical } = numberValues(text);
   const holds = (values: string[]) =>
     values.some(
@@ -86,9 +149,21 @@ export function searchTier(part: SearchablePart, text: string): number | null {
     );
   const exact = [literal, canonical].filter((v) => v.length > 0);
   for (let i = 0; i < exact.length; i += 1) if (holds(exact[i])) return i;
+  const key = numberPrefixKey(text);
+  if (key && hasPrefixTier && startsWithKey(part, key)) return exact.length;
+  const titleTier = exact.length + (key && hasPrefixTier ? 1 : 0);
   return part.title.toLowerCase().includes(text.toLowerCase())
-    ? exact.length
+    ? titleTier
     : null;
+}
+
+/** In-memory twin of numberPrefixIds over a list of parts (specs, audits). */
+export function prefixIdsIn<T extends SearchablePart & { id: string }>(
+  parts: readonly T[],
+  text: string,
+): string[] {
+  const key = numberPrefixKey(text);
+  return key ? parts.filter((p) => startsWithKey(p, key)).map((p) => p.id) : [];
 }
 
 /**
@@ -96,7 +171,7 @@ export function searchTier(part: SearchablePart, text: string): number | null {
  * was typed. The one definition the listing, POST /v1/search and the
  * typeahead share, so a count and its page never disagree.
  */
-export function partTextWhere(text: string): Where {
+export function partTextWhere(text: string, prefixIds: readonly string[] = []): Where {
   const { literal, canonical } = numberConditions(text);
   const or: Where[] = [
     // Literal text: a `%` or `_` the buyer typed is not a wildcard (INFO-9).
@@ -104,6 +179,8 @@ export function partTextWhere(text: string): Where {
   ];
   if (literal) or.push(literal);
   if (canonical) or.push(canonical);
+  const prefix = prefixIn(prefixIds);
+  if (prefix) or.push(prefix);
   return { OR: or };
 }
 
@@ -112,13 +189,14 @@ export function partTextWhere(text: string): Where {
  * `partTextWhere(text)` into DISJOINT parts (each tier excludes the ones above):
  *   1. a stored number spelled exactly as typed;
  *   2. a stored number equal to a typed number's canonical form;
- *   3. everything else (title matches).
+ *   3. a stored number that starts with the typed number (`prefixIds`);
+ *   4. everything else (title matches).
  * Under a base that includes partTextWhere(text), the tiers' counts add up to
  * the base's count. A single tier means there is nothing to rank.
  */
-export function relevanceTiers(text: string): Where[] {
+export function relevanceTiers(text: string, prefixIds: readonly string[] = []): Where[] {
   const { literal, canonical } = numberConditions(text);
-  const exact = [literal, canonical].filter((w): w is Where => w !== null);
+  const exact = [literal, canonical, prefixIn(prefixIds)].filter((w): w is Where => w !== null);
   if (exact.length === 0) return [{}];
   const tiers: Where[] = [];
   exact.forEach((w, i) =>

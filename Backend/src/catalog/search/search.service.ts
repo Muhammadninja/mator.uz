@@ -22,6 +22,7 @@ import {
 } from '../categories/category-tree-scope';
 import { categorySubtreeWhere, partOrderBy } from '../parts/parts.service';
 import {
+  numberPrefixIds,
   partTextWhere,
   ranksByRelevance,
   relevanceTiers,
@@ -84,7 +85,8 @@ export class SearchService {
     // everything beneath it. Kept under AND
     // so the `seller` rating filter below can still be spread in beside it.
     const conditions = await this.listedParts();
-    if (q) conditions.push(partTextWhere(q));
+    const prefixIds = q ? await numberPrefixIds(this.prisma, q) : [];
+    if (q) conditions.push(partTextWhere(q, prefixIds));
     if (categories.length) {
       conditions.push({ OR: categories.map(categorySubtreeWhere) });
     }
@@ -104,7 +106,7 @@ export class SearchService {
             }),
           where,
           // Exact part-number matches first, unless the buyer chose a sort.
-          q && ranksByRelevance(dto.sortBy) ? relevanceTiers(q) : [{}],
+          q && ranksByRelevance(dto.sortBy) ? relevanceTiers(q, prefixIds) : [{}],
           offset,
           // One past the page says whether another page exists.
           limit + 1,
@@ -245,8 +247,9 @@ export class SearchService {
     if (term) suggestions.push({ text: term, type: 'query' });
 
     if (term) {
-      // Exact part-number matches first, then titles; newest first within each,
-      // so the same text always suggests the same parts.
+      // Exact part-number matches first, then number prefixes, then titles;
+      // newest first within each, so the same text always suggests the same parts.
+      const prefixIds = await numberPrefixIds(this.prisma, term);
       const products = await tieredPage(
         (w) => this.prisma.catalogPart.count({ where: w }),
         (w, skip, take) =>
@@ -257,8 +260,8 @@ export class SearchService {
             skip,
             take,
           }),
-        { AND: [...(await this.listedParts()), partTextWhere(term)] },
-        relevanceTiers(term),
+        { AND: [...(await this.listedParts()), partTextWhere(term, prefixIds)] },
+        relevanceTiers(term, prefixIds),
         0,
         Math.max(0, safeLimit - 1),
       );

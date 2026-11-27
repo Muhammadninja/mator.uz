@@ -18,6 +18,8 @@ async function search(
 ): Promise<string[]> {
   let where: unknown;
   const prisma = {
+    // No number-prefix rows: these cases are about exact key indexing.
+    $queryRaw: () => Promise.resolve([]),
     partCategory: { findMany: partCategoryFindMany() },
     catalogPart: {
       // The listing's own predicate is the one its total is counted over (the

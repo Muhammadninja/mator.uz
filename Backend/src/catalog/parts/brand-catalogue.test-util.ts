@@ -203,6 +203,16 @@ export function catalogPrisma(rows: CatalogueRow[] = CATALOGUE) {
   return {
     counted,
     paged,
+    // numberPrefixIds' raw scan over the rows: the bound LIKE pattern is "KEY%".
+    $queryRaw: (_sql: TemplateStringsArray, pattern: string) => {
+      const key = String(pattern).slice(0, -1);
+      const norm = (n: string) => n.toUpperCase().replace(/[^A-Z0-9]/g, '');
+      return Promise.resolve(
+        rows
+          .filter((r) => [...r.oemNumbers, ...r.gmNumbers].some((n) => norm(n).startsWith(key)))
+          .map((r) => ({ id: r.id })),
+      );
+    },
     catalogPart: {
       count: ({ where }: { where: unknown }) => {
         counted.push(where);

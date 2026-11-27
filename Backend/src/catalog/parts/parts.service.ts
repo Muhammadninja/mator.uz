@@ -16,6 +16,7 @@ import {
 } from '@prisma/client';
 import { OIL_TYPE_LABELS, formatVolume } from '../../common/motor-oil.util';
 import {
+  numberPrefixIds,
   partTextWhere,
   ranksByRelevance,
   relevanceTiers,
@@ -210,16 +211,17 @@ export class PartsService {
     lang: AppLang = DEFAULT_APP_LANG,
     userId: string | null = null,
   ) {
-    const [vehicle, tree] = await Promise.all([
+    const [vehicle, tree, prefixIds] = await Promise.all([
       this.loadGarageVehicle(userId, query.vehicle_id),
       loadCategoryTreeScope(this.prisma),
+      query.q ? numberPrefixIds(this.prisma, query.q) : Promise.resolve([]),
     ]);
-    const where = this.buildWhere(query, vehicle, tree);
+    const where = this.buildWhere(query, vehicle, tree, prefixIds);
     // The brand facet counts every brand the OTHER filters leave, so a picked
     // brand keeps the rest on offer — to swap it, or to add a second. Without
     // a brand filter that is `where` itself.
     const brandFacetWhere = query.brand
-      ? this.buildWhere({ ...query, brand: undefined }, vehicle, tree)
+      ? this.buildWhere({ ...query, brand: undefined }, vehicle, tree, prefixIds)
       : where;
     const rollup = this.rollupMainCategory(query);
     // A macro-category rollup defaults to bestseller-first; an explicit sort wins.
@@ -262,7 +264,7 @@ export class PartsService {
             where,
             // Exact part-number matches first, unless the buyer chose a sort.
             query.q && ranksByRelevance(query.sort)
-              ? relevanceTiers(query.q)
+              ? relevanceTiers(query.q, prefixIds)
               : [{}],
             (page - 1) * pageSize,
             pageSize,
@@ -550,6 +552,7 @@ export class PartsService {
     q: ListPartsQueryDto,
     vehicle: VehicleFitContext | null,
     tree: CategoryTreeScope,
+    prefixIds: readonly string[] = [],
   ): Prisma.CatalogPartWhereInput {
     // Only buyer-listed parts: no suspended dealer, at least one ready photo
     // (see buyer-visibility.ts). Part of the one `where` the count, the page
@@ -638,8 +641,9 @@ export class PartsService {
     // equals it exactly — as typed, or (when the text is a part number) in its
     // canonical form (`has` → exact membership, GIN-indexed). A text with
     // letters normalizeOem would drop ("ВАЗ 2106") is not a part number and
-    // gets no canonical lookup (search/part-relevance.ts).
-    if (q.q) and.push(partTextWhere(q.q));
+    // gets no canonical lookup (search/part-relevance.ts). A lone typed number
+    // also matches stored numbers that start with it (prefixIds).
+    if (q.q) and.push(partTextWhere(q.q, prefixIds));
 
     // Listing kind + the kind-specific attribute filters (motor oils).
     for (const cond of this.kindWhere(q)) and.push(cond);
