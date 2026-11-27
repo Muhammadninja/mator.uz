@@ -52,9 +52,8 @@ const SUPPLY: SupplyProduct[] = [
   { id: 'p19', categoryId: 'clutch-kits', mainCategory: null },
   { id: 'p20', categoryId: 'cooling-radiators', mainCategory: null },
   { id: 'p21', categoryId: null, mainCategory: null },
-  // No photo: listed and counted like any other part.
-  { id: 'p22', categoryId: 'air-filters', mainCategory: null, photo: false },
   // Not buyer-listed: neither counted nor listed anywhere.
+  { id: 'p22', categoryId: 'air-filters', mainCategory: null, photo: false },
   {
     id: 'p23',
     categoryId: 'front-brake-pads',
@@ -67,7 +66,7 @@ const SUPPLY: SupplyProduct[] = [
 const EXPECTED_TILE_COUNTS: Record<string, number> = {
   brakes: 3,
   batteries: 1,
-  filters: 5,
+  filters: 4,
   ignition: 1,
   engine: 1,
   'electrical-parts': 1,
@@ -197,7 +196,7 @@ describe('home grid — tile counts match their listings', () => {
   it('counts every listed bucketed part once, and parts without a bucket on no tile', async () => {
     const onTiles = grid.reduce((n, t) => n + t.count, 0);
     const listed = (await parts.list({}, 'ru', null)).total;
-    expect(listed).toBe(SUPPLY.length - 1); // suspended dealer
+    expect(listed).toBe(SUPPLY.length - 2); // no photo, suspended dealer
     expect(onTiles).toBe(listed - 3); // clutch-kits, cooling-radiators, none
   });
 

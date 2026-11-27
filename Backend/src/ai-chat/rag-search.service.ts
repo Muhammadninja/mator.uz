@@ -136,7 +136,7 @@ export class RagSearchService {
     const read = (match: Prisma.CatalogPartWhereInput[]) =>
       this.prisma.catalogPart.findMany({
         // Never quote a part the catalog does not list: a suspended dealer's, or
-        // one with a zero price (catalog/buyer-visibility.ts).
+        // one without a ready photo (catalog/buyer-visibility.ts).
         where: {
           inStock: true,
           OR: match,

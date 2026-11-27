@@ -1,8 +1,9 @@
-// Buyer-facing catalog reads list a part without a photo like any other one
-// (the 2026-10-19 photo requirement was reverted): every count, facet and page
-// includes it, and the admin console sees every part too. Each read runs its
+// No buyer-facing catalog read returns a part without a READY photo. It is
+// decided in the `where` itself, so no count, facet or page includes such a
+// part, while the admin console still sees every part. Each read runs its
 // real `where` over in-memory parts (where-eval); Prisma is mocked.
 
+import { NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PartsService } from './parts/parts.service';
 import { CategoriesService } from './categories/categories.service';
@@ -183,8 +184,8 @@ const partsService = (rows: Row[]) =>
   new PartsService(catalogStore(rows) as never, noDiscounts as never);
 const ids = (res: { items: { id: string }[] }) => res.items.map((i) => i.id);
 
-describe('buyer catalog — a part without a photo is listed like any other', () => {
-  it('no photo, an empty or a NULL list, is listed; a suspended dealer still is not', () => {
+describe('buyer catalog — only parts with a ready photo are listed', () => {
+  it('one ready photo is enough; none — an empty or a NULL list — is not', () => {
     const rows = [
       withoutPhoto('no_photo'),
       catalogRow(fx.part({ id: 'null_images', images: null })),
@@ -194,21 +195,18 @@ describe('buyer catalog — a part without a photo is listed like any other', ()
       }),
     ];
     expect(selectIds(rows, BUYER_LISTED_PART)).toEqual([
-      'no_photo',
-      'null_images',
       'one_photo',
       'two_photos',
     ]);
-    expect(BUYER_LISTED_PART).not.toHaveProperty('images');
-    // The suspended-dealer rule stays.
+    // It is the suspended-dealer rule plus the photo rule, not instead of it.
     expect(BUYER_LISTED_PART).toMatchObject(BUYER_VISIBLE_PART);
-    const suspended = withoutPhoto('suspended', {
+    const suspended = photographed('suspended', {
       seller: { status: 'SUSPENDED' },
     });
     expect(selectIds([suspended], BUYER_LISTED_PART)).toEqual([]);
   });
 
-  it('GET /v1/catalog/parts pages, totals and facets include the parts without a photo', async () => {
+  it('GET /v1/catalog/parts filters before skip/take: full pages, totals and facets of listed parts only', async () => {
     // 7 photographed parts, each followed by one without a photo (newest last).
     const rows = Array.from({ length: 7 }, (_, i) => [
       photographed(`ok_${i}`),
@@ -221,38 +219,37 @@ describe('buyer catalog — a part without a photo is listed like any other', ()
     const svc = partsService(rows);
 
     const pages: Awaited<ReturnType<PartsService['list']>>[] = [];
-    for (const page of [1, 2, 3, 4, 5])
+    for (const page of [1, 2, 3])
       pages.push(await svc.list({ page, page_size: 3 }));
 
-    expect(pages.flatMap(ids).sort()).toEqual(rows.map((r) => r.id).sort());
-    expect(pages.map((p) => p.total)).toEqual([14, 14, 14, 14, 14]);
-    expect(pages.map((p) => p.next_page)).toEqual([2, 3, 4, 5, null]);
-    expect(pages[0].facets.brands).toHaveLength(2);
-    expect(pages[0].facets.brands).toEqual(
-      expect.arrayContaining([
-        { id: 'brand_bosch', name: 'brand_bosch', count: 7 },
-        { id: 'brand_other', name: 'brand_other', count: 7 },
-      ]),
-    );
+    // Newest first, 3 + 3 + 1: no page is short or empty while parts remain.
+    expect(pages.map(ids)).toEqual([
+      ['ok_6', 'ok_5', 'ok_4'],
+      ['ok_3', 'ok_2', 'ok_1'],
+      ['ok_0'],
+    ]);
+    expect(pages.map((p) => p.total)).toEqual([7, 7, 7]);
+    expect(pages.map((p) => p.next_page)).toEqual([2, 3, null]);
+    // The facets count the same set: the photo-less parts' brand and price are absent.
+    expect(pages[0].facets.brands).toEqual([
+      { id: 'brand_bosch', name: 'brand_bosch', count: 7 },
+    ]);
     expect(pages[0].facets.price_range_uzs).toEqual({
       min: 150_000,
-      max: 9_000_000,
+      max: 150_000,
     });
   });
 
-  it('GET /v1/catalog/parts/:id serves a part without a photo', async () => {
+  it('GET /v1/catalog/parts/:id serves a photographed part and 404s one without a photo', async () => {
     const svc = partsService([photographed('ok'), withoutPhoto('bare')]);
     await expect(svc.detail('ok')).resolves.toMatchObject({
       id: 'ok',
       images: [fx.READY_PHOTO],
     });
-    await expect(svc.detail('bare')).resolves.toMatchObject({
-      id: 'bare',
-      images: [],
-    });
+    await expect(svc.detail('bare')).rejects.toBeInstanceOf(NotFoundException);
   });
 
-  describe('filters and garage compatibility treat a part without a photo like its photographed twin', () => {
+  describe('filters and garage compatibility drop exactly the parts without a photo', () => {
     const BARE = '__no_photo';
     // Every fitment shape of the compatibility fixtures, and a twin of each
     // that is identical except that it has no photo.
@@ -289,14 +286,19 @@ describe('buyer catalog — a part without a photo is listed like any other', ()
       ['kind', { kind: ['spare_part'] }],
     ])('%s', async (_name, query) => {
       const shown = await listIds([...WITH_PHOTO, ...TWINS], query);
-      const photographedIds = shown.filter((id) => !id.endsWith(BARE));
-      expect(photographedIds.length).toBeGreaterThan(0);
-      expect(shown.filter((id) => id.endsWith(BARE))).toEqual(
-        photographedIds.map((id) => `${id}${BARE}`).sort(),
+      expect(shown.length).toBeGreaterThan(0);
+      expect(shown.filter((id) => id.endsWith(BARE))).toEqual([]);
+      // Not vacuous: given a photo, the twins pass the very same filter.
+      const twinsWithPhoto = TWINS.map((t) => ({
+        ...t,
+        images: [fx.READY_PHOTO],
+      }));
+      expect(await listIds(twinsWithPhoto, query)).toEqual(
+        shown.map((id) => `${id}${BARE}`).sort(),
       );
     });
 
-    it('the garage compatibility facet counts every listed part', async () => {
+    it('the garage compatibility facet counts only listed parts', async () => {
       const res = await partsService([...WITH_PHOTO, ...TWINS]).list(
         { vehicle_id: 'veh_1', page_size: 100 },
         'ru',
@@ -307,7 +309,7 @@ describe('buyer catalog — a part without a photo is listed like any other', ()
     });
   });
 
-  it('GET /v1/categories counts the parts without a photo, unscoped and per garage vehicle', async () => {
+  it('GET /v1/categories counts only photographed parts, unscoped and per garage vehicle', async () => {
     const store = catalogStore([
       photographed('a'),
       withoutPhoto('b'),
@@ -320,16 +322,16 @@ describe('buyer catalog — a part without a photo is listed like any other', ()
       id: string,
     ) => r.items.find((c) => c.id === id)!.count;
 
-    expect(countOf(await svc.list({}), 'brakes')).toBe(4);
+    expect(countOf(await svc.list({}), 'brakes')).toBe(3);
     expect(countOf(await svc.list({ scope: 'vehicle' }), 'BRAKE_SYSTEM')).toBe(
-      4,
+      3,
     );
-    // The Cobalt sees the three universal parts, not the Spark one.
+    // The Cobalt sees the two universal photographed parts, not the Spark one.
     const garage = await svc.list({ vehicle_id: 'veh_1' }, 'ru', OWNER);
-    expect(countOf(garage, 'brakes')).toBe(3);
+    expect(countOf(garage, 'brakes')).toBe(2);
   });
 
-  it('POST /v1/search: total, results and every facet count the parts without a photo', async () => {
+  it('POST /v1/search: total, results and every facet count only photographed parts', async () => {
     const svc = new SearchService(
       catalogStore([
         photographed('cheap_ok'),
@@ -341,38 +343,31 @@ describe('buyer catalog — a part without a photo is listed like any other', ()
     );
     const res = await svc.search({ query: 'колодки' });
 
-    expect(res.total).toBe(4);
-    expect(res.results.map((r) => r.id).sort()).toEqual([
-      'cheap_bare',
-      'cheap_ok',
-      'mid_bare',
-      'mid_ok',
-    ]);
-    expect(res.facetCounts.price).toEqual({ under_200k: 2, '200k_to_500k': 2 });
-    expect(res.facetCounts.minRating['4plus']).toBe(4);
+    expect(res.total).toBe(2);
+    expect(res.results.map((r) => r.id)).toEqual(['mid_ok', 'cheap_ok']);
+    expect(res.facetCounts.price).toEqual({ under_200k: 1, '200k_to_500k': 1 });
+    expect(res.facetCounts.minRating['4plus']).toBe(2);
     expect(res.categories).toEqual([
-      { id: 'brakes', name: 'Тормоза', count: 4 },
+      { id: 'brakes', name: 'Тормоза', count: 2 },
     ]);
   });
 
-  it('GET /v1/typeahead suggests a part without a photo', async () => {
+  it('GET /v1/typeahead suggests only photographed parts', async () => {
     const svc = new SearchService(
       catalogStore([photographed('ok'), withoutPhoto('bare')]) as never,
       fakeDiscounts() as never,
     );
     const { suggestions } = await svc.typeahead('колодки');
-    expect(
-      suggestions
-        .filter((s) => s.type === 'product')
-        .map((s) => s.deeplink)
-        .sort(),
-    ).toEqual([
-      '/(tabs)/(explore)/item-detail/bare',
-      '/(tabs)/(explore)/item-detail/ok',
+    expect(suggestions.filter((s) => s.type === 'product')).toEqual([
+      {
+        text: 'Тормозные колодки ok',
+        type: 'product',
+        deeplink: '/(tabs)/(explore)/item-detail/ok',
+      },
     ]);
   });
 
-  it('GET /v1/search/quick-filters counts the parts without a photo', async () => {
+  it('GET /v1/search/quick-filters offers no chip that only photo-less parts fill', async () => {
     const other = {
       brandId: 'brand_gates',
       brand: { id: 'brand_gates', name: 'Gates' },
@@ -388,13 +383,10 @@ describe('buyer catalog — a part without a photo is listed like any other', ()
       fakeDiscounts() as never,
     );
     const { items } = await svc.quickFilters();
-    expect(items.map((i) => [i.label, i.count])).toEqual([
-      ['brand_bosch', 3],
-      ['brand_gates', 2],
-    ]);
+    expect(items.map((i) => [i.label, i.count])).toEqual([['brand_bosch', 2]]);
   });
 
-  it('the AI chat quotes a part without a photo', async () => {
+  it('the AI chat quotes only photographed parts, and a part without one is "not in stock"', async () => {
     const query = { partName: 'колодки', brand: null, model: null };
     const rag = (rows: Row[]) =>
       new RagSearchService(
@@ -406,15 +398,19 @@ describe('buyer catalog — a part without a photo is listed like any other', ()
 
     const res = await rag([
       photographed('ok', price),
+      photographed('ok_2', price),
       withoutPhoto('bare', price),
     ]);
-    expect(res.items.map((i) => i.id).sort()).toEqual(['bare', 'ok']);
-    const only = await rag([withoutPhoto('bare', price)]);
-    expect(only.found).toBe(true);
-    expect(only.items.map((i) => i.id)).toEqual(['bare']);
+    expect(res.items.map((i) => i.id).sort()).toEqual(['ok', 'ok_2']);
+    // Only photo-less matches: the chat answers "not found" (→ sourcing ticket),
+    // exactly as for a suspended dealer's part.
+    expect(await rag([withoutPhoto('bare', price)])).toEqual({
+      found: false,
+      items: [],
+    });
   });
 
-  it('the AI advisor catalog tools find a part without a photo', async () => {
+  it('the AI advisor catalog tools find only photographed parts', async () => {
     const store = catalogStore([photographed('ok'), withoutPhoto('bare')]);
     const tools = new CatalogToolsService(
       new PartsService(store as never, noDiscounts as never),
@@ -424,15 +420,15 @@ describe('buyer catalog — a part without a photo is listed like any other', ()
     const search = JSON.parse(
       (await tools.run('search_catalog', { q: 'колодки' })).content,
     );
-    expect(
-      search.items.map((i: { part_id: string }) => i.part_id).sort(),
-    ).toEqual(['bare', 'ok']);
-    expect(search.total).toBe(2);
+    expect(search.items.map((i: { part_id: string }) => i.part_id)).toEqual([
+      'ok',
+    ]);
+    expect(search.total).toBe(1);
 
     const product = JSON.parse(
       (await tools.run('get_product', { part_id: 'bare' })).content,
     );
-    expect(product.error).toBeUndefined();
+    expect(product.error).toBe('No catalogue part with id "bare".');
   });
 });
 

@@ -74,10 +74,8 @@ const PARTS = [
   filed('b_calipers', 'brake-calipers-kits', B.BRAKES),
   filed('b_cylinders', 'brake-cylinders', B.BRAKES),
   filed('b_hoses', 'brake-hoses-cables', B.BRAKES),
-  // Not buyer-listed (suspended dealer): never listed, never counted.
-  filed('b_suspended', 'front-brake-pads', B.BRAKES, {
-    sellerStatus: 'SUSPENDED',
-  }),
+  // Not buyer-listed (no ready photo): never listed, never counted.
+  filed('b_no_photo', 'front-brake-pads', B.BRAKES, { images: [] }),
 
   filed('s_root', 'suspension-and-steering', B.SUSPENSION),
   // A STALE stored bucket: filed on shock-absorbers, still carrying the BRAKES
@@ -210,7 +208,7 @@ describe('a system root lists its whole subtree', () => {
     }
     expect(new Set(seen).size).toBe(seen.length);
     expect(seen).not.toContain('u_none');
-    expect(seen).not.toContain('b_suspended');
+    expect(seen).not.toContain('b_no_photo');
   });
 });
 

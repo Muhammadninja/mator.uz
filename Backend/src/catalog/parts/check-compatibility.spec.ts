@@ -467,11 +467,10 @@ describe('compatibility endpoints honour buyer visibility', () => {
     ).rejects.toThrow('Part not found');
 
     for (const [args] of findFirst.mock.calls as any[]) {
-      // Suspended dealer and no price are part of this predicate; a photo is not.
+      // Suspended dealer, no photo and no price are all part of this predicate.
       expect(args.where).toMatchObject({ ...BUYER_LISTED_PART });
       expect(args.where.seller).toEqual({ status: { not: 'SUSPENDED' } });
-      expect(args.where.NOT).toEqual({ priceUzs: { lte: 0 } });
-      expect(args.where).not.toHaveProperty('images');
+      expect(args.where.images).toEqual({ isEmpty: false });
     }
   });
 });

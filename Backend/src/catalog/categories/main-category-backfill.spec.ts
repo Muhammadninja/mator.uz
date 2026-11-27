@@ -197,11 +197,11 @@ describe('main_category backfill — dry-run plan', () => {
       now: 0,
       after: 2,
     });
-    // part_4 has no photo, but is listed all the same: the tile gains both.
+    // part_4 is filled too, but has no photo, so the tile gains one part.
     expect(tile(B.FILTERS)).toEqual({
       mainCategory: B.FILTERS,
       now: 0,
-      after: 2,
+      after: 1,
     });
     expect(tile(B.IGNITION)).toEqual({
       mainCategory: B.IGNITION,

@@ -56,7 +56,7 @@ export class CategoriesService {
   ) {
     const scope = query.scope ?? 'main';
     // Counts cover exactly what the listing can show: buyer-listed parts (no
-    // suspended dealer, a positive price), scoped to the garage vehicle when one
+    // suspended dealer, a ready photo), scoped to the garage vehicle when one
     // is given.
     const [scopeWhere, tree] = await Promise.all([
       this.vehicleScopeWhere(query.vehicle_id, userId),
