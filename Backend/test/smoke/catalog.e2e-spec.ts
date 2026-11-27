@@ -306,6 +306,7 @@ describe('Catalog/Categories smoke', () => {
     const [visible, vehicleClause] = where.AND;
     expect(visible).toEqual({
       seller: { status: { not: 'SUSPENDED' } },
+      images: { isEmpty: false },
       NOT: { priceUzs: { lte: 0 } },
     });
     expect(vehicleClause.OR).toContainEqual({ isUniversal: true });

@@ -100,7 +100,7 @@ describe('search and listing agree (CAT-002)', () => {
     row('a', child),
     row('b', root, { title: 'Disc', gmNumbers: ['96953062'] }),
     row('c', category('oils', null), { title: 'Oil' }),
-    row('hidden', child, { seller: { status: 'SUSPENDED' } }),
+    row('hidden', child, { images: [] }),
   ];
   const tree = categoryTreeScope([
     { id: 'brakes', parentId: null },

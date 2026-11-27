@@ -80,8 +80,8 @@ export function presentPhotoCoverageRow(
  * a photo the app can display, overall and per category, and the parts behind
  * each number. Read-only; photo edits live in AdminPartPhotosService.
  *
- * Deliberately NOT built on the buyer API, which hides suspended dealers and
- * zero prices (BUYER_LISTED_PART). Every part counts here, whatever its dealer
+ * Deliberately NOT built on the buyer API, which lists only parts that already
+ * have a photo (BUYER_LISTED_PART). Every part counts here, whatever its dealer
  * status or price.
  *
  * Counting is one row per part: the photo test reads the first element of the

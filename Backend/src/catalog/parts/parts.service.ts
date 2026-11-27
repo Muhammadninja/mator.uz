@@ -551,7 +551,7 @@ export class PartsService {
     vehicle: VehicleFitContext | null,
     tree: CategoryTreeScope,
   ): Prisma.CatalogPartWhereInput {
-    // Only buyer-listed parts: no suspended dealer, a positive price
+    // Only buyer-listed parts: no suspended dealer, at least one ready photo
     // (see buyer-visibility.ts). Part of the one `where` the count, the page
     // and every facet share, so it applies before skip/take.
     const and: Prisma.CatalogPartWhereInput[] = [BUYER_LISTED_PART];
